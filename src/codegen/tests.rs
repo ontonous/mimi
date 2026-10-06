@@ -5,9 +5,105 @@
 //! (no object compilation / linking) and fast to run.
 
 use super::*;
+use crate::error::MimiResult;
 use inkwell::context::Context;
 use inkwell::types::BasicType;
 use inkwell::values::BasicValue;
+use std::collections::HashMap;
+
+// The production fifth pass is canonical-only. Keep the old surface emitter
+// reachable solely from this test-module adapter so low-level builder tests
+// can continue to exercise compatibility code without adding a production
+// `compile_func_legacy` call edge.
+impl<'ctx> CodeGenerator<'ctx> {
+    pub(crate) fn compile_legacy_test_function(
+        &mut self,
+        function: &FuncDef,
+    ) -> crate::error::MimiResult<()> {
+        self.compile_func_legacy(function)
+    }
+
+    pub(crate) fn compile_file_with_resolved(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+        eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
+    ) -> crate::error::MimiResult<()> {
+        self.shared_dynamic_any_preflight_passed = false;
+        self.install_checked_declaration_names(program)?;
+        self.compile_file_inner(
+            program.legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder),
+            Some((program, eligible)),
+            true,
+        )
+    }
+
+    // The following impl-body adapters are deliberately test-only. They keep
+    // compatibility-registry tests able to exercise the retired surface AST
+    // emitter without leaving a production call edge from registry/funcs.rs.
+    pub(in crate::codegen) fn compile_impl_methods(&mut self) -> MimiResult<()> {
+        for (type_name, trait_impls) in self.type_impls.clone() {
+            for (trait_name, methods) in &trait_impls {
+                for method in methods {
+                    let mangled = format!("{}__{}__{}", type_name, trait_name, method.name);
+                    let type_args_for_self = self
+                        .impl_type_args
+                        .get(&type_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let self_type_name = if type_args_for_self.is_empty() {
+                        Type::Name(type_name.clone(), vec![])
+                    } else {
+                        Type::Name(type_name.clone(), type_args_for_self.clone())
+                    };
+                    let self_ty = match type_name.as_str() {
+                        "i32" | "i64" | "f64" | "bool" | "Record" | "Map" | "Any" => self_type_name,
+                        _ => Type::Ref(None, Box::new(self_type_name)),
+                    };
+                    self.compile_impl_method_body_for_test(
+                        method,
+                        &mangled,
+                        type_args_for_self,
+                        self_ty,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn compile_impl_method_body_for_test(
+        &mut self,
+        method: &FuncDef,
+        symbol: &str,
+        type_args_for_self: Vec<Type>,
+        self_ty: Type,
+    ) -> MimiResult<()> {
+        let impl_method = self.impl_method_with_self_type(method, symbol, self_ty);
+        let saved_type_map = self.type_map.clone();
+        if !type_args_for_self.is_empty() {
+            let mut identity_map: HashMap<String, Type> = HashMap::new();
+            for argument in &type_args_for_self {
+                if let Type::Name(name, _) = argument.unlocated() {
+                    identity_map.insert(name.clone(), argument.clone());
+                }
+            }
+            if !identity_map.is_empty() && self.type_map.is_empty() {
+                self.type_map.extend(identity_map);
+            }
+        }
+        let result = self.compile_func_legacy(&impl_method);
+        self.type_map = saved_type_map;
+        result
+    }
+
+    pub(crate) fn compile_checked_impl_method_instance_legacy_for_test(
+        &mut self,
+        instance: &FuncDef,
+        type_map: &HashMap<String, Type>,
+    ) -> MimiResult<()> {
+        self.compile_generic_func(instance, type_map)
+    }
+}
 
 fn with_test_function<'ctx, F>(context: &'ctx Context, f: F)
 where
@@ -71,6 +167,281 @@ fn actor_runtime_handles_and_state_layouts_are_distinct() {
             BasicTypeEnum::PointerType(actor_ptr),
         ],
         "product ABI widens narrow integers and keeps actor handles as pointers"
+    );
+}
+
+#[test]
+fn checked_primitive_alias_layout_does_not_read_the_surface_target() {
+    let source = r#"
+type InnerText = string
+type Text = InnerText
+func main() -> i32 { 0 }
+"#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let mut text_declaration = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Type(declaration) if declaration.name == "Text" => Some(declaration.clone()),
+            _ => None,
+        })
+        .expect("Text alias header");
+    let crate::ast::TypeDefKind::Alias(target) = &mut text_declaration.kind else {
+        panic!("Text must be a transparent alias");
+    };
+    *target = Type::Name("i64".into(), vec![]);
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_alias_layout");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    assert_eq!(
+        codegen.resolve_alias_type_name("Text"),
+        "string",
+        "Display/cast normalization uses the canonical terminal primitive"
+    );
+    assert!(codegen.map_type_is_statically_string(Type::Name("Text".into(), vec![])));
+    assert_eq!(
+        codegen.surface_ownership_class(&Type::Name("Text".into(), vec![])),
+        crate::codegen::abi::ownership::OwnershipClass::StringBox,
+        "alias ownership is canonical even before the compatibility TypeDef is registered"
+    );
+    assert_eq!(
+        codegen.surface_ownership_class(&Type::Name(
+            "List".into(),
+            vec![Type::Name("Text".into(), vec![])],
+        )),
+        crate::codegen::abi::ownership::OwnershipClass::List(Box::new(
+            crate::codegen::abi::ownership::OwnershipClass::StringBox
+        )),
+        "nested containers preserve the canonical StringBox alias obligation"
+    );
+    codegen
+        .register_type_def(&text_declaration)
+        .expect("install alias layout");
+
+    let string_layout = codegen.type_llvm.get("Text").expect("Text LLVM layout");
+    assert_eq!(
+        *string_layout,
+        BasicTypeEnum::StructType(context.struct_type(
+            &[
+                BasicTypeEnum::PointerType(context.ptr_type(inkwell::AddressSpace::default())),
+                BasicTypeEnum::IntType(context.i64_type()),
+            ],
+            false,
+        )),
+        "the canonical alias chain ends at String despite the poisoned surface target"
+    );
+}
+
+#[test]
+fn checked_native_record_and_repr_c_layouts_ignore_surface_fields_and_attributes() {
+    let source = r#"
+type InnerText = string
+type Payload { id: i32, text: InnerText }
+#[repr(C)]
+type CPair { value: i32, flag: bool }
+func main() -> i32 { 0 }
+"#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let mut payload = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Type(declaration) if declaration.name == "Payload" => Some(declaration.clone()),
+            _ => None,
+        })
+        .expect("Payload declaration");
+    let TypeDefKind::Record(fields) = &mut payload.kind else {
+        panic!("Payload must be a record");
+    };
+    fields[1].ty = Type::Name("i64".into(), vec![]);
+    let mut c_pair = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Type(declaration) if declaration.name == "CPair" => Some(declaration.clone()),
+            _ => None,
+        })
+        .expect("CPair declaration");
+    let TypeDefKind::Record(fields) = &mut c_pair.kind else {
+        panic!("CPair must be a record");
+    };
+    fields[1].ty = Type::Name("string".into(), vec![]);
+    c_pair.attributes.clear();
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_native_record_layouts");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    codegen.register_type_def(&payload).expect("Payload layout");
+    codegen.register_type_def(&c_pair).expect("CPair layout");
+
+    let payload_fields = codegen
+        .type_llvm
+        .get("Payload")
+        .expect("Payload layout")
+        .into_struct_type()
+        .get_field_types();
+    assert_eq!(
+        payload_fields,
+        vec![
+            BasicTypeEnum::IntType(context.i32_type()),
+            BasicTypeEnum::StructType(context.struct_type(
+                &[
+                    BasicTypeEnum::PointerType(context.ptr_type(inkwell::AddressSpace::default())),
+                    BasicTypeEnum::IntType(context.i64_type()),
+                ],
+                false,
+            )),
+        ],
+        "record fields and the transparent string-alias ABI come from checked field IDs"
+    );
+    assert_eq!(
+        codegen
+            .type_llvm
+            .get("CPair")
+            .expect("CPair layout")
+            .into_struct_type()
+            .get_field_types(),
+        vec![
+            BasicTypeEnum::IntType(context.i32_type()),
+            BasicTypeEnum::IntType(context.i8_type()),
+        ],
+        "repr(C) and bool's C width come from checked representation metadata"
+    );
+    assert!(codegen.repr_c_record_names.contains("CPair"));
+}
+
+#[test]
+fn checked_native_enum_payload_tags_and_drop_ordinals_ignore_surface_payloads() {
+    let source = r#"
+type Outcome { Wrapped(string), Count(i32, i32), Only(i32), None }
+func main() -> i32 { 0 }
+"#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let mut outcome = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Type(declaration) if declaration.name == "Outcome" => Some(declaration.clone()),
+            _ => None,
+        })
+        .expect("Outcome declaration");
+    let TypeDefKind::Enum(variants) = &mut outcome.kind else {
+        panic!("Outcome must be an enum");
+    };
+    for variant in variants {
+        match variant.name.as_str() {
+            "Wrapped" => {
+                variant.payload = Some(VariantPayload::Tuple(vec![Type::Name(
+                    "i32".into(),
+                    vec![],
+                )]));
+            }
+            "Count" => variant.payload = None,
+            "Only" => {
+                variant.payload = Some(VariantPayload::Tuple(vec![
+                    Type::Name("string".into(), vec![]),
+                    Type::Name("string".into(), vec![]),
+                ]));
+            }
+            "None" => {}
+            _ => panic!("unexpected variant {}", variant.name),
+        }
+    }
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_native_enum_layout");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    codegen.register_type_def(&outcome).expect("Outcome layout");
+
+    assert_eq!(
+        codegen.enum_boxed_variant_ordinals("Outcome"),
+        vec![0, 3],
+        "sorted native tags and boxed-payload facts come from checked variant identities/types"
+    );
+    assert!(codegen.variant_payload_is_boxed("Wrapped"));
+    assert!(codegen.variant_payload_is_boxed("Count"));
+    assert!(!codegen.variant_payload_is_boxed("Only"));
+}
+
+#[test]
+fn checked_native_flow_state_layout_ignores_surface_payload_type() {
+    let source = r#"
+flow Inventory {
+    state Ready { id: i32, label: string }
+}
+func main() -> i32 { 0 }
+"#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let flow = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Flow(flow) if flow.name == "Inventory" => Some(flow),
+            _ => None,
+        })
+        .expect("Inventory flow");
+    let state = &flow.states[0];
+    let mut surface_fields = state.payload.clone().unwrap_or_default();
+    surface_fields[1].ty = Type::Name("i64".into(), vec![]);
+    let declaration = TypeDef {
+        meta: AstNodeMeta::inherited(state.meta.span, AstOrigin::RuntimeSystem("test-flow-state")),
+        name: "flow::Inventory::Ready".into(),
+        pub_: false,
+        kind: TypeDefKind::Record(surface_fields),
+        generics: vec![],
+        derives: vec![],
+        attributes: vec![],
+    };
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_native_flow_state");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    codegen
+        .register_type_def(&declaration)
+        .expect("Flow state layout");
+    assert_eq!(
+        codegen
+            .type_llvm
+            .get("flow::Inventory::Ready")
+            .expect("Flow state layout")
+            .into_struct_type()
+            .get_field_types(),
+        vec![
+            BasicTypeEnum::IntType(context.i32_type()),
+            BasicTypeEnum::StructType(context.struct_type(
+                &[
+                    BasicTypeEnum::PointerType(context.ptr_type(inkwell::AddressSpace::default())),
+                    BasicTypeEnum::IntType(context.i64_type()),
+                ],
+                false,
+            )),
+        ],
+        "qualified Flow state ABI fields come from the canonical field catalog"
     );
 }
 
@@ -313,7 +684,7 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
 }
 
 #[test]
-fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
+fn compile_checked_routes_closed_map_any_owner_v1_without_legacy_access() {
     let profiles = [
         (
             "i32",
@@ -327,7 +698,7 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
             0
         }
     "#,
-            "mimi_mir_map_root_set",
+            "mimi_mir_map_any_owner_v1_set_i32",
         ),
         (
             "string",
@@ -345,7 +716,7 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
             0
         }
             "#,
-            "mimi_mir_map_root_set_string",
+            "mimi_mir_map_any_owner_v1_set_string",
         ),
         (
             "remove",
@@ -360,7 +731,7 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
             size
         }
     "#,
-            "mimi_mir_map_root_remove",
+            "mimi_mir_map_any_owner_v1_remove",
         ),
         (
             "contains",
@@ -375,7 +746,7 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
             size
         }
     "#,
-            "mimi_mir_map_root_contains",
+            "mimi_mir_map_any_owner_v1_contains",
         ),
     ];
     for (profile, source, set_runtime) in profiles {
@@ -387,43 +758,66 @@ fn compile_checked_routes_checker_receipted_map_root_without_legacy_access() {
         let admission = crate::core::mir::classify_canonical_mir_route_admission(&program);
         assert_eq!(
             admission.map_root,
-            crate::core::mir::MapRootAdmission::CompleteCoverage,
-            "{profile} MapRoot profile must be fully checker-receipted: {admission:#?}"
+            crate::core::mir::MapRootAdmission::OutsideProfile,
+            "{profile} must not be admitted under the raw MapRoot identity: {admission:#?}"
         );
+        assert_eq!(
+            admission.map_any_owner,
+            crate::core::mir::MapAnyOwnerAdmission::CompleteCoverage,
+            "{profile} must have a complete independent MapAnyOwner v1 receipt: {admission:#?}"
+        );
+        assert!(crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1.is_admitted(admission));
 
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let context = Context::create();
-        let mut codegen = CodeGenerator::new(&context, &format!("map_root_{profile}_direct_route"));
+        let mut codegen = CodeGenerator::new(
+            &context,
+            &format!("map_any_owner_v1_{profile}_direct_route"),
+        );
         codegen
             .compile_checked(&program)
-            .expect("direct CheckedProgram native entry must route MapRoot through MIR");
+            .expect("direct CheckedProgram native entry must route MapAnyOwner v1 through MIR");
         codegen
             .module
             .verify()
-            .expect("valid direct MapRoot module");
+            .expect("valid direct MapAnyOwner v1 module");
+        let native_ir = codegen.module.print_to_string().to_string();
+        let result_abi = if profile == "contains" {
+            "call i32"
+        } else {
+            "call i64"
+        };
+        assert!(
+            native_ir.contains(&format!("{result_abi} @{set_runtime}")),
+            "direct {profile} native route must call {set_runtime}; emitted LLVM IR:\n{native_ir}"
+        );
+        assert!(
+            !native_ir.contains("call i64 @mimi_mir_map_root_"),
+            "direct {profile} native route must not call the raw MapRoot runtime"
+        );
         for runtime in [
-            "mimi_mir_map_root_new",
+            "mimi_mir_map_any_owner_v1_new",
             set_runtime,
-            "mimi_mir_map_root_size",
-            "mimi_mir_map_root_drop",
+            "mimi_mir_map_any_owner_v1_size",
+            "mimi_mir_map_any_owner_v1_drop",
         ] {
             assert!(codegen.module.get_function(runtime).is_some(), "{runtime}");
         }
         if profile == "remove" {
             assert!(codegen
                 .module
-                .get_function("mimi_mir_map_root_remove")
+                .get_function("mimi_mir_map_any_owner_v1_remove")
                 .is_some());
         }
         assert!(
             crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "direct {profile} MapRoot native compilation must not access retained legacy bodies"
+            "direct {profile} MapAnyOwner v1 native compilation must not access retained legacy bodies"
         );
     }
 }
 
 #[test]
-fn compile_checked_preserves_dynamic_map_key_outside_maproot_profile() {
+fn compile_checked_rejects_dynamic_map_key_without_legacy_owner() {
     let source = r#"
         func main() -> i32 {
             let root = map_new()
@@ -438,23 +832,137 @@ fn compile_checked_preserves_dynamic_map_key_outside_maproot_profile() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&program);
     assert_eq!(
-        crate::core::mir::classify_canonical_mir_route_admission(&program).map_root,
+        admission.map_root,
         crate::core::mir::MapRootAdmission::OutsideProfile
     );
+    assert_eq!(
+        admission.map_any_owner,
+        crate::core::mir::MapAnyOwnerAdmission::OutsideProfile
+    );
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "map_dynamic_key_legacy_compatibility");
-    codegen
+    let mut codegen = CodeGenerator::new(&context, "map_dynamic_key_rejected");
+    let errors = codegen
         .compile_checked(&program)
-        .expect("dynamic Map keys remain available outside the MapRoot profile");
-    codegen
-        .module
-        .verify()
-        .expect("valid dynamic Map key module");
+        .expect_err("dynamic Map keys outside the closed profile must fail closed");
+    assert!(
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                || diagnostic
+                    .message
+                    .contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }),
+        "unsupported Map operation must fail at the canonical route gate: {errors:?}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
+fn compile_checked_routes_ordinary_map_values_without_legacy_owner() {
+    let source = r#"
+        func main() -> i32 {
+            let root = map_new()
+            let values = values(root)
+            drop(root)
+            drop(values)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&program);
+    assert_eq!(
+        admission.ordinary_map_owned_get_i32_string_v1,
+        crate::core::mir::OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage
+    );
+    assert_eq!(
+        admission.ordinary_map_owner_lifecycle_i32_string_v1,
+        crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
+    );
+    assert!(!admission.map_any_owner.is_candidate());
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "ordinary_map_values_direct_route");
+    codegen
+        .compile_checked(&program)
+        .expect("complete ordinary Map values must route through canonical MIR");
+    codegen
+        .module
+        .verify()
+        .expect("ordinary Map values native module must verify");
+    assert!(codegen
+        .module
+        .get_function("mimi_mir_ordinary_map_owned_get_i32_string_v1_values")
+        .is_some());
+    let native_ir = codegen.module.print_to_string().to_string();
+    assert!(
+        native_ir.contains("@mimi_mir_ordinary_map_owned_get_i32_string_v1_values"),
+        "ordinary Map values native route must call its owned-result runtime: {native_ir}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "ordinary Map values native compilation must not access retained legacy bodies"
+    );
+
+    // Keep a negative route fixture on a genuinely unsupported Map operation.
+    // Typed map_get_i32 and values are both canonical owned-result operations;
+    // `keys` remains outside the ordinary Map/Any closure and must therefore
+    // retain an explicit fail-closed route.
+    let get_source = r#"
+        func main() -> i32 {
+            let root = map_new()
+            let pair = map_get_i32(root, "answer")
+            let unsupported = keys(root)
+            drop(pair)
+            drop(unsupported)
+            drop(root)
+            0
+        }
+    "#;
+    let get_tokens = crate::lexer::Lexer::new(get_source)
+        .tokenize()
+        .expect("lex typed GetI32 route fixture");
+    let get_file = crate::parser::Parser::new(get_tokens)
+        .parse_file()
+        .expect("parse typed GetI32 route fixture");
+    let get_program =
+        crate::core::check_program(&get_file).expect("check typed GetI32 route fixture");
+    let get_admission = crate::core::mir::classify_canonical_mir_route_admission(&get_program);
+    assert!(get_admission
+        .ordinary_map_owned_get_i32_string_v1
+        .has_profile_signal());
+    assert!(!get_admission.ordinary_map_owned_get_i32_string_v1_complete());
+    assert_eq!(
+        get_admission.ordinary_map_owner_lifecycle_i32_string_v1,
+        crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "ordinary_map_incomplete_compatibility");
+    let errors = codegen
+        .compile_checked(&get_program)
+        .expect_err("incomplete ordinary Map coverage must fail closed");
+    assert!(
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                || diagnostic
+                    .message
+                    .contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }),
+        "unsupported Map operation must fail at the canonical route gate: {errors:?}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn compile_checked_rejects_unmigrated_generic_body_without_legacy_owner() {
     let source = r#"
         func choose<T>(left: T, right: T) -> T { left }
         func main() -> i64 { choose(42, 43) }
@@ -468,16 +976,14 @@ fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "legacy_generic_owner");
-    codegen
+    let error = codegen
         .compile_checked(&program)
-        .expect("out-of-profile generic body should remain compilable");
+        .expect_err("reachable generic compatibility must fail closed");
+    assert_eq!(error[0].code.as_deref(), Some("MIR-COVERAGE-001"));
+    assert!(error[0].message.contains("NITS"));
     assert!(
-        codegen.module.get_function("main").is_some(),
-        "generic compatibility path must still emit main"
-    );
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "a rejected generic route must not enter the legacy body"
     );
 }
 
@@ -498,28 +1004,18 @@ fn compile_checked_does_not_reenter_legacy_for_resolved_plain_scalar_body() {
     crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "resolved_plain_scalar_no_legacy_reentry");
-    codegen
+    let error = codegen
         .compile_checked(&program)
-        .expect("resolved plain scalar body plus generic compatibility body");
+        .expect_err("reachable generic compatibility must fail closed");
+    assert_eq!(error[0].code.as_deref(), Some("MIR-COVERAGE-001"));
+    assert!(error[0].message.contains("NITS"));
     assert!(
-        codegen
-            .module
-            .get_function("add_one")
-            .is_some_and(|function| function.count_basic_blocks() != 0),
-        "resolved plain scalar function must have a native body"
-    );
-    let legacy_calls = crate::core::CheckedProgram::test_legacy_codegen_function_calls();
-    assert!(
-        !legacy_calls.iter().any(|name| name == "add_one"),
-        "already-emitted plain scalar body must not enter legacy emitter: {legacy_calls:?}"
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "a rejected generic route must not invoke the legacy emitter"
     );
     assert!(
-        legacy_calls.iter().any(|name| name == "choose"),
-        "generic compatibility body must retain an explicit legacy call: {legacy_calls:?}"
-    );
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "a rejected generic route must not read a legacy body"
     );
 }
 
@@ -540,8 +1036,8 @@ fn codegen_shares_checker_ast_snapshot_for_progressive_comptime() {
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "shared_progressive_comptime");
     codegen
-        .compile_checked(&program)
-        .expect("direct codegen should route comptime functions through compatibility setup");
+        .compile_file_with_resolved(&program, None)
+        .expect("test-only compatibility adapter should retain its comptime input");
     let codegen_file = codegen
         .comptime_file
         .as_ref()
@@ -834,11 +1330,9 @@ fn direct_native_entry_rejects_nested_unit_result_without_legacy_access() {
 
 #[test]
 fn direct_native_entry_rejects_complete_scalar_collection_materialization_failure() {
-    // R6-1052 restatement: the coverage scan is a checker-side type
-    // heuristic, so a shape construction cannot lower (a nested-block assign
-    // outside the MIR Phase 0 scalar-assign face) is an explicit
-    // compatibility input — compile_checked keeps the previously working
-    // legacy body alive instead of hard-rejecting the program.
+    // R6-1052 closure: a shape construction that cannot lower (a nested-block
+    // assign outside the MIR Phase 0 scalar-assign face) is an explicit
+    // coverage failure. Production codegen must not reopen the legacy body.
     let source = r#"
         func main() -> i32 {
             let mut total = 0
@@ -858,12 +1352,17 @@ fn direct_native_entry_rejects_complete_scalar_collection_materialization_failur
         crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
     );
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s23_scalar_collection_materialization_error");
-    codegen
+    let errors = codegen
         .compile_checked(&program)
-        .expect("nested-assign construction failure must keep the compatibility route alive");
-    assert!(codegen.module.get_function("main").is_some());
+        .expect_err("nested-assign construction failure must fail closed");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some("MIR-COVERAGE-001")
+            || diagnostic.code.as_deref() == Some("MIR-LOWERING-001")
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -928,7 +1427,7 @@ fn compile_checked_routes_concrete_protocol_method_without_legacy_access() {
 }
 
 #[test]
-fn compile_checked_keeps_dynamic_protocol_method_on_legacy_owner() {
+fn compile_checked_rejects_dynamic_protocol_method_without_legacy_owner() {
     let source = include_str!("../../tests/fixtures/mir_protocol_method_dyn.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
@@ -938,18 +1437,19 @@ fn compile_checked_keeps_dynamic_protocol_method_on_legacy_owner() {
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "dyn_protocol_legacy_compatibility");
-    codegen
+    let mut codegen = CodeGenerator::new(&context, "dyn_protocol_rejected");
+    let errors = codegen
         .compile_checked(&program)
-        .expect("dynamic protocol dispatch must retain its compatibility emitter");
-    assert!(codegen.module.get_function("main").is_some());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access()
-        .contains(&crate::core::LegacyBodyConsumer::CodegenLegacyRemainder));
+        .expect_err("dynamic protocol dispatch must fail closed before legacy codegen");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_keeps_flow_transition_on_legacy_owner() {
-    let source = include_str!("../../tests/real_world/flow_counter.mimi");
+fn compile_checked_routes_multi_transition_flow_through_canonical_mir() {
+    let source = include_str!("../../tests/real_world/flow_multi_transition_selfloops.mimi");
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -958,21 +1458,17 @@ fn compile_checked_keeps_flow_transition_on_legacy_owner() {
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "flow_transition_legacy_owner");
+    let mut codegen = CodeGenerator::new(&context, "flow_transition_canonical_owner");
     codegen
         .compile_checked(&program)
-        .expect("legacy Flow transition must remain compilable");
-    assert!(codegen.module.get_function("main").is_some());
+        .expect("multi-transition Flow must use canonical MIR native codegen");
     assert!(
-        codegen
-            .module
-            .get_function("Counter__inc__from_Zero")
-            .is_some(),
-        "the retained Flow transition body must be emitted"
+        codegen.module.get_function("main").is_some(),
+        "canonical multi-transition Flow must emit main"
     );
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "canonical multi-transition Flow must not access retained legacy bodies"
     );
 }
 
@@ -1106,7 +1602,7 @@ fn native_flow_actor_transition_fails_closed_without_hijacking_flow_or_actor_met
 }
 
 #[test]
-fn compile_checked_keeps_trait_impl_specialization_on_legacy_owner() {
+fn compile_checked_rejects_trait_impl_specialization_without_legacy_owner() {
     let source = r#"
         trait Computable {
             func compute() -> i32
@@ -1131,22 +1627,18 @@ fn compile_checked_keeps_trait_impl_specialization_on_legacy_owner() {
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "trait_impl_legacy_owner");
-    codegen
+    let mut codegen = CodeGenerator::new(&context, "trait_impl_rejected");
+    let errors = codegen
         .compile_checked(&program)
-        .expect("trait implementation compatibility path must remain compilable");
-    assert!(codegen
-        .module
-        .get_function("Data__Computable__compute")
-        .is_some());
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
-    );
+        .expect_err("trait implementation specialization must fail closed");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_keeps_captured_nested_helper_on_legacy_owner() {
+fn compile_checked_rejects_captured_nested_helper_without_legacy_owner() {
     let source = r#"
         func main() -> i32 {
             let offset = 1
@@ -1163,17 +1655,23 @@ fn compile_checked_keeps_captured_nested_helper_on_legacy_owner() {
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "nested_helper_legacy_owner");
-    codegen
+    let error = codegen
         .compile_checked(&program)
-        .expect("captured nested helper must remain on the compatibility owner");
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+        .expect_err("captured nested helper must fail closed before legacy codegen");
+    assert!(
+        error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("MIR-COVERAGE-001")),
+        "captured nested helper coverage diagnostic: {error:?}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "nested coverage rejection must not enter a legacy body"
     );
 }
 
 #[test]
-fn compile_checked_keeps_export_wrapper_body_on_legacy_owner() {
+fn compile_checked_routes_scalar_export_wrapper_without_legacy_access() {
     let source = r#"
         extern "C" func owner_tripwire_export(value: i32) -> i32 {
             value + 1
@@ -1185,13 +1683,14 @@ fn compile_checked_keeps_export_wrapper_body_on_legacy_owner() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).scalar_export);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "export_wrapper_legacy_owner");
     codegen
         .compile_checked(&program)
-        .expect("legacy C export wrapper must remain compilable");
+        .expect("scalar C export wrapper must compile canonically");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen
         .module
@@ -1202,17 +1701,30 @@ fn compile_checked_keeps_export_wrapper_body_on_legacy_owner() {
         .get_function(&CodeGenerator::export_body_symbol("owner_tripwire_export"))
         .is_some());
     assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+        codegen
+            .module
+            .get_function("owner_tripwire_export")
+            .expect("public scalar wrapper")
+            .get_linkage(),
+        inkwell::module::Linkage::External
     );
+    assert_eq!(
+        codegen
+            .module
+            .get_function(&CodeGenerator::export_body_symbol("owner_tripwire_export"))
+            .expect("internal scalar body")
+            .get_linkage(),
+        inkwell::module::Linkage::Internal
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_keeps_scalar_ffi_with_export_body_on_compatibility_owner() {
+fn compile_checked_routes_scalar_ffi_with_export_body_without_legacy_access() {
     let source = r#"
-        extern "C" { func abs(value: i32) -> i32; }
-        extern "C" func internal_export(value: i32) -> i32 { value + 1 }
-        func main() -> i32 { abs(internal_export(-3)) }
+        extern "C" { func abs(value: i64) -> i64; }
+        extern "C" func internal_export(value: i64) -> i64 { value + 1 }
+        func main() -> i32 { println(abs(internal_export(-3))) 0 }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
@@ -1225,21 +1737,18 @@ fn compile_checked_keeps_scalar_ffi_with_export_body_on_compatibility_owner() {
     let mut codegen = CodeGenerator::new(&context, "scalar_ffi_export_compatibility");
     codegen
         .compile_checked(&program)
-        .expect("mixed scalar import and export body must use compatibility codegen");
+        .expect("mixed scalar import and export body must use canonical codegen");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.module.get_function("internal_export").is_some());
     assert!(codegen
         .module
         .get_function(&CodeGenerator::export_body_symbol("internal_export"))
         .is_some());
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
-    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_export_body_precedes_a_closed_maproot_candidate() {
+fn compile_checked_rejects_export_map_any_owner_composition_without_legacy_access() {
     let source = r#"
         extern "C" func internal_export(value: i32) -> i32 { value + 1 }
         func main() -> i32 {
@@ -1255,19 +1764,20 @@ fn compile_checked_export_body_precedes_a_closed_maproot_candidate() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).map_root_complete());
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program).map_any_owner_complete()
+    );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "export_body_precedes_map_root");
-    codegen
+    let mut codegen = CodeGenerator::new(&context, "export_body_precedes_map_any_owner");
+    let error = codegen
         .compile_checked(&program)
-        .expect("direct default-compatible compilation must honor the export boundary");
-    codegen.module.verify().expect("valid compatibility module");
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
-    );
+        .expect_err("mixed scalar export and MapAnyOwner must fail closed");
+    assert!(error.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1288,6 +1798,7 @@ fn compile_checked_routes_recursive_c_export_calls_to_internal_body() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "recursive_export_internal_abi");
     codegen
@@ -1341,10 +1852,11 @@ fn compile_checked_routes_recursive_c_export_calls_to_internal_body() {
         .module
         .verify()
         .expect("recursive export LLVM module must verify");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_keeps_actor_method_on_legacy_owner() {
+fn compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access() {
     let source = r#"
         actor OwnerTripwireWorker {
             value: i32
@@ -1360,26 +1872,114 @@ fn compile_checked_keeps_actor_method_on_legacy_owner() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
+    let route = crate::core::mir::materialize_canonical_mir_route(&program, None)
+        .expect("closed scalar Actor route");
+    assert!(route.admission.scalar_actor);
+    assert!(
+        crate::core::mir::CanonicalMirRouteProfile::ScalarActor.is_materialized(&route),
+        "the actor method body must be present in the selected canonical graph"
+    );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "actor_body_legacy_owner");
     codegen
         .compile_checked(&program)
-        .expect("legacy actor method must remain compilable");
+        .expect("canonical scalar Actor method must remain compilable");
     assert!(codegen.module.get_function("main").is_some());
-    assert!(codegen
-        .module
-        .get_function("OwnerTripwireWorker__read__method")
-        .is_some());
+    let actor = route
+        .program
+        .actors()
+        .iter()
+        .next()
+        .expect("one checker-owned Actor contract")
+        .1;
+    let worker_owner = &actor.methods.first().expect("read method").owner;
+    assert!(
+        route
+            .program
+            .actor_execution_plan()
+            .expect("Actor execution plan")
+            .tagged_functions
+            .contains(worker_owner),
+        "the Actor method must be in the tagged canonical worker graph"
+    );
+    let worker_symbol = format!(
+        "__mimi_actor_status_{}",
+        worker_owner
+            .0
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert!(
+        codegen.module.get_function(&worker_symbol).is_some(),
+        "the checker-owned actor method must be emitted under its canonical status ABI"
+    );
+    assert!(
+        codegen
+            .module
+            .get_function("OwnerTripwireWorker__read__method")
+            .is_none(),
+        "the legacy Actor worker must not shadow the canonical body"
+    );
     assert_eq!(
         crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+        Vec::<crate::core::LegacyBodyConsumer>::new(),
+        "closed Actor compilation must not read a legacy body"
     );
+    codegen
+        .module
+        .verify()
+        .expect("canonical scalar Actor module must verify");
 }
 
 #[test]
-fn compile_checked_keeps_map_any_borrowed_access_on_legacy_owner() {
+fn compile_checked_rejects_contract_bearing_actor_without_legacy_owner() {
+    let source = r#"
+        actor OwnerTripwireWorker {
+            value: i32
+            func read() -> i32 { self.value }
+        }
+        func guarded(value: i32) -> i32 {
+            ensures: result == value
+            value
+        }
+        func main() -> i32 {
+            let worker = OwnerTripwireWorker.spawn()
+            worker.read()
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let boundary = crate::core::mir::scalar_actor_contract_boundary_reason(&program)
+        .expect("the contract-bearing callable must stay outside ScalarActor NoContracts");
+    assert!(
+        boundary.contains("guarded"),
+        "unexpected boundary reason: {boundary}"
+    );
+    assert!(
+        !crate::core::mir::classify_canonical_mir_route_admission(&program).scalar_actor,
+        "a whole-program proof obligation must keep this Actor graph out of ScalarActor"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let errors = CodeGenerator::new(&context, "actor_body_rejected")
+        .compile_checked(&program)
+        .expect_err("contract-bearing Actor must fail closed outside ScalarActor");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn compile_checked_rejects_map_any_borrowed_access_without_legacy_owner() {
     let source = r#"
         func main() -> i32 {
             let original = map_new()
@@ -1400,16 +2000,13 @@ fn compile_checked_keeps_map_any_borrowed_access_on_legacy_owner() {
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "map_any_borrowed_legacy_owner");
-    codegen
+    let errors = CodeGenerator::new(&context, "map_any_borrowed_rejected")
         .compile_checked(&program)
-        .expect("borrowed Map/Any compatibility body must remain compilable");
-    assert!(codegen.module.get_function("main").is_some());
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder],
-        "Map/Any map_get and values borrows must not enter the Canonical MIR route"
-    );
+        .expect_err("borrowed Map/Any access must fail closed outside its receipt");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1479,8 +2076,8 @@ fn legacy_map_set_uses_source_string_type_instead_of_pointer_integer_shape() {
         let context = Context::create();
         let mut codegen = CodeGenerator::new(&context, "legacy_map_static_string");
         codegen
-            .compile_checked(&program)
-            .expect("compile legacy body");
+            .compile_file_with_resolved(&program, None)
+            .expect("compile legacy body through the test-only adapter");
         codegen.module.verify().expect("verify legacy Map IR");
         let ir = codegen.module.print_to_string().to_string();
         assert_eq!(
@@ -2197,5 +2794,814 @@ fn flow_matrix_generated_transition_function_types_share_lowering_origin() {
     assert_eq!(
         transition.params[0].ty.meta().unwrap().origin,
         AstOrigin::User
+    );
+}
+
+#[test]
+fn checked_declaration_name_installation_does_not_open_legacy_body_owner() {
+    let source = r#"
+        cap A;
+        cap B;
+        cap Combined = A + B;
+        cap Extended + B;
+        trait Slots { func second() -> i32; func first() -> i32; }
+        actor LaterActor { func get() -> i32 { 42 } }
+        func main() -> i32 { 0 }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_names");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    assert_eq!(codegen.cap_components["Combined"], ["A", "B"]);
+    assert_eq!(codegen.cap_components["Extended"], ["Extended", "B"]);
+    assert_eq!(codegen.cap_components["A"], ["A"]);
+    assert_eq!(codegen.trait_method_names["Slots"], ["second", "first"]);
+    let later = crate::ast::Type::Name("LaterActor".into(), vec![]);
+    assert_eq!(
+        codegen.llvm_type_for(&later),
+        Some(BasicTypeEnum::PointerType(
+            context.ptr_type(inkwell::AddressSpace::default()),
+        )),
+        "preseeded actor forward references use the handle ABI",
+    );
+    assert!(
+        codegen.actor_defs.is_empty(),
+        "installer never reconstructs ActorDef"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn checked_trait_slot_order_drives_legacy_vtable_without_trait_ast_cache() {
+    let source = r#"
+        trait Slots { func second() -> i32; func first() -> i32; }
+        type Item { value: i32 }
+        impl Slots for Item {
+            func first() -> i32 { self.value }
+            func second() -> i32 { self.value + 1 }
+        }
+        func main() -> i32 { let item = Item { value: 41 }; item.second() }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let implementation = program
+        .native_declarations()
+        .impls
+        .values()
+        .find(|implementation| implementation.trait_name == "Slots")
+        .expect("checked Slots impl");
+    let second_symbol = &implementation
+        .methods
+        .iter()
+        .find(|method| method.trait_slots == vec![0])
+        .expect("second method slot")
+        .symbol;
+    let first_symbol = &implementation
+        .methods
+        .iter()
+        .find(|method| method.trait_slots == vec![1])
+        .expect("first method slot")
+        .symbol;
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_slots");
+    codegen
+        .compile_file_with_resolved(&program, None)
+        .expect("compatibility compilation");
+    codegen.module.verify().expect("valid IR");
+    let initializer = codegen
+        .module
+        .get_global(&implementation.vtable_symbol)
+        .expect("vtable")
+        .get_initializer()
+        .expect("initializer")
+        .to_string();
+    let second = initializer.find(second_symbol).expect("second slot");
+    let first = initializer.find(first_symbol).expect("first slot");
+    assert!(
+        second < first,
+        "trait declaration order controls the ABI, not impl order"
+    );
+}
+
+#[test]
+fn checked_generic_trait_specializations_keep_distinct_method_and_vtable_symbols() {
+    let source = r#"
+        trait Marker<T> { func read() -> i32; }
+        impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+        func main() -> i32 { 0 }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let implementations = program
+        .native_declarations()
+        .impls
+        .values()
+        .filter(|implementation| implementation.trait_name == "Marker")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        implementations.len(),
+        2,
+        "both checked specializations survive"
+    );
+    assert_ne!(implementations[0].owner, implementations[1].owner);
+    assert_ne!(
+        implementations[0].vtable_symbol,
+        implementations[1].vtable_symbol
+    );
+    let symbols = implementations
+        .iter()
+        .map(|implementation| {
+            let [method] = implementation.methods.as_slice() else {
+                panic!("Marker impl must have exactly one method");
+            };
+            method.symbol.clone()
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(
+        symbols[0], symbols[1],
+        "typed impl owners must not alias bodies"
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_generic_marker");
+    codegen
+        .compile_file_with_resolved(&program, None)
+        .expect("compile checked generic specializations");
+    codegen.module.verify().expect("valid IR");
+    assert!(
+        !codegen.vtable_globals.contains_key("List__Marker"),
+        "an ambiguous legacy lookup key must not silently choose one specialization",
+    );
+    for (implementation, method_symbol) in implementations.iter().zip(symbols) {
+        assert!(codegen
+            .vtable_globals
+            .contains_key(&implementation.vtable_symbol));
+        let initializer = codegen
+            .module
+            .get_global(&implementation.vtable_symbol)
+            .expect("owner-qualified vtable global")
+            .get_initializer()
+            .expect("vtable initializer")
+            .to_string();
+        assert!(
+            initializer.contains(&method_symbol),
+            "each vtable slot must reference its own checked method body",
+        );
+    }
+}
+
+#[test]
+fn checked_generic_protocol_method_stops_before_compatibility_abi_emission() {
+    let source = r#"
+        trait Echo<T> {
+            func echo(value: T) -> T;
+            func echo_local<U>(value: U) -> U;
+        }
+        type Holder { marker: i32 }
+        impl<T> Echo<T> for Holder {
+            func echo(value: T) -> T { value }
+            func echo_local<U>(value: U) -> U { value }
+        }
+        func main() -> i32 {
+            let holder = Holder { marker: 0 }
+            let text = holder.echo("A\0雪")
+            let local = holder.echo_local("B\0木")
+            println(text.len())
+            println(local.len())
+            0
+        }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "generic_protocol_native_fail_closed");
+    let diagnostics = codegen
+        .compile_checked(&program)
+        .expect_err("generic ProtocolMethod lacks a concrete MIR native ABI");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some("NATIVE-GENERIC-PROTOCOL-ABI-001")
+    }));
+    assert!(codegen.module.get_function("main").is_none());
+    for implementation in program.native_declarations().impls.values() {
+        for method in &implementation.methods {
+            assert!(
+                codegen.module.get_function(&method.symbol).is_none(),
+                "generic base body '{}' must not be emitted with the erased i64 ABI",
+                method.symbol
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_generic_trait_calls_use_exact_impl_owner() {
+    let source = r#"
+        trait Marker<T> { func read() -> i32; }
+        impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+        func main() -> i32 {
+            let numbers: List<i32> = [1]
+            let words: List<string> = ["x"]
+            println(words.read())
+            println(numbers.read())
+            0
+        }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let implementations = program
+        .native_declarations()
+        .impls
+        .values()
+        .filter(|implementation| implementation.trait_name == "Marker")
+        .collect::<Vec<_>>();
+    assert_eq!(implementations.len(), 2);
+    let method_symbols = implementations
+        .iter()
+        .map(|implementation| {
+            let [method] = implementation.methods.as_slice() else {
+                panic!("Marker impl must have exactly one method");
+            };
+            method.symbol.clone()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        method_symbols.len(),
+        2,
+        "each checked impl owns a distinct body"
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_generic_trait_call_owners");
+    codegen
+        .compile_file_with_resolved(&program, None)
+        .expect("compile both exact checked generic trait calls");
+    codegen.module.verify().expect("valid IR");
+    let main = codegen
+        .module
+        .get_function("main")
+        .expect("compiled main")
+        .to_string();
+    for symbol in method_symbols {
+        assert!(
+            main.contains(&symbol),
+            "main must call the exact checker-selected impl body {symbol}"
+        );
+    }
+}
+
+#[test]
+fn checked_string_protocol_method_precedes_builtin_spelling_fallback() {
+    let source = r#"
+        trait TrimOverride { func trim() -> string; }
+        impl TrimOverride for string { func trim() -> string { "from-trait" } }
+        func choose(value: string) -> string { value.trim() }
+        func main() -> i32 { 0 }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let implementation = program
+        .native_declarations()
+        .impls
+        .values()
+        .find(|implementation| implementation.trait_name == "TrimOverride")
+        .expect("checked TrimOverride impl");
+    let [method] = implementation.methods.as_slice() else {
+        panic!("TrimOverride must have exactly one checked method");
+    };
+    let expected_symbol = method.symbol.clone();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_string_trait_precedence");
+    codegen
+        .compile_file_with_resolved(&program, None)
+        .expect("compile exact checked string method");
+    codegen.module.verify().expect("valid IR");
+    let body = codegen
+        .module
+        .get_function("choose")
+        .expect("choose function")
+        .to_string();
+    assert!(
+        body.contains(&expected_symbol),
+        "the exact checker-selected trait body must win over `trim`'s builtin spelling"
+    );
+    assert!(
+        !body.contains("str_trim"),
+        "a ProtocolMethod call must not be desugared to the string builtin"
+    );
+}
+
+#[test]
+fn checked_string_builtin_call_keeps_the_builtin_adapter() {
+    let source = r#"
+        func choose(value: string) -> string { value.trim() }
+        func main() -> i32 { 0 }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_string_builtin_precedence");
+    codegen
+        .compile_file_with_resolved(&program, None)
+        .expect("compile exact builtin string call");
+    codegen.module.verify().expect("valid IR");
+    let body = codegen
+        .module
+        .get_function("choose")
+        .expect("choose function")
+        .to_string();
+    assert!(
+        body.contains("str_trim"),
+        "an exact Builtin call must continue through the string builtin adapter"
+    );
+}
+
+#[test]
+fn checked_impl_bodies_compile_from_callable_owners_without_type_impls() {
+    let source = r#"
+        trait Measure { func first() -> i32; func second() -> i32; }
+        type Counter { value: i32 }
+        impl Measure for Counter {
+            func second() -> i32 { self.value + 1 }
+            func first() -> i32 { self.value }
+        }
+        func main() -> i32 {
+            let counter = Counter { value: 40 };
+            counter.first() + counter.second()
+        }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let mut body_file = (*program
+        .legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder))
+    .clone();
+    let mut reordered_impl_body = false;
+    for item in &mut body_file.items {
+        if let crate::ast::Item::Impl(implementation) = item {
+            implementation.methods.swap(0, 1);
+            reordered_impl_body = true;
+        }
+    }
+    assert!(
+        reordered_impl_body,
+        "test carries implementation body payloads"
+    );
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_impl_owner_body");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    let expected_targets = program
+        .call_sites()
+        .values()
+        .filter_map(|site| match site.resolved_callee.as_ref()? {
+            crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method } => Some((
+                protocol.clone(),
+                crate::core::NodeId(method.as_str().into()),
+            )),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let installed_targets = codegen
+        .checked_trait_method_dispatch
+        .call_targets
+        .values()
+        .flatten()
+        .map(|target| (target.key.trait_owner.clone(), target.key.callable.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(expected_targets.len(), 2);
+    assert_eq!(installed_targets, expected_targets);
+    assert_eq!(codegen.checked_trait_method_dispatch.call_targets.len(), 2);
+    assert_eq!(
+        codegen
+            .checked_trait_method_dispatch
+            .call_targets
+            .values()
+            .map(Vec::len)
+            .sum::<usize>(),
+        2,
+        "each checker-selected static call retains one exact metadata receipt"
+    );
+    for (node, site) in program.call_sites() {
+        if matches!(
+            site.resolved_callee.as_ref(),
+            Some(crate::core::ir::ResolvedCallee::ProtocolMethod { .. })
+        ) {
+            let span = site.origin.user_span();
+            let key = (
+                span.source_id.raw(),
+                span.start_line,
+                span.start_col,
+                span.end_line,
+                span.end_col,
+            );
+            assert!(
+                codegen
+                    .checked_trait_method_dispatch
+                    .call_targets
+                    .contains_key(&key),
+                "checked call node '{}' is indexed at its source span",
+                node.0
+            );
+        }
+    }
+    for item in &body_file.items {
+        if let crate::ast::Item::Type(definition) = item {
+            codegen
+                .register_type_def(definition)
+                .expect("register type");
+        }
+    }
+    codegen
+        .install_checked_impl_method_bodies(&body_file, &program)
+        .expect("owner-indexed body payloads");
+    assert!(codegen.type_impls.is_empty());
+    codegen
+        .compile_checked_impl_methods(&program)
+        .expect("compile from native method bindings");
+    let checked_methods = program
+        .native_declarations()
+        .impls
+        .values()
+        .flat_map(|implementation| implementation.methods.iter())
+        .collect::<Vec<_>>();
+    let first_binding = checked_methods
+        .iter()
+        .find(|method| method.name == "first")
+        .expect("checked first method binding");
+    let second_binding = checked_methods
+        .iter()
+        .find(|method| method.name == "second")
+        .expect("checked second method binding");
+    let function = codegen
+        .module
+        .get_function(&first_binding.symbol)
+        .expect("canonical checked first method symbol");
+    assert!(function.count_basic_blocks() > 0);
+    assert!(
+        codegen
+            .module
+            .get_function(&second_binding.symbol)
+            .expect("canonical checked second method symbol")
+            .count_basic_blocks()
+            > 0
+    );
+    let first_owner = first_binding.callable.clone();
+    let first_call_site = program
+        .call_sites()
+        .values()
+        .find(|site| {
+            matches!(
+                site.resolved_callee.as_ref(),
+                Some(crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. })
+                    if method.as_str() == first_owner.0.as_str()
+            )
+        })
+        .expect("resolved first method callsite");
+    let first_call_meta = crate::ast::AstNodeMeta::inherited(
+        first_call_site.origin.user_span(),
+        crate::ast::AstOrigin::User,
+    );
+    assert_eq!(
+        codegen.infer_impl_method_return_type("Counter", "first", Some(first_call_meta)),
+        "i32",
+        "call result typing reads the native signature, not the body AST"
+    );
+    codegen
+        .checked_impl_method_bodies
+        .get_mut(&first_owner)
+        .expect("cached first method body")
+        .0
+        .ret = Some(crate::ast::Type::Name("string".into(), Vec::new()));
+    assert_eq!(
+        codegen.infer_impl_method_return_type("Counter", "first", Some(first_call_meta)),
+        "i32",
+        "changing the executable AST payload cannot rewrite the checked ABI result"
+    );
+}
+
+#[test]
+fn checked_dyn_trait_dispatch_uses_the_canonical_trait_slot_signature() {
+    let source = r#"
+        trait Read { func read() -> i32; }
+        type Counter { value: i32 }
+        impl Read for Counter { func read() -> i32 { self.value } }
+        func read_dynamic(value: dyn Read) -> i32 { value.read() }
+        func main() -> i32 {
+            let counter = Counter { value: 41 };
+            let dynamic: dyn Read = counter;
+            read_dynamic(dynamic)
+        }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_dyn_trait_slot_abi");
+    codegen
+        .compile_file_with_resolved(&program, None)
+        .expect("compile canonical dynamic trait ABI");
+    codegen
+        .module
+        .verify()
+        .expect("valid dynamic trait call IR");
+    let body = codegen
+        .module
+        .get_function("read_dynamic")
+        .expect("dynamic method caller")
+        .to_string();
+    assert!(body.contains("dyn_call"), "call uses the checked slot ABI");
+}
+
+#[test]
+fn checked_vtable_uses_native_impl_slot_receipt_without_ast_impl_map() {
+    let source = r#"
+        trait Slots { func second() -> i32; func first() -> i32; }
+        type Item { value: i32 }
+        impl Slots for Item {
+            func first() -> i32 { self.value }
+            func second() -> i32 { self.value + 1 }
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let implementation = program
+        .native_declarations()
+        .impls
+        .values()
+        .find(|implementation| implementation.trait_name == "Slots")
+        .expect("checked Slots impl");
+    let second_symbol = &implementation
+        .methods
+        .iter()
+        .find(|method| method.trait_slots == vec![0])
+        .expect("second method slot")
+        .symbol;
+    let first_symbol = &implementation
+        .methods
+        .iter()
+        .find(|method| method.trait_slots == vec![1])
+        .expect("first method slot")
+        .symbol;
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "checked_native_vtable_receipt");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    let function_type = context.i32_type().fn_type(&[], false);
+    codegen
+        .module
+        .add_function(second_symbol, function_type, None);
+    codegen
+        .module
+        .add_function(first_symbol, function_type, None);
+    codegen.type_impls.clear();
+    let anchor = codegen.module.add_function(
+        "vtable_anchor",
+        context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = context.append_basic_block(anchor, "entry");
+    codegen.builder.position_at_end(entry);
+    codegen
+        .compile_vtables()
+        .expect("checked vtable installation");
+    codegen.builder.build_return(None).expect("anchor return");
+    codegen.module.verify().expect("valid vtable IR");
+    let initializer = codegen
+        .module
+        .get_global(&implementation.vtable_symbol)
+        .expect("vtable global")
+        .get_initializer()
+        .expect("vtable initializer")
+        .to_string();
+    let second = initializer
+        .find(second_symbol)
+        .expect("first declared slot points at second");
+    let first = initializer
+        .find(first_symbol)
+        .expect("second declared slot points at first");
+    assert!(second < first, "slot identity is checker-receipt driven");
+}
+
+#[test]
+fn checked_actor_mailbox_headers_emit_real_resolved_calls_without_actor_ast_cache() {
+    for ty in ["i32", "string", "List<string>", "(i32, bool, string)"] {
+        let source = format!(
+            r#"
+            actor Echo {{ func echo(value: {ty}) -> {ty} {{ value }} }}
+            func call_actor(handle: Echo, value: {ty}) -> {ty} {{ handle.echo(value) }}
+            func main() -> i32 {{ 0 }}
+        "#
+        );
+        let file =
+            crate::parser::Parser::new(crate::lexer::Lexer::new(&source).tokenize().expect("lex"))
+                .parse_file()
+                .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, "checked_actor_header_call");
+        codegen
+            .install_checked_declaration_names(&program)
+            .expect("install checked declarations");
+        assert!(codegen.actor_defs.is_empty());
+        assert!(codegen.actor_method_ids.is_empty());
+        let owner = program
+            .function("call_actor")
+            .expect("caller")
+            .node_id
+            .clone();
+        let selected = std::collections::BTreeSet::from([owner]);
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let (count, _) = codegen
+            .compile_resolved_subset(&program, &selected)
+            .expect("real canonical mailbox caller");
+        assert_eq!(count, 1, "typed caller must not defer to AST for {ty}");
+        codegen.module.verify().expect("valid LLVM call/packing IR");
+        let caller = codegen
+            .module
+            .get_function("call_actor")
+            .expect("caller symbol");
+        assert!(caller.to_string().contains("@mimi_actor_call"));
+        assert!(
+            codegen.actor_defs.is_empty(),
+            "emitter must not synthesize ActorDef"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn checked_actor_tuple_text_alias_header_matches_legacy_worker_layout() {
+    let source = r#"
+        type InnerText = string
+        type Text = InnerText
+        actor Echo {
+            func echo(value: (Text, i32)) -> (Text, i32) { value }
+        }
+        func main() -> i32 {
+            let echo = Echo.spawn()
+            let source: (Text, i32) = ("A\0雪", 73)
+            let result = echo.echo(source)
+            if result.0 == "A\0雪" && result.1 == 73 { 0 } else { 1 }
+        }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let context = Context::create();
+    let mut typed_alias_layout = CodeGenerator::new(&context, "typed_alias_tuple_layout");
+    typed_alias_layout
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    assert!(typed_alias_layout.type_defs.is_empty());
+    let alias_type = crate::ast::Type::Name("Text".into(), Vec::new());
+    let alias_layout = typed_alias_layout
+        .checked_alias_llvm_types
+        .get("Text")
+        .copied()
+        .expect("checker target should materialize the closed String alias layout");
+    assert_eq!(
+        typed_alias_layout.tuple_field_type_for_actor_values(&alias_type),
+        Some(alias_layout),
+        "tuple alias lowering must not need the retained TypeDef AST map"
+    );
+
+    let mut codegen = CodeGenerator::new(&context, "actor_tuple_text_alias_header");
+    codegen
+        .compile_file_with_resolved(&program, None)
+        .expect("compile resolved caller and native actor worker");
+    codegen.module.verify().expect("valid LLVM module");
+
+    let actor = crate::core::NodeId("actor:Echo".into());
+    let header = codegen
+        .checked_actor_mailbox_header(&program, &actor, "echo")
+        .expect("checked mailbox header")
+        .expect("canonical tuple header");
+    let worker = codegen
+        .module
+        .get_function("Echo__echo__method")
+        .expect("actor worker method");
+    assert_eq!(header.parameters.len(), 1);
+    assert_eq!(
+        worker.get_nth_param(1).expect("tuple argument").get_type(),
+        header.parameters[0],
+        "worker parameter layout must match the checked mailbox declaration"
+    );
+    assert_eq!(
+        worker.get_type().get_return_type(),
+        Some(header.result),
+        "worker return layout must match the checked mailbox declaration"
+    );
+}
+
+#[test]
+fn checked_actor_mailbox_header_preserves_order_and_explicit_abi_boundaries() {
+    let source = r#"
+        actor Echo {
+            func second(value: i32) -> i32 { value }
+            func first(value: Option<List<i32>>) -> Option<List<i32>> { value }
+            func implicit() { }
+            func explicit_unit() -> () { }
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "mailbox_header_boundary");
+    codegen
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    let actor = crate::core::NodeId("actor:Echo".into());
+    let second = codegen
+        .checked_actor_mailbox_header(&program, &actor, "second")
+        .expect("header")
+        .expect("closed primitive header");
+    assert_eq!(
+        second.method_id, 0,
+        "declaration order is the runtime dispatch ordinal"
+    );
+    assert_eq!(
+        second.parameters,
+        [BasicTypeEnum::IntType(context.i32_type())]
+    );
+    let implicit = codegen
+        .checked_actor_mailbox_header(&program, &actor, "implicit")
+        .expect("header")
+        .expect("implicit sentinel");
+    assert_eq!(implicit.result, BasicTypeEnum::IntType(context.i64_type()));
+    assert_eq!(implicit.method_id, 2);
+    let unit = codegen
+        .checked_actor_mailbox_header(&program, &actor, "explicit_unit")
+        .expect("header")
+        .expect("unit header");
+    assert_eq!(unit.result, BasicTypeEnum::IntType(context.i64_type()));
+    assert!(
+        codegen
+            .checked_actor_mailbox_header(&program, &actor, "first")
+            .expect("known unmigrated ABI")
+            .is_none(),
+        "Option<List> preserves compatibility disposition"
+    );
+    assert!(codegen
+        .checked_actor_mailbox_header(&program, &actor, "absent")
+        .is_err());
+
+    let mut incomplete = CodeGenerator::new(&context, "mailbox_header_missing_catalog_actor");
+    incomplete
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    incomplete
+        .checked_native_declarations
+        .as_mut()
+        .expect("production declaration catalog")
+        .actors
+        .remove(&actor);
+    assert!(
+        incomplete
+            .checked_actor_mailbox_header(&program, &actor, "second")
+            .is_err(),
+        "an installed but incomplete native Actor schema must fail closed"
     );
 }

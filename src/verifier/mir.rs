@@ -7,23 +7,30 @@
 //! `NotInTrustedSubset` result; they never fall through to the legacy verifier.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 use std::time::Instant;
+
+use crate::verifier::checked_power::{
+    encode_checked_integer_power, CheckedPowerWidth, POWER_PROFILE_0_1_11_COMPAT,
+};
 
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
-    MirAbiClass, MirBuiltinKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeKind,
+    MirAbiClass, MirBuiltinKind, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership,
+    MirTypeKind,
 };
 use crate::core::mir::{
-    MirAggregateKind, MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind,
-    MirContractUnaryOp, MirFunction, MirInstructionKind, MirListOperation, MirProjection,
-    MirSwitchCase, MirTerminator, MirValueId,
+    MirAggregateKind, MirBlockId, MirContract, MirContractBinaryOp, MirContractExpr,
+    MirContractKind, MirContractUnaryOp, MirEdgeId, MirFunction, MirInstructionKind,
+    MirListOperation, MirManagedAnyOperation, MirProjection, MirProofBlock, MirProofExpression,
+    MirProofLoopEdgeKind, MirProofLoopReceipt, MirProofOperation, MirProofWorklist, MirSwitchCase,
+    MirTerminator, MirValueId,
 };
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
 };
-use z3::ast::{Bool, Float, Int, RoundingMode, Set as Z3Set};
-use z3::SatResult;
-use z3::Sort;
+use z3::ast::{Bool, Float, Int, RoundingMode, Set as Z3Set, String as Z3String};
+use z3::{SatResult, Solver, Sort};
 
 #[derive(Debug, Clone)]
 enum SymbolicValue {
@@ -46,6 +53,11 @@ enum SymbolicValue {
     Opaque {
         ty: crate::core::ResolvedTypeId,
     },
+    /// Exact String expression. Ordinary String inputs normally stay opaque
+    /// and live in `known_strings`; owned Map getters place a selected String
+    /// directly inside Result payloads so a subsequent exact equality remains
+    /// expressible, including embedded NUL and all Unicode scalar values.
+    String(SymbolicString),
     Tuple(Vec<SymbolicValue>),
     Record {
         nominal: crate::core::ir::NominalTypeId,
@@ -65,6 +77,28 @@ enum SymbolicValue {
     /// the verifier intentionally abstracts away payloads.
     MapRoot {
         keys: BTreeSet<String>,
+    },
+    /// An independent symbolic domain for the source-compatible ordinary
+    /// Map profile. Persistent updates preserve their source root and use
+    /// symbolic String equality for dynamic keys.
+    OrdinaryMapOwnerLifecycleV1 {
+        entries: Vec<SymbolicOrdinaryMapEntry>,
+    },
+    /// Independent typed owned-get ordinary Map snapshot. Unlike the older
+    /// lifecycle profile this retains each entry's i32/String payload so the
+    /// Result getters can distinguish Missing from TypeMismatch.
+    OrdinaryMapOwnedGetI32StringV1 {
+        entries: Vec<SymbolicOrdinaryMapOwnedGetEntry>,
+    },
+    /// A generation-bearing snapshot has its own dynamic descriptor and
+    /// both possible payload slots. It never aliases the symbolic Map root.
+    /// The discriminator selects the active payload; retaining both slots
+    /// keeps a dynamically selected key exact without guessing its kind.
+    ManagedAnyI32StringV1 {
+        kind: Int,
+        descriptor_version: Int,
+        i32_payload: Int,
+        string_payload: SymbolicString,
     },
     /// A scalar canonical List is represented by its length in the verifier.
     /// Set-to-list does not expose HashSet iteration order as a proof
@@ -99,6 +133,12 @@ struct SymbolicTrap {
 struct SymbolicState {
     values: BTreeMap<MirValueId, SymbolicValue>,
     constraints: Vec<Bool>,
+    /// Facts established at callable entry (type domains, transition state
+    /// invariants, and `requires`). A mutable-loop header is universally
+    /// abstracted from these facts only: preheader constraints over an older
+    /// SSA version must never leak onto a fresh current value.
+    callable_entry_values: Option<BTreeMap<MirValueId, SymbolicValue>>,
+    callable_entry_constraints: Option<Vec<Bool>>,
     traps: Vec<SymbolicTrap>,
     /// Exact child-list shapes for concrete `ConstructList` values.  The
     /// symbolic List value still exposes only its length to Z3; this side
@@ -109,10 +149,19 @@ struct SymbolicState {
     /// through the shape table.  Non-literal indices remain symbolic and use
     /// the ordinary bounds proof.
     known_ints: BTreeMap<MirValueId, i64>,
+    /// String expressions carried through MIR. Literal text remains in its
+    /// native form until it is actually used as an ordinary Map key, so an
+    /// unrelated opaque String payload never enters Z3's key domain.
+    known_strings: BTreeMap<MirValueId, SymbolicString>,
     /// FFI call-contract checks observed along this symbolic path. Keeping
     /// them in the path state means branch joins never lose a call-site
     /// obligation or accidentally merge facts from mutually exclusive arms.
     ffi_checks: Vec<FfiCheck>,
+    /// A sealed ManagedAny trap-cleanup call has no normal continuation. The
+    /// exact instance receipt guarantees its immediately following checked
+    /// i32 operation traps; stop this path before the structurally present
+    /// return and any caller instructions after the call.
+    normal_path_terminated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +169,132 @@ struct SymbolicListShape {
     length: Int,
     elements: Option<Vec<SymbolicValue>>,
     children: Option<Vec<SymbolicListShape>>,
+}
+
+#[derive(Debug, Clone)]
+struct SymbolicOrdinaryMapEntry {
+    key: Z3String,
+    present: Bool,
+}
+
+#[derive(Debug, Clone)]
+struct SymbolicOrdinaryMapOwnedGetEntry {
+    key: Z3String,
+    present: Bool,
+    value: SymbolicOrdinaryMapOwnedGetValue,
+}
+
+#[derive(Debug, Clone)]
+enum SymbolicOrdinaryMapOwnedGetValue {
+    I32(Int),
+    String(SymbolicString),
+}
+
+#[derive(Debug, Clone)]
+enum SymbolicString {
+    Symbol(Z3String),
+    Literal(String),
+    Concat(Box<SymbolicString>, Box<SymbolicString>),
+}
+
+impl SymbolicString {
+    fn as_z3(&self) -> Result<Z3String, String> {
+        match self {
+            Self::Symbol(value) => Ok(value.clone()),
+            Self::Literal(value) => symbolic_string_literal(value),
+            Self::Concat(left, right) => {
+                let left = left.as_z3()?;
+                let right = right.as_z3()?;
+                Ok(Z3String::concat(&[left, right]))
+            }
+        }
+    }
+}
+
+/// Encode supported Unicode scalars with Z3's `\\u{...}` string escape. The
+/// supported Z3 4.8 `Z3_mk_string` treats raw UTF-8 as bytes and interprets raw
+/// backslash escape text; its Rust wrapper also rejects embedded NUL through
+/// `CString`. Encoding every scalar preserves all three cases exactly and
+/// leaves the wrapper with ASCII input containing no NUL. The host SMT String
+/// alphabet ends at U+2FFFF; higher valid Rust scalars return a model-boundary
+/// error before entering Z3. This proof boundary does not restrict runtime
+/// Strings. The newer Char constructor is unavailable on the supported host.
+pub(super) fn symbolic_string_literal(value: &str) -> Result<Z3String, String> {
+    if let Some(character) = value
+        .chars()
+        .find(|character| (*character as u32) > 0x2ffff)
+    {
+        return Err(format!(
+            "exact SMT String literal is Deferred: Unicode scalar U+{:X} exceeds the host proof alphabet U+2FFFF",
+            character as u32
+        ));
+    }
+    let escaped = value
+        .chars()
+        .map(|character| format!("\\u{{{:x}}}", character as u32))
+        .collect::<String>();
+    Z3String::from_str(&escaped).map_err(|error| error.to_string())
+}
+
+/// Check the static callable-value declaration carried by the no-capture
+/// closure instructions.  The value identity is metadata for the bound local,
+/// not a runtime closure pointer; receipt preflight separately proves that
+/// the bind and invoke share the same sealed source declaration.
+pub(super) fn validate_closure_callable_value(
+    program: &MirProgram,
+    function: &MirFunction,
+    closure_local: &crate::core::ResolvedLocalId,
+    function_value: &MirValueId,
+    source_function_type: &crate::core::ResolvedTypeId,
+    source_abi: crate::core::FunctionTypeAbi,
+    source_parameter_count: usize,
+) -> Result<(), String> {
+    let expected = MirValueId::new(format!("local:{}", closure_local.0 .0))
+        .map_err(|error| format!("closure local has no canonical MIR value identity: {error}"))?;
+    if function_value != &expected {
+        return Err(format!(
+            "callable value '{}' does not identify closure local '{}'",
+            function_value, closure_local.0 .0
+        ));
+    }
+    let declaration = function.values.get(function_value).ok_or_else(|| {
+        format!(
+            "callable value '{}' is absent from the MIR declaration catalog",
+            function_value
+        )
+    })?;
+    if &declaration.ty != source_function_type {
+        return Err(format!(
+            "callable value '{}' TypeDesc disagrees with its checked function type",
+            function_value
+        ));
+    }
+    if source_abi != crate::core::FunctionTypeAbi::Mimi {
+        return Err("no-capture closure callable requires the Mimi function ABI".into());
+    }
+    let descriptor = program
+        .type_catalog()
+        .get(source_function_type)
+        .ok_or_else(|| {
+            format!(
+                "closure function TypeDesc '{}' is absent",
+                source_function_type.as_str()
+            )
+        })?;
+    if descriptor.ownership != MirOwnership::Copy
+        || !matches!(
+            &descriptor.kind,
+            MirTypeKind::Function {
+                abi: crate::core::FunctionTypeAbi::Mimi,
+                arity,
+            } if *arity == source_parameter_count
+        )
+    {
+        return Err(
+            "closure function TypeDesc is not a Copy Mimi function with the checked arity".into(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -174,14 +349,160 @@ pub(crate) fn verify_program_with_route_receipt(
     verify_program_inner(program, source_hash, route_receipt)
 }
 
+fn proof_source_rejection_results(
+    rejections: &BTreeMap<crate::core::NodeId, String>,
+) -> Vec<VerificationResult> {
+    rejections
+        .iter()
+        .map(|(owner, message)| VerificationResult {
+            func_name: owner.0.clone(),
+            status: VerifStatus::NotInTrustedSubset,
+            message: format!("canonical MIR proof source receipt rejected: {message}"),
+            diagnostic: None,
+            duration_us: 0,
+            constraint_count: 0,
+            artifact: None,
+            trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+        })
+        .collect()
+}
+
 fn verify_program_inner(
     program: &MirProgram,
     source_hash: String,
     route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
 ) -> Result<Vec<VerificationResult>, String> {
+    // Worklists are optional execution inputs, but the checker-derived proof
+    // census is mandatory. Validate its private seal and complete owner table
+    // before any verifier path can create a SolverSession or skip an owner.
+    program
+        .validate_proof_source_census()
+        .map_err(|error| format!("canonical MIR proof source census rejected: {error:?}"))?;
+    // Closure source seals must be checked before any solver/session state or
+    // callee effects are materialized. Binding metadata alone is never authority.
+    program
+        .validate_closure_callable_receipts()
+        .map_err(|messages| {
+            format!(
+                "canonical MIR closure callable receipt rejected: {}",
+                messages.join("; ")
+            )
+        })?;
+    program
+        .validate_actor_contracts()
+        .map_err(|messages| messages.join("; "))?;
+    // Keep malformed ManagedAny instance tables fail-closed, but classify the
+    // failure per affected MIR owner.  The verifier's public result contract
+    // is owner-scoped: a forged identity/cleanup receipt must produce a
+    // zero-constraint `NotInTrustedSubset` result rather than aborting the
+    // complete batch before unrelated owners can be reported.  The direct
+    // FFI adapter still returns an error for the same preflight failure.
+    let mut managed_any_global_rejections = BTreeMap::<crate::core::NodeId, String>::new();
+    if let Err(errors) = program.validate_managed_any_identity_instances() {
+        let message = format!(
+            "canonical MIR ManagedAny identity instance/call receipt rejected: {}",
+            errors.join("; ")
+        );
+        for function in program.functions().values() {
+            if function_has_managed_any(function, program.type_catalog()) {
+                managed_any_global_rejections
+                    .entry(function.owner.clone())
+                    .or_insert_with(|| message.clone());
+            }
+        }
+    }
+    if let Err(errors) = program.validate_managed_any_trap_cleanup_instances() {
+        let message = format!(
+            "canonical MIR ManagedAny trap-cleanup instance/call receipt rejected: {}",
+            errors.join("; ")
+        );
+        for function in program.functions().values() {
+            if function_has_managed_any(function, program.type_catalog()) {
+                managed_any_global_rejections
+                    .entry(function.owner.clone())
+                    .or_insert_with(|| message.clone());
+            }
+        }
+    }
+    // The checked-source inventory also contains proof-relevant callables
+    // that have no materialized MIR function (for example an uninstantiated
+    // generic template). These are owner-scoped coverage gaps, not owners that
+    // can be silently omitted from the verifier result set.
+    let mut proof_source_rejections = managed_any_global_rejections;
+    for owner in program
+        .proof_source_census()
+        .missing_mir_verification_owners()
+    {
+        match program.validate_owner_proof_worklist(&owner) {
+            Ok(_) => {
+                return Err(format!(
+                    "canonical MIR proof source census listed '{}' as missing despite complete owner coverage",
+                    owner.0
+                ));
+            }
+            Err(crate::core::mir::MirProofCensusError::GlobalIntegrity(error)) => {
+                return Err(format!(
+                    "canonical MIR proof source census rejected: {}",
+                    error.message
+                ));
+            }
+            Err(crate::core::mir::MirProofCensusError::OwnerCoverageGap(gap)) => {
+                proof_source_rejections.insert(
+                    owner,
+                    format!("proof worklist coverage gap: {:?}", gap.kind),
+                );
+            }
+        }
+    }
+    if program.actor_execution_plan().is_some() {
+        route_receipt.validate_against_program(program)?;
+        if program
+            .functions()
+            .values()
+            .any(|function| function_has_verification_obligation(function, program))
+        {
+            return Err(
+                "canonical Actor mailbox effects have no trusted contract or scoped-proof model"
+                    .into(),
+            );
+        }
+        // No contract is an explicit neutral result. Structure admission is
+        // not a proof of asynchronous mailbox or state effects. Still report
+        // source owners absent from MIR instead of returning an empty result.
+        return Ok(proof_source_rejection_results(&proof_source_rejections));
+    }
+    // Source/worklist seals and loop source-expression bindings are checked
+    // for the whole program before a solver session is created. A malformed
+    // artifact is later returned as a function-scoped NITS result, while
+    // unrelated functions can still be verified in the same batch.
+    for (owner, function) in program.functions() {
+        match program.validate_owner_proof_worklist(owner) {
+            Ok(_) => {}
+            Err(crate::core::mir::MirProofCensusError::GlobalIntegrity(error)) => {
+                return Err(format!(
+                    "canonical MIR proof source census rejected: {}",
+                    error.message
+                ));
+            }
+            Err(crate::core::mir::MirProofCensusError::OwnerCoverageGap(gap)) => {
+                proof_source_rejections.insert(
+                    owner.clone(),
+                    format!("proof worklist coverage gap: {:?}", gap.kind),
+                );
+                continue;
+            }
+        }
+        if let Err(message) = preflight_proof_source_integrity(function, program.type_catalog()) {
+            proof_source_rejections.insert(owner.clone(), message);
+        }
+    }
+    // Materialize owner-scoped coverage failures before constructing a solver
+    // session. A missing optional worklist therefore has no opportunity to
+    // add constraints or produce an artifact, while unaffected owners can
+    // still be verified below.
+    let mut results = proof_source_rejection_results(&proof_source_rejections);
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
-    let mut results = Vec::new();
 
     // `verify_mir` is also exercised as a public MIR-only API by callers that
     // already built a structural program but have not run the verifier
@@ -234,7 +555,11 @@ fn verify_program_inner(
         .collect::<Vec<_>>();
 
     for function in program.functions().values() {
-        if function.contracts.is_empty() && !has_call_precondition_obligation(function, program) {
+        if proof_source_rejections.contains_key(&function.owner) {
+            continue;
+        }
+        let has_verification_obligation = function_has_verification_obligation(function, program);
+        if !has_verification_obligation {
             continue;
         }
         // A non-Copy variant in an unrelated callable must not erase a valid
@@ -276,15 +601,27 @@ fn verify_program_inner(
                 Some(TrustedSubsetDomain::Body),
             ),
         };
-        // A successful call-site check does not invent an ensures proof for
-        // an otherwise obligation-free caller. Failures still belong to it.
-        if function.contracts.is_empty() && status == VerifStatus::NoObligations {
+        let has_local_proof_obligation =
+            !function.contracts.is_empty() || has_scoped_proof_obligation(function, program);
+        // A successful direct-call precondition check is a caller-side safety
+        // obligation. Keep comparison-only helper observations visible for
+        // library proofs, but suppress a neutral contract-free result when
+        // the transitive callee has its own checked arithmetic definedness
+        // boundary; that observation is internal safety support.
+        let is_entry_owner = function.owner.0 == "function:main";
+        let has_transitive_definedness_call =
+            has_transitive_call_definedness_obligation(function, program);
+        if !has_local_proof_obligation
+            && !is_entry_owner
+            && has_transitive_definedness_call
+            && matches!(status, VerifStatus::Proven | VerifStatus::NoObligations)
+        {
             continue;
         }
         let artifact = if status.is_definitive() || status == VerifStatus::NoObligations {
             Some(ProofArtifact {
                 semantics_version: ProofArtifact::SEMANTICS_VERSION,
-                integer_model: "checked_i32_i64".into(),
+                integer_model: "checked_i32_i64_power_i64_then_i32_wrap_0_1_11".into(),
                 float_model: crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL.into(),
                 solver_version: format!("z3 {}", z3::full_version()),
                 source_hash: source_hash.clone(),
@@ -335,6 +672,51 @@ fn verify_ffi_program_inner(
     source_hash: String,
     route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
 ) -> Result<Vec<VerificationResult>, String> {
+    // A normal MIR verification batch calls this helper after the per-owner
+    // contract pass.  Do not re-run the whole-program FFI/ManagedAny preflight
+    // for a program that has no extern call or attached FFI receipt: doing so
+    // would turn an owner-scoped ManagedAny NITS result into a batch-level
+    // error even though there is no FFI obligation to inspect.  The standalone
+    // FFI entry below still reaches every fail-closed preflight when a caller
+    // actually supplies an extern call or receipt.
+    let has_extern_call = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::Call {
+                        callee: crate::core::ir::ResolvedCallee::Extern(_),
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    if !has_extern_call && program.ffi_calls().is_empty() {
+        return Ok(Vec::new());
+    }
+    program
+        .validate_managed_any_identity_instances()
+        .map_err(|errors| {
+            format!(
+                "canonical MIR FFI verifier ManagedAny identity preflight rejected: {}",
+                errors.join("; ")
+            )
+        })?;
+    program
+        .validate_managed_any_trap_cleanup_instances()
+        .map_err(|errors| {
+            format!(
+                "canonical MIR FFI verifier ManagedAny trap-cleanup preflight rejected: {}",
+                errors.join("; ")
+            )
+        })?;
+    program.validate_ffi_source_census().map_err(|errors| {
+        format!(
+            "canonical MIR FFI verifier checked-source census rejected: {}",
+            errors.join("; ")
+        )
+    })?;
     if let Some(message) =
         crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
             .into_iter()
@@ -424,6 +806,29 @@ fn verify_ffi_program_inner(
     {
         return Ok(Vec::new());
     }
+
+    // FFI checks execute the caller body to collect path-sensitive call-site
+    // obligations.  Validate every such caller's ManagedAny authority before
+    // constructing a solver session or evaluating caller contracts; otherwise
+    // a forged owner/CFG can influence constraints before the normal function
+    // verifier boundary is reached (or when the function has no own proof
+    // obligation at all).
+    for function in program.functions().values() {
+        let has_ffi_obligation = program.ffi_calls().values().any(|call| {
+            call.caller == function.owner && (call.requires.is_some() || call.ensures.is_some())
+        });
+        if has_ffi_obligation {
+            validate_managed_any_verifier_boundary(function, program.type_catalog()).map_err(
+                |message| {
+                    format!(
+                        "canonical MIR FFI verifier caller '{}' ManagedAny preflight rejected: {message}",
+                        function.owner.0
+                    )
+                },
+            )?;
+        }
+    }
+
     let mut session = SolverSession::new(super::ctx::DEFAULT_TIMEOUT_MS)?;
     let mir_hash = canonical_mir_hash(program);
     let mut checks_by_instruction =
@@ -596,7 +1001,7 @@ fn verify_ffi_program_inner(
         let artifact = if status.is_definitive() {
             Some(ProofArtifact {
                 semantics_version: ProofArtifact::SEMANTICS_VERSION,
-                integer_model: "checked_i32_i64".into(),
+                integer_model: "checked_i32_i64_power_i64_then_i32_wrap_0_1_11".into(),
                 float_model: crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL.into(),
                 solver_version: format!("z3 {}", z3::full_version()),
                 source_hash: source_hash.clone(),
@@ -648,22 +1053,40 @@ fn verify_function(
     diagnostic: &mut Option<crate::diagnostic::Diagnostic>,
 ) -> Result<(VerifStatus, String, usize, Option<TrustedSubsetDomain>), String> {
     let catalog = program.type_catalog();
+    program
+        .validate_managed_any_identity_instances()
+        .map_err(|errors| {
+            format!(
+                "canonical MIR ManagedAny identity instance/call receipt rejected: {}",
+                errors.join("; ")
+            )
+        })?;
+    program
+        .validate_managed_any_trap_cleanup_instances()
+        .map_err(|errors| {
+            format!(
+                "canonical MIR ManagedAny trap-cleanup instance/call receipt rejected: {}",
+                errors.join("; ")
+            )
+        })?;
     validate_map_root_verifier_boundary(function, catalog)?;
+    validate_map_any_owner_verifier_boundary(function, catalog)?;
+    validate_ordinary_map_owner_verifier_boundary(function, program, catalog)?;
+    validate_ordinary_map_owned_get_verifier_boundary(function, program, catalog)?;
+    validate_managed_any_verifier_boundary(function, catalog)?;
+    // Generic ManagedAny identity admission is an ABI/effect boundary. Check
+    // every relevant call before `initial_state` or any requires term can add
+    // constraints, so a stale or forged instance cannot leave a partial proof.
+    validate_managed_any_generic_calls(function, program)?;
     let mut requires = Vec::new();
     let mut ensures = Vec::new();
+    let mut invariants = Vec::new();
+    crate::core::mir::validate_entry_invariant_shapes(function)?;
     for contract in &function.contracts {
         match contract.kind {
             MirContractKind::Requires => requires.push(contract),
             MirContractKind::Ensures => ensures.push(contract),
-            MirContractKind::Invariant => {
-                return Ok((
-                    VerifStatus::NotInTrustedSubset,
-                    "canonical MIR verifier does not yet materialize invariant effect semantics"
-                        .into(),
-                    0,
-                    Some(TrustedSubsetDomain::Contract),
-                ));
-            }
+            MirContractKind::Invariant => invariants.push(contract),
         }
     }
     // R6-1036: the multi-target Flow union no longer rejects the whole
@@ -677,7 +1100,13 @@ fn verify_function(
     // native admission. String payloads stay opaque in Z3, but their TypeDesc
     // ABI and exactly-once ownership transfer are still checked before any
     // arithmetic contract is proved.
-    if crate::core::mir::is_owned_string_return_candidate(function, program.functions(), catalog) {
+    if !function_has_managed_any(function, catalog)
+        && crate::core::mir::is_owned_string_return_candidate(
+            function,
+            program.functions(),
+            catalog,
+        )
+    {
         crate::core::mir::validate_owned_string_return_shape(
             function,
             program.functions(),
@@ -689,6 +1118,25 @@ fn verify_function(
     let mut initial = initial_state(function, catalog, session)?;
     let mut require_terms = Vec::with_capacity(requires.len());
     let mut constraint_count = 0;
+    let flow_contract = program.transitions().get(&function.owner);
+    // Transition invariants describe valid source states. Their definedness
+    // is owed before their truth is assumed; call sites must establish truth.
+    // Ordinary function invariants instead have an establishment obligation.
+    if flow_contract.is_some() {
+        for contract in &invariants {
+            if let Some(outcome) = verify_entry_invariant(
+                contract,
+                catalog,
+                &mut initial,
+                session,
+                diagnostic,
+                &mut constraint_count,
+                false,
+            )? {
+                return Ok(outcome);
+            }
+        }
+    }
     for contract in &requires {
         let (term, defined) =
             checked_contract_term(contract, catalog, &initial.values, &initial.values, None)?;
@@ -714,7 +1162,7 @@ fn verify_function(
                     "canonical MIR requires expression definedness could not be decided".into(),
                     constraint_count,
                     Some(TrustedSubsetDomain::Contract),
-                ))
+                ));
             }
             SatResult::Unsat => {}
         }
@@ -746,6 +1194,54 @@ fn verify_function(
         }
     }
 
+    if flow_contract.is_none() {
+        for contract in &invariants {
+            if let Some(outcome) = verify_entry_invariant(
+                contract,
+                catalog,
+                &mut initial,
+                session,
+                diagnostic,
+                &mut constraint_count,
+                true,
+            )? {
+                return Ok(outcome);
+            }
+        }
+    }
+    // Freeze the callable-entry environment after Requires and ordinary
+    // entry invariants have been checked. Dynamic loop summaries may use
+    // these facts after discarding path constraints over preheader SSA values.
+    initial.callable_entry_values = Some(initial.values.clone());
+    initial.callable_entry_constraints = Some(initial.constraints.clone());
+    if function_has_verification_obligation(function, program) {
+        // The checked worklist also records direct-call identities for the
+        // source census. Interpret it only when this callable owns a proof
+        // root or scoped obligation. Direct-call Requires/definedness facts
+        // are discharged by `explore_block`, which has the actual MIR call
+        // result and path state; replaying a census-only Call here would turn
+        // a closed scalar branch into an artificial unmodeled-call boundary.
+        if has_scoped_proof_obligation(function, program) {
+            let Some(worklist) = function.proof_worklist.as_ref() else {
+                return Err("canonical MIR proof worklist is required but missing".into());
+            };
+            if let Err(((status, message, count, domain), point)) = verify_mir_proof_worklist(
+                worklist,
+                function,
+                program,
+                &initial,
+                catalog,
+                session,
+                &mut constraint_count,
+            ) {
+                *diagnostic = Some(mir_contract_diagnostic(&message, Some(&point)));
+                return Ok((status, message, count, domain));
+            }
+        }
+    }
+    // Execution consumes source identities. Contracts retain immutable entry
+    // parameter snapshots, while `old` always addresses this entry map.
+    let entry_values = initial.values.clone();
     let mut returns = Vec::new();
     let mut traps = Vec::new();
     explore_block(
@@ -758,10 +1254,6 @@ fn verify_function(
         &mut returns,
         &mut traps,
     )?;
-    if returns.is_empty() {
-        return Err("canonical MIR body has no non-trapping return path".into());
-    }
-
     let mut saw_unknown = false;
 
     // A trapping arithmetic operation is a real MIR execution path.  It may
@@ -781,8 +1273,9 @@ fn verify_function(
                     "canonical MIR body can reach trap '{}' under requires{explanation}",
                     trap.code
                 );
-                *diagnostic = Some(mir_contract_diagnostic(
+                *diagnostic = Some(mir_contract_call_diagnostic(
                     &message,
+                    program,
                     trap.subject.as_ref().or(Some(&function.owner)),
                 ));
                 return Ok((
@@ -796,6 +1289,9 @@ fn verify_function(
             (SatResult::Unsat, _) => {}
         }
     }
+    if returns.is_empty() {
+        return Err("canonical MIR body has no non-trapping return path".into());
+    }
     if saw_unknown {
         return Ok((
             session.unknown_status(),
@@ -807,12 +1303,40 @@ fn verify_function(
 
     for path in returns {
         let path_condition = conjunction(&path.constraints);
+        if let Some(flow) = flow_contract.filter(|flow| flow.effect.is_recoverable()) {
+            let unchanged =
+                recoverable_source_unchanged(function, flow, catalog, &entry_values, &path.value)?;
+            constraint_count += 1;
+            match session
+                .check_scope(Bool::and(&[&path_condition, &unchanged.not()]))
+                .0
+            {
+                SatResult::Sat => {
+                    let message =
+                        "canonical MIR fails path changed the returned source state".to_string();
+                    *diagnostic = Some(mir_contract_diagnostic(&message, Some(&function.owner)));
+                    return Ok((
+                        VerifStatus::Disproven,
+                        message,
+                        constraint_count,
+                        Some(TrustedSubsetDomain::Body),
+                    ));
+                }
+                SatResult::Unknown => {
+                    saw_unknown = true;
+                    continue;
+                }
+                SatResult::Unsat => {}
+            }
+        }
+        let mut contract_values = entry_values.clone();
+        contract_values.extend(path_value_map(&path));
         for ensure in &ensures {
             let (term, defined) = checked_contract_term(
                 ensure,
                 catalog,
-                &path_value_map(&path),
-                &initial.values,
+                &contract_values,
+                &entry_values,
                 Some(&path.value),
             )?;
             constraint_count += 1;
@@ -869,7 +1393,12 @@ fn verify_function(
             constraint_count,
             Some(TrustedSubsetDomain::Contract),
         ))
-    } else if ensures.is_empty() && requires.is_empty() {
+    } else if ensures.is_empty()
+        && requires.is_empty()
+        && invariants.is_empty()
+        && !has_scoped_proof_obligation(function, program)
+        && !has_call_precondition_obligation(function, program)
+    {
         Ok((
             VerifStatus::NoObligations,
             "canonical MIR call-site preconditions hold; no ensures contract".into(),
@@ -890,11 +1419,2207 @@ fn verify_function(
     }
 }
 
+type ContractOutcome = (VerifStatus, String, usize, Option<TrustedSubsetDomain>);
+
+#[derive(Clone)]
+struct MirProofPath {
+    constraints: Vec<Bool>,
+    values: BTreeMap<MirValueId, SymbolicValue>,
+}
+
+fn proof_expression_contract(expression: &MirProofExpression) -> MirContract {
+    MirContract {
+        id: expression.origin.clone(),
+        // The shared term evaluator uses `kind` only for diagnostics and
+        // checked arithmetic TypeDesc validation. Proof scopes remain their
+        // own typed operation; they are not appended to callable contracts.
+        kind: MirContractKind::Requires,
+        condition: expression.expression.clone(),
+        expression_types: expression.expression_types.clone(),
+    }
+}
+
+fn proof_expression_value(
+    expression: &MirProofExpression,
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    path: &MirProofPath,
+    entry_values: &BTreeMap<MirValueId, SymbolicValue>,
+) -> Result<(SymbolicValue, Bool), String> {
+    let contract = proof_expression_contract(expression);
+    checked_contract_term(&contract, catalog, &path.values, entry_values, None)
+        .map_err(|message| format!("{}: {message}", function.owner.0))
+}
+
+fn prove_mir_proof_definedness(
+    expression: &MirProofExpression,
+    point: &crate::core::NodeId,
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    path: &mut MirProofPath,
+    entry_values: &BTreeMap<MirValueId, SymbolicValue>,
+    session: &mut SolverSession,
+    constraint_count: &mut usize,
+) -> Result<SymbolicValue, (ContractOutcome, crate::core::NodeId)> {
+    let (value, defined) =
+        proof_expression_value(expression, function, catalog, path, entry_values).map_err(
+            |message| {
+                (
+                    (
+                        VerifStatus::NotInTrustedSubset,
+                        format!("canonical MIR scoped proof expression is unsupported: {message}"),
+                        *constraint_count,
+                        Some(TrustedSubsetDomain::Contract),
+                    ),
+                    point.clone(),
+                )
+            },
+        )?;
+    *constraint_count += 1;
+    match session
+        .check_scope(Bool::and(&[
+            &conjunction(&path.constraints),
+            &defined.not(),
+        ]))
+        .0
+    {
+        SatResult::Sat => {
+            return Err((
+                (
+                    VerifStatus::Disproven,
+                    "canonical MIR scoped proof expression can trap on a reachable path".into(),
+                    *constraint_count,
+                    Some(TrustedSubsetDomain::Body),
+                ),
+                point.clone(),
+            ));
+        }
+        SatResult::Unknown => {
+            return Err((
+                (
+                    session.unknown_status(),
+                    "canonical MIR scoped proof expression definedness is unknown".into(),
+                    *constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                ),
+                point.clone(),
+            ));
+        }
+        SatResult::Unsat => {}
+    }
+    path.constraints.push(defined);
+    Ok(value)
+}
+
+fn prove_mir_proof_predicate(
+    expression: &MirProofExpression,
+    point: &crate::core::NodeId,
+    label: &str,
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    paths: &mut [MirProofPath],
+    entry_values: &BTreeMap<MirValueId, SymbolicValue>,
+    session: &mut SolverSession,
+    constraint_count: &mut usize,
+) -> Result<(), (ContractOutcome, crate::core::NodeId)> {
+    for path in paths {
+        let value = prove_mir_proof_definedness(
+            expression,
+            point,
+            function,
+            catalog,
+            path,
+            entry_values,
+            session,
+            constraint_count,
+        )?;
+        let predicate = expect_bool(value, "scoped MIR proof predicate").map_err(|message| {
+            (
+                (
+                    VerifStatus::NotInTrustedSubset,
+                    message,
+                    *constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                ),
+                point.clone(),
+            )
+        })?;
+        *constraint_count += 1;
+        match session
+            .check_scope(Bool::and(&[
+                &conjunction(&path.constraints),
+                &predicate.not(),
+            ]))
+            .0
+        {
+            SatResult::Sat => {
+                return Err((
+                    (
+                        VerifStatus::Disproven,
+                        format!("canonical MIR {label} is false on a reachable path"),
+                        *constraint_count,
+                        Some(TrustedSubsetDomain::Contract),
+                    ),
+                    point.clone(),
+                ));
+            }
+            SatResult::Unknown => {
+                return Err((
+                    (
+                        session.unknown_status(),
+                        format!("canonical MIR could not prove {label}"),
+                        *constraint_count,
+                        Some(TrustedSubsetDomain::Contract),
+                    ),
+                    point.clone(),
+                ));
+            }
+            SatResult::Unsat => path.constraints.push(predicate),
+        }
+    }
+    Ok(())
+}
+
+fn mutable_loop_failure(
+    point: &crate::core::NodeId,
+    message: impl Into<String>,
+    constraint_count: usize,
+    status: VerifStatus,
+    domain: TrustedSubsetDomain,
+) -> (
+    (VerifStatus, String, usize, Option<TrustedSubsetDomain>),
+    crate::core::NodeId,
+) {
+    (
+        (status, message.into(), constraint_count, Some(domain)),
+        point.clone(),
+    )
+}
+
+fn mutable_loop_path_from_state(
+    state: &SymbolicState,
+    receipt: &MirProofLoopReceipt,
+    binding_value: impl Fn(&crate::core::mir::MirProofLoopBinding) -> &MirValueId,
+) -> Result<MirProofPath, String> {
+    let mut values = state.values.clone();
+    for binding in &receipt.bindings {
+        let source = binding_value(binding);
+        let current = values
+            .get(source)
+            .cloned()
+            .ok_or_else(|| format!("loop current value '{}' is absent", source))?;
+        values.insert(loop_stable_local_value(&binding.local)?, current);
+    }
+    Ok(MirProofPath {
+        constraints: state.constraints.clone(),
+        values,
+    })
+}
+
+fn prove_mutable_loop_traps(
+    traps: &[SymbolicTrap],
+    point: &crate::core::NodeId,
+    session: &mut SolverSession,
+    constraint_count: &mut usize,
+) -> Result<
+    (),
+    (
+        (VerifStatus, String, usize, Option<TrustedSubsetDomain>),
+        crate::core::NodeId,
+    ),
+> {
+    for trap in traps {
+        *constraint_count += trap.condition.len();
+        match session.check_scope(&conjunction(&trap.condition)).0 {
+            SatResult::Sat => {
+                return Err(mutable_loop_failure(
+                    trap.subject.as_ref().unwrap_or(point),
+                    format!(
+                        "mutable MIR loop can reach trap '{}' under the invariant",
+                        trap.code
+                    ),
+                    *constraint_count,
+                    VerifStatus::Disproven,
+                    TrustedSubsetDomain::Body,
+                ));
+            }
+            SatResult::Unknown => {
+                return Err(mutable_loop_failure(
+                    trap.subject.as_ref().unwrap_or(point),
+                    format!(
+                        "mutable MIR loop trap '{}' reachability is unknown",
+                        trap.code
+                    ),
+                    *constraint_count,
+                    session.unknown_status(),
+                    TrustedSubsetDomain::Contract,
+                ));
+            }
+            SatResult::Unsat => {}
+        }
+    }
+    Ok(())
+}
+
+fn verify_mutable_loop_proof(
+    point: &crate::core::NodeId,
+    header: &MirBlockId,
+    body_entry: &MirBlockId,
+    exit: &MirBlockId,
+    condition_value: &MirValueId,
+    condition: &MirProofExpression,
+    invariants: &[crate::core::mir::MirProofAssertion],
+    body: &MirProofBlock,
+    receipt: &MirProofLoopReceipt,
+    paths: Vec<MirProofPath>,
+    function: &MirFunction,
+    program: &MirProgram,
+    initial_state: &SymbolicState,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    entry_values: &BTreeMap<MirValueId, SymbolicValue>,
+    session: &mut SolverSession,
+    constraint_count: &mut usize,
+) -> Result<
+    Vec<MirProofPath>,
+    (
+        (VerifStatus, String, usize, Option<TrustedSubsetDomain>),
+        crate::core::NodeId,
+    ),
+> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_mutable_loop_receipt(
+        function,
+        catalog,
+        point,
+        header,
+        body_entry,
+        exit,
+        condition_value,
+        invariants,
+        receipt,
+    )
+    .map_err(|message| {
+        mutable_loop_failure(
+            point,
+            format!("mutable MIR loop receipt is not trusted: {message}"),
+            *constraint_count,
+            VerifStatus::NotInTrustedSubset,
+            TrustedSubsetDomain::Contract,
+        )
+    })?;
+
+    let (preheaders, _preheader_traps) =
+        capture_loop_preheaders(function, program, catalog, initial_state, header).map_err(
+            |message| {
+                mutable_loop_failure(
+                    point,
+                    format!("mutable MIR loop preheader replay failed closed: {message}"),
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            },
+        )?;
+    if preheaders.is_empty() {
+        return Err(mutable_loop_failure(
+            point,
+            "proof worklist reaches a mutable loop with no actual MIR preheader path",
+            *constraint_count,
+            VerifStatus::NotInTrustedSubset,
+            TrustedSubsetDomain::Contract,
+        ));
+    }
+
+    let mut exits = Vec::new();
+    for preheader in preheaders {
+        let mut init_path =
+            mutable_loop_path_from_state(&preheader, receipt, |binding| &binding.preheader_value)
+                .map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    message,
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        for invariant in invariants {
+            prove_mir_proof_predicate(
+                &invariant.expression,
+                &invariant.id.statement,
+                "loop invariant initialization",
+                function,
+                catalog,
+                std::slice::from_mut(&mut init_path),
+                entry_values,
+                session,
+                constraint_count,
+            )?;
+        }
+
+        let mut abstract_header = preheader;
+        abstract_mutable_loop_header_state(function, catalog, receipt, point, &mut abstract_header)
+            .map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    format!("mutable MIR loop header abstraction failed: {message}"),
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        let mut header_path = mutable_loop_path_from_state(&abstract_header, receipt, |binding| {
+            &binding.header_parameter
+        })
+        .map_err(|message| {
+            mutable_loop_failure(
+                point,
+                message,
+                *constraint_count,
+                VerifStatus::NotInTrustedSubset,
+                TrustedSubsetDomain::Body,
+            )
+        })?;
+
+        // The header condition has both a source expression receipt and an
+        // emitted MIR value. Require the symbolic source term to agree with
+        // that actual header value before splitting the iteration path.
+        let source_condition = prove_mir_proof_definedness(
+            condition,
+            point,
+            function,
+            catalog,
+            &mut header_path,
+            entry_values,
+            session,
+            constraint_count,
+        )?;
+        let source_condition = expect_bool(source_condition, "typed mutable-loop condition")
+            .map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    message,
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Contract,
+                )
+            })?;
+        let actual_header = function.blocks.get(header).ok_or_else(|| {
+            mutable_loop_failure(
+                point,
+                "mutable MIR loop header disappeared after receipt validation",
+                *constraint_count,
+                VerifStatus::NotInTrustedSubset,
+                TrustedSubsetDomain::Body,
+            )
+        })?;
+        let mut actual_header_state = abstract_header.clone();
+        eval_loop_block_instructions(function, program, catalog, header, &mut actual_header_state)
+            .map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    format!("mutable MIR loop header replay failed: {message}"),
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        let actual_condition = actual_header_state
+            .values
+            .get(condition_value)
+            .cloned()
+            .ok_or_else(|| {
+                mutable_loop_failure(
+                    point,
+                    "mutable MIR loop header condition value is absent",
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        let actual_condition = expect_bool(actual_condition, "actual mutable-loop condition")
+            .map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    message,
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        *constraint_count += 1;
+        match session
+            .check_scope(&Bool::and(&[
+                &conjunction(&header_path.constraints),
+                &actual_condition.xor(&source_condition),
+            ]))
+            .0
+        {
+            SatResult::Sat => {
+                return Err(mutable_loop_failure(
+                    point,
+                    "typed loop condition disagrees with the emitted MIR header condition",
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Contract,
+                ));
+            }
+            SatResult::Unknown => {
+                return Err(mutable_loop_failure(
+                    point,
+                    "MIR/source loop condition equivalence is unknown",
+                    *constraint_count,
+                    session.unknown_status(),
+                    TrustedSubsetDomain::Contract,
+                ));
+            }
+            SatResult::Unsat => {}
+        }
+
+        // Replay one real MIR iteration from the fresh header symbols. This
+        // records each exact Continue/fallthrough/Break/Return path and all
+        // checked arithmetic traps without assuming a source-level body.
+        let iteration = run_mutable_loop_iteration(
+            function,
+            program,
+            catalog,
+            header,
+            body_entry,
+            exit,
+            abstract_header.clone(),
+        )
+        .map_err(|message| {
+            mutable_loop_failure(
+                point,
+                format!("mutable MIR one-iteration replay failed closed: {message}"),
+                *constraint_count,
+                VerifStatus::NotInTrustedSubset,
+                TrustedSubsetDomain::Body,
+            )
+        })?;
+        prove_mutable_loop_traps(&iteration.traps, point, session, constraint_count)?;
+
+        for backedge in &iteration.backedges {
+            let mut preservation_path =
+                mutable_loop_path_from_state(&backedge.state, receipt, |binding| {
+                    &binding.header_parameter
+                })
+                .map_err(|message| {
+                    mutable_loop_failure(
+                        point,
+                        message,
+                        *constraint_count,
+                        VerifStatus::NotInTrustedSubset,
+                        TrustedSubsetDomain::Body,
+                    )
+                })?;
+            for invariant in invariants {
+                prove_mir_proof_predicate(
+                    &invariant.expression,
+                    &invariant.id.statement,
+                    "loop invariant preservation on every backedge/continue",
+                    function,
+                    catalog,
+                    std::slice::from_mut(&mut preservation_path),
+                    entry_values,
+                    session,
+                    constraint_count,
+                )?;
+            }
+        }
+
+        // The checker worklist retains exact lexical Math/Branch points.
+        // Run that timeline on the same abstract current state; actual MIR
+        // replay above separately supplies preservation, effects and traps.
+        let mut body_header_state = abstract_header;
+        eval_loop_block_instructions(function, program, catalog, header, &mut body_header_state)
+            .map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    format!("mutable MIR proof header replay failed: {message}"),
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        let MirTerminator::Branch {
+            condition: actual_condition_id,
+            then_target,
+            then_arguments,
+            ..
+        } = &actual_header.terminator
+        else {
+            return Err(mutable_loop_failure(
+                point,
+                "mutable MIR proof header is no longer a conditional branch",
+                *constraint_count,
+                VerifStatus::NotInTrustedSubset,
+                TrustedSubsetDomain::Body,
+            ));
+        };
+        let condition_value = body_header_state
+            .values
+            .get(actual_condition_id)
+            .cloned()
+            .ok_or_else(|| {
+                mutable_loop_failure(
+                    point,
+                    "mutable MIR proof condition value is absent",
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        let condition_value =
+            expect_bool(condition_value, "mutable MIR proof condition").map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    message,
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        let mut body_state = edge_state(&body_header_state, function, then_target, then_arguments)
+            .map_err(|message| {
+                mutable_loop_failure(
+                    point,
+                    message,
+                    *constraint_count,
+                    VerifStatus::NotInTrustedSubset,
+                    TrustedSubsetDomain::Body,
+                )
+            })?;
+        body_state.constraints.push(condition_value);
+        let body_path =
+            mutable_loop_path_from_state(&body_state, receipt, |binding| &binding.header_parameter)
+                .map_err(|message| {
+                    mutable_loop_failure(
+                        point,
+                        message,
+                        *constraint_count,
+                        VerifStatus::NotInTrustedSubset,
+                        TrustedSubsetDomain::Body,
+                    )
+                })?;
+        let _ = verify_mir_proof_block(
+            body,
+            vec![body_path],
+            function,
+            program,
+            initial_state,
+            catalog,
+            entry_values,
+            true,
+            session,
+            constraint_count,
+        )?;
+
+        for observed_exit in &iteration.exits {
+            exits.push(
+                mutable_loop_path_from_state(&observed_exit.state, receipt, |binding| {
+                    &binding.exit_parameter
+                })
+                .map_err(|message| {
+                    mutable_loop_failure(
+                        point,
+                        message,
+                        *constraint_count,
+                        VerifStatus::NotInTrustedSubset,
+                        TrustedSubsetDomain::Body,
+                    )
+                })?,
+            );
+        }
+        if exits.len() > 256 {
+            return Err(mutable_loop_failure(
+                point,
+                "mutable MIR loop exit-path count exceeds its bound",
+                *constraint_count,
+                VerifStatus::NotInTrustedSubset,
+                TrustedSubsetDomain::Body,
+            ));
+        }
+    }
+    Ok(exits)
+}
+
+fn verify_mir_proof_block(
+    block: &MirProofBlock,
+    mut paths: Vec<MirProofPath>,
+    function: &MirFunction,
+    program: &MirProgram,
+    initial_state: &SymbolicState,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    entry_values: &BTreeMap<MirValueId, SymbolicValue>,
+    check_actual_branches: bool,
+    session: &mut SolverSession,
+    constraint_count: &mut usize,
+) -> Result<Vec<MirProofPath>, (ContractOutcome, crate::core::NodeId)> {
+    use MirProofOperation as P;
+
+    for operation in &block.operations {
+        if paths.is_empty() {
+            break;
+        }
+        match operation {
+            P::Bind {
+                point,
+                local,
+                initializer,
+                ..
+            } => {
+                for path in &mut paths {
+                    let value = prove_mir_proof_definedness(
+                        initializer,
+                        point,
+                        function,
+                        catalog,
+                        path,
+                        entry_values,
+                        session,
+                        constraint_count,
+                    )?;
+                    path.values.insert(local.clone(), value);
+                }
+            }
+            P::Assign {
+                point,
+                target,
+                value: expression,
+                conversion,
+                result,
+                conversion_result,
+            } => {
+                if !target.projections.is_empty()
+                    || !matches!(
+                        conversion.kind,
+                        crate::core::ir::CheckedConversionKind::Identity
+                            | crate::core::ir::CheckedConversionKind::NumericWiden
+                    )
+                    || catalog
+                        .validate_conversion(&conversion.from, &conversion.to)
+                        .is_err()
+                {
+                    return Err((
+                        (
+                            VerifStatus::NotInTrustedSubset,
+                            "canonical MIR Assign is outside the checked scalar-copy profile"
+                                .into(),
+                            *constraint_count,
+                            Some(TrustedSubsetDomain::Body),
+                        ),
+                        point.clone(),
+                    ));
+                }
+                for path in &mut paths {
+                    let assigned = prove_mir_proof_definedness(
+                        expression,
+                        point,
+                        function,
+                        catalog,
+                        path,
+                        entry_values,
+                        session,
+                        constraint_count,
+                    )?;
+                    ensure_result_shape(function, catalog, result, &assigned).map_err(
+                        |message| {
+                            (
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    format!(
+                                        "canonical MIR Assign result is not well typed: {message}"
+                                    ),
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            )
+                        },
+                    )?;
+                    path.values.insert(result.clone(), assigned.clone());
+                    if let Some(converted) = conversion_result {
+                        ensure_result_shape(function, catalog, converted, &assigned).map_err(
+                            |message| {
+                                (
+                                    (
+                                        VerifStatus::NotInTrustedSubset,
+                                        format!("canonical MIR Assign conversion result is not well typed: {message}"),
+                                        *constraint_count,
+                                        Some(TrustedSubsetDomain::Contract),
+                                    ),
+                                    point.clone(),
+                                )
+                            },
+                        )?;
+                        path.values.insert(converted.clone(), assigned.clone());
+                    }
+                    path.values.insert(
+                        loop_stable_local_value(&target.base).map_err(|message| {
+                            (
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    message,
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            )
+                        })?,
+                        assigned,
+                    );
+                }
+            }
+            P::Eval { point, expression } => {
+                for path in &mut paths {
+                    let _ = prove_mir_proof_definedness(
+                        expression,
+                        point,
+                        function,
+                        catalog,
+                        path,
+                        entry_values,
+                        session,
+                        constraint_count,
+                    )?;
+                }
+            }
+            P::Call(call) => {
+                return Err((
+                    (
+                        VerifStatus::NotInTrustedSubset,
+                        "canonical MIR scoped proof worklist contains an unmodeled call".into(),
+                        *constraint_count,
+                        Some(TrustedSubsetDomain::Body),
+                    ),
+                    call.statement.clone(),
+                ));
+            }
+            P::Math(assertion) => prove_mir_proof_predicate(
+                &assertion.expression,
+                &assertion.id.statement,
+                "scoped Math proof point",
+                function,
+                catalog,
+                &mut paths,
+                entry_values,
+                session,
+                constraint_count,
+            )?,
+            P::Branch {
+                point,
+                branch_block,
+                then_target,
+                else_target,
+                condition_value,
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                let mut then_paths = Vec::with_capacity(paths.len());
+                let mut else_paths = Vec::with_capacity(paths.len());
+                for mut path in paths.drain(..) {
+                    let value = prove_mir_proof_definedness(
+                        condition,
+                        point,
+                        function,
+                        catalog,
+                        &mut path,
+                        entry_values,
+                        session,
+                        constraint_count,
+                    )?;
+                    let source_condition = expect_bool(value, "scoped MIR branch condition")
+                        .map_err(|message| {
+                            (
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    message,
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            )
+                        })?;
+                    if check_actual_branches {
+                        let expected_condition =
+                            MirValueId::new(format!("expr:{}", condition.origin.0)).map_err(
+                                |error| {
+                                    (
+                                        (
+                                            VerifStatus::NotInTrustedSubset,
+                                            error.to_string(),
+                                            *constraint_count,
+                                            Some(TrustedSubsetDomain::Contract),
+                                        ),
+                                        point.clone(),
+                                    )
+                                },
+                            )?;
+                        if condition_value != &expected_condition {
+                            return Err((
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    "typed loop branch condition has a noncanonical MIR value identity".into(),
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            ));
+                        }
+                        let mir_branch = function.blocks.get(branch_block).ok_or_else(|| {
+                            (
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    format!("typed loop branch block '{}' is absent", branch_block),
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            )
+                        })?;
+                        let MirTerminator::Branch {
+                            condition: actual_condition_id,
+                            then_target: actual_then_target,
+                            else_target: actual_else_target,
+                            ..
+                        } = &mir_branch.terminator
+                        else {
+                            return Err((
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    "typed loop branch block is not an actual MIR Branch".into(),
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            ));
+                        };
+                        if actual_condition_id != condition_value
+                            || actual_then_target != then_target
+                            || actual_else_target != else_target
+                        {
+                            return Err((
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    "typed loop branch metadata disagrees with actual MIR targets or condition".into(),
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            ));
+                        }
+                        let mut actual_state = initial_state.clone();
+                        actual_state.values = path.values.clone();
+                        actual_state.constraints = path.constraints.clone();
+                        actual_state.traps.clear();
+                        actual_state.normal_path_terminated = false;
+                        eval_loop_block_instructions(
+                            function,
+                            program,
+                            catalog,
+                            branch_block,
+                            &mut actual_state,
+                        )
+                        .map_err(|message| {
+                            (
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    format!("actual loop branch replay failed: {message}"),
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Body),
+                                ),
+                                point.clone(),
+                            )
+                        })?;
+                        let actual_condition = actual_state
+                            .values
+                            .get(condition_value)
+                            .cloned()
+                            .ok_or_else(|| {
+                                (
+                                    (
+                                        VerifStatus::NotInTrustedSubset,
+                                        "actual MIR loop branch condition value is absent".into(),
+                                        *constraint_count,
+                                        Some(TrustedSubsetDomain::Body),
+                                    ),
+                                    point.clone(),
+                                )
+                            })?;
+                        let actual_condition =
+                            expect_bool(actual_condition, "actual MIR loop branch condition")
+                                .map_err(|message| {
+                                    (
+                                        (
+                                            VerifStatus::NotInTrustedSubset,
+                                            message,
+                                            *constraint_count,
+                                            Some(TrustedSubsetDomain::Body),
+                                        ),
+                                        point.clone(),
+                                    )
+                                })?;
+                        *constraint_count += 1;
+                        match session
+                            .check_scope(&Bool::and(&[
+                                &conjunction(&path.constraints),
+                                &actual_condition.xor(&source_condition),
+                            ]))
+                            .0
+                        {
+                            SatResult::Sat => {
+                                return Err((
+                                    (
+                                        VerifStatus::NotInTrustedSubset,
+                                        "typed loop branch condition disagrees with the actual MIR path".into(),
+                                        *constraint_count,
+                                        Some(TrustedSubsetDomain::Contract),
+                                    ),
+                                    point.clone(),
+                                ));
+                            }
+                            SatResult::Unknown => {
+                                return Err((
+                                    (
+                                        session.unknown_status(),
+                                        "MIR/source loop branch equivalence is unknown".into(),
+                                        *constraint_count,
+                                        Some(TrustedSubsetDomain::Contract),
+                                    ),
+                                    point.clone(),
+                                ));
+                            }
+                            SatResult::Unsat => {}
+                        }
+                    }
+                    let mut then_path = path.clone();
+                    then_path.constraints.push(source_condition.clone());
+                    then_paths.push(then_path);
+                    path.constraints.push(source_condition.not());
+                    else_paths.push(path);
+                }
+                let then_paths = verify_mir_proof_block(
+                    then_block,
+                    then_paths,
+                    function,
+                    program,
+                    initial_state,
+                    catalog,
+                    entry_values,
+                    check_actual_branches,
+                    session,
+                    constraint_count,
+                )?;
+                let else_paths = verify_mir_proof_block(
+                    else_block,
+                    else_paths,
+                    function,
+                    program,
+                    initial_state,
+                    catalog,
+                    entry_values,
+                    check_actual_branches,
+                    session,
+                    constraint_count,
+                )?;
+                paths = then_paths;
+                paths.extend(else_paths);
+                if paths.len() > 256 {
+                    return Err((
+                        (
+                            VerifStatus::NotInTrustedSubset,
+                            "canonical MIR scoped proof worklist exceeds its path bound".into(),
+                            *constraint_count,
+                            Some(TrustedSubsetDomain::Contract),
+                        ),
+                        function.owner.clone(),
+                    ));
+                }
+            }
+            P::Scope(inner) => {
+                paths = verify_mir_proof_block(
+                    inner,
+                    paths,
+                    function,
+                    program,
+                    initial_state,
+                    catalog,
+                    entry_values,
+                    check_actual_branches,
+                    session,
+                    constraint_count,
+                )?;
+            }
+            P::Loop {
+                point,
+                header,
+                body_entry,
+                exit,
+                condition_value,
+                condition,
+                condition_calls: _,
+                invariants,
+                body,
+                stationary,
+                receipt,
+            } => {
+                if !stationary {
+                    let Some(receipt) = receipt.as_ref() else {
+                        return Err((
+                            (
+                                VerifStatus::NotInTrustedSubset,
+                                "canonical MIR mutable loop lacks a checker-sealed induction receipt".into(),
+                                *constraint_count,
+                                Some(TrustedSubsetDomain::Contract),
+                            ),
+                            point.clone(),
+                        ));
+                    };
+                    paths = verify_mutable_loop_proof(
+                        point,
+                        header,
+                        body_entry,
+                        exit,
+                        condition_value,
+                        condition,
+                        invariants,
+                        body,
+                        receipt,
+                        paths,
+                        function,
+                        program,
+                        initial_state,
+                        catalog,
+                        entry_values,
+                        session,
+                        constraint_count,
+                    )?;
+                    continue;
+                }
+                for invariant in invariants {
+                    prove_mir_proof_predicate(
+                        &invariant.expression,
+                        &invariant.id.statement,
+                        "loop invariant establishment",
+                        function,
+                        catalog,
+                        &mut paths,
+                        entry_values,
+                        session,
+                        constraint_count,
+                    )?;
+                }
+                let mut body_paths = Vec::with_capacity(paths.len());
+                let mut exit_paths = Vec::with_capacity(paths.len());
+                for mut path in paths.iter().cloned() {
+                    let value = prove_mir_proof_definedness(
+                        condition,
+                        point,
+                        function,
+                        catalog,
+                        &mut path,
+                        entry_values,
+                        session,
+                        constraint_count,
+                    )?;
+                    let condition =
+                        expect_bool(value, "scoped MIR loop condition").map_err(|message| {
+                            (
+                                (
+                                    VerifStatus::NotInTrustedSubset,
+                                    message,
+                                    *constraint_count,
+                                    Some(TrustedSubsetDomain::Contract),
+                                ),
+                                point.clone(),
+                            )
+                        })?;
+                    let mut body_path = path.clone();
+                    body_path.constraints.push(condition.clone());
+                    body_paths.push(body_path);
+                    // This proof profile admits only stationary loop bodies,
+                    // so the pure condition has the same value on every
+                    // iteration. A path reaching the next lexical operation
+                    // must have taken the false exit edge. Keep that fact in
+                    // this path rather than widening it to callable scope.
+                    path.constraints.push(condition.not());
+                    exit_paths.push(path);
+                }
+                let _ = verify_mir_proof_block(
+                    body,
+                    body_paths,
+                    function,
+                    program,
+                    initial_state,
+                    catalog,
+                    entry_values,
+                    check_actual_branches,
+                    session,
+                    constraint_count,
+                )?;
+                // The admitted loop body contains only proof operations. The
+                // MIR CFG validator separately checks an empty body block and
+                // the exact header back edge, so iteration preserves every
+                // pre-existing value and established invariant by stasis.
+                paths = exit_paths;
+            }
+            P::Exit => paths.clear(),
+            P::Break { point, value, .. } => {
+                if let Some(value) = value {
+                    for path in &mut paths {
+                        let _ = prove_mir_proof_definedness(
+                            value,
+                            point,
+                            function,
+                            catalog,
+                            path,
+                            entry_values,
+                            session,
+                            constraint_count,
+                        )?;
+                    }
+                }
+                paths.clear();
+            }
+            P::Continue { .. } => paths.clear(),
+            P::Return { point, value, .. } => {
+                if let Some(value) = value {
+                    for path in &mut paths {
+                        let _ = prove_mir_proof_definedness(
+                            value,
+                            point,
+                            function,
+                            catalog,
+                            path,
+                            entry_values,
+                            session,
+                            constraint_count,
+                        )?;
+                    }
+                }
+                paths.clear();
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn verify_mir_proof_worklist(
+    worklist: &MirProofWorklist,
+    function: &MirFunction,
+    program: &MirProgram,
+    initial_state: &SymbolicState,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    session: &mut SolverSession,
+    constraint_count: &mut usize,
+) -> Result<(), (ContractOutcome, crate::core::NodeId)> {
+    if worklist.owner != function.owner {
+        return Err((
+            (
+                VerifStatus::NotInTrustedSubset,
+                "canonical MIR proof worklist owner disagrees with its function".into(),
+                *constraint_count,
+                Some(TrustedSubsetDomain::Contract),
+            ),
+            function.owner.clone(),
+        ));
+    }
+    let path = MirProofPath {
+        constraints: initial_state.constraints.clone(),
+        values: initial_state.values.clone(),
+    };
+    let entry_values = initial_state
+        .callable_entry_values
+        .clone()
+        .unwrap_or_else(|| initial_state.values.clone());
+    let check_actual_branches = proof_block_has_mutable_loop_receipt(&worklist.root);
+    let _ = verify_mir_proof_block(
+        &worklist.root,
+        vec![path],
+        function,
+        program,
+        initial_state,
+        catalog,
+        &entry_values,
+        check_actual_branches,
+        session,
+        constraint_count,
+    )?;
+    Ok(())
+}
+
+fn proof_block_has_mutable_loop_receipt(block: &MirProofBlock) -> bool {
+    block.operations.iter().any(|operation| match operation {
+        MirProofOperation::Branch {
+            then_block,
+            else_block,
+            ..
+        } => {
+            proof_block_has_mutable_loop_receipt(then_block)
+                || proof_block_has_mutable_loop_receipt(else_block)
+        }
+        MirProofOperation::Scope(inner) => proof_block_has_mutable_loop_receipt(inner),
+        MirProofOperation::Loop { body, receipt, .. } => {
+            receipt.is_some() || proof_block_has_mutable_loop_receipt(body)
+        }
+        MirProofOperation::Bind { .. }
+        | MirProofOperation::Call(_)
+        | MirProofOperation::Eval { .. }
+        | MirProofOperation::Assign { .. }
+        | MirProofOperation::Math(_)
+        | MirProofOperation::Break { .. }
+        | MirProofOperation::Continue { .. }
+        | MirProofOperation::Return { .. }
+        | MirProofOperation::Exit => false,
+    })
+}
+
+/// Check checker-source and lowered-term witnesses without creating a solver
+/// session. The private worklist seal authenticates the whole lowered tree;
+/// each dynamic-loop expression is additionally looked up in its private
+/// typed source receipt using the exact event role, point, branch identity,
+/// ordinal, scope, TypeDesc, effects, and both source fingerprints.
+fn preflight_proof_source_integrity(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> Result<(), String> {
+    let Some(worklist) = function.proof_worklist.as_ref() else {
+        return Ok(());
+    };
+    if !worklist.has_valid_source_witness() {
+        return Err("MIR proof worklist private source witness is invalid".into());
+    }
+
+    use crate::core::ir::{TypedLoopExpressionRole as Role, TypedProofScopeFrame as SourceScope};
+
+    fn source_scope(scope: &[crate::core::mir::MirProofScopeFrame]) -> Vec<SourceScope> {
+        scope
+            .iter()
+            .map(|frame| match frame {
+                crate::core::mir::MirProofScopeFrame::Block(node) => {
+                    SourceScope::Block(node.clone())
+                }
+                crate::core::mir::MirProofScopeFrame::Branch {
+                    statement,
+                    expression,
+                    then_arm,
+                } => SourceScope::Branch {
+                    statement: statement.clone(),
+                    expression: expression.clone(),
+                    then_arm: *then_arm,
+                },
+                crate::core::mir::MirProofScopeFrame::Loop(node) => SourceScope::Loop(node.clone()),
+            })
+            .collect()
+    }
+
+    fn validate_site(
+        receipt: &MirProofLoopReceipt,
+        expression: &MirProofExpression,
+        role: Role,
+        point: &crate::core::NodeId,
+        branch_expression: Option<&crate::core::NodeId>,
+        ordinal: u32,
+        scope: &[SourceScope],
+    ) -> Result<(), String> {
+        if expression.expression_types.get(&Vec::new()) != Some(&expression.ty)
+            || crate::core::ir::type_path_fingerprint(&expression.expression_types)
+                != expression.type_path_fingerprint
+        {
+            return Err(format!(
+                "proof expression '{}' has a TypeDesc map outside its private source seal",
+                expression.origin.0
+            ));
+        }
+        if !crate::core::ir::validate_loop_expression_site(
+            &receipt.typed,
+            role,
+            point,
+            &expression.origin,
+            branch_expression,
+            ordinal,
+            scope,
+            &expression.ty,
+            &expression.effects,
+            &expression.source_fingerprint,
+            &expression.type_path_fingerprint,
+        ) {
+            return Err(format!(
+                "proof expression '{}' does not match its unique checker-sealed {:?} source site",
+                expression.origin.0, role
+            ));
+        }
+        if !expression.effects.is_empty() {
+            return Err(format!(
+                "proof expression '{}' has effects outside the scalar mutable-loop profile",
+                expression.origin.0
+            ));
+        }
+        Ok(())
+    }
+
+    fn walk_block(
+        block: &MirProofBlock,
+        function: &MirFunction,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+        scope: &mut Vec<SourceScope>,
+        active_loop: Option<(&crate::core::NodeId, &MirProofLoopReceipt)>,
+    ) -> Result<(), String> {
+        use MirProofOperation as P;
+        scope.push(SourceScope::Block(block.id.clone()));
+        for operation in &block.operations {
+            match operation {
+                P::Bind {
+                    point, initializer, ..
+                } => {
+                    if let Some((_, receipt)) = active_loop {
+                        validate_site(
+                            receipt,
+                            initializer,
+                            Role::BindInitializer,
+                            point,
+                            None,
+                            0,
+                            scope,
+                        )?;
+                    }
+                }
+                P::Call(_) => {
+                    if active_loop.is_some() {
+                        return Err(
+                            "MIR proof loop contains a Call operation outside the empty-call profile"
+                                .into(),
+                        );
+                    }
+                }
+                P::Eval { point, expression } => {
+                    if let Some((_, receipt)) = active_loop {
+                        validate_site(receipt, expression, Role::Eval, point, None, 0, scope)?;
+                    }
+                }
+                P::Assign { point, value, .. } => {
+                    if let Some((_, receipt)) = active_loop {
+                        validate_site(receipt, value, Role::WriteValue, point, None, 0, scope)?;
+                    }
+                }
+                P::Math(assertion) => {
+                    if let Some((_, receipt)) = active_loop {
+                        validate_site(
+                            receipt,
+                            &assertion.expression,
+                            Role::Math,
+                            &assertion.id.statement,
+                            None,
+                            assertion.id.ordinal,
+                            &source_scope(&assertion.scope),
+                        )?;
+                    }
+                }
+                P::Branch {
+                    point,
+                    expression,
+                    condition,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    if let Some((_, receipt)) = active_loop {
+                        validate_site(
+                            receipt,
+                            condition,
+                            Role::BranchCondition,
+                            point,
+                            Some(expression),
+                            0,
+                            scope,
+                        )?;
+                    }
+                    scope.push(SourceScope::Branch {
+                        statement: point.clone(),
+                        expression: expression.clone(),
+                        then_arm: true,
+                    });
+                    walk_block(then_block, function, catalog, scope, active_loop)?;
+                    scope.pop();
+                    scope.push(SourceScope::Branch {
+                        statement: point.clone(),
+                        expression: expression.clone(),
+                        then_arm: false,
+                    });
+                    walk_block(else_block, function, catalog, scope, active_loop)?;
+                    scope.pop();
+                }
+                P::Scope(inner) => walk_block(inner, function, catalog, scope, active_loop)?,
+                P::Loop {
+                    point,
+                    header,
+                    body_entry,
+                    exit,
+                    condition_value,
+                    condition,
+                    condition_calls,
+                    invariants,
+                    body,
+                    stationary,
+                    receipt,
+                    ..
+                } => {
+                    if active_loop.is_some() && !stationary {
+                        return Err(format!(
+                            "nested mutable loop '{}' is outside the checked induction profile",
+                            point.0
+                        ));
+                    }
+                    if !stationary {
+                        let receipt = receipt.as_ref().ok_or_else(|| {
+                            format!(
+                                "mutable loop '{}' has no checker-sealed induction receipt",
+                                point.0
+                            )
+                        })?;
+                        if !receipt.typed.has_valid_source_witness() {
+                            return Err(format!(
+                                "mutable loop '{}' typed source receipt witness is invalid",
+                                point.0
+                            ));
+                        }
+                        if !condition_calls.is_empty() {
+                            return Err(format!(
+                                "mutable loop '{}' condition has unmodeled call events",
+                                point.0
+                            ));
+                        }
+                        validate_mutable_loop_receipt(
+                            function,
+                            catalog,
+                            point,
+                            header,
+                            body_entry,
+                            exit,
+                            condition_value,
+                            invariants,
+                            receipt,
+                        )?;
+                        let body_region = loop_region_blocks(function, header, body_entry, exit)?;
+                        validate_mutable_loop_current_values(
+                            function,
+                            catalog,
+                            point,
+                            receipt,
+                            header,
+                            body_entry,
+                            exit,
+                            &body_region,
+                        )?;
+
+                        let mut condition_scope = scope.clone();
+                        condition_scope.push(SourceScope::Loop(point.clone()));
+                        validate_site(
+                            receipt,
+                            condition,
+                            Role::Condition,
+                            point,
+                            None,
+                            0,
+                            &condition_scope,
+                        )?;
+                        for invariant in invariants {
+                            validate_site(
+                                receipt,
+                                &invariant.expression,
+                                Role::Invariant,
+                                &invariant.id.statement,
+                                None,
+                                invariant.id.ordinal,
+                                &source_scope(&invariant.scope),
+                            )?;
+                        }
+                        if receipt
+                            .typed
+                            .expression_sites
+                            .iter()
+                            .any(|site| site.role == Role::PlaceInput)
+                        {
+                            return Err(format!(
+                                "mutable loop '{}' has dynamic place inputs outside the scalar carry profile",
+                                point.0
+                            ));
+                        }
+                        scope.push(SourceScope::Loop(point.clone()));
+                        walk_block(body, function, catalog, scope, Some((point, receipt)))?;
+                        scope.pop();
+                    } else if let Some(receipt) = receipt {
+                        if !receipt.typed.has_valid_source_witness() {
+                            return Err(format!(
+                                "stationary loop '{}' typed source receipt witness is invalid",
+                                point.0
+                            ));
+                        }
+                        // Stationary loops keep their established checker
+                        // path; their source identity is still covered by the
+                        // complete private MIR worklist seal.
+                    }
+                }
+                P::Break { point, value, .. } => {
+                    if let (Some((_, receipt)), Some(value)) = (active_loop, value) {
+                        validate_site(receipt, value, Role::BreakValue, point, None, 0, scope)?;
+                    }
+                }
+                P::Continue { .. } | P::Exit => {}
+                P::Return { point, value, .. } => {
+                    if let (Some((_, receipt)), Some(value)) = (active_loop, value) {
+                        validate_site(receipt, value, Role::ReturnValue, point, None, 0, scope)?;
+                    }
+                }
+            }
+        }
+        scope.pop();
+        Ok(())
+    }
+
+    walk_block(&worklist.root, function, catalog, &mut Vec::new(), None)
+}
+
+#[derive(Debug, Clone)]
+struct MirLoopObservedEdge {
+    edge: MirEdgeId,
+    from: MirBlockId,
+    to: MirBlockId,
+    arguments: Vec<MirValueId>,
+    state: SymbolicState,
+}
+
+#[derive(Debug, Clone)]
+struct MirLoopObservedReturn {
+    from: MirBlockId,
+    value: Option<MirValueId>,
+    state: SymbolicState,
+}
+
+#[derive(Debug, Default)]
+struct MirLoopIteration {
+    backedges: Vec<MirLoopObservedEdge>,
+    exits: Vec<MirLoopObservedEdge>,
+    returns: Vec<MirLoopObservedReturn>,
+    traps: Vec<SymbolicTrap>,
+}
+
+fn eval_loop_block_instructions(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    block_id: &MirBlockId,
+    state: &mut SymbolicState,
+) -> Result<(), String> {
+    let block = function
+        .blocks
+        .get(block_id)
+        .ok_or_else(|| format!("MIR loop block '{}' is absent", block_id))?;
+    for instruction in &block.instructions {
+        if state.normal_path_terminated {
+            break;
+        }
+        let previous_traps = state.traps.len();
+        eval_instruction(
+            function,
+            program,
+            catalog,
+            state,
+            &instruction.id,
+            &instruction.kind,
+        )?;
+        for trap in &mut state.traps[previous_traps..] {
+            if trap.subject.is_none() {
+                trap.subject = instruction
+                    .id
+                    .as_str()
+                    .splitn(3, ':')
+                    .nth(2)
+                    .map(|node| crate::core::NodeId(node.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn capture_loop_preheaders(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    initial: &SymbolicState,
+    header: &MirBlockId,
+) -> Result<(Vec<SymbolicState>, Vec<SymbolicTrap>), String> {
+    fn walk(
+        function: &MirFunction,
+        program: &MirProgram,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+        state: SymbolicState,
+        block_id: &MirBlockId,
+        target_header: &MirBlockId,
+        active: &mut BTreeSet<MirBlockId>,
+        preheaders: &mut Vec<SymbolicState>,
+        traps: &mut Vec<SymbolicTrap>,
+    ) -> Result<(), String> {
+        if !active.insert(block_id.clone()) {
+            return Err(format!(
+                "MIR preheader path reaches a cycle before loop header '{}'",
+                target_header
+            ));
+        }
+        let mut state = state;
+        eval_loop_block_instructions(function, program, catalog, block_id, &mut state)?;
+        if state.normal_path_terminated {
+            traps.extend(state.traps);
+            active.remove(block_id);
+            return Ok(());
+        }
+        let block = function
+            .blocks
+            .get(block_id)
+            .ok_or_else(|| format!("MIR preheader block '{}' is absent", block_id))?;
+        match &block.terminator {
+            MirTerminator::Goto {
+                target, arguments, ..
+            } => {
+                let next = edge_state(&state, function, target, arguments)?;
+                if target == target_header {
+                    preheaders.push(next);
+                } else {
+                    walk(
+                        function,
+                        program,
+                        catalog,
+                        next,
+                        target,
+                        target_header,
+                        &mut active.clone(),
+                        preheaders,
+                        traps,
+                    )?;
+                }
+            }
+            MirTerminator::Branch {
+                condition,
+                then_target,
+                then_arguments,
+                else_target,
+                else_arguments,
+                ..
+            } => {
+                let condition =
+                    expect_bool(
+                        state.values.get(condition).cloned().ok_or_else(|| {
+                            "MIR preheader branch condition is absent".to_string()
+                        })?,
+                        "loop preheader branch condition",
+                    )?;
+                for (target, arguments, guard) in [
+                    (then_target, then_arguments, condition.clone()),
+                    (else_target, else_arguments, condition.not()),
+                ] {
+                    let mut next = edge_state(&state, function, target, arguments)?;
+                    next.constraints.push(guard);
+                    if target == target_header {
+                        preheaders.push(next);
+                    } else {
+                        walk(
+                            function,
+                            program,
+                            catalog,
+                            next,
+                            target,
+                            target_header,
+                            &mut active.clone(),
+                            preheaders,
+                            traps,
+                        )?;
+                    }
+                }
+            }
+            MirTerminator::Return { .. } | MirTerminator::Unreachable => {}
+            MirTerminator::Trap { code } => traps.push(SymbolicTrap {
+                condition: state.constraints.clone(),
+                code: code.clone(),
+                subject: None,
+            }),
+            MirTerminator::Switch { .. }
+            | MirTerminator::SwitchMove { .. }
+            | MirTerminator::Fault { .. } => {
+                return Err(format!(
+                    "MIR preheader path reaches unsupported terminator in '{}'",
+                    block_id
+                ));
+            }
+        }
+        active.remove(block_id);
+        Ok(())
+    }
+
+    let mut preheaders = Vec::new();
+    let mut traps = Vec::new();
+    if &function.entry == header {
+        preheaders.push(initial.clone());
+    } else {
+        walk(
+            function,
+            program,
+            catalog,
+            initial.clone(),
+            &function.entry,
+            header,
+            &mut BTreeSet::new(),
+            &mut preheaders,
+            &mut traps,
+        )?;
+    }
+    if preheaders.len() > 256 {
+        return Err("MIR mutable-loop preheader path count exceeds its bound".into());
+    }
+    Ok((preheaders, traps))
+}
+
+fn loop_region_blocks(
+    function: &MirFunction,
+    header: &MirBlockId,
+    body_entry: &MirBlockId,
+    exit: &MirBlockId,
+) -> Result<BTreeSet<MirBlockId>, String> {
+    let mut pending = vec![body_entry.clone()];
+    let mut region = BTreeSet::new();
+    while let Some(block_id) = pending.pop() {
+        if block_id == *header || block_id == *exit || !region.insert(block_id.clone()) {
+            continue;
+        }
+        let block = function
+            .blocks
+            .get(&block_id)
+            .ok_or_else(|| format!("MIR loop region block '{}' is absent", block_id))?;
+        match &block.terminator {
+            MirTerminator::Goto { target, .. } => pending.push(target.clone()),
+            MirTerminator::Branch {
+                then_target,
+                else_target,
+                ..
+            } => {
+                pending.push(then_target.clone());
+                pending.push(else_target.clone());
+            }
+            MirTerminator::Return { .. } | MirTerminator::Trap { .. } => {}
+            MirTerminator::Unreachable => {
+                return Err(format!(
+                    "MIR mutable-loop region contains Unreachable at '{}'",
+                    block_id
+                ));
+            }
+            MirTerminator::Switch { .. }
+            | MirTerminator::SwitchMove { .. }
+            | MirTerminator::Fault { .. } => {
+                return Err(format!(
+                    "MIR mutable-loop region contains an unsupported terminator at '{}'",
+                    block_id
+                ));
+            }
+        }
+    }
+    Ok(region)
+}
+
+fn run_mutable_loop_iteration(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    header: &MirBlockId,
+    body_entry: &MirBlockId,
+    exit: &MirBlockId,
+    mut header_state: SymbolicState,
+) -> Result<MirLoopIteration, String> {
+    fn walk_body(
+        function: &MirFunction,
+        program: &MirProgram,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+        header: &MirBlockId,
+        exit: &MirBlockId,
+        region: &BTreeSet<MirBlockId>,
+        state: SymbolicState,
+        block_id: &MirBlockId,
+        active: &mut BTreeSet<MirBlockId>,
+        output: &mut MirLoopIteration,
+    ) -> Result<(), String> {
+        if !region.contains(block_id) {
+            return Err(format!(
+                "MIR loop body reaches unreceipted block '{}'",
+                block_id
+            ));
+        }
+        if !active.insert(block_id.clone()) {
+            return Err(format!(
+                "MIR mutable-loop body contains a nested cycle at '{}'",
+                block_id
+            ));
+        }
+        let mut state = state;
+        eval_loop_block_instructions(function, program, catalog, block_id, &mut state)?;
+        if state.normal_path_terminated {
+            output.traps.extend(state.traps);
+            active.remove(block_id);
+            return Ok(());
+        }
+        let block = function
+            .blocks
+            .get(block_id)
+            .ok_or_else(|| format!("MIR loop body block '{}' is absent", block_id))?;
+        match &block.terminator {
+            MirTerminator::Goto {
+                edge,
+                target,
+                arguments,
+            } => {
+                let next = edge_state(&state, function, target, arguments)?;
+                if target == header {
+                    output.backedges.push(MirLoopObservedEdge {
+                        edge: edge.clone(),
+                        from: block_id.clone(),
+                        to: target.clone(),
+                        arguments: arguments.clone(),
+                        state: next,
+                    });
+                } else if target == exit {
+                    output.exits.push(MirLoopObservedEdge {
+                        edge: edge.clone(),
+                        from: block_id.clone(),
+                        to: target.clone(),
+                        arguments: arguments.clone(),
+                        state: next,
+                    });
+                } else {
+                    walk_body(
+                        function,
+                        program,
+                        catalog,
+                        header,
+                        exit,
+                        region,
+                        next,
+                        target,
+                        &mut active.clone(),
+                        output,
+                    )?;
+                }
+            }
+            MirTerminator::Branch {
+                condition,
+                then_edge,
+                then_target,
+                then_arguments,
+                else_edge,
+                else_target,
+                else_arguments,
+            } => {
+                let condition =
+                    expect_bool(
+                        state.values.get(condition).cloned().ok_or_else(|| {
+                            "MIR loop body branch condition is absent".to_string()
+                        })?,
+                        "mutable-loop body branch condition",
+                    )?;
+                for (edge, target, arguments, guard) in [
+                    (then_edge, then_target, then_arguments, condition.clone()),
+                    (else_edge, else_target, else_arguments, condition.not()),
+                ] {
+                    let mut next = edge_state(&state, function, target, arguments)?;
+                    next.constraints.push(guard);
+                    if target == header {
+                        output.backedges.push(MirLoopObservedEdge {
+                            edge: edge.clone(),
+                            from: block_id.clone(),
+                            to: target.clone(),
+                            arguments: arguments.clone(),
+                            state: next,
+                        });
+                    } else if target == exit {
+                        output.exits.push(MirLoopObservedEdge {
+                            edge: edge.clone(),
+                            from: block_id.clone(),
+                            to: target.clone(),
+                            arguments: arguments.clone(),
+                            state: next,
+                        });
+                    } else {
+                        walk_body(
+                            function,
+                            program,
+                            catalog,
+                            header,
+                            exit,
+                            region,
+                            next,
+                            target,
+                            &mut active.clone(),
+                            output,
+                        )?;
+                    }
+                }
+            }
+            MirTerminator::Return { value } => output.returns.push(MirLoopObservedReturn {
+                from: block_id.clone(),
+                value: value.clone(),
+                state: state.clone(),
+            }),
+            MirTerminator::Trap { code } => output.traps.push(SymbolicTrap {
+                condition: state.constraints.clone(),
+                code: code.clone(),
+                subject: None,
+            }),
+            MirTerminator::Unreachable
+            | MirTerminator::Switch { .. }
+            | MirTerminator::SwitchMove { .. }
+            | MirTerminator::Fault { .. } => {
+                return Err(format!(
+                    "MIR mutable-loop body has an unsupported terminator at '{}'",
+                    block_id
+                ));
+            }
+        }
+        active.remove(block_id);
+        Ok(())
+    }
+
+    let region = loop_region_blocks(function, header, body_entry, exit)?;
+    let mut result = MirLoopIteration::default();
+    eval_loop_block_instructions(function, program, catalog, header, &mut header_state)?;
+    if header_state.normal_path_terminated {
+        result.traps.extend(header_state.traps);
+        return Ok(result);
+    }
+    let header_block = function
+        .blocks
+        .get(header)
+        .ok_or_else(|| format!("MIR mutable-loop header '{}' is absent", header))?;
+    let MirTerminator::Branch {
+        condition,
+        then_edge,
+        then_target,
+        then_arguments,
+        else_edge,
+        else_target,
+        else_arguments,
+    } = &header_block.terminator
+    else {
+        return Err("MIR mutable-loop header does not terminate in a condition branch".into());
+    };
+    if then_target != body_entry || else_target != exit {
+        return Err("MIR mutable-loop header branch targets disagree with its receipt".into());
+    }
+    let condition = expect_bool(
+        header_state
+            .values
+            .get(condition)
+            .cloned()
+            .ok_or_else(|| "MIR mutable-loop condition value is absent".to_string())?,
+        "mutable-loop header condition",
+    )?;
+    let mut body_state = edge_state(&header_state, function, then_target, then_arguments)?;
+    body_state.constraints.push(condition.clone());
+    walk_body(
+        function,
+        program,
+        catalog,
+        header,
+        exit,
+        &region,
+        body_state,
+        body_entry,
+        &mut BTreeSet::new(),
+        &mut result,
+    )?;
+    let mut exit_state = edge_state(&header_state, function, else_target, else_arguments)?;
+    exit_state.constraints.push(condition.not());
+    result.exits.push(MirLoopObservedEdge {
+        edge: else_edge.clone(),
+        from: header.clone(),
+        to: else_target.clone(),
+        arguments: else_arguments.clone(),
+        state: exit_state,
+    });
+    let _ = then_edge;
+    Ok(result)
+}
+
+fn verify_entry_invariant(
+    contract: &MirContract,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    session: &mut SolverSession,
+    diagnostic: &mut Option<crate::diagnostic::Diagnostic>,
+    constraint_count: &mut usize,
+    establish: bool,
+) -> Result<Option<ContractOutcome>, String> {
+    let (value, defined) =
+        checked_contract_term(contract, catalog, &state.values, &state.values, None)?;
+    let predicate = expect_bool(value, "entry invariant")?;
+    let mut obligations = vec![(
+        defined,
+        "canonical MIR entry invariant expression is undefined",
+    )];
+    if establish {
+        obligations.push((
+            predicate.clone(),
+            "canonical MIR invariant is not established by requires",
+        ));
+    }
+    for (obligation, message) in obligations {
+        *constraint_count += 1;
+        match session
+            .check_scope(Bool::and(&[
+                &conjunction(&state.constraints),
+                &obligation.not(),
+            ]))
+            .0
+        {
+            SatResult::Sat => {
+                *diagnostic = Some(mir_contract_diagnostic(message, Some(&contract.id)));
+                return Ok(Some((
+                    VerifStatus::Disproven,
+                    message.into(),
+                    *constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                )));
+            }
+            SatResult::Unknown => {
+                return Ok(Some((
+                    session.unknown_status(),
+                    format!("{message}; solver could not decide"),
+                    *constraint_count,
+                    Some(TrustedSubsetDomain::Contract),
+                )));
+            }
+            SatResult::Unsat => {}
+        }
+    }
+    state.constraints.push(predicate);
+    Ok(None)
+}
+
+fn symbolic_product_equal(left: &SymbolicValue, right: &SymbolicValue) -> Result<Bool, String> {
+    match (left, right) {
+        (SymbolicValue::Int(left), SymbolicValue::Int(right)) => Ok(left.eq(right)),
+        (SymbolicValue::Bool(left), SymbolicValue::Bool(right)) => Ok(left.eq(right)),
+        (SymbolicValue::Unit, SymbolicValue::Unit) => Ok(Bool::from_bool(true)),
+        (SymbolicValue::Tuple(left), SymbolicValue::Tuple(right)) if left.len() == right.len() => {
+            let terms = left.iter().zip(right).map(|(left, right)| symbolic_product_equal(left, right)).collect::<Result<Vec<_>, _>>()?;
+            Ok(conjunction(&terms))
+        }
+        (SymbolicValue::Record { nominal: left_nominal, fields: left }, SymbolicValue::Record { nominal: right_nominal, fields: right })
+            if left_nominal == right_nominal && left.keys().eq(right.keys()) => {
+            let terms = left.iter().map(|(field, value)| symbolic_product_equal(value, &right[field])).collect::<Result<Vec<_>, _>>()?;
+            Ok(conjunction(&terms))
+        }
+        _ => Err("exact fails source equality needs a canonical symbolic payload model; opaque type identity is not value identity".into()),
+    }
+}
+
+fn recoverable_source_unchanged(
+    function: &MirFunction,
+    transition: &crate::core::mir::MirTransitionContract,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    entry_values: &BTreeMap<MirValueId, SymbolicValue>,
+    returned: &SymbolicValue,
+) -> Result<Bool, String> {
+    let source_parameter = function
+        .parameters
+        .first()
+        .ok_or("Flow source parameter is absent")?;
+    if function.values.get(source_parameter).map(|value| &value.ty) != Some(&transition.source) {
+        return Err("Flow source parameter TypeDesc disagrees with its transition receipt".into());
+    }
+    let source = entry_values
+        .get(source_parameter)
+        .ok_or("Flow source snapshot is absent")?;
+    let Some((nominal, variants)) = catalog.variant_layout(&transition.result) else {
+        return Err("fails return has no canonical Result layout".into());
+    };
+    let error = variants
+        .iter()
+        .find(|variant| variant.id.0 == "builtin:variant:Result::Err")
+        .ok_or("fails return has no Err variant receipt")?;
+    let [field] = error.fields.as_slice() else {
+        return Err("fails Err payload arity is invalid".into());
+    };
+    let SymbolicValue::Variant {
+        nominal: actual_nominal,
+        tag,
+        payload,
+        active_variant,
+    } = returned
+    else {
+        return Err("fails return is not a symbolic Result".into());
+    };
+    if actual_nominal.as_str() != nominal {
+        return Err("fails return nominal disagrees with receipt".into());
+    }
+    if active_variant
+        .as_ref()
+        .is_some_and(|variant| variant != &error.id)
+    {
+        return Ok(Bool::from_bool(true));
+    }
+    let SymbolicValue::Tuple(pair) = payload
+        .get(&field.id)
+        .ok_or("fails source/error payload is absent")?
+    else {
+        return Err("fails Err payload is not (source, error)".into());
+    };
+    let [returned_source, _error_value] = pair.as_slice() else {
+        return Err("fails source/error pair arity is invalid".into());
+    };
+    let unchanged = symbolic_product_equal(source, returned_source)?;
+    Ok(tag
+        .eq(Int::from_i64(error.discriminant as i64))
+        .implies(&unchanged))
+}
+
 fn mir_contract_diagnostic(
     message: &str,
     subject: Option<&crate::core::NodeId>,
 ) -> crate::diagnostic::Diagnostic {
     crate::diagnostic::Diagnostic::error(message, crate::span::Span::UNKNOWN).with_origin(
+        crate::diagnostic::DiagnosticOrigin {
+            kind: crate::diagnostic::DiagnosticOriginKind::Desugared,
+            rule: Some("canonical_mir.contract".into()),
+            parent_node_id: subject.map(|subject| subject.0.clone()),
+        },
+    )
+}
+
+fn mir_contract_call_diagnostic(
+    message: &str,
+    program: &MirProgram,
+    subject: Option<&crate::core::NodeId>,
+) -> crate::diagnostic::Diagnostic {
+    let span = subject
+        .and_then(|call_node| {
+            let mut matches = program
+                .proof_source_census()
+                .owners()
+                .flat_map(|owner| owner.body_calls())
+                .filter(|call| call.call_node() == call_node);
+            let call = matches.next()?;
+            // A trap can bubble through a helper, so its source owner may be
+            // below the function currently reporting it. Node identity is
+            // global to the checked source; retain a location only when the
+            // census maps it to exactly one body call.
+            matches
+                .next()
+                .is_none()
+                .then(|| call.source_origin().map(|origin| origin.user_span()))?
+        })
+        .unwrap_or(crate::span::Span::UNKNOWN);
+    crate::diagnostic::Diagnostic::error(message, span).with_origin(
         crate::diagnostic::DiagnosticOrigin {
             kind: crate::diagnostic::DiagnosticOriginKind::Desugared,
             rule: Some("canonical_mir.contract".into()),
@@ -927,27 +3652,265 @@ fn has_call_precondition_obligation(function: &MirFunction, program: &MirProgram
             continue;
         };
         for instruction in caller.blocks.values().flat_map(|block| &block.instructions) {
-            let MirInstructionKind::Call {
-                callee: crate::core::ir::ResolvedCallee::Function(target),
-                ..
-            } = &instruction.kind
-            else {
-                continue;
+            let (target, protocol_call) = match &instruction.kind {
+                MirInstructionKind::Call {
+                    callee: crate::core::ir::ResolvedCallee::Function(target),
+                    ..
+                } => (target.clone(), None),
+                MirInstructionKind::Call {
+                    callee: callee @ crate::core::ir::ResolvedCallee::ProtocolMethod { .. },
+                    result,
+                    arguments,
+                    ..
+                } => {
+                    if crate::core::mir::validate_protocol_method_identity(callee).is_err() {
+                        // Malformed protocol dispatch is never evidence that a
+                        // potentially proof-bearing call can be ignored.
+                        return true;
+                    }
+                    let Some(target) = crate::core::mir::canonical_protocol_call_target(callee)
+                    else {
+                        return true;
+                    };
+                    (
+                        target,
+                        Some((callee, result.as_ref(), arguments.as_slice())),
+                    )
+                }
+                MirInstructionKind::ClosureInvoke { callee: target, .. }
+                | MirInstructionKind::FlowTransition {
+                    transition: target, ..
+                } => (target.clone(), None),
+                _ => continue,
             };
-            let Some(callee) = program.functions().get(target) else {
-                continue;
+            let Some(callee) = program.functions().get(&target) else {
+                // An unresolved executable owner cannot establish that the
+                // call has no Requires precondition.
+                return true;
             };
-            if callee
-                .contracts
-                .iter()
-                .any(|contract| contract.kind == MirContractKind::Requires)
-            {
+            if let Some((protocol, result, arguments)) = protocol_call {
+                if callee.validate().is_err()
+                    || arguments
+                        .iter()
+                        .any(|argument| !caller.values.contains_key(argument))
+                    || result.is_some_and(|result| !caller.values.contains_key(result))
+                {
+                    return true;
+                }
+                if !crate::core::mir::validate_protocol_method_abi(
+                    protocol, caller, callee, result, arguments,
+                )
+                .is_empty()
+                {
+                    return true;
+                }
+            }
+            if callee.contracts.iter().any(|contract| {
+                matches!(
+                    contract.kind,
+                    MirContractKind::Requires | MirContractKind::Invariant
+                )
+            }) {
                 return true;
             }
             pending.push(target.clone());
         }
     }
     false
+}
+
+/// A contract-free caller may be inspected only because it reaches another
+/// callable's `Requires`. Keep a successful comparison-only call in the
+/// public proof set, but do not publish a neutral result when the transitive
+/// callee body has a checked integer operation whose definedness was the
+/// actual reason for walking the caller. This mirrors the Resolved verifier's
+/// `had_definedness_obligations` behavior for guarded division/precondition
+/// helpers.
+fn has_transitive_call_definedness_obligation(
+    function: &MirFunction,
+    program: &MirProgram,
+) -> bool {
+    fn contract_has_definedness_operation(expression: &MirContractExpr) -> bool {
+        match expression {
+            MirContractExpr::Unary { op, operand } => {
+                matches!(op, MirContractUnaryOp::Negate)
+                    || contract_has_definedness_operation(operand)
+            }
+            MirContractExpr::Binary { op, left, right } => {
+                matches!(
+                    op,
+                    MirContractBinaryOp::Add
+                        | MirContractBinaryOp::Subtract
+                        | MirContractBinaryOp::Multiply
+                        | MirContractBinaryOp::Divide
+                        | MirContractBinaryOp::Remainder
+                        | MirContractBinaryOp::Power
+                ) || contract_has_definedness_operation(left)
+                    || contract_has_definedness_operation(right)
+            }
+            MirContractExpr::Project { base, .. } => contract_has_definedness_operation(base),
+            MirContractExpr::Value(_)
+            | MirContractExpr::Result
+            | MirContractExpr::Old(_)
+            | MirContractExpr::Int(_)
+            | MirContractExpr::Bool(_)
+            | MirContractExpr::Float(_) => false,
+        }
+    }
+
+    fn body_has_definedness_operation(function: &MirFunction) -> bool {
+        function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .any(|instruction| match &instruction.kind {
+                MirInstructionKind::Binary { op, .. } => matches!(
+                    op,
+                    crate::core::ir::ResolvedBinaryOp::Add
+                        | crate::core::ir::ResolvedBinaryOp::Subtract
+                        | crate::core::ir::ResolvedBinaryOp::Multiply
+                        | crate::core::ir::ResolvedBinaryOp::Divide
+                        | crate::core::ir::ResolvedBinaryOp::Remainder
+                        | crate::core::ir::ResolvedBinaryOp::Power
+                ),
+                MirInstructionKind::Unary {
+                    op: crate::core::ir::ResolvedUnaryOp::Negate,
+                    ..
+                }
+                | MirInstructionKind::BuiltinCall {
+                    kind: MirBuiltinKind::Abs,
+                    ..
+                } => true,
+                _ => false,
+            })
+    }
+
+    let mut pending = vec![function.owner.clone()];
+    let mut seen = BTreeSet::new();
+    while let Some(owner) = pending.pop() {
+        if !seen.insert(owner.clone()) {
+            continue;
+        }
+        let Some(caller) = program.functions().get(&owner) else {
+            continue;
+        };
+        for instruction in caller.blocks.values().flat_map(|block| &block.instructions) {
+            let target = match &instruction.kind {
+                MirInstructionKind::Call {
+                    callee: crate::core::ir::ResolvedCallee::Function(target),
+                    ..
+                }
+                | MirInstructionKind::ClosureInvoke { callee: target, .. }
+                | MirInstructionKind::FlowTransition {
+                    transition: target, ..
+                } => target.clone(),
+                _ => continue,
+            };
+            let Some(callee) = program.functions().get(&target) else {
+                continue;
+            };
+            if callee.contracts.iter().any(|contract| {
+                matches!(
+                    contract.kind,
+                    MirContractKind::Requires | MirContractKind::Invariant
+                ) && contract_has_definedness_operation(&contract.condition)
+            }) || body_has_definedness_operation(callee)
+            {
+                return true;
+            }
+            pending.push(target);
+        }
+    }
+    false
+}
+
+/// Worklists are also carried as checked source metadata for obligation-free
+/// functions. Their presence alone must not turn an unrelated unsupported
+/// call into a verifier failure. Run symbolic worklist interpretation only
+/// when the callable has a contract, a scoped/default Math or loop point, or
+/// a direct-call precondition obligation.
+fn has_scoped_proof_obligation(function: &MirFunction, program: &MirProgram) -> bool {
+    program.requires_proof_worklist(&function.owner)
+        || function.proof_worklist.as_ref().is_some_and(|worklist| {
+            // An invalid private seal may hide a proof root by mutating the public
+            // census. Treat only that malformed artifact as relevant; a valid,
+            // root-free worklist remains obligation-free.
+            !worklist.has_valid_source_witness()
+                || !worklist.expected_math_points.is_empty()
+                || !worklist.expected_loop_invariants.is_empty()
+                || !worklist.expected_default_roots.is_empty()
+                || !worklist.expected_default_math_points.is_empty()
+                || worklist.boundaries.iter().any(|boundary| {
+                    !boundary.math_points.is_empty()
+                        || !boundary.loop_invariants.is_empty()
+                        || !boundary.default_roots.is_empty()
+                        || !boundary.default_math_points.is_empty()
+                })
+        })
+}
+
+fn has_proof_boundary_call_precondition_obligation(
+    function: &MirFunction,
+    program: &MirProgram,
+) -> bool {
+    let Some(worklist) = function.proof_worklist.as_ref() else {
+        return false;
+    };
+    let calls = worklist
+        .expected_deferred_calls
+        .iter()
+        .chain(&worklist.expected_default_calls)
+        .chain(worklist.boundaries.iter().flat_map(|boundary| {
+            boundary
+                .calls
+                .iter()
+                .chain(&boundary.deferred_calls)
+                .chain(&boundary.default_calls)
+        }));
+    calls.into_iter().any(|call| {
+        let Some(source_callee) = call.callee.as_ref() else {
+            return true;
+        };
+        let target = match source_callee {
+            crate::core::ir::ResolvedCallee::Function(target) => target.clone(),
+            crate::core::ir::ResolvedCallee::ProtocolMethod { .. } => {
+                if crate::core::mir::validate_protocol_method_identity(source_callee).is_err() {
+                    return true;
+                }
+                let Some(target) = crate::core::mir::canonical_protocol_call_target(source_callee)
+                else {
+                    return true;
+                };
+                target
+            }
+            // Dynamic and externally implemented families have no concrete
+            // MIR owner from which to infer the absence of a precondition.
+            // Their own typed boundary keeps them outside this direct-call
+            // graph; a relevant verifier request will fail closed there.
+            crate::core::ir::ResolvedCallee::ActorMethod { .. }
+            | crate::core::ir::ResolvedCallee::Constructor(_)
+            | crate::core::ir::ResolvedCallee::Extern(_)
+            | crate::core::ir::ResolvedCallee::Builtin(_)
+            | crate::core::ir::ResolvedCallee::LocalClosure(_)
+            | crate::core::ir::ResolvedCallee::Transition(_) => return true,
+        };
+        let Some(callee) = program.functions().get(&target) else {
+            return true;
+        };
+        callee.contracts.iter().any(|contract| {
+            matches!(
+                contract.kind,
+                MirContractKind::Requires | MirContractKind::Invariant
+            )
+        }) || has_call_precondition_obligation(callee, program)
+    })
+}
+
+fn function_has_verification_obligation(function: &MirFunction, program: &MirProgram) -> bool {
+    !function.contracts.is_empty()
+        || has_scoped_proof_obligation(function, program)
+        || has_call_precondition_obligation(function, program)
+        || has_proof_boundary_call_precondition_obligation(function, program)
 }
 
 /// Recheck the private receipt and exact opaque-handle ABI at every verifier
@@ -963,15 +3926,8 @@ fn validate_map_root_verifier_boundary(
         || function.ownership.has_checker_map_root_actions()
         || function.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction.kind,
-                    MirInstructionKind::MapRootNew { .. }
-                        | MirInstructionKind::MapRootSet { .. }
-                        | MirInstructionKind::MapRootRemove { .. }
-                        | MirInstructionKind::MapRootSize { .. }
-                        | MirInstructionKind::MapRootContains { .. }
-                        | MirInstructionKind::MapRootDrop { .. }
-                )
+                is_map_root_operation(&instruction.kind)
+                    && !instruction_touches_map_any_owner(function, &instruction.kind)
             })
         });
     if !has_map_root {
@@ -1086,6 +4042,785 @@ fn validate_map_root_verifier_boundary(
     Ok(())
 }
 
+/// Recheck MapAnyOwner v1 at the symbolic verifier boundary. The lifecycle
+/// instruction variants are shared with the earlier raw MapRoot profile, so
+/// this boundary keys the profile from its distinct TypeDesc and Checker
+/// receipt before applying its own no-Clone opaque-handle contract.
+fn validate_map_any_owner_verifier_boundary(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> Result<(), String> {
+    let owner_ty = crate::core::mir::types::map_any_owner_v1_type_id();
+    let has_map_any_owner = function.result == owner_ty
+        || function.values.values().any(|value| value.ty == owner_ty)
+        || function.ownership.has_checker_map_any_owner_actions()
+        || function.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| instruction_touches_map_any_owner(function, &instruction.kind))
+        });
+    if !has_map_any_owner {
+        return Ok(());
+    }
+    function.validate().map_err(|errors| {
+        format!(
+            "canonical MIR MapAnyOwner v1 verifier receipt/shape rejected: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    catalog
+        .validate_glue(&owner_ty, MirGlueOperation::MoveOut)
+        .map_err(|message| {
+            format!("canonical MIR MapAnyOwner v1 verifier TypeDesc rejected: {message}")
+        })?;
+    catalog
+        .validate_glue(&owner_ty, MirGlueOperation::Drop)
+        .map_err(|message| {
+            format!("canonical MIR MapAnyOwner v1 verifier TypeDesc rejected: {message}")
+        })?;
+    if catalog
+        .validate_glue(&owner_ty, MirGlueOperation::Clone)
+        .is_ok()
+    {
+        return Err(
+            "canonical MIR MapAnyOwner v1 verifier TypeDesc unexpectedly exposes Clone glue".into(),
+        );
+    }
+    if function.result == owner_ty
+        || function.parameters.iter().any(|parameter| {
+            function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_ty)
+        })
+        || function.blocks.values().any(|block| {
+            block.parameters.iter().any(|parameter| {
+                function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_ty)
+            })
+        })
+    {
+        return Err(
+            "canonical MIR MapAnyOwner v1 root cannot enter through a parameter or escape as a result"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Recheck the independent source-compatible ordinary Map lifecycle at the
+/// symbolic verifier boundary. This profile has its own opaque TypeDesc and
+/// Checker receipt; its source-preserving operations never normalize through
+/// the static-key MapRoot or consuming MapAnyOwner v1 contracts.
+fn validate_ordinary_map_owner_verifier_boundary(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> Result<(), String> {
+    let owner_ty = crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+    let has_profile_type = catalog.iter().any(|(id, descriptor)| {
+        id == &owner_ty
+            || descriptor.kind == MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+            || descriptor.layout == MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
+    });
+    let has_program_receipt = program.functions().values().any(|function| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+    });
+    if has_profile_type != has_program_receipt {
+        return Err(
+            "canonical MIR ordinary Map owner lifecycle v1 TypeDesc presence does not match its independent Checker receipt".into(),
+        );
+    }
+    if has_profile_type {
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            catalog.validate_glue(&owner_ty, operation).map_err(|message| {
+                format!(
+                    "canonical MIR ordinary Map owner lifecycle v1 verifier TypeDesc rejected: {message}"
+                )
+            })?;
+        }
+    }
+    if has_profile_type
+        && (catalog.iter().any(|(_, descriptor)| {
+            descriptor.kind == MirTypeKind::MapRoot
+                || descriptor.kind == MirTypeKind::MapAnyOwnerV1
+                || descriptor.layout == MirLayout::MapRoot
+                || descriptor.layout == MirLayout::MapAnyOwnerV1
+        }) || program.functions().values().any(|function| {
+            function.ownership.has_checker_map_root_actions()
+                || function.ownership.has_checker_map_any_owner_actions()
+        }))
+    {
+        return Err(
+            "canonical MIR MapRoot, MapAnyOwner v1, and ordinary Map owner lifecycle v1 profiles cannot share a verifier program".into(),
+        );
+    }
+    let has_ordinary_map_owner = function.result == owner_ty
+        || function.values.values().any(|value| value.ty == owner_ty)
+        || function
+            .ownership
+            .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+        || function.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| instruction_touches_ordinary_map_owner(&instruction.kind))
+        });
+    if !has_ordinary_map_owner {
+        return Ok(());
+    }
+    function.validate().map_err(|errors| {
+        format!(
+            "canonical MIR ordinary Map owner lifecycle v1 verifier receipt/shape rejected: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    for operation in [
+        MirGlueOperation::MoveOut,
+        MirGlueOperation::Clone,
+        MirGlueOperation::Drop,
+    ] {
+        catalog.validate_glue(&owner_ty, operation).map_err(|message| {
+            format!(
+                "canonical MIR ordinary Map owner lifecycle v1 verifier TypeDesc rejected: {message}"
+            )
+        })?;
+    }
+    if function.result == owner_ty
+        || function.parameters.iter().any(|parameter| {
+            function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_ty)
+        })
+        || function.blocks.values().any(|block| {
+            block.parameters.iter().any(|parameter| {
+                function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_ty)
+            })
+        })
+    {
+        return Err(
+            "canonical MIR ordinary Map owner lifecycle v1 root cannot enter through a parameter or escape as a result".into(),
+        );
+    }
+
+    let is_owner = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == owner_ty)
+    };
+    let is_string = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .and_then(|value| catalog.get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                    && catalog.validate_owned_string(&descriptor.id).is_ok()
+            })
+    };
+    let is_ordinary_payload = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .and_then(|value| catalog.get(&value.ty))
+            .is_some_and(|descriptor| match descriptor.kind {
+                MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
+                    catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                }
+                MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
+                    catalog.validate_owned_string(&descriptor.id).is_ok()
+                }
+                _ => false,
+            })
+    };
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+    {
+        let valid = match &instruction.kind {
+            MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result } => is_owner(result),
+            MirInstructionKind::Clone { result, source }
+                if is_owner(result) || is_owner(source) =>
+            {
+                is_owner(result) && is_owner(source)
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                is_owner(result) && is_owner(source) && is_string(key) && is_ordinary_payload(value)
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleRemove {
+                result,
+                source,
+                key,
+            } => is_owner(result) && is_owner(source) && is_string(key),
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, root } => {
+                let result_is_i32 = function
+                    .values
+                    .get(result)
+                    .and_then(|value| catalog.get(&value.ty))
+                    .is_some_and(|descriptor| {
+                        descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+                            && catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                    });
+                is_owner(root) && result_is_i32
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, root, key } => {
+                let result_is_bool = function
+                    .values
+                    .get(result)
+                    .and_then(|value| catalog.get(&value.ty))
+                    .is_some_and(|descriptor| {
+                        descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+                            && catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                    });
+                is_owner(root) && is_string(key) && result_is_bool
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root } => is_owner(root),
+            _ => true,
+        };
+        if !valid {
+            return Err(format!(
+                "{}: canonical MIR ordinary Map owner lifecycle v1 instruction TypeDesc contract is invalid",
+                instruction.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the exact List<ManagedAny> result published by ordinary Map
+/// `values()`.  The list is a move-owned aggregate and every element is a
+/// checker-authorized ManagedAny owner; accepting a generic List here would
+/// let the symbolic verifier prove a runtime payload with the wrong ABI.
+fn is_canonical_managed_any_list_type(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    let Some(descriptor) = catalog.get(ty) else {
+        return false;
+    };
+    let MirLayout::List { element } = &descriptor.layout else {
+        return false;
+    };
+    descriptor.kind == MirTypeKind::List
+        && descriptor.abi == MirAbiClass::OpaqueHandle
+        && descriptor.ownership == MirOwnership::Move
+        && descriptor.needs_drop_glue
+        && descriptor.needs_clone_glue
+        && descriptor.session_protocol.is_none()
+        && descriptor.drop_plan.is_none()
+        && descriptor.variant_drop_plan.is_none()
+        && descriptor.glue
+            == (crate::core::mir::types::MirGlueContract {
+                move_out: MirGlueKind::List,
+                clone: MirGlueKind::List,
+                drop: MirGlueKind::List,
+            })
+        && catalog.is_managed_any_i32_string_v1(element)
+}
+
+/// Revalidate the independent typed owned-get Map profile at the symbolic
+/// boundary. Getter results are the exact built-in Result<i32, i32> and
+/// Result<string, i32> layouts; no other Map profile receipt can authorize
+/// these instructions.
+fn validate_ordinary_map_owned_get_verifier_boundary(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> Result<(), String> {
+    let owner_ty = crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+    let has_profile_type = catalog.iter().any(|(id, descriptor)| {
+        id == &owner_ty
+            || descriptor.kind == MirTypeKind::OrdinaryMapOwnedGetI32StringV1
+            || descriptor.layout == MirLayout::OrdinaryMapOwnedGetI32StringV1
+    });
+    let has_program_receipt = program.functions().values().any(|function| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+    });
+    if has_profile_type != has_program_receipt {
+        return Err(
+            "canonical MIR ordinary Map owned-get v1 TypeDesc presence does not match its independent Checker receipt".into(),
+        );
+    }
+
+    let has_other_map_type = catalog.iter().any(|(id, descriptor)| {
+        id == &crate::core::mir::types::map_root_type_id()
+            || id == &crate::core::mir::types::map_any_owner_v1_type_id()
+            || id == &crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+            || matches!(
+                descriptor.kind,
+                MirTypeKind::MapRoot
+                    | MirTypeKind::MapAnyOwnerV1
+                    | MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+            )
+            || matches!(
+                descriptor.layout,
+                MirLayout::MapRoot
+                    | MirLayout::MapAnyOwnerV1
+                    | MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
+            )
+    });
+    let has_other_map_receipt = program.functions().values().any(|function| {
+        function.ownership.has_checker_map_root_actions()
+            || function.ownership.has_checker_map_any_owner_actions()
+            || function
+                .ownership
+                .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+    });
+    if has_profile_type && (has_other_map_type || has_other_map_receipt) {
+        return Err(
+            "canonical MIR ordinary Map owned-get v1 cannot share authority with MapRoot, MapAnyOwner v1, or ordinary Map owner lifecycle v1".into(),
+        );
+    }
+
+    let has_profile = function.result == owner_ty
+        || function.values.values().any(|value| value.ty == owner_ty)
+        || function
+            .ownership
+            .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+        || function.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| instruction_touches_ordinary_map_owned_get(&instruction.kind))
+        });
+    if !has_profile {
+        return Ok(());
+    }
+    if !function
+        .ownership
+        .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+    {
+        return Err(
+            "canonical MIR ordinary Map owned-get v1 operation has no independent Checker receipt"
+                .into(),
+        );
+    }
+    if function.ownership.has_checker_map_root_actions()
+        || function.ownership.has_checker_map_any_owner_actions()
+        || function
+            .ownership
+            .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+    {
+        return Err(
+            "canonical MIR ordinary Map owned-get v1 receipt cannot borrow another Map profile receipt".into(),
+        );
+    }
+    function.validate().map_err(|errors| {
+        format!(
+            "canonical MIR ordinary Map owned-get v1 verifier receipt/shape rejected: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    for operation in [
+        MirGlueOperation::MoveOut,
+        MirGlueOperation::Clone,
+        MirGlueOperation::Drop,
+    ] {
+        catalog
+            .validate_glue(&owner_ty, operation)
+            .map_err(|message| {
+                format!(
+                    "canonical MIR ordinary Map owned-get v1 verifier TypeDesc rejected: {message}"
+                )
+            })?;
+    }
+    if function.result == owner_ty
+        || function.parameters.iter().any(|parameter| {
+            function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_ty)
+        })
+        || function.blocks.values().any(|block| {
+            block.parameters.iter().any(|parameter| {
+                function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_ty)
+            })
+        })
+    {
+        return Err(
+            "canonical MIR ordinary Map owned-get v1 root cannot enter through a parameter or escape as a result".into(),
+        );
+    }
+
+    let is_owner = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == owner_ty)
+    };
+    let is_string = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .and_then(|value| catalog.get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                    && catalog.validate_owned_string(&descriptor.id).is_ok()
+            })
+    };
+    let is_i32 = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .and_then(|value| catalog.get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+                    && catalog.validate_copy_scalar(&descriptor.id).is_ok()
+            })
+    };
+    let is_bool = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .and_then(|value| catalog.get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+                    && catalog.validate_copy_scalar(&descriptor.id).is_ok()
+            })
+    };
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+    {
+        let valid = match &instruction.kind {
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result } => is_owner(result),
+            MirInstructionKind::Clone { result, source }
+                if is_owner(result) || is_owner(source) =>
+            {
+                is_owner(result) && is_owner(source)
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let payload_is_i32 = function
+                    .values
+                    .get(value)
+                    .and_then(|value| catalog.get(&value.ty))
+                    .is_some_and(|descriptor| match descriptor.kind {
+                        MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
+                            catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                        }
+                        MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
+                            catalog.validate_owned_string(&descriptor.id).is_ok()
+                        }
+                        _ => false,
+                    });
+                is_owner(result) && is_owner(source) && is_string(key) && payload_is_i32
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove {
+                result,
+                source,
+                key,
+            } => is_owner(result) && is_owner(source) && is_string(key),
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { result, root } => {
+                is_owner(root) && is_i32(result)
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { result, root, key } => {
+                is_owner(root) && is_string(key) && is_bool(result)
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { result, root, key } => {
+                is_owner(root)
+                    && is_string(key)
+                    && function.values.get(result).is_some_and(|value| {
+                        catalog.validate_copy_result_i32_variant(&value.ty).is_ok()
+                    })
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { result, root, key } => {
+                is_owner(root)
+                    && is_string(key)
+                    && function.values.get(result).is_some_and(|value| {
+                        catalog
+                            .validate_result_string_i32_variant(&value.ty)
+                            .is_ok()
+                    })
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { result, root, key } => {
+                is_owner(root)
+                    && is_string(key)
+                    && function.values.get(result).is_some_and(|value| {
+                        catalog
+                            .validate_ordinary_map_owned_get_any_result_type(&value.ty)
+                            .is_ok()
+                    })
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { result, root } => {
+                is_owner(root)
+                    && function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| is_canonical_managed_any_list_type(catalog, &value.ty))
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => is_owner(root),
+            _ => true,
+        };
+        if !valid {
+            return Err(format!(
+                "{}: canonical MIR ordinary Map owned-get v1 instruction TypeDesc contract is invalid",
+                instruction.id
+            ));
+        }
+        if instruction_touches_ordinary_map_owned_get_type(function, &instruction.kind)
+            && !instruction_touches_ordinary_map_owned_get(&instruction.kind)
+            && !matches!(&instruction.kind, MirInstructionKind::Clone { result, source }
+                if is_owner(result) && is_owner(source))
+        {
+            return Err(format!(
+                "{}: ordinary Map owned-get v1 root is used outside its receipt-bound operation",
+                instruction.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Revalidate sealed per-value Checker authority before introducing symbolic
+/// inputs or constraints. A plausible TypeDesc or public operation contract
+/// cannot authorize an Any owner, a parameter, or a returned snapshot.
+fn validate_managed_any_verifier_boundary(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> Result<(), String> {
+    if !function_has_managed_any(function, catalog)
+        && !function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(instruction.kind, MirInstructionKind::ManagedAny { .. })
+            })
+        })
+    {
+        return Ok(());
+    }
+    function.validate().map_err(|errors| {
+        format!(
+            "canonical MIR ManagedAny sealed Checker receipt rejected: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    catalog.validate_managed_any_function(function)?;
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        if let MirInstructionKind::ManagedAny {
+            result,
+            source,
+            operation,
+            contract,
+        } = &instruction.kind
+        {
+            catalog.validate_managed_any_contract(
+                function,
+                source,
+                result.as_ref(),
+                *operation,
+                contract.as_ref(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn function_has_managed_any(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> bool {
+    catalog.contains_dynamic_or_managed_any(&function.result)
+        || function
+            .values
+            .values()
+            .any(|value| catalog.contains_dynamic_or_managed_any(&value.ty))
+}
+
+fn instruction_touches_ordinary_map_owner(instruction: &MirInstructionKind) -> bool {
+    matches!(
+        instruction,
+        MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+    )
+}
+
+fn instruction_touches_ordinary_map_owned_get(instruction: &MirInstructionKind) -> bool {
+    matches!(
+        instruction,
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+    )
+}
+
+fn instruction_touches_ordinary_map_owned_get_type(
+    function: &MirFunction,
+    instruction: &MirInstructionKind,
+) -> bool {
+    let owner_ty = crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+    let is_owner = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == owner_ty)
+    };
+    match instruction {
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. } => true,
+        MirInstructionKind::MapRootNew { result } => is_owner(result),
+        MirInstructionKind::MapRootSet {
+            result,
+            source,
+            value,
+            ..
+        } => is_owner(result) || is_owner(source) || is_owner(value),
+        MirInstructionKind::MapRootRemove { result, source, .. } => {
+            is_owner(result) || is_owner(source)
+        }
+        MirInstructionKind::MapRootSize { result, root }
+        | MirInstructionKind::MapRootContains { result, root, .. } => {
+            is_owner(result) || is_owner(root)
+        }
+        MirInstructionKind::MapRootDrop { root } => is_owner(root),
+        MirInstructionKind::Copy { result, source }
+        | MirInstructionKind::Move { result, source }
+        | MirInstructionKind::Clone { result, source } => is_owner(result) || is_owner(source),
+        MirInstructionKind::Drop { value } | MirInstructionKind::EndBorrow { borrow: value } => {
+            is_owner(value)
+        }
+        MirInstructionKind::Call {
+            result, arguments, ..
+        } => result.as_ref().is_some_and(is_owner) || arguments.iter().any(is_owner),
+        MirInstructionKind::ClosureInvoke {
+            result,
+            function_value,
+            arguments,
+            ..
+        } => {
+            is_owner(function_value)
+                || result.as_ref().is_some_and(is_owner)
+                || arguments.iter().any(is_owner)
+        }
+        MirInstructionKind::BuiltinCall {
+            result, arguments, ..
+        } => is_owner(result) || arguments.iter().any(is_owner),
+        _ => false,
+    }
+}
+
+fn is_map_root_operation(instruction: &MirInstructionKind) -> bool {
+    matches!(
+        instruction,
+        MirInstructionKind::MapRootNew { .. }
+            | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootRemove { .. }
+            | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootContains { .. }
+            | MirInstructionKind::MapRootDrop { .. }
+    )
+}
+
+fn instruction_touches_map_any_owner(
+    function: &MirFunction,
+    instruction: &MirInstructionKind,
+) -> bool {
+    let owner_ty = crate::core::mir::types::map_any_owner_v1_type_id();
+    let is_owner = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == owner_ty)
+    };
+    match instruction {
+        MirInstructionKind::MapRootNew { result } => is_owner(result),
+        MirInstructionKind::MapRootSet {
+            result,
+            source,
+            value,
+            ..
+        } => is_owner(result) || is_owner(source) || is_owner(value),
+        MirInstructionKind::MapRootRemove { result, source, .. } => {
+            is_owner(result) || is_owner(source)
+        }
+        MirInstructionKind::MapRootSize { result, root }
+        | MirInstructionKind::MapRootContains { result, root, .. } => {
+            is_owner(result) || is_owner(root)
+        }
+        MirInstructionKind::MapRootDrop { root } => is_owner(root),
+        _ => false,
+    }
+}
+
+fn map_owner_type_for_instruction(
+    function: &MirFunction,
+    instruction: &MirInstructionKind,
+) -> crate::core::ResolvedTypeId {
+    if instruction_touches_map_any_owner(function, instruction) {
+        crate::core::mir::types::map_any_owner_v1_type_id()
+    } else {
+        crate::core::mir::types::map_root_type_id()
+    }
+}
+
 // Return paths retain their complete SSA environment in the constraints by
 // using the same value IDs.  This helper makes the contract API explicit and
 // keeps the verifier from reaching back into a frontend body.
@@ -1099,24 +4834,25 @@ fn initial_state(
     session: &mut SolverSession,
 ) -> Result<SymbolicState, String> {
     let mut state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::new(),
         constraints: Vec::new(),
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     for parameter in &function.parameters {
         let name = format!("mir.value.{}", parameter.as_str());
-        let (value, constraints) = symbolic_value_for_type(
-            catalog,
-            &function
-                .values
-                .get(parameter)
-                .ok_or_else(|| format!("MIR parameter '{}' is absent from values", parameter))?
-                .ty,
-            &name,
-        )?;
+        let parameter_ty = &function
+            .values
+            .get(parameter)
+            .ok_or_else(|| format!("MIR parameter '{}' is absent from values", parameter))?
+            .ty;
+        let (value, constraints) = symbolic_value_for_type(catalog, parameter_ty, &name)?;
         state.constraints.extend(constraints);
         if let SymbolicValue::List { length } = &value {
             state.list_shapes.insert(
@@ -1126,6 +4862,18 @@ fn initial_state(
                     elements: None,
                     children: None,
                 },
+            );
+        }
+        if catalog.get(parameter_ty).is_some_and(|descriptor| {
+            descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+        }) {
+            catalog.validate_owned_string(parameter_ty)?;
+            state.known_strings.insert(
+                parameter.clone(),
+                SymbolicString::Symbol(Z3String::new_const(format!(
+                    "mir.string.{}",
+                    parameter.as_str()
+                ))),
             );
         }
         state.values.insert(parameter.clone(), value);
@@ -1169,6 +4917,34 @@ fn symbolic_value_for_type(
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| format!("MIR verifier TypeDesc '{}' is absent", ty.as_str()))?;
+    if catalog.is_managed_any_i32_string_v1(ty) {
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            catalog.validate_glue(ty, operation)?;
+        }
+        let kind = Int::new_const(format!("{name}.kind"));
+        let i32_payload = Int::new_const(format!("{name}.i32"));
+        // Sealed input authority has already been checked. Valid incoming
+        // owners carry v1 and either canonical i32 or String; this is an ABI
+        // invariant, not an unchecked cast assumption.
+        return Ok((
+            SymbolicValue::ManagedAnyI32StringV1 {
+                kind: kind.clone(),
+                descriptor_version: Int::from_i64(1),
+                i32_payload: i32_payload.clone(),
+                string_payload: SymbolicString::Symbol(Z3String::new_const(format!(
+                    "{name}.string"
+                ))),
+            },
+            vec![
+                Bool::or(&[&kind.eq(Int::from_i64(1)), &kind.eq(Int::from_i64(2))]),
+                int_range_constraint(&i32_payload, 32),
+            ],
+        ));
+    }
     if descriptor.glue.move_out == crate::core::mir::types::MirGlueKind::Session {
         catalog.validate_session_channel(ty)?;
         return Ok((SymbolicValue::Opaque { ty: ty.clone() }, Vec::new()));
@@ -1710,6 +5486,2798 @@ fn symbolic_default_guard(previous_cases: &[Bool]) -> Bool {
     Bool::and(&refs)
 }
 
+fn proof_loop_at_header<'a>(
+    worklist: &'a MirProofWorklist,
+    header: &crate::core::mir::MirBlockId,
+) -> Option<&'a MirProofOperation> {
+    fn find<'a>(
+        block: &'a MirProofBlock,
+        header: &crate::core::mir::MirBlockId,
+    ) -> Option<&'a MirProofOperation> {
+        for operation in &block.operations {
+            match operation {
+                MirProofOperation::Loop {
+                    header: candidate,
+                    body,
+                    ..
+                } => {
+                    if candidate == header {
+                        return Some(operation);
+                    }
+                    if let Some(found) = find(body, header) {
+                        return Some(found);
+                    }
+                }
+                MirProofOperation::Branch {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    if let Some(found) = find(then_block, header) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find(else_block, header) {
+                        return Some(found);
+                    }
+                }
+                MirProofOperation::Scope(inner) => {
+                    if let Some(found) = find(inner, header) {
+                        return Some(found);
+                    }
+                }
+                MirProofOperation::Bind { .. }
+                | MirProofOperation::Call(_)
+                | MirProofOperation::Eval { .. }
+                | MirProofOperation::Assign { .. }
+                | MirProofOperation::Math(_)
+                | MirProofOperation::Break { .. }
+                | MirProofOperation::Continue { .. }
+                | MirProofOperation::Return { .. }
+                | MirProofOperation::Exit => {}
+            }
+        }
+        None
+    }
+    find(&worklist.root, header)
+}
+
+fn proof_loop_at_exit<'a>(
+    worklist: &'a MirProofWorklist,
+    exit: &MirBlockId,
+) -> Option<&'a MirProofOperation> {
+    fn find<'a>(block: &'a MirProofBlock, exit: &MirBlockId) -> Option<&'a MirProofOperation> {
+        for operation in &block.operations {
+            match operation {
+                MirProofOperation::Loop {
+                    exit: candidate,
+                    body,
+                    ..
+                } => {
+                    if candidate == exit {
+                        return Some(operation);
+                    }
+                    if let Some(found) = find(body, exit) {
+                        return Some(found);
+                    }
+                }
+                MirProofOperation::Branch {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    if let Some(found) = find(then_block, exit) {
+                        return Some(found);
+                    }
+                    if let Some(found) = find(else_block, exit) {
+                        return Some(found);
+                    }
+                }
+                MirProofOperation::Scope(inner) => {
+                    if let Some(found) = find(inner, exit) {
+                        return Some(found);
+                    }
+                }
+                MirProofOperation::Bind { .. }
+                | MirProofOperation::Call(_)
+                | MirProofOperation::Eval { .. }
+                | MirProofOperation::Assign { .. }
+                | MirProofOperation::Math(_)
+                | MirProofOperation::Break { .. }
+                | MirProofOperation::Continue { .. }
+                | MirProofOperation::Return { .. }
+                | MirProofOperation::Exit => {}
+            }
+        }
+        None
+    }
+    find(&worklist.root, exit)
+}
+
+fn loop_edge_target(
+    function: &MirFunction,
+    edge: &MirEdgeId,
+) -> Option<(MirBlockId, MirBlockId, Vec<MirValueId>)> {
+    for (from, block) in &function.blocks {
+        match &block.terminator {
+            MirTerminator::Goto {
+                edge: candidate,
+                target,
+                arguments,
+            } if candidate == edge => {
+                return Some((from.clone(), target.clone(), arguments.clone()));
+            }
+            MirTerminator::Branch {
+                then_edge,
+                then_target,
+                then_arguments,
+                else_edge,
+                else_target,
+                else_arguments,
+                ..
+            } => {
+                if then_edge == edge {
+                    return Some((from.clone(), then_target.clone(), then_arguments.clone()));
+                }
+                if else_edge == edge {
+                    return Some((from.clone(), else_target.clone(), else_arguments.clone()));
+                }
+            }
+            MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
+                if let Some(arm) = arms.iter().find(|arm| &arm.edge == edge) {
+                    return Some((from.clone(), arm.target.clone(), arm.arguments.clone()));
+                }
+            }
+            MirTerminator::Return { .. }
+            | MirTerminator::Trap { .. }
+            | MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable
+            | MirTerminator::Goto { .. } => {}
+        }
+    }
+    None
+}
+
+fn validate_mutable_loop_receipt(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    loop_node: &crate::core::NodeId,
+    header: &MirBlockId,
+    body_entry: &MirBlockId,
+    exit: &MirBlockId,
+    condition_value: &MirValueId,
+    invariants: &[crate::core::mir::MirProofAssertion],
+    receipt: &MirProofLoopReceipt,
+) -> Result<(), String> {
+    let typed = &receipt.typed;
+    if typed.schema_version != crate::core::ir::loop_proof::TYPED_LOOP_PROOF_SCHEMA_VERSION
+        || typed.owner != function.owner
+        || typed.loop_node != *loop_node
+    {
+        return Err("mutable-loop source receipt schema/owner/node is stale".into());
+    }
+    if !typed.call_nodes.is_empty() || !typed.effect_nodes.is_empty() {
+        return Err("mutable-loop induction has unmodeled calls or effects".into());
+    }
+    if !typed.loans.is_empty() {
+        return Err("mutable-loop induction is outside the no-loan capability".into());
+    }
+    let cfg_edge_ids = typed
+        .cfg_edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<BTreeSet<_>>();
+    let resource_edge_ids = typed
+        .resource_edges
+        .iter()
+        .map(|edge| edge.edge.clone())
+        .collect::<BTreeSet<_>>();
+    if cfg_edge_ids.len() != typed.cfg_edges.len()
+        || resource_edge_ids.len() != typed.resource_edges.len()
+        || resource_edge_ids != cfg_edge_ids
+    {
+        return Err(
+            "mutable-loop ownership receipt does not cover the exact source CFG edge set".into(),
+        );
+    }
+    let entry_cfg_edges = typed
+        .cfg_edges
+        .iter()
+        .filter(|edge| {
+            edge.source.node == *loop_node && edge.kind == crate::core::cfg::EdgeKind::Fallthrough
+        })
+        .collect::<Vec<_>>();
+    let [entry_cfg_edge] = entry_cfg_edges.as_slice() else {
+        return Err(
+            "mutable-loop source CFG has no unique entry edge for ownership validation".into(),
+        );
+    };
+    for resource in &typed.resource_edges {
+        let cfg_edge = typed
+            .cfg_edges
+            .iter()
+            .find(|edge| edge.id == resource.edge)
+            .ok_or("mutable-loop ownership edge is absent from source CFG")?;
+        let reachable_from = typed.cfg_reachable_blocks.contains(&cfg_edge.from);
+        let reachable_to = typed.cfg_reachable_blocks.contains(&cfg_edge.to);
+        if resource.edge == entry_cfg_edge.id {
+            if resource.from_output.is_none()
+                || resource.to_input.is_none()
+                || resource.from_output != resource.to_input
+            {
+                return Err("mutable-loop entry ownership edge is absent or changes state".into());
+            }
+        } else if reachable_from || reachable_to {
+            if resource.from_input.is_none()
+                || resource.from_output.is_none()
+                || resource.to_input.is_none()
+                || resource.from_input != resource.from_output
+                || resource.from_output != resource.to_input
+            {
+                return Err(
+                    "mutable-loop ownership receipt is absent or changes across an edge".into(),
+                );
+            }
+        }
+    }
+    let exit_cfg_edges = typed
+        .cfg_edges
+        .iter()
+        .filter(|edge| {
+            edge.source.node == *loop_node && edge.kind == crate::core::cfg::EdgeKind::LoopExit
+        })
+        .collect::<Vec<_>>();
+    let [exit_cfg_edge] = exit_cfg_edges.as_slice() else {
+        return Err(
+            "mutable-loop source CFG has no unique normal-exit edge for ownership validation"
+                .into(),
+        );
+    };
+    let post_loop_exit_block = exit_cfg_edge.to.clone();
+    let mut cfg_block_ids = typed
+        .cfg_blocks
+        .iter()
+        .map(|block| block.id.clone())
+        .collect::<BTreeSet<_>>();
+    let resource_block_ids = typed
+        .resource_blocks
+        .iter()
+        .map(|block| block.block.clone())
+        .collect::<BTreeSet<_>>();
+    if cfg_block_ids.len() != typed.cfg_blocks.len()
+        || resource_block_ids.len() != typed.resource_blocks.len()
+    {
+        return Err("mutable-loop ownership receipt repeats a source CFG block".into());
+    }
+    cfg_block_ids.remove(&post_loop_exit_block);
+    if resource_block_ids != cfg_block_ids {
+        return Err(
+            "mutable-loop ownership receipt does not cover every internal source CFG block".into(),
+        );
+    }
+    for resource in &typed.resource_blocks {
+        if typed.cfg_reachable_blocks.contains(&resource.block)
+            && resource.block != post_loop_exit_block
+            && (resource.input.is_none()
+                || resource.output.is_none()
+                || resource.input != resource.output)
+        {
+            return Err(format!(
+                "mutable-loop ownership changes inside reachable source CFG block '{}'",
+                resource.block.0 .0
+            ));
+        }
+    }
+    if typed.resource_actions.iter().any(|action| {
+        action.location.block != post_loop_exit_block
+            && action.kind != crate::core::CanonicalActionKind::Read
+    }) {
+        return Err("mutable-loop source CFG contains an unsupported ownership action".into());
+    }
+    let loop_source_points = typed
+        .cfg_blocks
+        .iter()
+        .filter(|block| block.id != post_loop_exit_block)
+        .flat_map(|block| block.points.iter().map(|point| point.source.node.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut expected_resource_events = typed
+        .resource_actions
+        .iter()
+        .filter(|action| action.location.block != post_loop_exit_block)
+        .map(|action| {
+            let kind = match action.kind {
+                crate::core::CanonicalActionKind::Read => {
+                    crate::core::mir::MirOwnershipEventKind::Read
+                }
+                crate::core::CanonicalActionKind::Write => {
+                    crate::core::mir::MirOwnershipEventKind::Write
+                }
+                crate::core::CanonicalActionKind::Introduce => {
+                    crate::core::mir::MirOwnershipEventKind::Introduce
+                }
+                crate::core::CanonicalActionKind::Move => {
+                    crate::core::mir::MirOwnershipEventKind::Move
+                }
+                crate::core::CanonicalActionKind::Drop => {
+                    crate::core::mir::MirOwnershipEventKind::Drop
+                }
+                crate::core::CanonicalActionKind::Return => {
+                    crate::core::mir::MirOwnershipEventKind::Return
+                }
+                crate::core::CanonicalActionKind::TransferSession => {
+                    crate::core::mir::MirOwnershipEventKind::TransferSession
+                }
+                crate::core::CanonicalActionKind::TransferChild => {
+                    crate::core::mir::MirOwnershipEventKind::TransferChild
+                }
+                crate::core::CanonicalActionKind::BorrowShared => {
+                    crate::core::mir::MirOwnershipEventKind::BorrowShared
+                }
+                crate::core::CanonicalActionKind::BorrowMut => {
+                    crate::core::mir::MirOwnershipEventKind::BorrowMut
+                }
+                crate::core::CanonicalActionKind::BorrowEnd => {
+                    crate::core::mir::MirOwnershipEventKind::BorrowEnd
+                }
+            };
+            (
+                kind,
+                action.resource.0 .0.clone(),
+                action.location.point.clone(),
+                action.source.as_ref().map(|place| place.display()),
+                action.target.as_ref().map(|place| place.display()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut actual_resource_events = function
+        .ownership
+        .events
+        .iter()
+        .filter(|event| loop_source_points.contains(&event.point))
+        .map(|event| {
+            (
+                event.kind,
+                event.resource.clone(),
+                event.point.clone(),
+                event.source.clone(),
+                event.target.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected_resource_events.sort();
+    actual_resource_events.sort();
+    if expected_resource_events != actual_resource_events {
+        return Err(
+            "mutable-loop MIR ownership events disagree with the checker resource-action slice"
+                .into(),
+        );
+    }
+    if typed
+        .state_locals
+        .windows(2)
+        .any(|pair| pair[0].local >= pair[1].local)
+        || typed.state_locals.len() != receipt.bindings.len()
+        || receipt
+            .bindings
+            .windows(2)
+            .any(|pair| pair[0].local >= pair[1].local)
+    {
+        return Err("mutable-loop state-local bindings are duplicated or not canonical".into());
+    }
+    let state_by_local = typed
+        .state_locals
+        .iter()
+        .map(|local| (local.local.clone(), local))
+        .collect::<BTreeMap<_, _>>();
+    let mut writes_by_local =
+        BTreeMap::<crate::core::ResolvedLocalId, BTreeSet<crate::core::NodeId>>::new();
+    let mut write_nodes = BTreeSet::new();
+    for write in &typed.writes {
+        if !write.target.projections.is_empty() || !write_nodes.insert(write.statement.clone()) {
+            return Err(
+                "mutable-loop write receipt has a projected or duplicate assignment".into(),
+            );
+        }
+        let state_local = state_by_local
+            .get(&write.target.base)
+            .ok_or("mutable-loop assignment target has no carried state binding")?;
+        if !state_local.written_in_loop
+            || !state_local.write_sites.contains(&write.statement)
+            || write.conversion.to != state_local.ty
+            || !matches!(
+                write.conversion.kind,
+                crate::core::ir::CheckedConversionKind::Identity
+                    | crate::core::ir::CheckedConversionKind::NumericWiden
+            )
+        {
+            return Err(format!(
+                "mutable-loop assignment '{}' disagrees with its carried scalar binding/conversion",
+                write.statement.0
+            ));
+        }
+        writes_by_local
+            .entry(write.target.base.clone())
+            .or_default()
+            .insert(write.statement.clone());
+    }
+    for state_local in &typed.state_locals {
+        let expected_writes = writes_by_local
+            .get(&state_local.local)
+            .cloned()
+            .unwrap_or_default();
+        let recorded_writes = state_local
+            .write_sites
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if recorded_writes.len() != state_local.write_sites.len()
+            || recorded_writes != expected_writes
+            || state_local.written_in_loop != !expected_writes.is_empty()
+        {
+            return Err(format!(
+                "mutable-loop state local '{}' has a stale write-site census",
+                state_local.local.0 .0
+            ));
+        }
+    }
+    let old_values = typed
+        .old_snapshot
+        .iter()
+        .map(loop_stable_local_value)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let callable_entry_values = function.parameters.iter().cloned().collect::<BTreeSet<_>>();
+    if old_values.len() != typed.old_snapshot.len() || old_values != callable_entry_values {
+        return Err(
+            "mutable-loop old snapshot is not the callable-entry parameter/capture set".into(),
+        );
+    }
+
+    let expected_header = MirBlockId::new(format!("bb:while.header:{}", loop_node.0))
+        .map_err(|error| error.to_string())?;
+    let expected_body = MirBlockId::new(format!("bb:while.body:{}", loop_node.0))
+        .map_err(|error| error.to_string())?;
+    let expected_exit = MirBlockId::new(format!("bb:while.exit:{}", loop_node.0))
+        .map_err(|error| error.to_string())?;
+    if header != &expected_header || body_entry != &expected_body || exit != &expected_exit {
+        return Err(
+            "mutable-loop block identities are not the canonical header/body/exit IDs".into(),
+        );
+    }
+    let header_block = function
+        .blocks
+        .get(header)
+        .ok_or("mutable-loop header block is absent")?;
+    let exit_block = function
+        .blocks
+        .get(exit)
+        .ok_or("mutable-loop exit block is absent")?;
+    let MirTerminator::Branch {
+        condition,
+        then_edge,
+        then_target,
+        then_arguments,
+        else_edge,
+        else_target,
+        else_arguments,
+    } = &header_block.terminator
+    else {
+        return Err("mutable-loop header does not have a conditional terminator".into());
+    };
+    if condition != condition_value
+        || then_target != body_entry
+        || else_target != exit
+        || !then_arguments.is_empty()
+        || then_edge.as_str() != format!("edge:while.body:{}", loop_node.0)
+        || else_edge.as_str() != format!("edge:while.exit:{}", loop_node.0)
+    {
+        return Err(
+            "mutable-loop condition/header edges disagree with the typed proof point".into(),
+        );
+    }
+    if typed.state_locals.len() != header_block.parameters.len()
+        || typed.state_locals.len() != exit_block.parameters.len()
+    {
+        return Err("mutable-loop block parameter arity disagrees with state-local receipt".into());
+    }
+    for (state_local, binding) in typed.state_locals.iter().zip(&receipt.bindings) {
+        let stable = loop_stable_local_value(&state_local.local)?;
+        if state_local.local != binding.local
+            || state_local.ty != binding.ty
+            || header_block
+                .parameters
+                .iter()
+                .find(|parameter| parameter.value == binding.header_parameter)
+                .is_none()
+            || exit_block
+                .parameters
+                .iter()
+                .find(|parameter| parameter.value == binding.exit_parameter)
+                .is_none()
+            || header_block
+                .parameters
+                .iter()
+                .position(|p| p.value == binding.header_parameter)
+                != exit_block
+                    .parameters
+                    .iter()
+                    .position(|p| p.value == binding.exit_parameter)
+            || function.values.get(&stable).map(|value| &value.ty) != Some(&binding.ty)
+            || function
+                .values
+                .get(&binding.preheader_value)
+                .map(|value| &value.ty)
+                != Some(&binding.ty)
+            || function
+                .values
+                .get(&binding.header_parameter)
+                .map(|value| &value.ty)
+                != Some(&binding.ty)
+            || function
+                .values
+                .get(&binding.exit_parameter)
+                .map(|value| &value.ty)
+                != Some(&binding.ty)
+        {
+            return Err(format!(
+                "mutable-loop value mapping for local '{}' disagrees with MIR parameters/TypeDesc",
+                state_local.local.0 .0
+            ));
+        }
+        let descriptor = catalog
+            .get(&binding.ty)
+            .ok_or_else(|| format!("mutable-loop TypeDesc '{}' is absent", binding.ty.as_str()))?;
+        if !descriptor.is_canonical_copy_scalar(true)
+            || !matches!(
+                descriptor.abi,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                } | MirAbiClass::Bool
+            )
+        {
+            return Err(format!(
+                "mutable-loop state local '{}' is outside signed i32/i64/Bool Copy scalars",
+                state_local.local.0 .0
+            ));
+        }
+    }
+    if exit_block
+        .parameters
+        .iter()
+        .map(|parameter| parameter.value.clone())
+        .collect::<Vec<_>>()
+        != receipt
+            .bindings
+            .iter()
+            .map(|binding| binding.exit_parameter.clone())
+            .collect::<Vec<_>>()
+        || header_block
+            .parameters
+            .iter()
+            .map(|parameter| parameter.value.clone())
+            .collect::<Vec<_>>()
+            != receipt
+                .bindings
+                .iter()
+                .map(|binding| binding.header_parameter.clone())
+                .collect::<Vec<_>>()
+    {
+        return Err("mutable-loop block parameters are not in canonical local order".into());
+    }
+    if else_arguments
+        != &receipt
+            .bindings
+            .iter()
+            .map(|binding| binding.header_parameter.clone())
+            .collect::<Vec<_>>()
+    {
+        return Err(
+            "mutable-loop condition-false edge does not carry header current values".into(),
+        );
+    }
+
+    if invariants.len() != typed.invariant_points.len()
+        || invariants
+            .iter()
+            .zip(&typed.invariant_points)
+            .any(|(assertion, point)| {
+                assertion.id.owner != point.owner
+                    || assertion.id.statement != point.statement
+                    || assertion.id.ordinal != point.ordinal
+            })
+    {
+        return Err(
+            "mutable-loop MIR invariants disagree with the typed source point census".into(),
+        );
+    }
+    let mut seen_sites = BTreeSet::new();
+    let mut seen_edges = BTreeSet::new();
+    let mut recorded_entry = 0usize;
+    let mut recorded_true = 0usize;
+    let mut recorded_false = 0usize;
+    for edge in &receipt.edges {
+        if !seen_sites.insert((format!("{:?}", edge.kind), edge.source_site.clone())) {
+            return Err("mutable-loop MIR edge receipt repeats a source terminal".into());
+        }
+        if let Some(mir_edge) = &edge.mir_edge {
+            if !seen_edges.insert(mir_edge.clone()) {
+                return Err("mutable-loop MIR edge receipt repeats a MIR edge identity".into());
+            }
+            let Some((from, to, arguments)) = loop_edge_target(function, mir_edge) else {
+                return Err(format!(
+                    "mutable-loop receipt names absent MIR edge '{mir_edge}'"
+                ));
+            };
+            if from != edge.from_block
+                || edge.to_block.as_ref() != Some(&to)
+                || edge.arguments != arguments
+                || edge.terminator_value.is_some()
+            {
+                return Err(format!(
+                    "mutable-loop MIR edge '{}' has stale endpoint/argument metadata",
+                    mir_edge
+                ));
+            }
+            match edge.kind.clone() {
+                MirProofLoopEdgeKind::Entry => {
+                    recorded_entry += 1;
+                    if edge.source_site != *loop_node
+                        || edge.source_cfg_edge.as_ref() != Some(&entry_cfg_edge.id)
+                        || edge.source_reachable
+                            != (typed.cfg_reachable_blocks.contains(&entry_cfg_edge.from)
+                                || typed.cfg_reachable_blocks.contains(&entry_cfg_edge.to))
+                        || mir_edge.as_str() != format!("edge:while.entry:{}", loop_node.0)
+                        || to != *header
+                        || arguments
+                            != receipt
+                                .bindings
+                                .iter()
+                                .map(|binding| binding.preheader_value.clone())
+                                .collect::<Vec<_>>()
+                    {
+                        return Err("mutable-loop entry edge does not establish the exact preheader mapping".into());
+                    }
+                }
+                MirProofLoopEdgeKind::ConditionTrue => {
+                    recorded_true += 1;
+                    let source_edge = typed
+                        .cfg_edges
+                        .iter()
+                        .find(|source| {
+                            source.kind == crate::core::cfg::EdgeKind::LoopBody
+                                && source.source.node == *loop_node
+                        })
+                        .ok_or("mutable-loop source CFG has no condition-true edge")?;
+                    if edge.source_site != *loop_node
+                        || edge.source_cfg_edge.as_ref() != Some(&source_edge.id)
+                        || edge.source_reachable
+                            != (typed.cfg_reachable_blocks.contains(&source_edge.from)
+                                || typed.cfg_reachable_blocks.contains(&source_edge.to))
+                        || mir_edge != then_edge
+                        || to != *body_entry
+                        || !arguments.is_empty()
+                    {
+                        return Err(
+                            "mutable-loop condition-true edge is not the header body edge".into(),
+                        );
+                    }
+                }
+                MirProofLoopEdgeKind::ConditionFalse => {
+                    recorded_false += 1;
+                    let source_edge = typed
+                        .cfg_edges
+                        .iter()
+                        .find(|source| {
+                            source.kind == crate::core::cfg::EdgeKind::LoopExit
+                                && source.source.node == *loop_node
+                        })
+                        .ok_or("mutable-loop source CFG has no condition-false edge")?;
+                    if edge.source_site != *loop_node
+                        || edge.source_cfg_edge.as_ref() != Some(&source_edge.id)
+                        || edge.source_reachable
+                            != (typed.cfg_reachable_blocks.contains(&source_edge.from)
+                                || typed.cfg_reachable_blocks.contains(&source_edge.to))
+                        || mir_edge != else_edge
+                        || to != *exit
+                        || arguments
+                            != receipt
+                                .bindings
+                                .iter()
+                                .map(|binding| binding.header_parameter.clone())
+                                .collect::<Vec<_>>()
+                    {
+                        return Err(
+                            "mutable-loop condition-false edge does not carry current values"
+                                .into(),
+                        );
+                    }
+                }
+                MirProofLoopEdgeKind::BodyFallthrough => {
+                    let source = typed
+                        .body_edges
+                        .iter()
+                        .find(|source| {
+                            source.site == edge.source_site
+                                && source.kind
+                                    == crate::core::ir::TypedLoopEdgeKind::BodyFallthrough
+                        })
+                        .ok_or("mutable-loop MIR fallthrough has no typed source edge")?;
+                    if edge.source_site != typed.body_node
+                        || edge.source_cfg_edge != source.cfg_terminal_edge
+                        || mir_edge.as_str() != format!("edge:while.back:{}", loop_node.0)
+                        || to != *header
+                    {
+                        return Err("mutable-loop fallthrough is not the exact backedge".into());
+                    }
+                }
+                MirProofLoopEdgeKind::Continue => {
+                    let source = typed
+                        .body_edges
+                        .iter()
+                        .find(|source| {
+                            source.site == edge.source_site
+                                && source.kind == crate::core::ir::TypedLoopEdgeKind::Continue
+                        })
+                        .ok_or("mutable-loop MIR continue has no typed source edge")?;
+                    if mir_edge.as_str() != format!("edge:while.continue:{}", edge.source_site.0)
+                        || edge.source_cfg_edge != source.cfg_terminal_edge
+                        || to != *header
+                    {
+                        return Err("mutable-loop continue does not target the header".into());
+                    }
+                }
+                MirProofLoopEdgeKind::Break => {
+                    let source = typed
+                        .body_edges
+                        .iter()
+                        .find(|source| {
+                            source.site == edge.source_site
+                                && source.kind == crate::core::ir::TypedLoopEdgeKind::Break
+                        })
+                        .ok_or("mutable-loop MIR break has no typed source edge")?;
+                    if mir_edge.as_str() != format!("edge:while.break:{}", edge.source_site.0)
+                        || edge.source_cfg_edge != source.cfg_terminal_edge
+                        || to != *exit
+                    {
+                        return Err("mutable-loop break does not target the exit".into());
+                    }
+                }
+                MirProofLoopEdgeKind::Return => {
+                    let source = typed
+                        .body_edges
+                        .iter()
+                        .find(|source| {
+                            source.site == edge.source_site
+                                && source.kind == crate::core::ir::TypedLoopEdgeKind::Return
+                        })
+                        .ok_or("mutable-loop MIR return has no typed source edge")?;
+                    if edge.source_cfg_edge != source.cfg_terminal_edge {
+                        return Err("mutable-loop return source CFG edge is stale".into());
+                    }
+                }
+            }
+            if matches!(
+                &edge.kind,
+                MirProofLoopEdgeKind::BodyFallthrough
+                    | MirProofLoopEdgeKind::Continue
+                    | MirProofLoopEdgeKind::Break
+            ) && (arguments.len() != receipt.bindings.len()
+                || arguments
+                    .iter()
+                    .zip(&receipt.bindings)
+                    .any(|(argument, binding)| {
+                        function.values.get(argument).map(|value| &value.ty) != Some(&binding.ty)
+                    }))
+            {
+                return Err(
+                    "mutable-loop backedge/exit arguments do not map typed current locals".into(),
+                );
+            }
+        } else {
+            if edge.kind != MirProofLoopEdgeKind::Return
+                || edge.to_block.is_some()
+                || !edge.arguments.is_empty()
+                || edge
+                    .terminator_value
+                    .as_ref()
+                    .is_some_and(|value| function.values.get(value).is_none())
+                || !matches!(
+                    function.blocks.get(&edge.from_block).map(|block| &block.terminator),
+                    Some(MirTerminator::Return { value }) if value == &edge.terminator_value
+                )
+            {
+                return Err(
+                    "mutable-loop return edge metadata is not an exact Return terminator".into(),
+                );
+            }
+        }
+    }
+    if recorded_entry != 1 || recorded_true != 1 || recorded_false != 1 {
+        return Err(
+            "mutable-loop receipt must cover entry and both header condition edges exactly once"
+                .into(),
+        );
+    }
+    if receipt.edges.len() != typed.body_edges.len() + 3 {
+        return Err(
+            "mutable-loop MIR receipt does not cover every typed body terminal exactly once".into(),
+        );
+    }
+    for source in &typed.body_edges {
+        let expected_kind = match source.kind {
+            crate::core::ir::TypedLoopEdgeKind::BodyFallthrough => {
+                MirProofLoopEdgeKind::BodyFallthrough
+            }
+            crate::core::ir::TypedLoopEdgeKind::Continue => MirProofLoopEdgeKind::Continue,
+            crate::core::ir::TypedLoopEdgeKind::Break => MirProofLoopEdgeKind::Break,
+            crate::core::ir::TypedLoopEdgeKind::Return => MirProofLoopEdgeKind::Return,
+        };
+        let matches = receipt
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.source_site == source.site
+                    && edge.kind == expected_kind
+                    && edge.source_cfg_edge == source.cfg_terminal_edge
+            })
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "mutable-loop typed source terminal '{}' does not map to exactly one MIR edge receipt",
+                source.site.0
+            ));
+        }
+        if receipt
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.source_site == source.site
+                    && edge.kind == expected_kind
+                    && edge.source_cfg_edge == source.cfg_terminal_edge
+            })
+            .is_none_or(|edge| edge.source_reachable != source.reachable)
+        {
+            return Err(format!(
+                "mutable-loop source terminal '{}' has stale reachability metadata",
+                source.site.0
+            ));
+        }
+    }
+
+    let mut incoming_header = Vec::new();
+    let mut incoming_exit = Vec::new();
+    let body_region = loop_region_blocks(function, header, body_entry, exit)?;
+    let mut body_terminal_edges = BTreeSet::new();
+    let mut body_return_blocks = BTreeSet::new();
+    for (block_id, block) in &function.blocks {
+        let mut add = |edge: &MirEdgeId, target: &MirBlockId| {
+            if target == header {
+                incoming_header.push((block_id.clone(), edge.clone()));
+            }
+            if target == exit {
+                incoming_exit.push(edge.clone());
+            }
+            if body_region.contains(block_id) && (target == header || target == exit) {
+                body_terminal_edges.insert(edge.clone());
+            }
+        };
+        match &block.terminator {
+            MirTerminator::Goto { edge, target, .. } => add(edge, target),
+            MirTerminator::Branch {
+                then_edge,
+                then_target,
+                else_edge,
+                else_target,
+                ..
+            } => {
+                add(then_edge, then_target);
+                add(else_edge, else_target);
+            }
+            MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
+                for arm in arms {
+                    add(&arm.edge, &arm.target);
+                }
+            }
+            MirTerminator::Return { .. } if body_region.contains(block_id) => {
+                body_return_blocks.insert(block_id.clone());
+            }
+            MirTerminator::Return { .. }
+            | MirTerminator::Trap { .. }
+            | MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable => {}
+        }
+    }
+    if incoming_header
+        .iter()
+        .filter(|(from, edge)| {
+            !body_region.contains(from)
+                && edge.as_str() == format!("edge:while.entry:{}", loop_node.0)
+        })
+        .count()
+        != 1
+    {
+        return Err("mutable-loop has no unique checker-bound preheader edge".into());
+    }
+    let actual_header_edges = incoming_header
+        .iter()
+        .map(|(_, edge)| edge.clone())
+        .collect::<BTreeSet<_>>();
+    let expected_header_edges = receipt
+        .edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                &edge.kind,
+                MirProofLoopEdgeKind::Entry
+                    | MirProofLoopEdgeKind::BodyFallthrough
+                    | MirProofLoopEdgeKind::Continue
+            )
+        })
+        .filter_map(|edge| edge.mir_edge.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_header_edges != expected_header_edges
+        || actual_header_edges.len() != incoming_header.len()
+    {
+        return Err("mutable-loop receipt does not cover every actual incoming header edge".into());
+    }
+    let actual_exit_edges = incoming_exit.into_iter().collect::<BTreeSet<_>>();
+    let expected_exit_edges = receipt
+        .edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                &edge.kind,
+                MirProofLoopEdgeKind::ConditionFalse | MirProofLoopEdgeKind::Break
+            )
+        })
+        .filter_map(|edge| edge.mir_edge.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_exit_edges != expected_exit_edges {
+        return Err("mutable-loop receipt does not cover every actual exit edge".into());
+    }
+    let expected_body_terminal_edges = receipt
+        .edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                &edge.kind,
+                MirProofLoopEdgeKind::BodyFallthrough
+                    | MirProofLoopEdgeKind::Continue
+                    | MirProofLoopEdgeKind::Break
+            )
+        })
+        .filter_map(|edge| edge.mir_edge.clone())
+        .collect::<BTreeSet<_>>();
+    if body_terminal_edges != expected_body_terminal_edges {
+        return Err(
+            "mutable-loop receipt does not cover every actual backedge/continue/break".into(),
+        );
+    }
+    let expected_returns = receipt
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == MirProofLoopEdgeKind::Return)
+        .map(|edge| edge.from_block.clone())
+        .collect::<BTreeSet<_>>();
+    if body_return_blocks != expected_returns {
+        return Err("mutable-loop receipt does not cover every actual return terminal".into());
+    }
+    validate_mutable_loop_current_values(
+        function,
+        catalog,
+        loop_node,
+        receipt,
+        header,
+        body_entry,
+        exit,
+        &body_region,
+    )?;
+    for block_id in body_region.iter().chain(std::iter::once(header)) {
+        let block = function
+            .blocks
+            .get(block_id)
+            .ok_or_else(|| format!("mutable-loop block '{}' is absent", block_id))?;
+        for instruction in &block.instructions {
+            match &instruction.kind {
+                MirInstructionKind::Const { result, .. } => {
+                    if function.values.get(result).is_none_or(|value| {
+                        !mutable_loop_scalar_type_is_supported(catalog, &value.ty)
+                    }) {
+                        return Err(format!(
+                            "mutable-loop constant '{}' has a non-scalar or missing TypeDesc",
+                            instruction.id
+                        ));
+                    }
+                }
+                MirInstructionKind::Binary {
+                    result,
+                    left,
+                    right,
+                    ..
+                } => {
+                    if [result, left, right].iter().any(|value| {
+                        function.values.get(*value).is_none_or(|value| {
+                            !mutable_loop_scalar_type_is_supported(catalog, &value.ty)
+                        })
+                    }) {
+                        return Err(format!(
+                            "mutable-loop binary instruction '{}' is outside the scalar Copy face",
+                            instruction.id
+                        ));
+                    }
+                }
+                MirInstructionKind::Unary {
+                    result, operand, ..
+                } => {
+                    if [result, operand].iter().any(|value| {
+                        function.values.get(*value).is_none_or(|value| {
+                            !mutable_loop_scalar_type_is_supported(catalog, &value.ty)
+                        })
+                    }) {
+                        return Err(format!(
+                            "mutable-loop unary instruction '{}' is outside the scalar Copy face",
+                            instruction.id
+                        ));
+                    }
+                }
+                MirInstructionKind::Clone { result, source } => {
+                    if [result, source].iter().any(|value| {
+                        function.values.get(*value).is_none_or(|value| {
+                            !mutable_loop_scalar_type_is_supported(catalog, &value.ty)
+                        })
+                    }) || function
+                        .values
+                        .get(result)
+                        .zip(function.values.get(source))
+                        .is_none_or(|(result, source)| result.ty != source.ty)
+                    {
+                        return Err(format!(
+                            "mutable-loop scalar Clone '{}' has an absent or mismatched TypeDesc",
+                            instruction.id
+                        ));
+                    }
+                }
+                MirInstructionKind::Nop => {}
+                MirInstructionKind::Move { result, source } => {
+                    let assigned = typed.writes.iter().any(|write| {
+                        result.as_str() == format!("assign:{}", write.statement.0)
+                            && instruction.id.as_str()
+                                == format!("inst:assign:{}", write.statement.0)
+                    });
+                    if !assigned
+                        || [result, source].iter().any(|value| {
+                            function.values.get(*value).is_none_or(|value| {
+                                !mutable_loop_scalar_type_is_supported(catalog, &value.ty)
+                            })
+                        })
+                    {
+                        return Err(format!(
+                            "mutable-loop block '{}' contains an unreceipted Move '{}', outside the scalar Assign face",
+                            block_id, instruction.id
+                        ));
+                    }
+                }
+                MirInstructionKind::Convert { result, source } => {
+                    let converted = typed.writes.iter().any(|write| {
+                        write.conversion.kind
+                            == crate::core::ir::CheckedConversionKind::NumericWiden
+                            && result.as_str()
+                                == format!("assign.convert:{}/assign-conversion", write.statement.0)
+                            && instruction.id.as_str()
+                                == format!(
+                                    "inst:assign_numeric_convert:{}/assign-conversion",
+                                    write.statement.0
+                                )
+                    });
+                    if !converted
+                        || [result, source].iter().any(|value| {
+                            function.values.get(*value).is_none_or(|value| {
+                                !mutable_loop_scalar_type_is_supported(catalog, &value.ty)
+                            })
+                        })
+                        || function
+                            .values
+                            .get(source)
+                            .zip(function.values.get(result))
+                            .is_none_or(|(source, result)| {
+                                catalog.validate_conversion(&source.ty, &result.ty).is_err()
+                            })
+                    {
+                        return Err(format!(
+                            "mutable-loop block '{}' contains an unreceipted scalar conversion '{}', outside the Assign face",
+                            block_id, instruction.id
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "mutable-loop block '{}' contains an unsupported effect/ownership instruction '{}'",
+                        block_id, instruction.id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct MutableLoopAssignValue {
+    local: crate::core::ResolvedLocalId,
+    result: MirValueId,
+    conversion_result: Option<MirValueId>,
+    expression: MirProofExpression,
+    conversion: crate::core::ir::CheckedConversion,
+}
+
+#[derive(Clone)]
+struct MutableLoopBindValue {
+    local_identity: crate::core::NodeId,
+    local: MirValueId,
+    initializer: MirProofExpression,
+}
+
+fn collect_mutable_loop_bindings(
+    block: &MirProofBlock,
+    output: &mut BTreeMap<crate::core::NodeId, MutableLoopBindValue>,
+) -> Result<(), String> {
+    for operation in &block.operations {
+        match operation {
+            MirProofOperation::Bind {
+                point,
+                local_identity,
+                local,
+                initializer,
+            } => {
+                if output
+                    .insert(
+                        point.clone(),
+                        MutableLoopBindValue {
+                            local_identity: local_identity.clone(),
+                            local: local.clone(),
+                            initializer: initializer.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(format!(
+                        "mutable-loop SSA replay found duplicate Bind point '{}'",
+                        point.0
+                    ));
+                }
+            }
+            MirProofOperation::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_mutable_loop_bindings(then_block, output)?;
+                collect_mutable_loop_bindings(else_block, output)?;
+            }
+            MirProofOperation::Scope(inner) => collect_mutable_loop_bindings(inner, output)?,
+            MirProofOperation::Loop { body, .. } => {
+                collect_mutable_loop_bindings(body, output)?;
+            }
+            MirProofOperation::Call(_)
+            | MirProofOperation::Eval { .. }
+            | MirProofOperation::Assign { .. }
+            | MirProofOperation::Math(_)
+            | MirProofOperation::Break { .. }
+            | MirProofOperation::Continue { .. }
+            | MirProofOperation::Return { .. }
+            | MirProofOperation::Exit => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_mutable_loop_assignments(
+    block: &MirProofBlock,
+    output: &mut BTreeMap<crate::core::NodeId, MutableLoopAssignValue>,
+) -> Result<(), String> {
+    for operation in &block.operations {
+        match operation {
+            MirProofOperation::Assign {
+                point,
+                target,
+                value,
+                conversion,
+                result,
+                conversion_result,
+            } => {
+                if !target.projections.is_empty()
+                    || output
+                        .insert(
+                            point.clone(),
+                            MutableLoopAssignValue {
+                                local: target.base.clone(),
+                                result: result.clone(),
+                                conversion_result: conversion_result.clone(),
+                                expression: value.clone(),
+                                conversion: conversion.clone(),
+                            },
+                        )
+                        .is_some()
+                {
+                    return Err(format!(
+                        "mutable-loop SSA replay found a projected or duplicate Assign point '{}'",
+                        point.0
+                    ));
+                }
+            }
+            MirProofOperation::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_mutable_loop_assignments(then_block, output)?;
+                collect_mutable_loop_assignments(else_block, output)?;
+            }
+            MirProofOperation::Scope(inner) => collect_mutable_loop_assignments(inner, output)?,
+            MirProofOperation::Loop { body, .. } => {
+                collect_mutable_loop_assignments(body, output)?;
+            }
+            MirProofOperation::Bind { .. }
+            | MirProofOperation::Call(_)
+            | MirProofOperation::Eval { .. }
+            | MirProofOperation::Math(_)
+            | MirProofOperation::Break { .. }
+            | MirProofOperation::Continue { .. }
+            | MirProofOperation::Return { .. }
+            | MirProofOperation::Exit => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_mutable_loop_returns(
+    block: &MirProofBlock,
+    output: &mut BTreeMap<crate::core::NodeId, Option<MirProofExpression>>,
+) -> Result<(), String> {
+    for operation in &block.operations {
+        match operation {
+            MirProofOperation::Return { point, value, .. } => {
+                if output.insert(point.clone(), value.clone()).is_some() {
+                    return Err(format!(
+                        "mutable-loop SSA replay found duplicate Return point '{}'",
+                        point.0
+                    ));
+                }
+            }
+            MirProofOperation::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_mutable_loop_returns(then_block, output)?;
+                collect_mutable_loop_returns(else_block, output)?;
+            }
+            MirProofOperation::Scope(inner) => collect_mutable_loop_returns(inner, output)?,
+            MirProofOperation::Loop { body, .. } => {
+                collect_mutable_loop_returns(body, output)?;
+            }
+            MirProofOperation::Bind { .. }
+            | MirProofOperation::Call(_)
+            | MirProofOperation::Eval { .. }
+            | MirProofOperation::Assign { .. }
+            | MirProofOperation::Math(_)
+            | MirProofOperation::Break { .. }
+            | MirProofOperation::Continue { .. }
+            | MirProofOperation::Exit => {}
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct MutableLoopBranchValue {
+    point: crate::core::NodeId,
+    condition_value: MirValueId,
+    condition: MirProofExpression,
+    branch_block: MirBlockId,
+    then_target: MirBlockId,
+    else_target: MirBlockId,
+}
+
+fn collect_mutable_loop_branches(
+    block: &MirProofBlock,
+    output: &mut BTreeMap<MirBlockId, MutableLoopBranchValue>,
+) -> Result<(), String> {
+    for operation in &block.operations {
+        match operation {
+            MirProofOperation::Branch {
+                point,
+                condition_value,
+                condition,
+                branch_block,
+                then_target,
+                else_target,
+                then_block,
+                else_block,
+                ..
+            } => {
+                let branch = MutableLoopBranchValue {
+                    point: point.clone(),
+                    condition_value: condition_value.clone(),
+                    condition: condition.clone(),
+                    branch_block: branch_block.clone(),
+                    then_target: then_target.clone(),
+                    else_target: else_target.clone(),
+                };
+                if output.insert(branch_block.clone(), branch).is_some() {
+                    return Err(format!(
+                        "mutable-loop worklist repeats branch block '{}'",
+                        branch_block
+                    ));
+                }
+                collect_mutable_loop_branches(then_block, output)?;
+                collect_mutable_loop_branches(else_block, output)?;
+            }
+            MirProofOperation::Scope(inner) => collect_mutable_loop_branches(inner, output)?,
+            MirProofOperation::Loop { body, .. } => collect_mutable_loop_branches(body, output)?,
+            MirProofOperation::Bind { .. }
+            | MirProofOperation::Call(_)
+            | MirProofOperation::Eval { .. }
+            | MirProofOperation::Assign { .. }
+            | MirProofOperation::Math(_)
+            | MirProofOperation::Break { .. }
+            | MirProofOperation::Continue { .. }
+            | MirProofOperation::Return { .. }
+            | MirProofOperation::Exit => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_mutable_loop_current_values(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    loop_node: &crate::core::NodeId,
+    receipt: &MirProofLoopReceipt,
+    header: &MirBlockId,
+    body_entry: &MirBlockId,
+    exit: &MirBlockId,
+    body_region: &BTreeSet<MirBlockId>,
+) -> Result<(), String> {
+    let mut all_assignments = BTreeMap::new();
+    let mut all_bindings = BTreeMap::new();
+    let worklist = function
+        .proof_worklist
+        .as_ref()
+        .ok_or("mutable-loop SSA replay has no typed proof worklist")?;
+    collect_mutable_loop_assignments(&worklist.root, &mut all_assignments)?;
+    collect_mutable_loop_bindings(&worklist.root, &mut all_bindings)?;
+
+    let mut loop_writes = BTreeSet::new();
+    for write in &receipt.typed.writes {
+        let assignment = all_assignments.get(&write.statement).ok_or_else(|| {
+            format!(
+                "typed loop write '{}' has no ordered MIR Assign operation",
+                write.statement.0
+            )
+        })?;
+        if assignment.local != write.target.base
+            || assignment.expression.origin != write.value
+            || assignment.conversion != write.conversion
+            || !write.target.projections.is_empty()
+            || !loop_writes.insert(write.statement.clone())
+        {
+            return Err(format!(
+                "typed loop write '{}' disagrees with its ordered Assign operation",
+                write.statement.0
+            ));
+        }
+    }
+
+    let tracked = receipt
+        .bindings
+        .iter()
+        .map(|binding| (binding.local.clone(), binding))
+        .collect::<BTreeMap<_, _>>();
+    let mut bind_by_instruction =
+        BTreeMap::<String, (crate::core::ResolvedLocalId, MirProofExpression)>::new();
+    for (point, binding) in &all_bindings {
+        let local = crate::core::ResolvedLocalId(binding.local_identity.clone());
+        if !tracked.contains_key(&local) {
+            continue;
+        }
+        let expected_local = loop_stable_local_value(&local)?;
+        let expected_source = MirValueId::new(format!("expr:{}", binding.initializer.origin.0))
+            .map_err(|error| error.to_string())?;
+        let instruction_id = format!("inst:bind:{}", point.0);
+        if binding.local != expected_local {
+            return Err(format!(
+                "typed Bind '{}' does not name the exact MIR local identity",
+                point.0
+            ));
+        }
+        let matching_moves = function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| instruction.id.as_str() == instruction_id)
+            .filter(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Move { result, source }
+                        if result == &expected_local && source == &expected_source
+                )
+            })
+            .count();
+        if matching_moves != 1 {
+            return Err(format!(
+                "typed Bind '{}' is not bound to one exact MIR initializer Move",
+                point.0
+            ));
+        }
+        if bind_by_instruction
+            .insert(instruction_id, (local, binding.initializer.clone()))
+            .is_some()
+        {
+            return Err("multiple Bind operations share one MIR instruction identity".into());
+        }
+    }
+    let mut assign_by_instruction =
+        BTreeMap::<String, (crate::core::ResolvedLocalId, MirValueId, MirProofExpression)>::new();
+    for (point, assignment) in &all_assignments {
+        if !tracked.contains_key(&assignment.local) {
+            continue;
+        }
+        let instruction_id = format!("inst:assign:{}", point.0);
+        let expected_result =
+            MirValueId::new(format!("assign:{}", point.0)).map_err(|error| error.to_string())?;
+        if assignment.result != expected_result {
+            return Err(format!(
+                "ordered Assign '{}' has a noncanonical result identity",
+                point.0
+            ));
+        }
+        let expected_source = MirValueId::new(format!("expr:{}", assignment.expression.origin.0))
+            .map_err(|error| error.to_string())?;
+        match assignment.conversion.kind {
+            crate::core::ir::CheckedConversionKind::Identity => {
+                if assignment.conversion_result.is_some() {
+                    return Err(format!(
+                        "identity Assign '{}' unexpectedly has a conversion result",
+                        point.0
+                    ));
+                }
+            }
+            crate::core::ir::CheckedConversionKind::NumericWiden => {
+                let expected_conversion_result =
+                    MirValueId::new(format!("assign.convert:{}/assign-conversion", point.0))
+                        .map_err(|error| error.to_string())?;
+                let expected_conversion_instruction =
+                    format!("inst:assign_numeric_convert:{}/assign-conversion", point.0);
+                let conversion_matches = function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| {
+                        instruction.id.as_str() == expected_conversion_instruction.as_str()
+                    })
+                    .filter(|instruction| {
+                        matches!(
+                            &instruction.kind,
+                            MirInstructionKind::Convert { result, source }
+                                if result == &expected_conversion_result && source == &expected_source
+                        )
+                    })
+                    .count();
+                if assignment.conversion_result.as_ref() != Some(&expected_conversion_result)
+                    || conversion_matches != 1
+                {
+                    return Err(format!(
+                        "numeric-widen Assign '{}' has no exact ordered Convert source/result",
+                        point.0
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "ordered Assign '{}' uses a conversion outside the scalar loop profile",
+                    point.0
+                ));
+            }
+        }
+        let expected_move_source = assignment
+            .conversion_result
+            .as_ref()
+            .unwrap_or(&expected_source);
+        let moves = function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| instruction.id.as_str() == instruction_id)
+            .filter(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Move { result, source }
+                        if result == &assignment.result && source == expected_move_source
+                )
+            })
+            .count();
+        if moves != 1 {
+            return Err(format!(
+                "ordered Assign '{}' is not bound to one exact MIR Move and RHS value",
+                point.0
+            ));
+        }
+        if tracked.contains_key(&assignment.local) {
+            if assign_by_instruction
+                .insert(
+                    instruction_id,
+                    (
+                        assignment.local.clone(),
+                        assignment.result.clone(),
+                        assignment.expression.clone(),
+                    ),
+                )
+                .is_some()
+            {
+                return Err("multiple Assign operations share one MIR instruction identity".into());
+            }
+        }
+    }
+
+    let seed = tracked
+        .keys()
+        .map(|local| Ok((local.clone(), loop_stable_local_value(local)?)))
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let mut checked_entry = false;
+    let mut pending = vec![(function.entry.clone(), seed.clone())];
+    let mut seen = BTreeSet::new();
+    while let Some((block_id, mut current)) = pending.pop() {
+        if !seen.insert((block_id.clone(), current.clone())) {
+            continue;
+        }
+        if seen.len() > function.blocks.len().saturating_mul(256).max(256) {
+            return Err("mutable-loop preheader SSA replay exceeded its finite path budget".into());
+        }
+        let block = function
+            .blocks
+            .get(&block_id)
+            .ok_or_else(|| format!("mutable-loop preheader block '{}' is absent", block_id))?;
+        for instruction in &block.instructions {
+            if let Some((local, initializer)) = bind_by_instruction.get(instruction.id.as_str()) {
+                validate_mutable_loop_expression_value(
+                    function,
+                    catalog,
+                    initializer,
+                    &current,
+                    &tracked,
+                    None,
+                )?;
+                current.insert(local.clone(), loop_stable_local_value(local)?);
+            } else if let Some((local, result, expression)) =
+                assign_by_instruction.get(instruction.id.as_str())
+            {
+                validate_mutable_loop_expression_value(
+                    function, catalog, expression, &current, &tracked, None,
+                )?;
+                current.insert(local.clone(), result.clone());
+            } else if let MirInstructionKind::Move { result, .. } = &instruction.kind {
+                for local in tracked.keys() {
+                    if result == &loop_stable_local_value(local)? {
+                        current.insert(local.clone(), result.clone());
+                    }
+                }
+            }
+        }
+        let mut push_edge = |edge: &MirEdgeId,
+                             target: &MirBlockId,
+                             arguments: &[MirValueId]|
+         -> Result<(), String> {
+            if target == header {
+                let expected_entry = format!("edge:while.entry:{}", loop_node.0);
+                if edge.as_str() != expected_entry {
+                    return Err(format!(
+                        "mutable-loop header is reached by unreceipted preheader edge '{}'",
+                        edge
+                    ));
+                }
+                if arguments.len() != receipt.bindings.len() {
+                    return Err(
+                        "mutable-loop preheader edge has the wrong carried-value arity".into(),
+                    );
+                }
+                for ((local, binding), argument) in tracked.iter().zip(arguments) {
+                    let actual = current.get(local).ok_or_else(|| {
+                        format!(
+                            "mutable-loop preheader has no current value for '{}'",
+                            local.0 .0
+                        )
+                    })?;
+                    if actual != &binding.preheader_value || argument != actual {
+                        return Err(format!(
+                            "mutable-loop entry edge carries stale value for local '{}'",
+                            local.0 .0
+                        ));
+                    }
+                }
+                checked_entry = true;
+                return Ok(());
+            }
+            let next =
+                mutable_loop_values_across_edge(function, target, arguments, &current, &tracked)?;
+            pending.push((target.clone(), next));
+            Ok(())
+        };
+        match &block.terminator {
+            MirTerminator::Goto {
+                edge,
+                target,
+                arguments,
+            } => push_edge(edge, target, arguments)?,
+            MirTerminator::Branch {
+                then_edge,
+                then_target,
+                then_arguments,
+                else_edge,
+                else_target,
+                else_arguments,
+                ..
+            } => {
+                push_edge(then_edge, then_target, then_arguments)?;
+                push_edge(else_edge, else_target, else_arguments)?;
+            }
+            MirTerminator::Return { .. }
+            | MirTerminator::Trap { .. }
+            | MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable => {}
+            MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
+                return Err("mutable-loop preheader reaches an unsupported switch".into());
+            }
+        }
+    }
+    if !checked_entry {
+        return Err("mutable-loop SSA replay found no reachable exact preheader edge".into());
+    }
+
+    let current = receipt
+        .bindings
+        .iter()
+        .map(|binding| (binding.local.clone(), binding.header_parameter.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let header_block = function
+        .blocks
+        .get(header)
+        .ok_or("mutable-loop SSA replay header is absent")?;
+    let MirTerminator::Branch {
+        else_edge,
+        else_target,
+        else_arguments,
+        ..
+    } = &header_block.terminator
+    else {
+        return Err("mutable-loop SSA replay requires the canonical header branch".into());
+    };
+    if else_target != exit {
+        return Err("mutable-loop condition-false edge does not target the loop exit".into());
+    }
+    validate_mutable_loop_terminal_values(else_edge, else_arguments, &current, &receipt.bindings)?;
+
+    let mut returns = BTreeMap::new();
+    let target_operation = proof_loop_at_header(worklist, header)
+        .ok_or("mutable-loop source operation is absent from worklist")?;
+    let MirProofOperation::Loop {
+        point,
+        body: target_body,
+        ..
+    } = target_operation
+    else {
+        return Err("mutable-loop header maps to a non-loop proof operation".into());
+    };
+    if point != loop_node {
+        return Err("mutable-loop MIR header maps to a different source loop".into());
+    }
+    validate_mutable_loop_body_bindings(target_body, &tracked)?;
+    collect_mutable_loop_returns(target_body, &mut returns)?;
+    let mut source_branches = BTreeMap::new();
+    collect_mutable_loop_branches(target_body, &mut source_branches)?;
+    let mut seen_body = BTreeSet::new();
+    let mut validated_source_branches = BTreeSet::new();
+    let mut return_edges = BTreeSet::new();
+    let mut terminal_edges = BTreeSet::new();
+    let mut body_pending = vec![(body_entry.clone(), current.clone(), BTreeSet::new())];
+    while let Some((block_id, mut current, active)) = body_pending.pop() {
+        if !body_region.contains(&block_id) {
+            return Err(format!(
+                "mutable-loop current-value replay reached unreceipted body block '{}'",
+                block_id
+            ));
+        }
+        if active.contains(&block_id) {
+            return Err(format!(
+                "mutable-loop current-value replay found a nested cycle at '{}'",
+                block_id
+            ));
+        }
+        if !seen_body.insert((block_id.clone(), current.clone())) {
+            continue;
+        }
+        if seen_body.len() > body_region.len().saturating_mul(256).max(256) {
+            return Err("mutable-loop body SSA replay exceeded its finite path budget".into());
+        }
+        let block = function
+            .blocks
+            .get(&block_id)
+            .ok_or_else(|| format!("mutable-loop body block '{}' is absent", block_id))?;
+        for instruction in &block.instructions {
+            if let Some((local, result, expression)) =
+                assign_by_instruction.get(instruction.id.as_str())
+            {
+                validate_mutable_loop_expression_value(
+                    function, catalog, expression, &current, &tracked, None,
+                )?;
+                current.insert(local.clone(), result.clone());
+            }
+        }
+        let mut active = active;
+        active.insert(block_id.clone());
+        let mut push_body_edge = |edge: &MirEdgeId,
+                                  target: &MirBlockId,
+                                  arguments: &[MirValueId]|
+         -> Result<(), String> {
+            if target == header || target == exit {
+                validate_mutable_loop_terminal_values(
+                    edge,
+                    arguments,
+                    &current,
+                    &receipt.bindings,
+                )?;
+                terminal_edges.insert(edge.clone());
+                return Ok(());
+            }
+            if !body_region.contains(target) {
+                return Err(format!(
+                    "mutable-loop path leaves its body through unexpected block '{}'",
+                    target
+                ));
+            }
+            let next =
+                mutable_loop_values_across_edge(function, target, arguments, &current, &tracked)?;
+            body_pending.push((target.clone(), next, active.clone()));
+            Ok(())
+        };
+        match &block.terminator {
+            MirTerminator::Goto {
+                edge,
+                target,
+                arguments,
+            } => push_body_edge(edge, target, arguments)?,
+            MirTerminator::Branch {
+                then_edge,
+                then_target,
+                then_arguments,
+                else_edge,
+                else_target,
+                else_arguments,
+                condition,
+            } => {
+                let source_branch = source_branches.get(&block_id).ok_or_else(|| {
+                    format!(
+                        "mutable-loop MIR branch block '{}' has no exact typed Branch operation",
+                        block_id
+                    )
+                })?;
+                if source_branch.branch_block != block_id
+                    || source_branch.condition_value != *condition
+                    || source_branch.then_target != *then_target
+                    || source_branch.else_target != *else_target
+                {
+                    return Err(format!(
+                        "mutable-loop Branch '{}' metadata disagrees with its actual MIR block/targets",
+                        source_branch.point.0
+                    ));
+                }
+                validate_mutable_loop_expression_value(
+                    function,
+                    catalog,
+                    &source_branch.condition,
+                    &current,
+                    &tracked,
+                    Some(condition),
+                )?;
+                validated_source_branches.insert(block_id.clone());
+                push_body_edge(then_edge, then_target, then_arguments)?;
+                push_body_edge(else_edge, else_target, else_arguments)?;
+            }
+            MirTerminator::Return { value } => {
+                return_edges.insert(block_id.clone());
+                let source = receipt
+                    .typed
+                    .body_edges
+                    .iter()
+                    .find(|source| {
+                        source.kind == crate::core::ir::TypedLoopEdgeKind::Return
+                            && receipt.edges.iter().any(|edge| {
+                                edge.kind == MirProofLoopEdgeKind::Return
+                                    && edge.source_site == source.site
+                                    && edge.from_block == block_id
+                            })
+                    })
+                    .ok_or_else(|| format!("loop Return block '{}' has no typed edge", block_id))?;
+                let proof_value = returns.get(&source.site).ok_or_else(|| {
+                    format!(
+                        "loop Return '{}' has no ordered Return worklist operation",
+                        source.site.0
+                    )
+                })?;
+                if proof_value.as_ref().map(|expression| &expression.origin)
+                    != source.terminal_value.as_ref()
+                    || value
+                        .as_ref()
+                        .is_some_and(|value| function.values.get(value).is_none())
+                    || proof_value.is_some() != value.is_some()
+                {
+                    return Err(format!(
+                        "loop Return '{}' source expression disagrees with its MIR operand",
+                        source.site.0
+                    ));
+                }
+                if let (Some(expression), Some(value)) = (proof_value, value) {
+                    validate_mutable_loop_expression_value(
+                        function,
+                        catalog,
+                        expression,
+                        &current,
+                        &tracked,
+                        Some(value),
+                    )?;
+                    let dependencies =
+                        mutable_loop_source_local_dependencies(&expression.expression, &tracked);
+                    let trace = mutable_loop_value_trace(function, value, &current, &tracked)?;
+                    for local in dependencies {
+                        let expected = current.get(&local).ok_or_else(|| {
+                            format!(
+                                "loop Return has no current value for local '{}'",
+                                local.0 .0
+                            )
+                        })?;
+                        if !trace.contains(expected) {
+                            return Err(format!(
+                                "loop Return '{}' does not consume the current SSA value of local '{}'",
+                                source.site.0, local.0 .0
+                            ));
+                        }
+                    }
+                }
+            }
+            MirTerminator::Trap { .. } => {}
+            MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable
+            | MirTerminator::Switch { .. }
+            | MirTerminator::SwitchMove { .. } => {
+                return Err(format!(
+                    "mutable-loop current-value replay found unsupported terminal in '{}'",
+                    block_id
+                ));
+            }
+        }
+    }
+    let expected_terminal_edges = receipt
+        .edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.kind,
+                MirProofLoopEdgeKind::BodyFallthrough
+                    | MirProofLoopEdgeKind::Continue
+                    | MirProofLoopEdgeKind::Break
+            )
+        })
+        .filter_map(|edge| edge.mir_edge.clone())
+        .collect::<BTreeSet<_>>();
+    if terminal_edges != expected_terminal_edges {
+        return Err(
+            "mutable-loop SSA replay did not validate every actual body terminal edge".into(),
+        );
+    }
+    let expected_return_blocks = receipt
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == MirProofLoopEdgeKind::Return)
+        .map(|edge| edge.from_block.clone())
+        .collect::<BTreeSet<_>>();
+    if return_edges != expected_return_blocks {
+        return Err("mutable-loop SSA replay did not validate every actual Return operand".into());
+    }
+    if validated_source_branches != source_branches.keys().cloned().collect() {
+        return Err("mutable-loop SSA replay did not validate every typed Branch condition".into());
+    }
+    Ok(())
+}
+
+fn validate_mutable_loop_body_bindings(
+    block: &MirProofBlock,
+    carried: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+) -> Result<(), String> {
+    for operation in &block.operations {
+        match operation {
+            MirProofOperation::Bind { point, .. } => {
+                return Err(format!(
+                    "mutable-loop body-local Bind '{}' is outside the checked carry profile",
+                    point.0
+                ));
+            }
+            MirProofOperation::Assign { point, target, .. }
+                if !carried.contains_key(&target.base) =>
+            {
+                return Err(format!(
+                    "mutable-loop Assign '{}' targets a local without a preheader carry",
+                    point.0
+                ));
+            }
+            MirProofOperation::Branch {
+                then_block,
+                else_block,
+                ..
+            } => {
+                validate_mutable_loop_body_bindings(then_block, carried)?;
+                validate_mutable_loop_body_bindings(else_block, carried)?;
+            }
+            MirProofOperation::Scope(inner) => {
+                validate_mutable_loop_body_bindings(inner, carried)?;
+            }
+            MirProofOperation::Loop { point, .. } => {
+                return Err(format!(
+                    "nested mutable loop '{}' is outside the checked carry profile",
+                    point.0
+                ));
+            }
+            MirProofOperation::Assign { .. }
+            | MirProofOperation::Call(_)
+            | MirProofOperation::Eval { .. }
+            | MirProofOperation::Math(_)
+            | MirProofOperation::Break { .. }
+            | MirProofOperation::Continue { .. }
+            | MirProofOperation::Return { .. }
+            | MirProofOperation::Exit => {}
+        }
+    }
+    Ok(())
+}
+
+fn mutable_loop_phi_local(
+    parameter: &MirValueId,
+    tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+) -> Option<crate::core::ResolvedLocalId> {
+    let value = parameter.as_str();
+    tracked.keys().find_map(|local| {
+        let suffix = format!(":{}", local.0 .0);
+        let prefix = value.strip_suffix(&suffix)?;
+        [
+            "if.stmt.join.local:",
+            "loop.header.local:",
+            "loop.exit.local:",
+        ]
+        .iter()
+        .any(|tag| {
+            prefix
+                .strip_prefix(tag)
+                .is_some_and(|site| !site.is_empty())
+        })
+        .then(|| local.clone())
+    })
+}
+
+fn mutable_loop_values_across_edge(
+    function: &MirFunction,
+    target: &MirBlockId,
+    arguments: &[MirValueId],
+    current: &BTreeMap<crate::core::ResolvedLocalId, MirValueId>,
+    tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+) -> Result<BTreeMap<crate::core::ResolvedLocalId, MirValueId>, String> {
+    let block = function
+        .blocks
+        .get(target)
+        .ok_or_else(|| format!("mutable-loop edge target '{}' is absent", target))?;
+    if block.parameters.len() != arguments.len() {
+        return Err(format!(
+            "mutable-loop edge to '{}' has stale block-parameter arity",
+            target
+        ));
+    }
+    let mut next = current.clone();
+    let mut seen = BTreeSet::new();
+    for (index, parameter) in block.parameters.iter().enumerate() {
+        let Some(local) = mutable_loop_phi_local(&parameter.value, tracked) else {
+            continue;
+        };
+        if !seen.insert(local.clone()) {
+            return Err(format!(
+                "mutable-loop join block '{}' has duplicate current-local parameters",
+                target
+            ));
+        }
+        let expected = current.get(&local).ok_or_else(|| {
+            format!(
+                "mutable-loop join has no reaching value for local '{}'",
+                local.0 .0
+            )
+        })?;
+        if arguments.get(index) != Some(expected) {
+            return Err(format!(
+                "mutable-loop join edge to '{}' carries a stale value for local '{}'",
+                target, local.0 .0
+            ));
+        }
+        if tracked.get(&local).is_none_or(|binding| {
+            function.values.get(&parameter.value).map(|value| &value.ty) != Some(&binding.ty)
+        }) {
+            return Err(format!(
+                "mutable-loop join parameter for '{}' has a mismatched TypeDesc",
+                local.0 .0
+            ));
+        }
+        next.insert(local, parameter.value.clone());
+    }
+    Ok(next)
+}
+
+fn validate_mutable_loop_terminal_values(
+    edge: &MirEdgeId,
+    arguments: &[MirValueId],
+    current: &BTreeMap<crate::core::ResolvedLocalId, MirValueId>,
+    bindings: &[crate::core::mir::MirProofLoopBinding],
+) -> Result<(), String> {
+    if arguments.len() != bindings.len() {
+        return Err(format!(
+            "mutable-loop terminal edge '{}' has stale carried-value arity",
+            edge
+        ));
+    }
+    for (binding, argument) in bindings.iter().zip(arguments) {
+        if current.get(&binding.local) != Some(argument) {
+            return Err(format!(
+                "mutable-loop terminal edge '{}' carries a stale SSA value for local '{}'",
+                edge, binding.local.0 .0
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn mutable_loop_unique_definition<'a>(
+    function: &'a MirFunction,
+    value: &MirValueId,
+) -> Result<Option<&'a crate::core::mir::MirInstruction>, String> {
+    let mut definition = None;
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        if instruction_definitions_value(&instruction.kind, value) {
+            if definition.replace(instruction).is_some() {
+                return Err(format!(
+                    "mutable-loop expression value '{}' has multiple MIR definitions",
+                    value
+                ));
+            }
+        }
+    }
+    Ok(definition)
+}
+
+fn mutable_loop_numeric_widen_is_safe(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    source: &crate::core::ResolvedTypeId,
+    target: &crate::core::ResolvedTypeId,
+) -> bool {
+    let Some(source_desc) = catalog.get(source) else {
+        return false;
+    };
+    let Some(target_desc) = catalog.get(target) else {
+        return false;
+    };
+    matches!(
+        (source_desc.abi, target_desc.abi),
+        (
+            MirAbiClass::Integer {
+                bits: source_bits,
+                signed: true
+            },
+            MirAbiClass::Integer {
+                bits: target_bits,
+                signed: true
+            }
+        ) if source_bits < target_bits
+    ) && catalog.validate_conversion(source, target).is_ok()
+}
+
+fn mutable_loop_copy_alias_matches(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    actual: &MirValueId,
+    expected: &MirValueId,
+    visiting: &mut BTreeSet<MirValueId>,
+) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
+    }
+    let actual_ty = function.values.get(actual).map(|value| &value.ty);
+    let expected_ty = function.values.get(expected).map(|value| &value.ty);
+    if actual_ty != expected_ty
+        || actual_ty.is_none_or(|ty| !mutable_loop_scalar_type_is_supported(catalog, ty))
+    {
+        return Err(format!(
+            "mutable-loop expression alias '{}' does not preserve the expected scalar TypeDesc for '{}'",
+            actual, expected
+        ));
+    }
+    if !visiting.insert(actual.clone()) {
+        return Err(format!(
+            "mutable-loop expression alias cycle reaches '{}':",
+            actual
+        ));
+    }
+    let definition = mutable_loop_unique_definition(function, actual)?.ok_or_else(|| {
+        format!(
+            "mutable-loop expression value '{}' has no definition",
+            actual
+        )
+    })?;
+    let (result, source) = match &definition.kind {
+        MirInstructionKind::Clone { result, source }
+        | MirInstructionKind::Move { result, source } => (result, source),
+        _ => {
+            visiting.remove(actual);
+            return Err(format!(
+                "mutable-loop expression value '{}' is not a direct scalar local read",
+                actual
+            ));
+        }
+    };
+    let result_ty = function.values.get(result).map(|value| &value.ty);
+    let source_ty = function.values.get(source).map(|value| &value.ty);
+    if result != actual
+        || result_ty != source_ty
+        || result_ty.is_none_or(|ty| !mutable_loop_scalar_type_is_supported(catalog, ty))
+    {
+        visiting.remove(actual);
+        return Err(format!(
+            "mutable-loop expression alias '{}' changes or lacks its scalar TypeDesc",
+            definition.id
+        ));
+    }
+    let result = mutable_loop_copy_alias_matches(function, catalog, source, expected, visiting);
+    visiting.remove(actual);
+    result
+}
+
+fn validate_mutable_loop_expression_value(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    expression: &MirProofExpression,
+    current: &BTreeMap<crate::core::ResolvedLocalId, MirValueId>,
+    tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+    actual_root: Option<&MirValueId>,
+) -> Result<(), String> {
+    fn compare(
+        function: &MirFunction,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+        expression: &MirProofExpression,
+        term: &MirContractExpr,
+        actual: &MirValueId,
+        current: &BTreeMap<crate::core::ResolvedLocalId, MirValueId>,
+        tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+        path: &mut Vec<u8>,
+        visiting: &mut BTreeSet<MirValueId>,
+    ) -> Result<(), String> {
+        if !visiting.insert(actual.clone()) {
+            return Err(format!(
+                "mutable-loop source expression '{}' has a cyclic MIR definition at '{}'",
+                expression.origin.0, actual
+            ));
+        }
+        let expected_ty = expression.expression_types.get(path).ok_or_else(|| {
+            format!(
+                "mutable-loop source expression '{}' omits its TypeDesc at {:?}",
+                expression.origin.0, path
+            )
+        })?;
+        let actual_ty = function
+            .values
+            .get(actual)
+            .map(|value| value.ty.clone())
+            .ok_or_else(|| {
+                format!(
+                    "mutable-loop source expression '{}' references absent MIR value '{}'",
+                    expression.origin.0, actual
+                )
+            })?;
+        if &actual_ty != expected_ty {
+            let definition =
+                mutable_loop_unique_definition(function, actual)?.ok_or_else(|| {
+                    format!(
+                        "mutable-loop expression value '{}' has no definition",
+                        actual
+                    )
+                })?;
+            let MirInstructionKind::Convert { result, source } = &definition.kind else {
+                visiting.remove(actual);
+                return Err(format!(
+                    "mutable-loop MIR value '{}' has a TypeDesc different from source expression '{}'",
+                    actual, expression.origin.0
+                ));
+            };
+            let source_ty = function
+                .values
+                .get(source)
+                .map(|value| &value.ty)
+                .ok_or_else(|| {
+                    format!(
+                        "mutable-loop conversion '{}' has no source TypeDesc",
+                        definition.id
+                    )
+                })?;
+            if result != actual
+                || source_ty != expected_ty
+                || !mutable_loop_numeric_widen_is_safe(catalog, source_ty, &actual_ty)
+            {
+                visiting.remove(actual);
+                return Err(format!(
+                    "mutable-loop conversion '{}' is not the exact safe widening required by source expression '{}'",
+                    definition.id, expression.origin.0
+                ));
+            }
+            let result = compare(
+                function, catalog, expression, term, source, current, tracked, path, visiting,
+            );
+            visiting.remove(actual);
+            return result;
+        }
+
+        let definition = mutable_loop_unique_definition(function, actual)?;
+        let result = match term {
+            MirContractExpr::Value(local_value) => {
+                let local = tracked
+                    .keys()
+                    .find(|local| loop_stable_local_value(local).as_ref() == Ok(local_value));
+                let expected = local.and_then(|local| current.get(local)).ok_or_else(|| {
+                    format!(
+                        "mutable-loop source expression '{}' reads an untracked current local '{}'",
+                        expression.origin.0, local_value
+                    )
+                })?;
+                mutable_loop_copy_alias_matches(
+                    function,
+                    catalog,
+                    actual,
+                    expected,
+                    &mut BTreeSet::new(),
+                )
+            }
+            MirContractExpr::Old(entry_value) => mutable_loop_copy_alias_matches(
+                function,
+                catalog,
+                actual,
+                entry_value,
+                &mut BTreeSet::new(),
+            ),
+            MirContractExpr::Int(expected) => match definition.map(|instruction| &instruction.kind)
+            {
+                Some(MirInstructionKind::Const {
+                    result,
+                    literal: crate::core::ResolvedLiteral::Int(value),
+                }) if result == actual && value == expected => Ok(()),
+                _ => Err(format!(
+                    "mutable-loop MIR value '{}' is not the source integer literal {}",
+                    actual, expected
+                )),
+            },
+            MirContractExpr::Bool(expected) => {
+                match definition.map(|instruction| &instruction.kind) {
+                    Some(MirInstructionKind::Const {
+                        result,
+                        literal: crate::core::ResolvedLiteral::Bool(value),
+                    }) if result == actual && value == expected => Ok(()),
+                    _ => Err(format!(
+                        "mutable-loop MIR value '{}' is not the source boolean literal {}",
+                        actual, expected
+                    )),
+                }
+            }
+            MirContractExpr::Float(expected) => {
+                match definition.map(|instruction| &instruction.kind) {
+                    Some(MirInstructionKind::Const {
+                        result,
+                        literal: crate::core::ResolvedLiteral::FloatBits(value),
+                    }) if result == actual && value == expected => Ok(()),
+                    _ => Err(format!(
+                        "mutable-loop MIR value '{}' is not the source float literal",
+                        actual
+                    )),
+                }
+            }
+            MirContractExpr::Unary { op, operand } => {
+                let Some(instruction) = definition else {
+                    visiting.remove(actual);
+                    return Err(format!(
+                        "mutable-loop source unary expression '{}' has no MIR definition",
+                        expression.origin.0
+                    ));
+                };
+                let MirInstructionKind::Unary {
+                    result,
+                    op: actual_op,
+                    operand: actual_operand,
+                } = &instruction.kind
+                else {
+                    visiting.remove(actual);
+                    return Err(format!(
+                        "mutable-loop source unary expression '{}' maps to a non-Unary MIR definition",
+                        expression.origin.0
+                    ));
+                };
+                let source_node = actual
+                    .as_str()
+                    .strip_prefix("expr:")
+                    .ok_or("mutable-loop unary result has a non-expression identity")?;
+                if result != actual
+                    || *actual_op
+                        != match op {
+                            MirContractUnaryOp::Negate => crate::core::ir::ResolvedUnaryOp::Negate,
+                            MirContractUnaryOp::Not => crate::core::ir::ResolvedUnaryOp::Not,
+                        }
+                    || instruction.id.as_str() != format!("inst:unary:{source_node}")
+                {
+                    visiting.remove(actual);
+                    return Err(format!(
+                        "mutable-loop source unary expression '{}' disagrees with its MIR operator/result",
+                        expression.origin.0
+                    ));
+                }
+                path.push(0);
+                let nested = compare(
+                    function,
+                    catalog,
+                    expression,
+                    operand,
+                    actual_operand,
+                    current,
+                    tracked,
+                    path,
+                    visiting,
+                );
+                path.pop();
+                nested
+            }
+            MirContractExpr::Binary { op, left, right } => {
+                let Some(instruction) = definition else {
+                    visiting.remove(actual);
+                    return Err(format!(
+                        "mutable-loop source binary expression '{}' has no MIR definition",
+                        expression.origin.0
+                    ));
+                };
+                let MirInstructionKind::Binary {
+                    result,
+                    op: actual_op,
+                    left: actual_left,
+                    right: actual_right,
+                } = &instruction.kind
+                else {
+                    visiting.remove(actual);
+                    return Err(format!(
+                        "mutable-loop source binary expression '{}' maps to a non-Binary MIR definition",
+                        expression.origin.0
+                    ));
+                };
+                let source_node = actual
+                    .as_str()
+                    .strip_prefix("expr:")
+                    .ok_or("mutable-loop binary result has a non-expression identity")?;
+                if result != actual
+                    || MirContractBinaryOp::from_resolved(*actual_op) != Some(*op)
+                    || instruction.id.as_str() != format!("inst:binary:{source_node}")
+                {
+                    visiting.remove(actual);
+                    return Err(format!(
+                        "mutable-loop source binary expression '{}' disagrees with its MIR operator/result",
+                        expression.origin.0
+                    ));
+                }
+                path.push(0);
+                let left_result = compare(
+                    function,
+                    catalog,
+                    expression,
+                    left,
+                    actual_left,
+                    current,
+                    tracked,
+                    path,
+                    visiting,
+                );
+                path.pop();
+                left_result?;
+                path.push(1);
+                let right_result = compare(
+                    function,
+                    catalog,
+                    expression,
+                    right,
+                    actual_right,
+                    current,
+                    tracked,
+                    path,
+                    visiting,
+                );
+                path.pop();
+                right_result
+            }
+            MirContractExpr::Project { .. } | MirContractExpr::Result => Err(format!(
+                "mutable-loop source expression '{}' uses an unsupported Project/Result term",
+                expression.origin.0
+            )),
+        };
+        visiting.remove(actual);
+        result
+    }
+
+    let root = if let Some(actual_root) = actual_root {
+        actual_root.clone()
+    } else {
+        MirValueId::new(format!("expr:{}", expression.origin.0))
+            .map_err(|error| error.to_string())?
+    };
+    compare(
+        function,
+        catalog,
+        expression,
+        &expression.expression,
+        &root,
+        current,
+        tracked,
+        &mut Vec::new(),
+        &mut BTreeSet::new(),
+    )
+}
+
+fn mutable_loop_source_local_dependencies(
+    expression: &MirContractExpr,
+    tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+) -> BTreeSet<crate::core::ResolvedLocalId> {
+    fn visit(
+        expression: &MirContractExpr,
+        tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+        output: &mut BTreeSet<crate::core::ResolvedLocalId>,
+    ) {
+        match expression {
+            MirContractExpr::Value(value) => {
+                for local in tracked.keys() {
+                    if loop_stable_local_value(local).as_ref() == Ok(value) {
+                        output.insert(local.clone());
+                    }
+                }
+            }
+            MirContractExpr::Unary { operand, .. } => visit(operand, tracked, output),
+            MirContractExpr::Binary { left, right, .. } => {
+                visit(left, tracked, output);
+                visit(right, tracked, output);
+            }
+            MirContractExpr::Project { base, .. } => visit(base, tracked, output),
+            // old() is the immutable callable-entry snapshot, never the
+            // mutable current value for a loop-carried local.
+            MirContractExpr::Old(_)
+            | MirContractExpr::Result
+            | MirContractExpr::Int(_)
+            | MirContractExpr::Bool(_)
+            | MirContractExpr::Float(_) => {}
+        }
+    }
+    let mut output = BTreeSet::new();
+    visit(expression, tracked, &mut output);
+    output
+}
+
+fn mutable_loop_value_trace(
+    function: &MirFunction,
+    root: &MirValueId,
+    current: &BTreeMap<crate::core::ResolvedLocalId, MirValueId>,
+    tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+) -> Result<BTreeSet<MirValueId>, String> {
+    fn visit(
+        function: &MirFunction,
+        value: &MirValueId,
+        current: &BTreeMap<crate::core::ResolvedLocalId, MirValueId>,
+        tracked: &BTreeMap<crate::core::ResolvedLocalId, &crate::core::mir::MirProofLoopBinding>,
+        seen: &mut BTreeSet<MirValueId>,
+    ) -> Result<(), String> {
+        if !seen.insert(value.clone()) {
+            return Ok(());
+        }
+        if let Some((local, _)) = current.iter().find(|(_, current)| *current == value) {
+            let _ = local;
+            return Ok(());
+        }
+        for local in tracked.keys() {
+            if loop_stable_local_value(local)? == *value
+                && current.get(local).is_some_and(|latest| latest != value)
+            {
+                return Err(format!(
+                    "loop Return operand reads stale pre-assignment value for local '{}'",
+                    local.0 .0
+                ));
+            }
+        }
+        let mut definition = None;
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                if instruction_definitions_value(&instruction.kind, value) {
+                    if definition.replace(instruction).is_some() {
+                        return Err(format!(
+                            "MIR value '{}' has multiple definitions in Return dependency trace",
+                            value
+                        ));
+                    }
+                }
+            }
+        }
+        let Some(instruction) = definition else {
+            return Ok(());
+        };
+        let inputs: Vec<&MirValueId> = match &instruction.kind {
+            MirInstructionKind::Clone { source, .. }
+            | MirInstructionKind::Move { source, .. }
+            | MirInstructionKind::Convert { source, .. } => vec![source],
+            MirInstructionKind::Binary { left, right, .. } => vec![left, right],
+            MirInstructionKind::Unary { operand, .. } => vec![operand],
+            MirInstructionKind::Const { .. } | MirInstructionKind::Nop => Vec::new(),
+            _ => {
+                return Err(format!(
+                    "loop Return dependency '{}' crosses an unsupported MIR instruction",
+                    instruction.id
+                ));
+            }
+        };
+        for input in inputs {
+            visit(function, input, current, tracked, seen)?;
+        }
+        Ok(())
+    }
+    let mut trace = BTreeSet::new();
+    visit(function, root, current, tracked, &mut trace)?;
+    Ok(trace)
+}
+
+fn instruction_definitions_value(kind: &MirInstructionKind, value: &MirValueId) -> bool {
+    match kind {
+        MirInstructionKind::Const { result, .. }
+        | MirInstructionKind::Clone { result, .. }
+        | MirInstructionKind::Move { result, .. }
+        | MirInstructionKind::Convert { result, .. }
+        | MirInstructionKind::Binary { result, .. }
+        | MirInstructionKind::Unary { result, .. } => result == value,
+        MirInstructionKind::Nop => false,
+        _ => false,
+    }
+}
+
+fn loop_stable_local_value(local: &crate::core::ResolvedLocalId) -> Result<MirValueId, String> {
+    MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+}
+
+fn mutable_loop_scalar_type_is_supported(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    catalog.get(ty).is_some_and(|descriptor| {
+        descriptor.is_canonical_copy_scalar(true)
+            && matches!(
+                descriptor.abi,
+                MirAbiClass::Integer {
+                    bits: 32 | 64,
+                    signed: true
+                } | MirAbiClass::Bool
+            )
+    })
+}
+
+/// Replace the first-iteration header parameters with universally quantified
+/// current-state symbols. The only retained preheader relationships are the
+/// equalities for state locals that the checked receipt says are not written
+/// in this loop; all path facts about old mutable SSA values are dropped.
+fn abstract_mutable_loop_header_state(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    receipt: &MirProofLoopReceipt,
+    loop_node: &crate::core::NodeId,
+    state: &mut SymbolicState,
+) -> Result<(), String> {
+    let local_facts = receipt
+        .typed
+        .state_locals
+        .iter()
+        .map(|local| (local.local.clone(), local))
+        .collect::<BTreeMap<_, _>>();
+    let mut constraints = state.callable_entry_constraints.clone().unwrap_or_default();
+    for binding in &receipt.bindings {
+        let source = local_facts.get(&binding.local).ok_or_else(|| {
+            format!(
+                "loop binding '{}' has no typed state local",
+                binding.local.0 .0
+            )
+        })?;
+        if source.ty != binding.ty
+            || function
+                .values
+                .get(&binding.preheader_value)
+                .map(|value| &value.ty)
+                != Some(&binding.ty)
+            || function
+                .values
+                .get(&binding.header_parameter)
+                .map(|value| &value.ty)
+                != Some(&binding.ty)
+            || function
+                .values
+                .get(&binding.exit_parameter)
+                .map(|value| &value.ty)
+                != Some(&binding.ty)
+        {
+            return Err(format!(
+                "loop binding '{}' disagrees with its source or MIR TypeDesc",
+                binding.local.0 .0
+            ));
+        }
+        let preheader = state
+            .values
+            .get(&binding.header_parameter)
+            .cloned()
+            .or_else(|| state.values.get(&binding.preheader_value).cloned())
+            .ok_or_else(|| {
+                format!(
+                    "loop preheader value '{}' is absent from the symbolic state",
+                    binding.preheader_value
+                )
+            })?;
+        let (fresh, type_constraints) = symbolic_value_for_type(
+            catalog,
+            &binding.ty,
+            &format!(
+                "mir.loop.{}.{}.{}",
+                function.owner.0, loop_node.0, binding.local.0 .0
+            ),
+        )?;
+        constraints.extend(type_constraints);
+        if !source.written_in_loop {
+            constraints.push(symbolic_product_equal(&preheader, &fresh)?);
+        }
+        state
+            .values
+            .insert(binding.header_parameter.clone(), fresh.clone());
+        state
+            .values
+            .insert(loop_stable_local_value(&binding.local)?, fresh);
+        state.list_shapes.remove(&binding.header_parameter);
+        state.known_ints.remove(&binding.header_parameter);
+        state.known_strings.remove(&binding.header_parameter);
+    }
+    state.constraints = constraints;
+    let old_values = state
+        .callable_entry_values
+        .as_ref()
+        .ok_or("mutable MIR loop has no frozen callable-entry snapshot")?
+        .clone();
+    for invariant in receipt
+        .typed
+        .invariant_points
+        .iter()
+        .map(|point| point.statement.clone())
+    {
+        let assertion = loop_invariant_assertion(function, receipt, &invariant)?;
+        let contract = proof_expression_contract(&assertion.expression);
+        let (value, defined) =
+            checked_contract_term(&contract, catalog, &state.values, &old_values, None)?;
+        state.constraints.push(defined);
+        state
+            .constraints
+            .push(expect_bool(value, "mutable MIR loop invariant")?);
+    }
+    Ok(())
+}
+
+fn loop_invariant_assertion<'a>(
+    function: &'a MirFunction,
+    receipt: &'a MirProofLoopReceipt,
+    statement: &crate::core::NodeId,
+) -> Result<&'a crate::core::mir::MirProofAssertion, String> {
+    let mut found = None;
+    fn walk<'a>(
+        block: &'a MirProofBlock,
+        statement: &crate::core::NodeId,
+        found: &mut Option<&'a crate::core::mir::MirProofAssertion>,
+    ) {
+        for operation in &block.operations {
+            match operation {
+                MirProofOperation::Loop {
+                    invariants, body, ..
+                } => {
+                    for invariant in invariants {
+                        if invariant.id.statement == *statement {
+                            *found = Some(invariant);
+                        }
+                    }
+                    walk(body, statement, found);
+                }
+                MirProofOperation::Branch {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    walk(then_block, statement, found);
+                    walk(else_block, statement, found);
+                }
+                MirProofOperation::Scope(inner) => walk(inner, statement, found),
+                MirProofOperation::Bind { .. }
+                | MirProofOperation::Call(_)
+                | MirProofOperation::Eval { .. }
+                | MirProofOperation::Assign { .. }
+                | MirProofOperation::Math(_)
+                | MirProofOperation::Break { .. }
+                | MirProofOperation::Continue { .. }
+                | MirProofOperation::Return { .. }
+                | MirProofOperation::Exit => {}
+            }
+        }
+    }
+    let Some(worklist) = &function.proof_worklist else {
+        return Err("mutable MIR loop has no proof worklist".into());
+    };
+    walk(&worklist.root, statement, &mut found);
+    let assertion = found.ok_or_else(|| {
+        format!(
+            "typed loop invariant '{}' has no MIR proof assertion",
+            statement.0
+        )
+    })?;
+    if !receipt
+        .typed
+        .invariant_points
+        .iter()
+        .any(|point| point.owner.0 == function.owner.0 && point.statement == assertion.id.statement)
+    {
+        return Err("mutable MIR invariant is outside the loop receipt point census".into());
+    }
+    Ok(assertion)
+}
+
+fn rebind_loop_exit_state(
+    function: &MirFunction,
+    target: &MirBlockId,
+    state: &mut SymbolicState,
+) -> Result<(), String> {
+    let Some(worklist) = &function.proof_worklist else {
+        return Ok(());
+    };
+    let Some(MirProofOperation::Loop {
+        receipt: Some(receipt),
+        ..
+    }) = proof_loop_at_exit(worklist, target)
+    else {
+        return Ok(());
+    };
+    for binding in &receipt.bindings {
+        let value = state
+            .values
+            .get(&binding.exit_parameter)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "mutable MIR loop exit parameter '{}' is absent",
+                    binding.exit_parameter
+                )
+            })?;
+        state
+            .values
+            .insert(loop_stable_local_value(&binding.local)?, value);
+    }
+    Ok(())
+}
+
 fn explore_block(
     function: &MirFunction,
     program: &MirProgram,
@@ -1720,14 +8288,81 @@ fn explore_block(
     returns: &mut Vec<ReturnPath>,
     traps: &mut Vec<SymbolicTrap>,
 ) -> Result<(), String> {
-    if !active.insert(block_id.clone()) {
-        return Err("canonical MIR verifier does not yet admit cyclic CFG/loops".into());
+    if active.contains(block_id) {
+        if function
+            .proof_worklist
+            .as_ref()
+            .and_then(|worklist| proof_loop_at_header(worklist, block_id))
+            .is_some_and(|operation| {
+                matches!(
+                    operation,
+                    MirProofOperation::Loop {
+                        stationary: true,
+                        ..
+                    } | MirProofOperation::Loop {
+                        stationary: false,
+                        receipt: Some(_),
+                        ..
+                    }
+                )
+            })
+        {
+            // Stationary loops are summarized by stasis; mutable loops are
+            // cut only after the independent worklist has established init,
+            // checked each actual backedge/continue, and discharged traps.
+            return Ok(());
+        }
+        return Err(
+            "canonical MIR verifier found a cycle without a stationary typed loop proof receipt"
+                .into(),
+        );
+    }
+    active.insert(block_id.clone());
+    if let Some(MirProofOperation::Loop {
+        point,
+        invariants: _,
+        stationary: false,
+        receipt: Some(receipt),
+        ..
+    }) = function
+        .proof_worklist
+        .as_ref()
+        .and_then(|worklist| proof_loop_at_header(worklist, block_id))
+    {
+        // The worklist has proved initialization and every current-state
+        // preservation VC. The execution explorer now uses fresh header
+        // symbols, never the concrete preheader values, and adds I only after
+        // that complete induction check has succeeded.
+        abstract_mutable_loop_header_state(function, catalog, receipt, point, state)?;
+    } else if let Some(MirProofOperation::Loop {
+        invariants,
+        stationary: true,
+        ..
+    }) = function
+        .proof_worklist
+        .as_ref()
+        .and_then(|worklist| proof_loop_at_header(worklist, block_id))
+    {
+        // The independent worklist proved stationary-loop establishment.
+        // Carry those scoped facts only into this loop's execution paths.
+        for invariant in invariants {
+            let contract = proof_expression_contract(&invariant.expression);
+            let (value, defined) =
+                checked_contract_term(&contract, catalog, &state.values, &state.values, None)?;
+            state.constraints.push(defined);
+            state
+                .constraints
+                .push(expect_bool(value, "stationary MIR loop invariant")?);
+        }
     }
     let block = function
         .blocks
         .get(block_id)
         .ok_or_else(|| format!("MIR verifier block '{}' is absent", block_id))?;
     for instruction in &block.instructions {
+        if state.normal_path_terminated {
+            break;
+        }
         let previous_traps = state.traps.len();
         eval_instruction(
             function,
@@ -1748,11 +8383,16 @@ fn explore_block(
             }
         }
     }
+    if state.normal_path_terminated {
+        traps.extend(state.traps.clone());
+        return Ok(());
+    }
     match &block.terminator {
         MirTerminator::Goto {
             target, arguments, ..
         } => {
             let mut next = edge_state(state, function, target, arguments)?;
+            rebind_loop_exit_state(function, target, &mut next)?;
             explore_block(function, program, catalog, &mut next, target, active, returns, traps)?;
         }
         MirTerminator::Branch {
@@ -1771,6 +8411,7 @@ fn explore_block(
                     "branch condition",
                 )?;
             let mut then_state = edge_state(state, function, then_target, then_arguments)?;
+            rebind_loop_exit_state(function, then_target, &mut then_state)?;
             then_state.constraints.push(condition.clone());
             explore_block(
                 function,
@@ -1783,6 +8424,7 @@ fn explore_block(
                 traps,
             )?;
             let mut else_state = edge_state(state, function, else_target, else_arguments)?;
+            rebind_loop_exit_state(function, else_target, &mut else_state)?;
             else_state.constraints.push(condition.not());
             explore_block(
                 function,
@@ -1808,6 +8450,21 @@ fn explore_block(
             traps,
         )?,
         MirTerminator::Return { value } => {
+            if state
+                .values
+                .values()
+                .any(|value| {
+                    matches!(
+                        value,
+                        SymbolicValue::OrdinaryMapOwnerLifecycleV1 { .. }
+                            | SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { .. }
+                    )
+                })
+            {
+                return Err(
+                    "canonical MIR ordinary Map ownership profile return leaves a live root obligation".into(),
+                );
+            }
             let value = match value {
                 Some(value) => state
                     .values
@@ -1823,6 +8480,15 @@ fn explore_block(
                 }
                 None => return Err("MIR verifier non-unit return value is absent".into()),
             };
+            let value = if function_has_managed_any(function, catalog)
+                && catalog.validate_owned_string(&function.result).is_ok()
+            {
+                match &block.terminator {
+                    MirTerminator::Return { value: Some(returned) } =>
+                        symbolic_string_for_value(state, returned).map(SymbolicValue::String).unwrap_or(value),
+                    _ => value,
+                }
+            } else { value };
             returns.push(ReturnPath {
                 constraints: state.constraints.clone(),
                 values: state.values.clone(),
@@ -2029,7 +8695,7 @@ fn explore_variant_switch(
             MirSwitchCase::Literal(_) => {
                 return Err(
                     "canonical MIR verifier variant switch cannot use a literal case".into(),
-                )
+                );
             }
         };
         let mut next = edge_state(state, function, &arm.target, &arm.arguments)?;
@@ -2093,11 +8759,11 @@ fn explore_literal_switch(
                 equals
             }
             MirSwitchCase::Literal(_) => {
-                return Err("scalar switch cannot dispatch on a float or string literal".into())
+                return Err("scalar switch cannot dispatch on a float or string literal".into());
             }
             MirSwitchCase::Default => symbolic_default_guard(&previous_cases),
             MirSwitchCase::Variant(_) => {
-                return Err("scalar switch cannot use a variant case".into())
+                return Err("scalar switch cannot use a variant case".into());
             }
         };
         let mut next = edge_state(state, function, &arm.target, &arm.arguments)?;
@@ -2229,9 +8895,735 @@ fn edge_state(
         if let Some(value) = state.known_ints.get(argument).copied() {
             next.known_ints.insert(parameter.value.clone(), value);
         }
+        if let Some(value) = state.known_strings.get(argument).cloned() {
+            next.known_strings.insert(parameter.value.clone(), value);
+        }
         next.values.insert(parameter.value.clone(), value);
     }
     Ok(next)
+}
+
+fn symbolic_string_for_value(state: &SymbolicState, value: &MirValueId) -> Option<SymbolicString> {
+    state
+        .known_strings
+        .get(value)
+        .cloned()
+        .or_else(|| match state.values.get(value) {
+            Some(SymbolicValue::String(value)) => Some(value.clone()),
+            _ => None,
+        })
+}
+
+fn bool_disjunction(values: &[Bool]) -> Bool {
+    if values.is_empty() {
+        Bool::from_bool(false)
+    } else {
+        let refs = values.iter().collect::<Vec<_>>();
+        Bool::or(&refs)
+    }
+}
+
+fn ordinary_map_owned_get_entry_matches(
+    present: &Bool,
+    entry_key: &Z3String,
+    query_key: &Z3String,
+) -> Bool {
+    Bool::and(&[present, &entry_key.eq(query_key)])
+}
+
+/// Build the standard `Result<T, i32>` emitted by a typed ordinary-Map getter.
+/// Capacity failure is an independent symbolic outcome because key staging
+/// and owned String output allocation can fail at runtime.  The tag/payload
+/// therefore admit only Ok, Err(1) Missing, Err(2) TypeMismatch, and Err(3)
+/// Capacity; a proof must remain true for every one of those outcomes.
+fn symbolic_ordinary_map_owned_get_result(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    result_ty: &crate::core::ResolvedTypeId,
+    entries: &[SymbolicOrdinaryMapOwnedGetEntry],
+    key: &Z3String,
+    string_payload: bool,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<SymbolicValue, String> {
+    if string_payload {
+        catalog.validate_result_string_i32_variant(result_ty)?;
+    } else {
+        catalog.validate_copy_result_i32_variant(result_ty)?;
+    }
+    let (nominal, variants) = catalog.variant_layout(result_ty).ok_or_else(|| {
+        "ordinary Map owned-get result has no canonical Result layout".to_string()
+    })?;
+    if nominal != "builtin:type:Result" {
+        return Err("ordinary Map owned-get result nominal is not built-in Result".into());
+    }
+    let ok = variants
+        .iter()
+        .find(|variant| variant.id.0 == "builtin:variant:Result::Ok")
+        .ok_or_else(|| "ordinary Map owned-get Result Ok variant is absent".to_string())?;
+    let err = variants
+        .iter()
+        .find(|variant| variant.id.0 == "builtin:variant:Result::Err")
+        .ok_or_else(|| "ordinary Map owned-get Result Err variant is absent".to_string())?;
+    let ok_field = ok
+        .fields
+        .first()
+        .ok_or_else(|| "ordinary Map owned-get Result Ok payload is absent".to_string())?;
+    let err_field = err
+        .fields
+        .first()
+        .ok_or_else(|| "ordinary Map owned-get Result Err payload is absent".to_string())?;
+
+    let matches = entries
+        .iter()
+        .map(|entry| ordinary_map_owned_get_entry_matches(&entry.present, &entry.key, key))
+        .collect::<Vec<_>>();
+    let has_entry = bool_disjunction(&matches);
+    let correct_matches = entries
+        .iter()
+        .zip(&matches)
+        .filter_map(|(entry, matched)| {
+            let correct_type = matches!(
+                (&entry.value, string_payload),
+                (SymbolicOrdinaryMapOwnedGetValue::String(_), true)
+                    | (SymbolicOrdinaryMapOwnedGetValue::I32(_), false)
+            );
+            correct_type.then(|| matched.clone())
+        })
+        .collect::<Vec<_>>();
+    let has_correct = bool_disjunction(&correct_matches);
+
+    let capacity = Bool::new_const(format!(
+        "mir.ordinary_map_owned_get.capacity.{}",
+        instruction_id.as_str()
+    ));
+    let successful_lookup = Bool::and(&[&has_correct, &capacity.not()]);
+    let error_status = capacity.ite(
+        &Int::from_i64(3),
+        &has_entry.ite(&Int::from_i64(2), &Int::from_i64(1)),
+    );
+    let tag = successful_lookup.ite(
+        &Int::from_i64(ok.discriminant as i64),
+        &Int::from_i64(err.discriminant as i64),
+    );
+    let ok_value = if string_payload {
+        let mut selected = z3::ast::String::from_str("").map_err(|error| error.to_string())?;
+        for (entry, matched) in entries.iter().zip(&matches) {
+            let SymbolicOrdinaryMapOwnedGetValue::String(value) = &entry.value else {
+                continue;
+            };
+            let value = value.as_z3()?;
+            selected = matched.ite(&value, &selected);
+        }
+        SymbolicValue::String(SymbolicString::Symbol(selected))
+    } else {
+        let mut selected = Int::from_i64(0);
+        for (entry, matched) in entries.iter().zip(&matches) {
+            let SymbolicOrdinaryMapOwnedGetValue::I32(value) = &entry.value else {
+                continue;
+            };
+            selected = matched.ite(value, &selected);
+        }
+        SymbolicValue::Int(selected)
+    };
+    Ok(SymbolicValue::Variant {
+        nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+            .map_err(|error| error.to_string())?,
+        tag,
+        payload: BTreeMap::from([
+            (ok_field.id.clone(), ok_value),
+            (err_field.id.clone(), SymbolicValue::Int(error_status)),
+        ]),
+        active_variant: None,
+    })
+}
+
+/// One lookup chooses presence, descriptor and owned payload together.
+/// Missing is a real owned i32-zero snapshot; payload zero never determines
+/// presence. Persistent root mutation cannot change these selected terms.
+fn symbolic_ordinary_map_get_any_snapshot(
+    entries: &[SymbolicOrdinaryMapOwnedGetEntry],
+    key: &Z3String,
+) -> Result<SymbolicValue, String> {
+    let mut kind = Int::from_i64(1);
+    let mut i32_payload = Int::from_i64(0);
+    let mut string_payload = symbolic_string_literal("")?;
+    let mut matches = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let matched = ordinary_map_owned_get_entry_matches(&entry.present, &entry.key, key);
+        match &entry.value {
+            SymbolicOrdinaryMapOwnedGetValue::I32(value) => {
+                kind = matched.ite(&Int::from_i64(1), &kind);
+                i32_payload = matched.ite(value, &i32_payload);
+            }
+            SymbolicOrdinaryMapOwnedGetValue::String(value) => {
+                kind = matched.ite(&Int::from_i64(2), &kind);
+                string_payload = matched.ite(&value.as_z3()?, &string_payload);
+            }
+        }
+        matches.push(matched);
+    }
+    Ok(SymbolicValue::Tuple(vec![
+        SymbolicValue::Bool(bool_disjunction(&matches)),
+        SymbolicValue::ManagedAnyI32StringV1 {
+            kind,
+            descriptor_version: Int::from_i64(1),
+            i32_payload,
+            string_payload: SymbolicString::Symbol(string_payload),
+        },
+    ]))
+}
+
+fn eval_managed_any_instruction(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    source: &MirValueId,
+    operation: MirManagedAnyOperation,
+    contract: Option<&crate::core::mir::MirManagedAnyContract>,
+) -> Result<(), String> {
+    catalog.validate_managed_any_contract(
+        function,
+        source,
+        result.as_ref(),
+        operation,
+        contract,
+    )?;
+    if operation == MirManagedAnyOperation::PackI32 {
+        let SymbolicValue::Int(i32_payload) =
+            state.values.get(source).cloned().ok_or_else(|| {
+                format!("ManagedAny PackI32 source '{}' is not available", source)
+            })?
+        else {
+            return Err("ManagedAny PackI32 source is not a symbolic i32 scalar".into());
+        };
+        let result = result
+            .as_ref()
+            .ok_or_else(|| "ManagedAny PackI32 result is absent".to_string())?;
+        let output = SymbolicValue::ManagedAnyI32StringV1 {
+            kind: Int::from_i64(1),
+            descriptor_version: Int::from_i64(1),
+            i32_payload,
+            string_payload: SymbolicString::Symbol(symbolic_string_literal("")?),
+        };
+        ensure_result_shape(function, catalog, result, &output)?;
+        if state.values.insert(result.clone(), output).is_some() {
+            return Err("ManagedAny PackI32 result was already defined".into());
+        }
+        return Ok(());
+    }
+    let value = state
+        .values
+        .get(source)
+        .cloned()
+        .ok_or_else(|| format!("ManagedAny source '{}' is not available", source))?;
+    let SymbolicValue::ManagedAnyI32StringV1 {
+        kind,
+        descriptor_version,
+        i32_payload,
+        string_payload,
+    } = &value
+    else {
+        return Err("ManagedAny source is not a generation-bearing snapshot".into());
+    };
+    match operation {
+        MirManagedAnyOperation::Drop => {
+            state.values.remove(source);
+        }
+        MirManagedAnyOperation::Clone => {
+            let result = result
+                .as_ref()
+                .ok_or_else(|| "ManagedAny Clone result is absent".to_string())?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        MirManagedAnyOperation::UnpackI32 | MirManagedAnyOperation::UnpackString => {
+            let expected_kind = if operation == MirManagedAnyOperation::UnpackI32 {
+                1
+            } else {
+                2
+            };
+            // Save the negation as a trap before assuming successful read.
+            // A wrong tag/version remains a Disproven execution path.
+            add_definedness(
+                state,
+                Bool::and(&[
+                    &kind.eq(Int::from_i64(expected_kind)),
+                    &descriptor_version.eq(Int::from_i64(1)),
+                ]),
+                "E0800",
+            )?;
+            let result = result
+                .as_ref()
+                .ok_or_else(|| "ManagedAny unpack result is absent".to_string())?;
+            let output = if expected_kind == 1 {
+                SymbolicValue::Int(i32_payload.clone())
+            } else {
+                state
+                    .known_strings
+                    .insert(result.clone(), string_payload.clone());
+                SymbolicValue::String(string_payload.clone())
+            };
+            ensure_result_shape(function, catalog, result, &output)?;
+            state.values.insert(result.clone(), output);
+            // Unpack borrows the owner. i32 is copied, String is an exact
+            // independently owned deep copy; the snapshot stays live.
+        }
+        MirManagedAnyOperation::Println => {
+            // Runtime validates the complete descriptor before writing any
+            // bytes. Reject a reachable invalid tag/version before mutating
+            // symbolic state, so no Unit side-effect result can make an
+            // invalid Any print look successful. This local solver checks
+            // the path without adding constraints to caller state.
+            let valid_i32 = Bool::and(&[
+                &kind.eq(Int::from_i64(1)),
+                &descriptor_version.eq(Int::from_i64(1)),
+                &int_range_constraint(i32_payload, 32),
+            ]);
+            let valid_string = Bool::and(&[
+                &kind.eq(Int::from_i64(2)),
+                &descriptor_version.eq(Int::from_i64(1)),
+            ]);
+            let valid_descriptor = Bool::or(&[&valid_i32, &valid_string]);
+            let invalid_path = Solver::new();
+            invalid_path.assert(conjunction(&state.constraints));
+            invalid_path.assert(valid_descriptor.not());
+            match invalid_path.check() {
+                SatResult::Unsat => {}
+                SatResult::Sat => {
+                    return Err(
+                        "ManagedAny println can reach an invalid descriptor/tag (E0800)".into(),
+                    );
+                }
+                SatResult::Unknown => {
+                    return Err(
+                        "ManagedAny println descriptor validation is undecidable; E0800 cannot be excluded"
+                            .into(),
+                    );
+                }
+            }
+            let result = result
+                .as_ref()
+                .ok_or_else(|| "ManagedAny println result is absent".to_string())?;
+            if state.values.contains_key(result) {
+                return Err("ManagedAny println result was already defined".into());
+            }
+            let output = SymbolicValue::Unit;
+            ensure_result_shape(function, catalog, result, &output)?;
+            // println is an opaque Unit side effect in the verifier. It has
+            // no modeled stdout trace; the owner remains live and the next
+            // explicit MIR Drop consumes only the argument snapshot.
+            state.values.insert(result.clone(), output);
+        }
+        MirManagedAnyOperation::PackI32 => unreachable!("PackI32 is handled before owner lookup"),
+    }
+    Ok(())
+}
+
+fn eval_ordinary_map_owned_get_instruction(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+    instruction: &MirInstructionKind,
+) -> Result<(), String> {
+    use MirInstructionKind as I;
+    let owner_ty = crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+    // Root construction and persistent mutation have no recoverable
+    // allocation-status result in their source contract. As with the existing
+    // MapRoot verifier model, process-wide allocator exhaustion on those
+    // operations is outside the symbolic execution assumptions. Get is
+    // different: its API explicitly returns Err(3) for a capacity failure,
+    // so that observable outcome is modeled by
+    // `symbolic_ordinary_map_owned_get_result`.
+    match instruction {
+        I::OrdinaryMapOwnedGetI32StringV1New { result } => {
+            if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owned-get New result does not use its canonical TypeDesc"
+                ));
+            }
+            catalog.validate_glue(&owner_ty, MirGlueOperation::MoveOut)?;
+            if state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owned-get New result '{}' is already defined",
+                    result
+                ));
+            }
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::OrdinaryMapOwnedGetI32StringV1 {
+                    entries: Vec::new(),
+                },
+            );
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Set {
+            result,
+            source,
+            key,
+            value,
+        } => {
+            if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty)
+                || function.values.get(source).map(|value| &value.ty) != Some(&owner_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owned-get Set source/result TypeDesc is invalid"
+                ));
+            }
+            let key_ty = instruction_value_type(function, key, "ordinary Map owned-get Set key")?;
+            catalog.validate_owned_string(&key_ty)?;
+            let symbolic_key = symbolic_string_for_value(state, key)
+                .ok_or_else(|| format!("{instruction_id}: Set key String is not modeled"))?
+                .as_z3()?;
+            let value_ty =
+                instruction_value_type(function, value, "ordinary Map owned-get Set value")?;
+            let payload = state.values.get(value).cloned().ok_or_else(|| {
+                format!("{instruction_id}: Set payload '{}' is unavailable", value)
+            })?;
+            let stored_value = match catalog.get(&value_ty).map(|desc| &desc.kind) {
+                Some(MirTypeKind::Primitive(crate::core::PrimitiveType::I32)) => {
+                    catalog.validate_copy_scalar(&value_ty)?;
+                    let SymbolicValue::Int(value) = payload else {
+                        return Err(format!(
+                            "{instruction_id}: Set i32 payload is not a symbolic integer"
+                        ));
+                    };
+                    add_definedness(
+                        state,
+                        Bool::and(&[
+                            &value.ge(Int::from_i64(i32::MIN as i64)),
+                            &value.le(Int::from_i64(i32::MAX as i64)),
+                        ]),
+                        "E0802",
+                    )?;
+                    SymbolicOrdinaryMapOwnedGetValue::I32(value)
+                }
+                Some(MirTypeKind::Primitive(crate::core::PrimitiveType::String)) => {
+                    catalog.validate_owned_string(&value_ty)?;
+                    let value = symbolic_string_for_value(state, value).ok_or_else(|| {
+                        format!("{instruction_id}: Set String payload is not modeled")
+                    })?;
+                    SymbolicOrdinaryMapOwnedGetValue::String(value)
+                }
+                _ => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map owned-get Set payload is outside the i32/String profile"
+                    ));
+                }
+            };
+            let mut entries = match state.values.get(source).cloned() {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: Set source is not an ordinary Map owned-get root"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: Set source '{}' is unavailable",
+                        source
+                    ));
+                }
+            };
+            if result == source || state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: Set result aliases an existing root"
+                ));
+            }
+            for entry in &mut entries {
+                entry.present = Bool::and(&[&entry.present, &entry.key.eq(&symbolic_key).not()]);
+            }
+            entries.push(SymbolicOrdinaryMapOwnedGetEntry {
+                key: symbolic_key,
+                present: Bool::from_bool(true),
+                value: stored_value,
+            });
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries },
+            );
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Remove {
+            result,
+            source,
+            key,
+        } => {
+            if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty)
+                || function.values.get(source).map(|value| &value.ty) != Some(&owner_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owned-get Remove source/result TypeDesc is invalid"
+                ));
+            }
+            let key_ty =
+                instruction_value_type(function, key, "ordinary Map owned-get Remove key")?;
+            catalog.validate_owned_string(&key_ty)?;
+            let symbolic_key = symbolic_string_for_value(state, key)
+                .ok_or_else(|| format!("{instruction_id}: Remove key String is not modeled"))?
+                .as_z3()?;
+            let source_entries = match state.values.get(source).cloned() {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: Remove source is not an ordinary Map owned-get root"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: Remove source '{}' is unavailable",
+                        source
+                    ));
+                }
+            };
+            if result == source || state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: Remove result aliases an existing root"
+                ));
+            }
+            let entries = source_entries
+                .into_iter()
+                .map(|entry| SymbolicOrdinaryMapOwnedGetEntry {
+                    present: Bool::and(&[&entry.present, &entry.key.eq(&symbolic_key).not()]),
+                    ..entry
+                })
+                .collect();
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries },
+            );
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Size { result, root } => {
+            let result_ty = instruction_value_type(function, result, "owned-get Size result")?;
+            let root_ty = instruction_value_type(function, root, "owned-get Size root")?;
+            if root_ty != owner_ty {
+                return Err(format!("{instruction_id}: Size root TypeDesc is invalid"));
+            }
+            catalog.validate_copy_scalar(&result_ty)?;
+            if catalog.get(&result_ty).map(|desc| &desc.kind)
+                != Some(&MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
+            {
+                return Err(format!(
+                    "{instruction_id}: Size result is not canonical i32"
+                ));
+            }
+            let entries = match state.values.get(root) {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: Size root has wrong symbolic kind"
+                    ));
+                }
+                None => return Err(format!("{instruction_id}: Size root is unavailable")),
+            };
+            let counts = entries
+                .iter()
+                .map(|entry| entry.present.ite(&Int::from_i64(1), &Int::from_i64(0)))
+                .collect::<Vec<_>>();
+            let refs = counts.iter().collect::<Vec<_>>();
+            let size = if refs.is_empty() {
+                Int::from_i64(0)
+            } else {
+                Int::add(&refs)
+            };
+            add_definedness(state, size.le(Int::from_i64(i32::MAX as i64)), "E0802")?;
+            state
+                .values
+                .insert(result.clone(), SymbolicValue::Int(size));
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Contains { result, root, key } => {
+            let result_ty = instruction_value_type(function, result, "owned-get Contains result")?;
+            let root_ty = instruction_value_type(function, root, "owned-get Contains root")?;
+            let key_ty = instruction_value_type(function, key, "owned-get Contains key")?;
+            if root_ty != owner_ty
+                || catalog.get(&result_ty).map(|desc| &desc.kind)
+                    != Some(&MirTypeKind::Primitive(crate::core::PrimitiveType::Bool))
+            {
+                return Err(format!(
+                    "{instruction_id}: Contains result/root TypeDesc is invalid"
+                ));
+            }
+            catalog.validate_copy_scalar(&result_ty)?;
+            catalog.validate_owned_string(&key_ty)?;
+            let symbolic_key = symbolic_string_for_value(state, key)
+                .ok_or_else(|| format!("{instruction_id}: Contains key String is not modeled"))?
+                .as_z3()?;
+            let entries = match state.values.get(root) {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: Contains root has wrong symbolic kind"
+                    ));
+                }
+                None => return Err(format!("{instruction_id}: Contains root is unavailable")),
+            };
+            let matches = entries
+                .iter()
+                .map(|entry| {
+                    ordinary_map_owned_get_entry_matches(&entry.present, &entry.key, &symbolic_key)
+                })
+                .collect::<Vec<_>>();
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::Bool(bool_disjunction(&matches)),
+            );
+        }
+        I::OrdinaryMapOwnedGetI32StringV1GetI32 { result, root, key } => {
+            let root_ty = instruction_value_type(function, root, "owned-get GetI32 root")?;
+            let key_ty = instruction_value_type(function, key, "owned-get GetI32 key")?;
+            let result_ty = instruction_value_type(function, result, "owned-get GetI32 result")?;
+            if root_ty != owner_ty {
+                return Err(format!("{instruction_id}: GetI32 root TypeDesc is invalid"));
+            }
+            catalog.validate_owned_string(&key_ty)?;
+            catalog.validate_copy_result_i32_variant(&result_ty)?;
+            let symbolic_key = symbolic_string_for_value(state, key)
+                .ok_or_else(|| format!("{instruction_id}: GetI32 key String is not modeled"))?
+                .as_z3()?;
+            let entries = match state.values.get(root) {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: GetI32 root has wrong symbolic kind"
+                    ));
+                }
+                None => return Err(format!("{instruction_id}: GetI32 root is unavailable")),
+            };
+            let value = symbolic_ordinary_map_owned_get_result(
+                catalog,
+                &result_ty,
+                entries,
+                &symbolic_key,
+                false,
+                instruction_id,
+            )?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        I::OrdinaryMapOwnedGetI32StringV1GetString { result, root, key } => {
+            let root_ty = instruction_value_type(function, root, "owned-get GetString root")?;
+            let key_ty = instruction_value_type(function, key, "owned-get GetString key")?;
+            let result_ty = instruction_value_type(function, result, "owned-get GetString result")?;
+            if root_ty != owner_ty {
+                return Err(format!(
+                    "{instruction_id}: GetString root TypeDesc is invalid"
+                ));
+            }
+            catalog.validate_owned_string(&key_ty)?;
+            catalog.validate_result_string_i32_variant(&result_ty)?;
+            let symbolic_key = symbolic_string_for_value(state, key)
+                .ok_or_else(|| format!("{instruction_id}: GetString key String is not modeled"))?
+                .as_z3()?;
+            let entries = match state.values.get(root) {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: GetString root has wrong symbolic kind"
+                    ));
+                }
+                None => return Err(format!("{instruction_id}: GetString root is unavailable")),
+            };
+            let value = symbolic_ordinary_map_owned_get_result(
+                catalog,
+                &result_ty,
+                entries,
+                &symbolic_key,
+                true,
+                instruction_id,
+            )?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
+        I::OrdinaryMapOwnedGetI32StringV1GetAny { result, root, key } => {
+            let root_ty = instruction_value_type(function, root, "owned-get GetAny root")?;
+            let key_ty = instruction_value_type(function, key, "owned-get GetAny key")?;
+            let result_ty = instruction_value_type(function, result, "owned-get GetAny result")?;
+            if root_ty != owner_ty {
+                return Err(format!("{instruction_id}: GetAny root TypeDesc is invalid"));
+            }
+            catalog.validate_owned_string(&key_ty)?;
+            catalog.validate_ordinary_map_owned_get_any_result_type(&result_ty)?;
+            let key = symbolic_string_for_value(state, key)
+                .ok_or_else(|| format!("{instruction_id}: GetAny key String is not modeled"))?
+                .as_z3()?;
+            let Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) =
+                state.values.get(root)
+            else {
+                return Err(format!(
+                    "{instruction_id}: GetAny root is unavailable or has the wrong symbolic kind"
+                ));
+            };
+            let value = symbolic_ordinary_map_get_any_snapshot(entries, &key)?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            if state.values.insert(result.clone(), value).is_some() {
+                return Err(format!(
+                    "{instruction_id}: GetAny result is already defined"
+                ));
+            }
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Values { result, root } => {
+            let root_ty = instruction_value_type(function, root, "owned-get Values root")?;
+            let result_ty = instruction_value_type(function, result, "owned-get Values result")?;
+            if root_ty != owner_ty {
+                return Err(format!("{instruction_id}: Values root TypeDesc is invalid"));
+            }
+            if !is_canonical_managed_any_list_type(catalog, &result_ty) {
+                return Err(format!(
+                    "{instruction_id}: Values result is not the canonical owned List<ManagedAny> TypeDesc"
+                ));
+            }
+            let entries = match state.values.get(root) {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: Values root has wrong symbolic kind"
+                    ));
+                }
+                None => return Err(format!("{instruction_id}: Values root is unavailable")),
+            };
+            // Each present entry contributes one independently owned
+            // ManagedAny snapshot.  The symbolic List abstraction tracks the
+            // exact cardinality while its element owners remain opaque to the
+            // verifier; List glue and the ManagedAny element TypeDesc prove
+            // the backend drop/clone obligations.
+            let counts = entries
+                .iter()
+                .map(|entry| entry.present.ite(&Int::from_i64(1), &Int::from_i64(0)))
+                .collect::<Vec<_>>();
+            let refs = counts.iter().collect::<Vec<_>>();
+            let length = if refs.is_empty() {
+                Int::from_i64(0)
+            } else {
+                Int::add(&refs)
+            };
+            let value = SymbolicValue::List { length };
+            ensure_result_shape(function, catalog, result, &value)?;
+            remember_list_shape(state, result, &value, None, None);
+            if state.values.insert(result.clone(), value).is_some() {
+                return Err(format!(
+                    "{instruction_id}: Values result is already defined"
+                ));
+            }
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+            if function.values.get(root).map(|value| &value.ty) != Some(&owner_ty) {
+                return Err(format!("{instruction_id}: Drop root TypeDesc is invalid"));
+            }
+            match state.values.remove(root) {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { .. }) => {}
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: Drop root has wrong symbolic kind"
+                    ));
+                }
+                None => return Err(format!("{instruction_id}: Drop root is unavailable")),
+            }
+        }
+        _ => {
+            return Err(format!(
+                "{instruction_id}: not an owned-get ordinary Map instruction"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn eval_instruction(
@@ -2243,8 +9635,29 @@ fn eval_instruction(
     instruction: &MirInstructionKind,
 ) -> Result<(), String> {
     match instruction {
+        MirInstructionKind::ManagedAny {
+            result,
+            source,
+            operation,
+            contract,
+        } => {
+            eval_managed_any_instruction(
+                function,
+                catalog,
+                state,
+                result,
+                source,
+                *operation,
+                contract.as_ref(),
+            )?;
+        }
+        MirInstructionKind::Actor { .. } => {
+            return Err(format!(
+                "{instruction_id}: Actor mailbox/state effects have no trusted symbolic proof model"
+            ));
+        }
         MirInstructionKind::MapRootNew { result } => {
-            let root_ty = crate::core::mir::types::map_root_type_id();
+            let root_ty = map_owner_type_for_instruction(function, instruction);
             if function.values.get(result).map(|value| &value.ty) != Some(&root_ty) {
                 return Err(format!(
                     "{instruction_id}: MapRoot New result does not use the canonical MapRoot TypeDesc"
@@ -2272,7 +9685,7 @@ fn eval_instruction(
             key,
             value,
         } => {
-            let root_ty = crate::core::mir::types::map_root_type_id();
+            let root_ty = map_owner_type_for_instruction(function, instruction);
             if function.values.get(result).map(|value| &value.ty) != Some(&root_ty)
                 || function.values.get(source).map(|value| &value.ty) != Some(&root_ty)
             {
@@ -2320,7 +9733,7 @@ fn eval_instruction(
                 _ => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Set payload is outside the receipted i32/String TypeDesc profile"
-                    ))
+                    ));
                 }
             }
 
@@ -2329,13 +9742,13 @@ fn eval_instruction(
                 Some(_) => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Set source is not a MapRoot value"
-                    ))
+                    ));
                 }
                 None => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Set source '{}' is unavailable",
                         source
-                    ))
+                    ));
                 }
             };
             if result == source || state.values.contains_key(result) {
@@ -2353,7 +9766,7 @@ fn eval_instruction(
             source,
             key,
         } => {
-            let root_ty = crate::core::mir::types::map_root_type_id();
+            let root_ty = map_owner_type_for_instruction(function, instruction);
             if function.values.get(result).map(|value| &value.ty) != Some(&root_ty)
                 || function.values.get(source).map(|value| &value.ty) != Some(&root_ty)
             {
@@ -2369,13 +9782,13 @@ fn eval_instruction(
                 Some(_) => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Remove source is not a MapRoot value"
-                    ))
+                    ));
                 }
                 None => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Remove source '{}' is unavailable",
                         source
-                    ))
+                    ));
                 }
             };
             if result == source || state.values.contains_key(result) {
@@ -2389,7 +9802,7 @@ fn eval_instruction(
                 .insert(result.clone(), SymbolicValue::MapRoot { keys: root });
         }
         MirInstructionKind::MapRootSize { result, root } => {
-            let root_ty = crate::core::mir::types::map_root_type_id();
+            let root_ty = map_owner_type_for_instruction(function, instruction);
             let i32_ty = catalog.iter().find_map(|(ty, descriptor)| {
                 (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
                     .then(|| ty.clone())
@@ -2407,13 +9820,13 @@ fn eval_instruction(
                 Some(_) => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Size source is not a MapRoot value"
-                    ))
+                    ));
                 }
                 None => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Size root '{}' is unavailable",
                         root
-                    ))
+                    ));
                 }
             };
             let narrowed = crate::core::mir::types::canonical_map_root_size_i32(size);
@@ -2429,7 +9842,7 @@ fn eval_instruction(
             state.known_ints.insert(result.clone(), i64::from(value));
         }
         MirInstructionKind::MapRootContains { result, root, key } => {
-            let root_ty = crate::core::mir::types::map_root_type_id();
+            let root_ty = map_owner_type_for_instruction(function, instruction);
             let bool_ty = catalog.iter().find_map(|(ty, descriptor)| {
                 (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool))
                     .then(|| ty.clone())
@@ -2449,13 +9862,13 @@ fn eval_instruction(
                 Some(_) => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Contains source is not a MapRoot value"
-                    ))
+                    ));
                 }
                 None => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Contains root '{}' is unavailable",
                         root
-                    ))
+                    ));
                 }
             };
             state.values.insert(
@@ -2464,9 +9877,8 @@ fn eval_instruction(
             );
         }
         MirInstructionKind::MapRootDrop { root } => {
-            if function.values.get(root).map(|value| &value.ty)
-                != Some(&crate::core::mir::types::map_root_type_id())
-            {
+            let root_ty = map_owner_type_for_instruction(function, instruction);
+            if function.values.get(root).map(|value| &value.ty) != Some(&root_ty) {
                 return Err(format!(
                     "{instruction_id}: MapRoot Drop operand does not use the canonical MapRoot TypeDesc"
                 ));
@@ -2476,15 +9888,375 @@ fn eval_instruction(
                 Some(_) => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Drop operand is not a MapRoot value"
-                    ))
+                    ));
                 }
                 None => {
                     return Err(format!(
                         "{instruction_id}: MapRoot Drop root '{}' is unavailable",
                         root
-                    ))
+                    ));
                 }
             }
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result } => {
+            let owner_ty =
+                crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+            if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owner New result does not use its canonical TypeDesc"
+                ));
+            }
+            catalog
+                .validate_glue(&owner_ty, MirGlueOperation::MoveOut)
+                .map_err(|message| format!("{instruction_id}: {message}"))?;
+            if state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owner New result '{}' is already defined",
+                    result
+                ));
+            }
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::OrdinaryMapOwnerLifecycleV1 {
+                    entries: Vec::new(),
+                },
+            );
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleSet {
+            result,
+            source,
+            key,
+            value,
+        } => {
+            let owner_ty =
+                crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+            if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty)
+                || function.values.get(source).map(|value| &value.ty) != Some(&owner_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map Set source/result does not use its canonical TypeDesc"
+                ));
+            }
+            let key_ty = function
+                .values
+                .get(key)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| format!("{instruction_id}: ordinary Map Set key value is absent"))?;
+            catalog.validate_owned_string(&key_ty).map_err(|message| {
+                format!("{instruction_id}: ordinary Map Set key is not a String: {message}")
+            })?;
+            let symbolic_key = state
+                .known_strings
+                .get(key)
+                .ok_or_else(|| {
+                    format!(
+                        "{instruction_id}: ordinary Map Set key '{}' is not modeled",
+                        key
+                    )
+                })?
+                .as_z3()
+                .map_err(|message| {
+                    format!(
+                        "{instruction_id}: ordinary Map Set key cannot enter the symbolic key domain: {message}"
+                    )
+                })?;
+            let payload = state.values.get(value).cloned().ok_or_else(|| {
+                format!(
+                    "{instruction_id}: ordinary Map Set payload '{}' is unavailable",
+                    value
+                )
+            })?;
+            let payload_ty = function
+                .values
+                .get(value)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| format!("{instruction_id}: ordinary Map Set payload is absent"))?;
+            let descriptor = catalog.get(&payload_ty).ok_or_else(|| {
+                format!("{instruction_id}: ordinary Map Set payload TypeDesc is absent")
+            })?;
+            match descriptor.kind {
+                MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
+                    catalog.validate_copy_scalar(&payload_ty)?;
+                    let SymbolicValue::Int(payload) = payload else {
+                        return Err(format!(
+                            "{instruction_id}: ordinary Map i32 payload is not represented as an integer"
+                        ));
+                    };
+                    let lower = payload.ge(Int::from_i64(i32::MIN as i64));
+                    let upper = payload.le(Int::from_i64(i32::MAX as i64));
+                    add_definedness(state, Bool::and(&[&lower, &upper]), "E0802")?;
+                }
+                MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
+                    catalog.validate_owned_string(&payload_ty)?;
+                    if !matches!(payload, SymbolicValue::Opaque { ty } if ty == payload_ty) {
+                        return Err(format!(
+                            "{instruction_id}: ordinary Map String payload does not retain its exact owned String TypeDesc"
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Set payload is outside the i32/String profile"
+                    ));
+                }
+            }
+            let mut entries = match state.values.get(source).cloned() {
+                Some(SymbolicValue::OrdinaryMapOwnerLifecycleV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Set source is not an ordinary Map owner value"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Set source '{}' is unavailable",
+                        source
+                    ));
+                }
+            };
+            if result == source || state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map Set result aliases an existing root"
+                ));
+            }
+            let occupied = entries
+                .iter()
+                .map(|entry| Bool::and(&[&entry.present, &entry.key.eq(&symbolic_key)]))
+                .collect::<Vec<_>>();
+            let present = if occupied.is_empty() {
+                Bool::from_bool(true)
+            } else {
+                let refs = occupied.iter().collect::<Vec<_>>();
+                Bool::or(&refs).not()
+            };
+            entries.push(SymbolicOrdinaryMapEntry {
+                key: symbolic_key,
+                present,
+            });
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::OrdinaryMapOwnerLifecycleV1 { entries },
+            );
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleRemove {
+            result,
+            source,
+            key,
+        } => {
+            let owner_ty =
+                crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+            if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty)
+                || function.values.get(source).map(|value| &value.ty) != Some(&owner_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map Remove source/result does not use its canonical TypeDesc"
+                ));
+            }
+            let key_ty = function
+                .values
+                .get(key)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| format!("{instruction_id}: ordinary Map Remove key is absent"))?;
+            catalog.validate_owned_string(&key_ty).map_err(|message| {
+                format!("{instruction_id}: ordinary Map Remove key is not a String: {message}")
+            })?;
+            let symbolic_key = state
+                .known_strings
+                .get(key)
+                .ok_or_else(|| {
+                    format!(
+                        "{instruction_id}: ordinary Map Remove key '{}' is not modeled",
+                        key
+                    )
+                })?
+                .as_z3()
+                .map_err(|message| {
+                    format!(
+                        "{instruction_id}: ordinary Map Remove key cannot enter the symbolic key domain: {message}"
+                    )
+                })?;
+            let source_entries = match state.values.get(source).cloned() {
+                Some(SymbolicValue::OrdinaryMapOwnerLifecycleV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Remove source is not an ordinary Map owner value"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Remove source '{}' is unavailable",
+                        source
+                    ));
+                }
+            };
+            if result == source || state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map Remove result aliases an existing root"
+                ));
+            }
+            let entries = source_entries
+                .into_iter()
+                .map(|entry| SymbolicOrdinaryMapEntry {
+                    present: Bool::and(&[&entry.present, &entry.key.eq(&symbolic_key).not()]),
+                    key: entry.key,
+                })
+                .collect();
+            state.values.insert(
+                result.clone(),
+                SymbolicValue::OrdinaryMapOwnerLifecycleV1 { entries },
+            );
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, root } => {
+            let owner_ty =
+                crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+            let i32_ty = catalog.iter().find_map(|(ty, descriptor)| {
+                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
+                    .then(|| ty.clone())
+            });
+            if i32_ty.as_ref().is_none_or(|i32_ty| {
+                function.values.get(result).map(|value| &value.ty) != Some(i32_ty)
+            }) || function.values.get(root).map(|value| &value.ty) != Some(&owner_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map Size result/root TypeDesc is invalid"
+                ));
+            }
+            let entries = match state.values.get(root) {
+                Some(SymbolicValue::OrdinaryMapOwnerLifecycleV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Size source is not an ordinary Map owner value"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Size root '{}' is unavailable",
+                        root
+                    ));
+                }
+            };
+            let counts = entries
+                .iter()
+                .map(|entry| entry.present.ite(&Int::from_i64(1), &Int::from_i64(0)))
+                .collect::<Vec<_>>();
+            let refs = counts.iter().collect::<Vec<_>>();
+            let size = if refs.is_empty() {
+                Int::from_i64(0)
+            } else {
+                Int::add(&refs)
+            };
+            let in_i32_range = size.le(Int::from_i64(i32::MAX as i64));
+            add_definedness(state, in_i32_range, "E0802")?;
+            state
+                .values
+                .insert(result.clone(), SymbolicValue::Int(size));
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, root, key } => {
+            let owner_ty =
+                crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+            let bool_ty = catalog.iter().find_map(|(ty, descriptor)| {
+                (descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool))
+                    .then(|| ty.clone())
+            });
+            let key_ty = function
+                .values
+                .get(key)
+                .map(|value| value.ty.clone())
+                .ok_or_else(|| format!("{instruction_id}: ordinary Map Contains key is absent"))?;
+            if bool_ty.as_ref().is_none_or(|bool_ty| {
+                function.values.get(result).map(|value| &value.ty) != Some(bool_ty)
+            }) || function.values.get(root).map(|value| &value.ty) != Some(&owner_ty)
+            {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map Contains result/root TypeDesc is invalid"
+                ));
+            }
+            catalog.validate_owned_string(&key_ty).map_err(|message| {
+                format!("{instruction_id}: ordinary Map Contains key is not a String: {message}")
+            })?;
+            let symbolic_key = state
+                .known_strings
+                .get(key)
+                .ok_or_else(|| {
+                    format!(
+                        "{instruction_id}: ordinary Map Contains key '{}' is not modeled",
+                        key
+                    )
+                })?
+                .as_z3()
+                .map_err(|message| {
+                    format!(
+                        "{instruction_id}: ordinary Map Contains key cannot enter the symbolic key domain: {message}"
+                    )
+                })?;
+            let entries = match state.values.get(root) {
+                Some(SymbolicValue::OrdinaryMapOwnerLifecycleV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Contains source is not an ordinary Map owner value"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Contains root '{}' is unavailable",
+                        root
+                    ));
+                }
+            };
+            let matches = entries
+                .iter()
+                .map(|entry| Bool::and(&[&entry.present, &entry.key.eq(&symbolic_key)]))
+                .collect::<Vec<_>>();
+            let contains = if matches.is_empty() {
+                Bool::from_bool(false)
+            } else {
+                let refs = matches.iter().collect::<Vec<_>>();
+                Bool::or(&refs)
+            };
+            state
+                .values
+                .insert(result.clone(), SymbolicValue::Bool(contains));
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root } => {
+            let owner_ty =
+                crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+            if function.values.get(root).map(|value| &value.ty) != Some(&owner_ty) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map Drop operand does not use its canonical TypeDesc"
+                ));
+            }
+            match state.values.remove(root) {
+                Some(SymbolicValue::OrdinaryMapOwnerLifecycleV1 { .. }) => {}
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Drop operand is not an ordinary Map owner value"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: ordinary Map Drop root '{}' is unavailable",
+                        root
+                    ));
+                }
+            }
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. } => {
+            eval_ordinary_map_owned_get_instruction(
+                function,
+                catalog,
+                state,
+                instruction_id,
+                instruction,
+            )?;
         }
         MirInstructionKind::Const { result, literal } => {
             let result_ty = function
@@ -2537,6 +10309,13 @@ fn eval_instruction(
             } else {
                 state.known_ints.remove(result);
             }
+            if let crate::core::ir::ResolvedLiteral::String(value) = literal {
+                state
+                    .known_strings
+                    .insert(result.clone(), SymbolicString::Literal(value.clone()));
+            } else {
+                state.known_strings.remove(result);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Load { result, place } => {
@@ -2562,8 +10341,14 @@ fn eval_instruction(
                         state.known_ints.remove(result);
                     }
                 }
+                if let Some(known) = state.known_strings.get(&source).cloned() {
+                    state.known_strings.insert(result.clone(), known);
+                } else {
+                    state.known_strings.remove(result);
+                }
             } else {
                 state.known_ints.remove(result);
+                state.known_strings.remove(result);
             }
             state.values.insert(result.clone(), value);
         }
@@ -2587,6 +10372,11 @@ fn eval_instruction(
                 None => {
                     state.known_ints.remove(result);
                 }
+            }
+            if let Some(known) = state.known_strings.get(source).cloned() {
+                state.known_strings.insert(result.clone(), known);
+            } else {
+                state.known_strings.remove(result);
             }
             state.values.insert(result.clone(), value);
         }
@@ -2624,6 +10414,14 @@ fn eval_instruction(
             } else {
                 state.known_ints.remove(result);
             }
+            if let Some(known) = state.known_strings.get(source).cloned() {
+                if !is_copy {
+                    state.known_strings.remove(source);
+                }
+                state.known_strings.insert(result.clone(), known);
+            } else {
+                state.known_strings.remove(result);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Clone { result, source } => {
@@ -2652,6 +10450,11 @@ fn eval_instruction(
                     state.known_ints.remove(result);
                 }
             }
+            if let Some(known) = state.known_strings.get(source).cloned() {
+                state.known_strings.insert(result.clone(), known);
+            } else {
+                state.known_strings.remove(result);
+            }
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::Drop { value } => {
@@ -2674,6 +10477,7 @@ fn eval_instruction(
                     ));
                 }
                 state.list_shapes.remove(value);
+                state.known_strings.remove(value);
             } else if !state.values.contains_key(value) {
                 return Err(format!("MIR drop value '{}' is not defined", value));
             }
@@ -2726,6 +10530,73 @@ fn eval_instruction(
             let result_ty = instruction_value_type(function, result, "binary result")?;
             let left_ty = instruction_value_type(function, left, "binary left operand")?;
             let right_ty = instruction_value_type(function, right, "binary right operand")?;
+            let is_string = |ty: &crate::core::ResolvedTypeId| {
+                catalog.get(ty).is_some_and(|descriptor| {
+                    descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                })
+            };
+            if *op == crate::core::ir::ResolvedBinaryOp::Add
+                && is_string(&result_ty)
+                && is_string(&left_ty)
+                && is_string(&right_ty)
+            {
+                for ty in [&result_ty, &left_ty, &right_ty] {
+                    catalog.validate_owned_string(ty)?;
+                }
+                let left_text = state.known_strings.get(left).cloned().ok_or_else(|| {
+                    format!("{instruction_id}: String concatenation left value is not modeled")
+                })?;
+                let right_text = state.known_strings.get(right).cloned().ok_or_else(|| {
+                    format!("{instruction_id}: String concatenation right value is not modeled")
+                })?;
+                state.known_strings.insert(
+                    result.clone(),
+                    SymbolicString::Concat(Box::new(left_text), Box::new(right_text)),
+                );
+                state.known_ints.remove(result);
+                state
+                    .values
+                    .insert(result.clone(), SymbolicValue::Opaque { ty: result_ty });
+                return Ok(());
+            }
+            if matches!(
+                op,
+                crate::core::ir::ResolvedBinaryOp::Equal
+                    | crate::core::ir::ResolvedBinaryOp::NotEqual
+            ) && is_string(&left_ty)
+                && is_string(&right_ty)
+                && (function
+                    .ownership
+                    .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+                    || function_has_managed_any(function, catalog))
+            {
+                catalog.validate_owned_string(&left_ty)?;
+                catalog.validate_owned_string(&right_ty)?;
+                if catalog.get(&result_ty).is_none_or(|descriptor| {
+                    descriptor.kind != MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+                        || catalog.validate_copy_scalar(&result_ty).is_err()
+                }) {
+                    return Err(format!(
+                        "{instruction_id}: String equality result is not canonical bool"
+                    ));
+                }
+                let left = symbolic_string_for_value(state, left).ok_or_else(|| {
+                    format!("{instruction_id}: left String equality operand is not modeled")
+                })?;
+                let right = symbolic_string_for_value(state, right).ok_or_else(|| {
+                    format!("{instruction_id}: right String equality operand is not modeled")
+                })?;
+                let equal = left.as_z3()?.eq(&right.as_z3()?);
+                let output = if *op == crate::core::ir::ResolvedBinaryOp::Equal {
+                    equal
+                } else {
+                    equal.not()
+                };
+                state
+                    .values
+                    .insert(result.clone(), SymbolicValue::Bool(output));
+                return Ok(());
+            }
             let float_shape = [
                 catalog.get(&result_ty),
                 catalog.get(&left_ty),
@@ -2758,30 +10629,36 @@ fn eval_instruction(
                         crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
                     ));
                 }
+                let left_id = left;
+                let right_id = right;
                 let left =
-                    state.values.get(left).cloned().ok_or_else(|| {
-                        format!("MIR binary left value '{}' is not defined", left)
+                    state.values.get(left_id).cloned().ok_or_else(|| {
+                        format!("MIR binary left value '{}' is not defined", left_id)
                     })?;
-                let right =
-                    state.values.get(right).cloned().ok_or_else(|| {
-                        format!("MIR binary right value '{}' is not defined", right)
-                    })?;
-                let output = eval_binary(function, catalog, state, *op, left, right, result)?;
+                let right = state.values.get(right_id).cloned().ok_or_else(|| {
+                    format!("MIR binary right value '{}' is not defined", right_id)
+                })?;
+                let output = eval_binary(
+                    function, catalog, state, *op, left_id, right_id, left, right, result,
+                )?;
                 ensure_result_shape(function, catalog, result, &output)?;
                 state.values.insert(result.clone(), output);
                 return Ok(());
             }
+            let left_id = left;
+            let right_id = right;
             let left = state
                 .values
-                .get(left)
+                .get(left_id)
                 .cloned()
-                .ok_or_else(|| format!("MIR binary left value '{}' is not defined", left))?;
-            let right = state
-                .values
-                .get(right)
-                .cloned()
-                .ok_or_else(|| format!("MIR binary right value '{}' is not defined", right))?;
-            let output = eval_binary(function, catalog, state, *op, left, right, result)?;
+                .ok_or_else(|| format!("MIR binary left value '{}' is not defined", left_id))?;
+            let right =
+                state.values.get(right_id).cloned().ok_or_else(|| {
+                    format!("MIR binary right value '{}' is not defined", right_id)
+                })?;
+            let output = eval_binary(
+                function, catalog, state, *op, left_id, right_id, left, right, result,
+            )?;
             ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
         }
@@ -3415,7 +11292,7 @@ fn eval_instruction(
                     return Err(
                         "MIR variant projection fallback values disagree with Copy scalar ABI"
                             .into(),
-                    )
+                    );
                 }
             };
             ensure_result_shape(function, catalog, result, &projected)?;
@@ -3964,8 +11841,8 @@ fn eval_instruction(
             callee,
             type_arguments,
             arguments,
+            effect_receipts,
             variant_call_contract,
-            ..
         } => {
             if matches!(callee, crate::core::ir::ResolvedCallee::Extern(_)) {
                 let crate::core::ir::ResolvedCallee::Extern(callee_owner) = callee else {
@@ -3987,10 +11864,12 @@ fn eval_instruction(
                     program,
                     catalog,
                     state,
+                    Some(instruction_id),
                     result,
                     callee,
                     type_arguments,
                     arguments,
+                    effect_receipts,
                     variant_call_contract.as_ref(),
                 )?;
             }
@@ -4034,6 +11913,58 @@ fn eval_instruction(
             let output = SymbolicValue::Bool(tag.eq(Int::from_i64(receipt.discriminant as i64)));
             ensure_result_shape(function, catalog, result, &output)?;
             state.values.insert(result.clone(), output);
+        }
+        MirInstructionKind::ClosureBind {
+            closure_local,
+            function_value,
+            abi,
+            ..
+        } => {
+            // Metadata only; it creates no runtime closure pointer or effect.
+            validate_closure_callable_value(
+                program,
+                function,
+                closure_local,
+                function_value,
+                &abi.source_function_type,
+                abi.source_abi,
+                abi.source_parameter_types.len(),
+            )?;
+        }
+        MirInstructionKind::ClosureInvoke {
+            closure_local,
+            function_value,
+            abi,
+            result,
+            callee,
+            type_arguments,
+            arguments,
+        } => {
+            validate_closure_callable_value(
+                program,
+                function,
+                closure_local,
+                function_value,
+                &abi.source_function_type,
+                abi.source_abi,
+                abi.source_parameter_types.len(),
+            )?;
+            // Reuse the closed direct-call interpreter so callee preconditions,
+            // traps, owned arguments, and return values share ordinary Call semantics.
+            let direct = crate::core::ir::ResolvedCallee::Function(callee.clone());
+            eval_materialized_call(
+                function,
+                program,
+                catalog,
+                state,
+                None,
+                result,
+                &direct,
+                type_arguments,
+                arguments,
+                &[],
+                None,
+            )?;
         }
         MirInstructionKind::FlowTransition {
             result,
@@ -4188,7 +12119,7 @@ fn eval_instruction(
             state.values.insert(result.clone(), value);
         }
         MirInstructionKind::UpdateRecord { .. } => {
-            return Err("MIR record update requires a record aggregate kind".into())
+            return Err("MIR record update requires a record aggregate kind".into());
         }
     }
     Ok(())
@@ -4403,12 +12334,16 @@ fn eval_flow_transition(
     }
 
     let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::new(),
         constraints: state.constraints.clone(),
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let argument_info = function.values.get(argument).ok_or_else(|| {
@@ -4455,6 +12390,30 @@ fn eval_flow_transition(
         }
     }
 
+    let entry_values = target_state.values.clone();
+    for kind in [MirContractKind::Invariant, MirContractKind::Requires] {
+        for predicate in target
+            .contracts
+            .iter()
+            .filter(|predicate| predicate.kind == kind)
+        {
+            let (term, defined) =
+                checked_contract_term(predicate, catalog, &entry_values, &entry_values, None)?;
+            add_definedness(
+                &mut target_state,
+                defined,
+                "transition source invariant/guard expression is undefined",
+            )?;
+            add_definedness(
+                &mut target_state,
+                expect_bool(term, "transition source invariant/guard")?,
+                &format!(
+                    "call to transition '{}' may violate its source invariant or guard",
+                    transition.0
+                ),
+            )?;
+        }
+    }
     let mut returns = Vec::new();
     let mut traps = Vec::new();
     explore_block(
@@ -4467,6 +12426,26 @@ fn eval_flow_transition(
         &mut returns,
         &mut traps,
     )?;
+    // The old pure-contract VIR route never observed a fails payload. The
+    // typed engine must prove the exact source is returned on every Err edge.
+    if recoverable && !target.contracts.is_empty() {
+        for path in &returns {
+            let unchanged = recoverable_source_unchanged(
+                target,
+                contract,
+                catalog,
+                &entry_values,
+                &path.value,
+            )?;
+            let mut condition = path.constraints.clone();
+            condition.push(unchanged.not());
+            traps.push(SymbolicTrap {
+                condition,
+                code: "Flow fails returned a changed source state".into(),
+                subject: Some(target.owner.clone()),
+            });
+        }
+    }
     let caller_constraints = state.constraints.clone();
     if recoverable {
         // A recoverable transition is total over two ordinary MIR return
@@ -4491,12 +12470,13 @@ fn eval_flow_transition(
         ensure_result_shape(function, catalog, result, &returned)?;
         state.values.insert(result.clone(), returned);
     } else {
-        if !traps.is_empty() {
-            return Err(format!(
-                "MIR verifier transition '{}' has a trapping execution path",
-                transition.0
-            ));
-        }
+        // A Flow call's source invariant and guards are caller obligations.
+        // Keep their counterexample paths in the caller's trap ledger so the
+        // enclosing proof can report Disproven; treating them as a verifier
+        // capability error would erase a real call-site violation as
+        // NotInTrustedSubset. Body traps are propagated by the same exact
+        // path condition and remain ordinary caller execution obligations.
+        state.traps.extend(traps);
         let [returned] = returns.as_slice() else {
             return Err(format!(
                 "MIR verifier transition '{}' must have exactly one non-trapping return path",
@@ -4582,15 +12562,409 @@ fn eval_ffi_call(
     Ok(())
 }
 
+/// Preflight every generic call that appears to carry the canonical Any ABI.
+/// This runs from `verify_function` before entry constraints are materialized;
+/// ordinary concrete helpers that take `Any` still use their existing direct
+/// helper route when they have no instance and no generic arguments.
+fn validate_managed_any_generic_calls(
+    function: &MirFunction,
+    program: &MirProgram,
+) -> Result<(), String> {
+    let catalog = program.type_catalog();
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        if let MirInstructionKind::ClosureInvoke {
+            function_value,
+            result,
+            callee,
+            type_arguments,
+            arguments,
+            ..
+        } = &instruction.kind
+        {
+            let direct = crate::core::ir::ResolvedCallee::Function(callee.clone());
+            let target = program.functions().get(callee);
+            let carries_any = type_arguments
+                .iter()
+                .any(|ty| catalog.contains_dynamic_or_managed_any(ty))
+                || arguments.iter().any(|argument| {
+                    function
+                        .values
+                        .get(argument)
+                        .is_some_and(|value| catalog.contains_dynamic_or_managed_any(&value.ty))
+                })
+                || function
+                    .values
+                    .get(function_value)
+                    .is_some_and(|value| catalog.contains_dynamic_or_managed_any(&value.ty))
+                || result.as_ref().is_some_and(|value| {
+                    function
+                        .values
+                        .get(value)
+                        .is_some_and(|value| catalog.contains_dynamic_or_managed_any(&value.ty))
+                })
+                || target.is_some_and(|target| function_has_managed_any(target, catalog));
+            let instance = program
+                .instances()
+                .values()
+                .find(|instance| instance.function == *callee);
+            if carries_any && (!type_arguments.is_empty() || instance.is_some()) {
+                let validation = match instance.map(|instance| &instance.contract) {
+                    Some(crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup {
+                        ..
+                    }) => validate_managed_any_trap_cleanup_call_boundary(
+                        function,
+                        program,
+                        result.as_ref(),
+                        &direct,
+                        type_arguments,
+                        arguments,
+                        &[],
+                        None,
+                    ),
+                    Some(crate::core::mir::MirGenericInstanceContract::ManagedAnyIdentity) => {
+                        validate_managed_any_identity_call_boundary(
+                            function,
+                            program,
+                            result.as_ref(),
+                            &direct,
+                            type_arguments,
+                            arguments,
+                            &[],
+                            None,
+                        )
+                    }
+                    _ => Err(
+                        "ManagedAny cannot cross an unreceipted generic ClosureInvoke ABI".into(),
+                    ),
+                };
+                validation.map_err(|message| format!("{}: {message}", instruction.id))?;
+            }
+            continue;
+        }
+        let MirInstructionKind::Call {
+            result,
+            callee,
+            type_arguments,
+            arguments,
+            effect_receipts,
+            variant_call_contract,
+        } = &instruction.kind
+        else {
+            continue;
+        };
+        let owner = crate::core::mir::canonical_protocol_call_target(callee);
+        let target = owner
+            .as_ref()
+            .and_then(|owner| program.functions().get(owner));
+        let matching_instances = owner
+            .as_ref()
+            .map(|owner| {
+                program
+                    .instances()
+                    .values()
+                    .filter(|instance| instance.function == *owner)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let carries_managed_any = type_arguments
+            .iter()
+            .any(|ty| catalog.contains_dynamic_or_managed_any(ty))
+            || catalog
+                .validate_managed_any_identity_source_argument(type_arguments)
+                .is_ok()
+            || arguments.iter().any(|argument| {
+                function
+                    .values
+                    .get(argument)
+                    .is_some_and(|value| catalog.contains_dynamic_or_managed_any(&value.ty))
+            })
+            || result.as_ref().is_some_and(|result| {
+                function
+                    .values
+                    .get(result)
+                    .is_some_and(|value| catalog.contains_dynamic_or_managed_any(&value.ty))
+            })
+            || target.is_some_and(|target| function_has_managed_any(target, catalog));
+        let claims_managed_any_identity = matching_instances.iter().any(|instance| {
+            matches!(
+                instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ManagedAnyIdentity
+            )
+        });
+        let claims_managed_any_trap_cleanup = matching_instances.iter().any(|instance| {
+            matches!(
+                instance.contract,
+                crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup { .. }
+            )
+        });
+        if claims_managed_any_identity
+            || claims_managed_any_trap_cleanup
+            || (carries_managed_any
+                && (!type_arguments.is_empty() || !matching_instances.is_empty()))
+        {
+            let validation = if claims_managed_any_trap_cleanup {
+                validate_managed_any_trap_cleanup_call_boundary(
+                    function,
+                    program,
+                    result.as_ref(),
+                    callee,
+                    type_arguments,
+                    arguments,
+                    effect_receipts,
+                    variant_call_contract.as_ref(),
+                )
+            } else {
+                validate_managed_any_identity_call_boundary(
+                    function,
+                    program,
+                    result.as_ref(),
+                    callee,
+                    type_arguments,
+                    arguments,
+                    effect_receipts,
+                    variant_call_contract.as_ref(),
+                )
+            };
+            validation.map_err(|message| format!("{}: {message}", instruction.id))?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate one exact generic cleanup call without changing symbolic state.
+/// Core checks the private Checker seal and guaranteed-trap body; this layer
+/// binds that proof to the unique instance and this source/ABI call site.
+fn validate_managed_any_trap_cleanup_call_boundary(
+    caller: &MirFunction,
+    program: &MirProgram,
+    result: Option<&MirValueId>,
+    callee: &crate::core::ir::ResolvedCallee,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    effect_receipts: &[crate::core::mir::types::MirCallEffectContract],
+    variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+) -> Result<(), String> {
+    let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
+        return Err(
+            "ManagedAny trap-cleanup call must target a canonical function instance".into(),
+        );
+    };
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "ManagedAny trap-cleanup target '{}' is absent from canonical MIR",
+            target_owner.0
+        )
+    })?;
+    let mut instances = program
+        .instances()
+        .values()
+        .filter(|instance| instance.function == *target_owner);
+    let instance = instances.next().ok_or_else(|| {
+        format!(
+            "ManagedAny trap-cleanup target '{}' has no canonical instance receipt",
+            target_owner.0
+        )
+    })?;
+    if instances.next().is_some() {
+        return Err("ManagedAny trap-cleanup target is bound by multiple instance receipts".into());
+    }
+    let crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup { trap } =
+        &instance.contract
+    else {
+        return Err("ManagedAny call does not name a trap-cleanup instance contract".into());
+    };
+    let canonical_any = program
+        .type_catalog()
+        .validate_managed_any_identity_source_argument(type_arguments)?;
+    if instance.arguments != type_arguments {
+        return Err(
+            "ManagedAny trap-cleanup Call type arguments disagree with the instance receipt".into(),
+        );
+    }
+    if !effect_receipts.is_empty()
+        || variant_call_contract.is_some()
+        || !target.contracts.is_empty()
+    {
+        return Err(
+            "ManagedAny trap-cleanup call cannot carry effects, variant receipts, or callee contracts"
+                .into(),
+        );
+    }
+    program
+        .type_catalog()
+        .validate_managed_any_trap_cleanup_instance(instance, target)?;
+    if let Some(message) =
+        crate::core::mir::validate_materialized_call_abi(callee, caller, target, result, arguments)
+            .into_iter()
+            .next()
+    {
+        return Err(format!(
+            "ManagedAny trap-cleanup call ABI rejected: {message}"
+        ));
+    }
+    if let Some(message) = crate::core::mir::validate_materialized_call_result_presence(
+        callee,
+        target,
+        result,
+        program.type_catalog(),
+    )
+    .into_iter()
+    .next()
+    {
+        return Err(format!(
+            "ManagedAny trap-cleanup result ABI rejected: {message}"
+        ));
+    }
+    let [argument] = arguments else {
+        return Err("ManagedAny trap-cleanup call must pass exactly one owner".into());
+    };
+    let argument_ty = caller
+        .values
+        .get(argument)
+        .map(|value| &value.ty)
+        .ok_or_else(|| format!("ManagedAny trap-cleanup source '{}' is absent", argument))?;
+    if argument_ty != &canonical_any {
+        return Err("ManagedAny trap-cleanup source is not the canonical owner TypeDesc".into());
+    }
+    let result =
+        result.ok_or_else(|| "ManagedAny trap-cleanup call has no result owner".to_string())?;
+    let result_ty = caller
+        .values
+        .get(result)
+        .map(|value| &value.ty)
+        .ok_or_else(|| format!("ManagedAny trap-cleanup result '{}' is absent", result))?;
+    let is_i32 = |ty: &crate::core::ResolvedTypeId| {
+        program.type_catalog().get(ty).is_some_and(|descriptor| {
+            descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+        })
+    };
+    if !is_i32(result_ty) || !is_i32(&target.result) {
+        return Err(format!(
+            "ManagedAny trap-cleanup `{}` call result is outside the canonical i32 ABI",
+            trap.canonical_text()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_managed_any_identity_call_boundary(
+    caller: &MirFunction,
+    program: &MirProgram,
+    result: Option<&MirValueId>,
+    callee: &crate::core::ir::ResolvedCallee,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+    effect_receipts: &[crate::core::mir::types::MirCallEffectContract],
+    variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+) -> Result<(), String> {
+    let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
+        return Err("ManagedAny identity call must target a canonical function instance".into());
+    };
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "ManagedAny identity target '{}' is absent from canonical MIR",
+            target_owner.0
+        )
+    })?;
+    let mut instances = program
+        .instances()
+        .values()
+        .filter(|instance| instance.function == *target_owner);
+    let instance = instances.next().ok_or_else(|| {
+        format!(
+            "ManagedAny identity target '{}' has no canonical instance receipt",
+            target_owner.0
+        )
+    })?;
+    if instances.next().is_some() {
+        return Err("ManagedAny identity target is bound by multiple instance receipts".into());
+    }
+    if !matches!(
+        instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ManagedAnyIdentity
+    ) {
+        return Err(
+            "ManagedAny call does not name the dedicated identity instance contract".into(),
+        );
+    }
+    let canonical_any = crate::core::mir::types::managed_any_i32_string_v1_type_id();
+    let managed_any_argument = program
+        .type_catalog()
+        .validate_managed_any_identity_source_argument(type_arguments)?;
+    if instance.arguments != type_arguments {
+        return Err(
+            "ManagedAny identity Call type arguments disagree with the canonical instance receipt"
+                .into(),
+        );
+    }
+    if managed_any_argument != canonical_any {
+        return Err(
+            "ManagedAny identity source argument does not resolve to the canonical owner TypeDesc"
+                .into(),
+        );
+    }
+    if !effect_receipts.is_empty() || variant_call_contract.is_some() {
+        return Err(
+            "ManagedAny identity call cannot carry unrelated effect or variant receipts".into(),
+        );
+    }
+    program
+        .type_catalog()
+        .validate_managed_any_identity_instance(instance, target)?;
+    if let Some(message) =
+        crate::core::mir::validate_materialized_call_abi(callee, caller, target, result, arguments)
+            .into_iter()
+            .next()
+    {
+        return Err(format!("ManagedAny identity call ABI rejected: {message}"));
+    }
+    if let Some(message) = crate::core::mir::validate_materialized_call_result_presence(
+        callee,
+        target,
+        result,
+        program.type_catalog(),
+    )
+    .into_iter()
+    .next()
+    {
+        return Err(format!(
+            "ManagedAny identity result ABI rejected: {message}"
+        ));
+    }
+    let [argument] = arguments else {
+        return Err("ManagedAny identity call must pass exactly one owned source value".into());
+    };
+    let argument_ty = caller
+        .values
+        .get(argument)
+        .map(|value| &value.ty)
+        .ok_or_else(|| format!("ManagedAny identity source '{}' is absent", argument))?;
+    if argument_ty != &canonical_any {
+        return Err("ManagedAny identity source is not the canonical owner TypeDesc".into());
+    }
+    let result =
+        result.ok_or_else(|| "ManagedAny identity call has no result owner".to_string())?;
+    if caller.values.get(result).map(|value| &value.ty) != Some(&canonical_any) {
+        return Err("ManagedAny identity result is not the canonical owner TypeDesc".into());
+    }
+    Ok(())
+}
+
 fn eval_materialized_call(
     function: &MirFunction,
     program: &MirProgram,
     catalog: &crate::core::mir::types::MirTypeCatalog,
     state: &mut SymbolicState,
+    instruction_id: Option<&crate::core::mir::MirInstructionId>,
     result: &Option<MirValueId>,
     callee: &crate::core::ir::ResolvedCallee,
     type_arguments: &[crate::core::ir::ResolvedTypeId],
     arguments: &[MirValueId],
+    effect_receipts: &[crate::core::mir::types::MirCallEffectContract],
     variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
 ) -> Result<(), String> {
     let Some(target_owner) = crate::core::mir::canonical_protocol_call_target(callee) else {
@@ -4634,7 +13008,22 @@ fn eval_materialized_call(
         .values()
         .find(|instance| instance.function == target_owner)
     else {
+        if function_has_managed_any(target, catalog) {
+            return eval_direct_managed_any_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                &target_owner,
+                type_arguments,
+                arguments,
+            );
+        }
         if is_direct_scalar_call_type(catalog, &target.result) {
+            let source_call_node = instruction_id
+                .and_then(|instruction| instruction.as_str().strip_prefix("inst:call:"))
+                .map(|node| crate::core::NodeId(node.to_owned()));
             return eval_direct_scalar_call(
                 function,
                 program,
@@ -4644,6 +13033,7 @@ fn eval_materialized_call(
                 &target_owner,
                 type_arguments,
                 arguments,
+                source_call_node.as_ref(),
             );
         }
         if catalog.validate_owned_string(&target.result).is_ok() {
@@ -4670,6 +13060,23 @@ fn eval_materialized_call(
             variant_call_contract,
         );
     };
+    let managed_any_crossing = function_has_managed_any(target, catalog)
+        || type_arguments
+            .iter()
+            .any(|ty| catalog.contains_dynamic_or_managed_any(ty));
+    // Only the dedicated Checker-sealed `T -> T` instance has a generic Any
+    // ownership ABI. A canonical TypeDesc alone never opens the generic gate.
+    if managed_any_crossing
+        && !matches!(
+            &instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ManagedAnyIdentity
+                | crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup { .. }
+        )
+    {
+        return Err(
+            "MIR verifier ManagedAny cannot cross an unreceipted generic instance ABI".into(),
+        );
+    }
     if instance.arguments != type_arguments {
         return Err(format!(
             "MIR verifier call target '{}' disagrees with its instance arguments",
@@ -4677,6 +13084,37 @@ fn eval_materialized_call(
         ));
     }
     match &instance.contract {
+        crate::core::mir::MirGenericInstanceContract::ManagedAnyIdentity => {
+            eval_materialized_managed_any_identity_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                callee,
+                type_arguments,
+                arguments,
+                effect_receipts,
+                variant_call_contract,
+                instance,
+            )
+        }
+        crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup { trap } => {
+            eval_materialized_managed_any_trap_cleanup_call(
+                function,
+                program,
+                catalog,
+                state,
+                result,
+                callee,
+                type_arguments,
+                arguments,
+                effect_receipts,
+                variant_call_contract,
+                instance,
+                *trap,
+            )
+        }
         crate::core::mir::MirGenericInstanceContract::ScalarIdentity
         | crate::core::mir::MirGenericInstanceContract::OwnedStringIdentity => {
             eval_materialized_identity_call(
@@ -4890,10 +13328,35 @@ pub(crate) fn direct_call_graph_reaches(
     };
     for block in function.blocks.values() {
         for instruction in &block.instructions {
-            let MirInstructionKind::Call { callee, .. } = &instruction.kind else {
-                continue;
+            let next = match &instruction.kind {
+                MirInstructionKind::Call { callee, .. } => {
+                    crate::core::mir::canonical_protocol_call_target(callee)
+                }
+                MirInstructionKind::ClosureInvoke {
+                    closure_local,
+                    function_value,
+                    callee,
+                    abi,
+                    ..
+                } => {
+                    if validate_closure_callable_value(
+                        program,
+                        function,
+                        closure_local,
+                        function_value,
+                        &abi.source_function_type,
+                        abi.source_abi,
+                        abi.source_parameter_types.len(),
+                    )
+                    .is_err()
+                    {
+                        continue;
+                    }
+                    Some(callee.clone())
+                }
+                _ => None,
             };
-            let Some(next) = crate::core::mir::canonical_protocol_call_target(callee) else {
+            let Some(next) = next else {
                 continue;
             };
             if direct_call_graph_reaches(program, &next, sought, visited) {
@@ -4902,6 +13365,172 @@ pub(crate) fn direct_call_graph_reaches(
         }
     }
     false
+}
+
+/// This direct-call snapshot ABI checkpoint admits only the managed leaf,
+/// the `(bool, Any)` getter product, and concrete scalar/String helpers.
+/// Generic Any forwarding is handled separately by the dedicated sealed
+/// `ManagedAnyIdentity` instance contract.
+pub(crate) fn is_direct_managed_any_call_type(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    catalog.is_managed_any_i32_string_v1(ty)
+        || catalog
+            .validate_ordinary_map_owned_get_any_result_type(ty)
+            .is_ok()
+        || is_direct_scalar_call_type(catalog, ty)
+        || catalog.validate_owned_string(ty).is_ok()
+}
+
+pub(crate) fn direct_call_uses_managed_any(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> bool {
+    function_has_managed_any(function, catalog)
+}
+
+fn eval_direct_managed_any_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    target_owner: &crate::core::NodeId,
+    type_arguments: &[crate::core::ResolvedTypeId],
+    arguments: &[MirValueId],
+) -> Result<(), String> {
+    if !type_arguments.is_empty() {
+        return Err(
+            "MIR verifier ManagedAny direct call cannot carry generic type arguments".into(),
+        );
+    }
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "MIR verifier ManagedAny call target '{}' is absent",
+            target_owner.0
+        )
+    })?;
+    validate_ordinary_map_owned_get_verifier_boundary(target, program, catalog)?;
+    validate_managed_any_verifier_boundary(target, catalog)?;
+    if !is_direct_managed_any_call_type(catalog, &target.result)
+        || direct_call_graph_reaches(program, target_owner, &function.owner, &mut BTreeSet::new())
+        || target.blocks.len() != 1
+        || arguments.len() != target.parameters.len()
+    {
+        return Err(
+            "MIR verifier ManagedAny call requires a concrete non-recursive one-block snapshot ABI"
+                .into(),
+        );
+    }
+    let result_is_unit = catalog
+        .get(&target.result)
+        .is_some_and(|desc| desc.is_canonical_ffi_unit());
+    if let Some(result) = result {
+        if instruction_value_type(function, result, "ManagedAny call result")? != target.result {
+            return Err(
+                "MIR verifier ManagedAny call result disagrees with target TypeDesc".into(),
+            );
+        }
+    } else if !result_is_unit {
+        return Err("MIR verifier ManagedAny call has no non-unit result".into());
+    }
+    let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
+        values: BTreeMap::new(),
+        constraints: state.constraints.clone(),
+        traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
+        ffi_checks: Vec::new(),
+        normal_path_terminated: false,
+    };
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        let argument_ty = instruction_value_type(function, argument, "ManagedAny call argument")?;
+        let parameter_ty = instruction_value_type(target, parameter, "ManagedAny call parameter")?;
+        if argument_ty != parameter_ty || !is_direct_managed_any_call_type(catalog, &parameter_ty) {
+            return Err(
+                "MIR verifier ManagedAny call parameter TypeDesc is outside its snapshot ABI"
+                    .into(),
+            );
+        }
+        let is_copy = is_copy_value(catalog, &argument_ty)?;
+        let value = if is_copy {
+            state.values.get(argument).cloned()
+        } else {
+            catalog.validate_glue(&argument_ty, MirGlueOperation::MoveOut)?;
+            state.values.remove(argument)
+        }
+        .ok_or_else(|| format!("ManagedAny call argument '{}' is unavailable", argument))?;
+        if !symbolic_matches_type(catalog, &parameter_ty, &value) {
+            return Err(
+                "MIR verifier ManagedAny call argument has the wrong symbolic shape".into(),
+            );
+        }
+        if let Some(value) = state.known_ints.get(argument).copied() {
+            target_state.known_ints.insert(parameter.clone(), value);
+        }
+        if let Some(value) = state.known_strings.get(argument).cloned() {
+            target_state.known_strings.insert(parameter.clone(), value);
+        }
+        if !is_copy {
+            state.known_ints.remove(argument);
+            state.known_strings.remove(argument);
+            state.list_shapes.remove(argument);
+        }
+        target_state.values.insert(parameter.clone(), value);
+    }
+    for contract in &target.contracts {
+        if contract.kind == MirContractKind::Requires {
+            let (condition, defined) = checked_contract_term(
+                contract,
+                catalog,
+                &target_state.values,
+                &target_state.values,
+                None,
+            )?;
+            add_definedness(
+                &mut target_state,
+                defined,
+                "callee requires expression is undefined",
+            )?;
+            add_definedness(
+                &mut target_state,
+                expect_bool(condition, "callee requires contract")?,
+                &format!("call to '{}' may violate precondition", target_owner.0),
+            )?;
+        }
+    }
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    let [returned] = returns.as_slice() else {
+        return Err("MIR verifier ManagedAny helper must have exactly one return path".into());
+    };
+    // Trap paths retain the pre-definedness state and reach the caller's
+    // proof check; rejecting them here would lose a real Disproven result.
+    state.traps.extend(traps);
+    state.ffi_checks.extend(returned.ffi_checks.clone());
+    state.constraints = returned.constraints.clone();
+    if let Some(result) = result {
+        ensure_result_shape(function, catalog, result, &returned.value)?;
+        if let SymbolicValue::String(value) = &returned.value {
+            state.known_strings.insert(result.clone(), value.clone());
+        }
+        state.values.insert(result.clone(), returned.value.clone());
+    }
+    Ok(())
 }
 
 /// Symbolically execute a concrete direct call whose ABI is a Copy scalar or
@@ -4919,6 +13548,7 @@ fn eval_direct_scalar_call(
     target_owner: &crate::core::NodeId,
     type_arguments: &[crate::core::ir::ResolvedTypeId],
     arguments: &[MirValueId],
+    source_call_node: Option<&crate::core::NodeId>,
 ) -> Result<(), String> {
     if !type_arguments.is_empty() {
         return Err("MIR verifier direct scalar call cannot carry generic type arguments".into());
@@ -4961,12 +13591,16 @@ fn eval_direct_scalar_call(
 
     let caller_constraints = state.constraints.clone();
     let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::new(),
         constraints: caller_constraints.clone(),
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let argument_info = function.values.get(argument).ok_or_else(|| {
@@ -5001,14 +13635,21 @@ fn eval_direct_scalar_call(
         if let Some(value) = state.known_ints.get(argument).copied() {
             target_state.known_ints.insert(parameter.clone(), value);
         }
+        if let Some(value) = state.known_strings.get(argument).cloned() {
+            target_state.known_strings.insert(parameter.clone(), value);
+        }
         target_state.values.insert(parameter.clone(), value);
     }
 
     // A callee's requires is an obligation at this call, never an unchecked
     // assumption. Its failing path is retained before the successful call
     // path gains the condition used to execute the callee's body.
-    for contract in &target.contracts {
-        if contract.kind == MirContractKind::Requires {
+    for kind in [MirContractKind::Requires, MirContractKind::Invariant] {
+        for contract in target
+            .contracts
+            .iter()
+            .filter(|contract| contract.kind == kind)
+        {
             let (condition, defined) = checked_contract_term(
                 contract,
                 catalog,
@@ -5051,6 +13692,12 @@ fn eval_direct_scalar_call(
     state
         .ffi_checks
         .extend(returns.iter().flat_map(|path| path.ffi_checks.clone()));
+    let precondition_failure = format!("call to '{}' may violate precondition", target_owner.0);
+    for trap in &mut traps {
+        if trap.code == precondition_failure && trap.subject.is_none() {
+            trap.subject = source_call_node.cloned();
+        }
+    }
     state.traps.extend(traps);
 
     let mut normalized = Vec::with_capacity(returns.len());
@@ -5476,12 +14123,16 @@ fn eval_direct_owned_string_call(
 
     let caller_constraints = state.constraints.clone();
     let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::new(),
         constraints: caller_constraints.clone(),
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     for (argument, parameter) in arguments.iter().zip(&target.parameters) {
         let argument_info = function.values.get(argument).ok_or_else(|| {
@@ -5503,6 +14154,7 @@ fn eval_direct_owned_string_call(
             );
         }
         let is_non_copy = !is_copy_value(catalog, &argument_info.ty)?;
+        let known_string = state.known_strings.get(argument).cloned();
         let value = if is_non_copy {
             state.values.remove(argument).ok_or_else(|| {
                 format!(
@@ -5520,12 +14172,18 @@ fn eval_direct_owned_string_call(
         };
         if is_non_copy {
             catalog.validate_glue(&argument_info.ty, MirGlueOperation::MoveOut)?;
+            state.known_strings.remove(argument);
         }
         if !symbolic_matches_type(catalog, &parameter_info.ty, &value) {
             return Err(
                 "MIR verifier direct owned String call argument has the wrong symbolic shape"
                     .into(),
             );
+        }
+        if let Some(known_string) = known_string {
+            target_state
+                .known_strings
+                .insert(parameter.clone(), known_string);
         }
         target_state.values.insert(parameter.clone(), value);
     }
@@ -5668,12 +14326,16 @@ fn eval_direct_variant_call(
 
     let caller_constraints = state.constraints.clone();
     let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::new(),
         constraints: caller_constraints.clone(),
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     for ((argument, parameter), parameter_ty) in arguments
         .iter()
@@ -5717,6 +14379,11 @@ fn eval_direct_variant_call(
                 })?
             }
         };
+        if let Some(known_string) = state.known_strings.get(argument).cloned() {
+            target_state
+                .known_strings
+                .insert(parameter.clone(), known_string);
+        }
         if !symbolic_matches_type(catalog, parameter_ty, &symbolic) {
             return Err("MIR verifier direct call argument has the wrong symbolic shape".into());
         }
@@ -6102,6 +14769,13 @@ fn merge_symbolic_scalars(
         }
         (SymbolicValue::Float(when_true), SymbolicValue::Float(when_false)) => {
             Ok(SymbolicValue::Float(condition.ite(&when_true, &when_false)))
+        }
+        (SymbolicValue::String(when_true), SymbolicValue::String(when_false)) => {
+            let when_true = when_true.as_z3()?;
+            let when_false = when_false.as_z3()?;
+            Ok(SymbolicValue::String(SymbolicString::Symbol(
+                condition.ite(&when_true, &when_false),
+            )))
         }
         (SymbolicValue::Opaque { ty: when_true }, SymbolicValue::Opaque { ty: when_false })
             if when_true == when_false =>
@@ -6988,12 +15662,16 @@ fn eval_materialized_owned_record_projection_call(
     }
     let caller_constraints = state.constraints.clone();
     let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::from([(parameter.clone(), value)]),
         constraints: caller_constraints,
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -7111,12 +15789,16 @@ fn eval_materialized_owned_record_projection_drop_call(
     }
     let caller_constraints = state.constraints.clone();
     let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::from([(parameter.clone(), value)]),
         constraints: caller_constraints,
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -7148,14 +15830,234 @@ fn eval_materialized_owned_record_projection_drop_call(
     Ok(())
 }
 
+/// Execute the exact generic ManagedAny cleanup instance. Core seals the
+/// parameter Drop immediately before a guaranteed checked i32 trap; symbolic
+/// execution records the trap and then marks the call path terminal. The
+/// structurally present MIR return is unreachable under that receipt and is
+/// never exposed to the caller as a normal i32 value.
+fn eval_materialized_managed_any_trap_cleanup_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    callee: &crate::core::ir::ResolvedCallee,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+    effect_receipts: &[crate::core::mir::types::MirCallEffectContract],
+    variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+    instance: &crate::core::mir::MirInstance,
+    trap_kind: crate::core::mir::MirManagedAnyTrapKind,
+) -> Result<(), String> {
+    let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
+        return Err(
+            "ManagedAny trap-cleanup call must target a canonical function instance".into(),
+        );
+    };
+    let target = program.functions().get(target_owner).ok_or_else(|| {
+        format!(
+            "ManagedAny trap-cleanup target '{}' is absent from canonical MIR",
+            target_owner.0
+        )
+    })?;
+    if instance.function != *target_owner
+        || !matches!(
+            &instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup { trap }
+                if *trap == trap_kind
+        )
+    {
+        return Err("ManagedAny trap-cleanup call and instance receipt disagree".into());
+    }
+    validate_managed_any_trap_cleanup_call_boundary(
+        function,
+        program,
+        result.as_ref(),
+        callee,
+        type_arguments,
+        arguments,
+        effect_receipts,
+        variant_call_contract,
+    )?;
+    let canonical_any = catalog.validate_managed_any_identity_source_argument(type_arguments)?;
+    let [argument] = arguments else {
+        return Err("ManagedAny trap-cleanup call must pass exactly one source owner".into());
+    };
+    let [parameter] = target.parameters.as_slice() else {
+        return Err("ManagedAny trap-cleanup callee must have exactly one parameter".into());
+    };
+    if instruction_value_type(function, argument, "ManagedAny trap-cleanup call argument")?
+        != canonical_any
+        || instruction_value_type(target, parameter, "ManagedAny trap-cleanup parameter")?
+            != canonical_any
+    {
+        return Err("ManagedAny trap-cleanup parameter is outside the canonical owner ABI".into());
+    }
+    catalog.validate_glue(&canonical_any, MirGlueOperation::MoveOut)?;
+    let value = state.values.get(argument).cloned().ok_or_else(|| {
+        format!(
+            "ManagedAny trap-cleanup source '{}' is unavailable",
+            argument
+        )
+    })?;
+    if !symbolic_matches_type(catalog, &canonical_any, &value) {
+        return Err("ManagedAny trap-cleanup source has the wrong symbolic owner shape".into());
+    }
+    let result = result.as_ref().ok_or_else(|| {
+        "ManagedAny trap-cleanup call has no materialized i32 result identity".to_string()
+    })?;
+    if !catalog.get(&target.result).is_some_and(|descriptor| {
+        descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+    }) || instruction_value_type(function, result, "ManagedAny trap-cleanup call result")?
+        != target.result
+    {
+        return Err("ManagedAny trap-cleanup call result is outside the canonical i32 ABI".into());
+    }
+
+    let caller_constraints = state.constraints.clone();
+    let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
+        values: BTreeMap::from([(parameter.clone(), value)]),
+        constraints: caller_constraints,
+        traps: Vec::new(),
+        list_shapes: BTreeMap::new(),
+        known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
+        ffi_checks: Vec::new(),
+        normal_path_terminated: false,
+    };
+    let mut returns = Vec::new();
+    let mut traps = Vec::new();
+    explore_block(
+        target,
+        program,
+        catalog,
+        &mut target_state,
+        &target.entry,
+        &mut BTreeSet::new(),
+        &mut returns,
+        &mut traps,
+    )?;
+    let [returned] = returns.as_slice() else {
+        return Err(
+            "ManagedAny trap-cleanup callee must have its one sealed structural return edge".into(),
+        );
+    };
+    // `add_definedness` records every predicate's trap edge before the outer
+    // verifier solver decides reachability. For the sealed 1/0 profile the
+    // nonzero-divisor E0801 edge is reachable and the following MIN/-1 E0802
+    // edge is present but unsatisfiable under the preceding `right != 0` fact.
+    let trap_shape_is_exact = match trap_kind {
+        crate::core::mir::MirManagedAnyTrapKind::DivisionByZeroI32 => {
+            traps.len() == 2
+                && traps.iter().filter(|trap| trap.code == "E0801").count() == 1
+                && traps.iter().filter(|trap| trap.code == "E0802").count() == 1
+        }
+        crate::core::mir::MirManagedAnyTrapKind::SignedOverflowI32 => {
+            traps.len() == 1 && traps[0].code == "E0802"
+        }
+    };
+    if !matches!(&returned.value, SymbolicValue::Int(_))
+        || !returned.ffi_checks.is_empty()
+        || !trap_shape_is_exact
+    {
+        return Err(format!(
+            "ManagedAny trap-cleanup `{}` body did not produce its sealed checked i32 trap set",
+            trap_kind.canonical_text()
+        ));
+    }
+
+    // The core receipt fixes constants that make the checked operation false
+    // on every path (1 / 0 or i32::MAX + 1) and seals the prior Any Drop. The
+    // symbolic execution above adds the corresponding trap condition; the
+    // structural Return exists for MIR ABI consistency only. Never copy the
+    // impossible ReturnPath or result value back into the caller.
+    state.values.remove(argument);
+    state.known_ints.remove(argument);
+    state.known_strings.remove(argument);
+    state.list_shapes.remove(argument);
+    state.traps.extend(traps);
+    state.normal_path_terminated = true;
+    Ok(())
+}
+
+/// Execute the sole admitted generic ManagedAny identity instance. The
+/// Checker seal fixes a `Clone; Drop(parameter); Return(clone)` body, so the
+/// call consumes the source owner and returns an independent snapshot with
+/// identical symbolic contents. All receipt and ABI checks happen before
+/// the source is removed from the caller state.
+fn eval_materialized_managed_any_identity_call(
+    function: &MirFunction,
+    program: &MirProgram,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    state: &mut SymbolicState,
+    result: &Option<MirValueId>,
+    callee: &crate::core::ir::ResolvedCallee,
+    type_arguments: &[crate::core::ir::ResolvedTypeId],
+    arguments: &[MirValueId],
+    effect_receipts: &[crate::core::mir::types::MirCallEffectContract],
+    variant_call_contract: Option<&crate::core::mir::types::MirVariantCallAbiContract>,
+    instance: &crate::core::mir::MirInstance,
+) -> Result<(), String> {
+    let crate::core::ir::ResolvedCallee::Function(target_owner) = callee else {
+        return Err("ManagedAny identity call must target a canonical function instance".into());
+    };
+    if instance.function != *target_owner
+        || !matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ManagedAnyIdentity
+        )
+    {
+        return Err("ManagedAny identity call and instance receipt disagree".into());
+    }
+    validate_managed_any_identity_call_boundary(
+        function,
+        program,
+        result.as_ref(),
+        callee,
+        type_arguments,
+        arguments,
+        effect_receipts,
+        variant_call_contract,
+    )?;
+    let canonical_any = catalog.validate_managed_any_identity_source_argument(type_arguments)?;
+    let [argument] = arguments else {
+        return Err("ManagedAny identity call must pass exactly one source owner".into());
+    };
+    let result = result
+        .as_ref()
+        .ok_or_else(|| "ManagedAny identity call has no result owner".to_string())?;
+    if result == argument {
+        return Err("ManagedAny identity call aliases its source and result identities".into());
+    }
+    catalog.validate_glue(&canonical_any, MirGlueOperation::MoveOut)?;
+    catalog.validate_glue(&canonical_any, MirGlueOperation::Clone)?;
+    let value = state
+        .values
+        .get(argument)
+        .cloned()
+        .ok_or_else(|| format!("ManagedAny identity source '{}' is unavailable", argument))?;
+    if !symbolic_matches_type(catalog, &canonical_any, &value) {
+        return Err("ManagedAny identity source has the wrong symbolic owner shape".into());
+    }
+    ensure_result_shape(function, catalog, result, &value)?;
+    state.values.remove(argument);
+    state.known_ints.remove(argument);
+    state.known_strings.remove(argument);
+    state.list_shapes.remove(argument);
+    state.values.insert(result.clone(), value);
+    Ok(())
+}
+
 /// Symbolically consume the concrete generic identity call admitted by this
 /// slice: Copy scalars plus flat Copy Option/Result values.
 ///
-/// The verifier does not infer a callee body from a template name.  It first
+/// The verifier does not infer a callee body from a template name. It first
 /// requires the call to name an instance in the canonical instance table,
 /// then checks that the executable target still has the exact specialized
-/// one-block or total branch identity shape produced by MIR lowering.  This keeps
-/// the proof tied to the same TypeDesc, instance identity, and ownership
+/// one-block or total branch identity shape produced by MIR lowering. This
+/// keeps the proof tied to the same TypeDesc, instance identity, and ownership
 /// contract consumed by the reference, bytecode, and native backends.
 fn eval_materialized_identity_call(
     function: &MirFunction,
@@ -7302,12 +16204,16 @@ fn eval_materialized_identity_call(
     }
     crate::core::mir::validate_variant_call_return_coverage(target)?;
     let mut target_state = SymbolicState {
+        callable_entry_values: None,
+        callable_entry_constraints: None,
         values: BTreeMap::from([(target_parameter.clone(), symbolic)]),
         constraints: caller_constraints.clone(),
         traps: Vec::new(),
         list_shapes: BTreeMap::new(),
         known_ints: BTreeMap::new(),
+        known_strings: BTreeMap::new(),
         ffi_checks: Vec::new(),
+        normal_path_terminated: false,
     };
     let mut returns = Vec::new();
     let mut traps = Vec::new();
@@ -7385,11 +16291,38 @@ fn symbolic_matches_type(
         (MirLayout::Handle, MirAbiClass::StringHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
             actual_ty == ty && catalog.validate_owned_string(ty).is_ok()
         }
+        (MirLayout::Handle, MirAbiClass::StringHandle, SymbolicValue::String(_)) => {
+            catalog.validate_owned_string(ty).is_ok()
+        }
         (MirLayout::Handle, MirAbiClass::OpaqueHandle, SymbolicValue::Opaque { ty: actual_ty }) => {
             actual_ty == ty && catalog.validate_session_channel(ty).is_ok()
         }
         (MirLayout::MapRoot, MirAbiClass::OpaqueHandle, SymbolicValue::MapRoot { .. }) => {
             catalog.validate_glue(ty, MirGlueOperation::MoveOut).is_ok()
+        }
+        (
+            MirLayout::OrdinaryMapOwnerLifecycleI32StringV1,
+            MirAbiClass::OpaqueHandle,
+            SymbolicValue::OrdinaryMapOwnerLifecycleV1 { .. },
+        ) => catalog.validate_glue(ty, MirGlueOperation::MoveOut).is_ok(),
+        (
+            MirLayout::OrdinaryMapOwnedGetI32StringV1,
+            MirAbiClass::OpaqueHandle,
+            SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { .. },
+        ) => catalog.validate_glue(ty, MirGlueOperation::MoveOut).is_ok(),
+        (
+            MirLayout::ManagedAnyI32StringV1,
+            MirAbiClass::OpaqueHandle,
+            SymbolicValue::ManagedAnyI32StringV1 { .. },
+        ) => {
+            catalog.is_managed_any_i32_string_v1(ty)
+                && [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ]
+                .into_iter()
+                .all(|operation| catalog.validate_glue(ty, operation).is_ok())
         }
         (MirLayout::Tuple(elements), _, SymbolicValue::Tuple(values)) => {
             elements.len() == values.len()
@@ -7608,6 +16541,8 @@ fn eval_binary(
     catalog: &crate::core::mir::types::MirTypeCatalog,
     state: &mut SymbolicState,
     op: crate::core::ir::ResolvedBinaryOp,
+    left_id: &MirValueId,
+    right_id: &MirValueId,
     left: SymbolicValue,
     right: SymbolicValue,
     result: &MirValueId,
@@ -7619,14 +16554,51 @@ fn eval_binary(
                 Op::Add => Int::add(&[&left, &right]),
                 Op::Subtract => Int::sub(&[&left, &right]),
                 Op::Multiply => Int::mul(&[&left, &right]),
+                Op::Power => {
+                    let width = checked_power_width_for_values(
+                        function, catalog, left_id, right_id, result,
+                    )?;
+                    let encoding = encode_checked_integer_power(
+                        &left,
+                        &right,
+                        width,
+                        POWER_PROFILE_0_1_11_COMPAT,
+                    );
+                    // Typed input values are range-pinned at introduction,
+                    // MIR constants are validated against their TypeDesc,
+                    // and all earlier producers preserve their checked width.
+                    // This static typing fact is deliberately not surfaced as
+                    // a Power runtime trap.
+                    state
+                        .constraints
+                        .push(encoding.faults.operands_outside_source_width.not());
+                    add_definedness(state, encoding.faults.negative_exponent.not(), "E0800")?;
+                    add_definedness(state, encoding.faults.exponent_above_u32.not(), "E0800")?;
+                    add_definedness(
+                        state,
+                        encoding.faults.checked_multiply_overflow.not(),
+                        "E0802",
+                    )?;
+                    encoding.value
+                }
                 Op::Divide | Op::Remainder => {
                     let kind = value_scalar_kind(function, catalog, result)?;
                     let ScalarKind::Int { bits } = kind else {
                         return Err("MIR integer operation has non-integer result TypeDesc".into());
                     };
-                    let (output, defined) =
+                    let (output, _defined) =
                         checked_int_division(&left, &right, bits, op == Op::Remainder);
-                    add_definedness(state, defined, "E0802")?;
+                    let zero = Int::from_i64(0);
+                    let signed_min = Int::from_i64(if bits == 32 {
+                        i32::MIN as i64
+                    } else {
+                        i64::MIN
+                    });
+                    let nonzero_divisor = right.ne(&zero);
+                    let no_signed_overflow =
+                        Bool::and(&[&left.eq(&signed_min), &right.eq(Int::from_i64(-1))]).not();
+                    add_definedness(state, nonzero_divisor, "E0801")?;
+                    add_definedness(state, no_signed_overflow, "E0802")?;
                     output
                 }
                 Op::Equal => return Ok(SymbolicValue::Bool(left.eq(&right))),
@@ -7687,7 +16659,7 @@ fn eval_binary(
                         "{}: MIR verifier finite-only f64 {op:?} has no IEEE Float symbolic domain; {} remains NotInTrustedSubset",
                         crate::core::mir::types::MIR_VERIFIER_FLOAT_BOUNDARY_CODE,
                         crate::core::mir::types::MIR_FLOAT_NOT_FINITE_TRAP_CODE
-                    ))
+                    ));
                 }
             };
             // The reference executor and native emitter both trap unless the
@@ -7716,6 +16688,43 @@ fn eval_binary(
     }
 }
 
+/// Resolve executable Power from all three exact MIR TypeDesc identities.
+/// A Z3 Int sort alone carries no source width and cannot choose the profile.
+fn checked_power_width_for_values(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    left: &MirValueId,
+    right: &MirValueId,
+    result: &MirValueId,
+) -> Result<CheckedPowerWidth, String> {
+    let left_ty = &function
+        .values
+        .get(left)
+        .ok_or_else(|| format!("MIR Power left value '{}' is absent", left))?
+        .ty;
+    let right_ty = &function
+        .values
+        .get(right)
+        .ok_or_else(|| format!("MIR Power exponent value '{}' is absent", right))?
+        .ty;
+    let result_ty = &function
+        .values
+        .get(result)
+        .ok_or_else(|| format!("MIR Power result value '{}' is absent", result))?
+        .ty;
+    if left_ty != right_ty || right_ty != result_ty {
+        return Err(
+            "MIR checked Power requires identical base, exponent, and result TypeDesc identities"
+                .into(),
+        );
+    }
+    match value_scalar_kind(function, catalog, result)? {
+        ScalarKind::Int { bits: 32 } => Ok(CheckedPowerWidth::I32),
+        ScalarKind::Int { bits: 64 } => Ok(CheckedPowerWidth::I64),
+        _ => Err("MIR checked Power requires a signed i32 or i64 TypeDesc".into()),
+    }
+}
+
 /// The IEEE finite-only predicate: neither NaN nor an infinity.  This is the
 /// exact negation of the runtime E0813 trap condition (SD-9).
 fn float_is_finite(value: &Float) -> Bool {
@@ -7741,11 +16750,15 @@ fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
         | SymbolicValue::Float(_)
         | SymbolicValue::Unit
         | SymbolicValue::Opaque { .. }
+        | SymbolicValue::String(_)
         | SymbolicValue::Tuple(_)
         | SymbolicValue::Record { .. }
         | SymbolicValue::Set { .. }
         | SymbolicValue::List { .. }
         | SymbolicValue::MapRoot { .. }
+        | SymbolicValue::OrdinaryMapOwnerLifecycleV1 { .. }
+        | SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { .. }
+        | SymbolicValue::ManagedAnyI32StringV1 { .. }
         | SymbolicValue::Variant { .. } => Err(format!("{context} is not boolean")),
     }
 }
@@ -7857,6 +16870,54 @@ fn checked_contract_term(
         }
     }
 
+    fn checked_power_width(
+        contract: &MirContract,
+        path: &[u8],
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+    ) -> Result<CheckedPowerWidth, String> {
+        let result_ty = contract
+            .expression_types
+            .get(path)
+            .ok_or_else(|| "checked Power has no result TypeDesc receipt".to_string())?;
+        let mut left_path = path.to_vec();
+        left_path.push(0);
+        let left_ty = contract
+            .expression_types
+            .get(&left_path)
+            .ok_or_else(|| "checked Power has no base TypeDesc receipt".to_string())?;
+        let mut exponent_path = path.to_vec();
+        exponent_path.push(1);
+        let exponent_ty = contract
+            .expression_types
+            .get(&exponent_path)
+            .ok_or_else(|| "checked Power has no exponent TypeDesc receipt".to_string())?;
+        if left_ty != exponent_ty || exponent_ty != result_ty {
+            return Err(
+                "checked Power requires identical base, exponent, and result TypeDesc identities"
+                    .into(),
+            );
+        }
+        let descriptor = catalog
+            .get(result_ty)
+            .ok_or_else(|| "checked Power TypeDesc is absent from the catalog".to_string())?;
+        if !descriptor.is_canonical_copy_scalar(true) {
+            return Err(
+                "checked Power TypeDesc is outside the canonical Copy scalar contract".into(),
+            );
+        }
+        match descriptor.abi {
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            } => Ok(CheckedPowerWidth::I32),
+            MirAbiClass::Integer {
+                bits: 64,
+                signed: true,
+            } => Ok(CheckedPowerWidth::I64),
+            _ => Err("checked Power requires matching signed i32/i64 TypeDesc receipts".into()),
+        }
+    }
+
     fn evaluate(
         expression: &MirContractExpr,
         path: &mut Vec<u8>,
@@ -7936,11 +16997,26 @@ fn checked_contract_term(
                     }
                     _ => Bool::and(&[&left_defined, &right_defined]),
                 };
-                let output = if matches!(op, Op::Divide | Op::Remainder)
+                let output = if *op == Op::Power {
+                    let (SymbolicValue::Int(left), SymbolicValue::Int(right)) = (left, right)
+                    else {
+                        return Err("checked Power operands must be integer terms".into());
+                    };
+                    let width = checked_power_width(contract, path, catalog)?;
+                    let encoding = encode_checked_integer_power(
+                        &left,
+                        &right,
+                        width,
+                        POWER_PROFILE_0_1_11_COMPAT,
+                    );
+                    defined = Bool::and(&[&defined, &encoding.defined]);
+                    SymbolicValue::Int(encoding.value)
+                } else if matches!(op, Op::Divide | Op::Remainder)
                     && matches!(
                         (&left, &right),
                         (SymbolicValue::Int(_), SymbolicValue::Int(_))
-                    ) {
+                    )
+                {
                     let (SymbolicValue::Int(left), SymbolicValue::Int(right)) = (left, right)
                     else {
                         return Err("canonical contract division operands must be integers".into());
@@ -7979,7 +17055,7 @@ fn checked_contract_term(
                             return Err(
                                 "canonical contract arithmetic result disagrees with its TypeDesc"
                                     .into(),
-                            )
+                            );
                         }
                     }
                 }
@@ -8125,6 +17201,9 @@ fn contract_binary(
             MirContractBinaryOp::Divide | MirContractBinaryOp::Remainder => Err(
                 "division/remainder in a canonical contract is deferred until its trap contract is materialized".into(),
             ),
+            MirContractBinaryOp::Power => Err(
+                "checked Power requires a TypeDesc-bearing definedness evaluator".into(),
+            ),
             MirContractBinaryOp::LogicalAnd | MirContractBinaryOp::LogicalOr => {
                 Err("contract logical operator requires boolean operands".into())
             }
@@ -8136,6 +17215,17 @@ fn contract_binary(
             MirContractBinaryOp::LogicalOr => Ok(SymbolicValue::Bool(Bool::or(&[&left, &right]))),
             _ => Err("contract boolean operands do not support this operator".into()),
         },
+        (SymbolicValue::String(left), SymbolicValue::String(right)) => {
+            let left = left.as_z3()?;
+            let right = right.as_z3()?;
+            match op {
+                MirContractBinaryOp::Equal => Ok(SymbolicValue::Bool(left.eq(&right))),
+                MirContractBinaryOp::NotEqual => {
+                    Ok(SymbolicValue::Bool(left.eq(&right).not()))
+                }
+                _ => Err("contract String operands support only exact equality".into()),
+            }
+        }
         (SymbolicValue::Float(left), SymbolicValue::Float(right)) => {
             // Face B (R6-1063): IEEE ordering predicates over the
             // finite-only f64 domain. `eq_fpa` is IEEE equality (+0 == -0,
@@ -8178,13 +17268,283 @@ fn contract_binary(
 #[cfg(test)]
 mod tests {
     use super::verify_program;
+    use super::{ordinary_map_owned_get_entry_matches, SymbolicString};
+    use super::{MirProofBlock, MirProofLoopEdgeKind, MirProofLoopReceipt, MirProofOperation};
     use crate::core::ir::{PrimitiveType, ResolvedType};
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::types::{MirDropGluePlan, MirLayout, MirOwnership};
     use crate::core::mir::MirInstructionKind;
+    use crate::core::mir::{MirBlockId, MirTerminator};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::collections::BTreeMap;
+    use z3::{SatResult, Solver};
+
+    #[test]
+    fn checked_power_vm_native_profile_checks_body_traps_even_for_nominal_true_ensures() {
+        if !crate::verifier::is_z3_available() {
+            return;
+        }
+        let source = r#"
+type PowerReceipt { completed: bool }
+
+func i32_wrap(base: i32, exponent: i32) -> i32 {
+    requires: base == 2 && exponent == 31
+    ensures: result == base ** exponent && result == -2147483647 - 1
+    base ** exponent
+}
+
+func hidden_negative(base: i32, exponent: i32) -> PowerReceipt {
+    requires: true
+    ensures: true
+    let computed = base ** exponent
+    PowerReceipt { completed: true }
+}
+
+func hidden_u32_cap(base: i64, exponent: i64) -> PowerReceipt {
+    requires: base == 1 && exponent == 4294967296
+    ensures: true
+    let computed = base ** exponent
+    PowerReceipt { completed: true }
+}
+
+func hidden_i64_checked_overflow(base: i64, exponent: i64) -> PowerReceipt {
+    requires: base == 2 && exponent == 63
+    ensures: true
+    let computed = base ** exponent
+    PowerReceipt { completed: true }
+}
+
+func main() -> i32 { 0 }
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("checked integer Power");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("canonical MIR checked Power lowering");
+        let results = verify_program(&program, "checked-power-profile-source-hash".into())
+            .expect("verify canonical MIR Power paths");
+        for (name, expected) in [
+            ("i32_wrap", crate::verifier::VerifStatus::Proven),
+            ("hidden_negative", crate::verifier::VerifStatus::Disproven),
+            ("hidden_u32_cap", crate::verifier::VerifStatus::Disproven),
+            (
+                "hidden_i64_checked_overflow",
+                crate::verifier::VerifStatus::Disproven,
+            ),
+        ] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name.ends_with(name))
+                .unwrap_or_else(|| panic!("missing MIR Power result for {name}"));
+            assert_eq!(result.status, expected, "{}", result.message);
+        }
+    }
+
+    #[test]
+    fn typed_fails_equation_rejects_corrupted_source_on_real_failure_path() {
+        if !crate::verifier::is_z3_available() {
+            return;
+        }
+        let source = include_str!("../../tests/real_world/flow_state_match_fail_result_failure_dual_backend.mimi")
+            .replace("transition go(A) -> B fails string {", "transition go(A) -> B fails string {\n invariant: self.n >= 0\n requires: self.n >= 0 && self.n <= 100\n ensures: true");
+        let file = crate::verifier::parse_memory_source(&source, "fails-rollback-proof-boundary")
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let crate::core::mir::verification::MirVerificationPreparation::Materialized(request) =
+            crate::core::mir::verification::prepare_verification_request(&checked)
+        else {
+            panic!("materialized fails graph");
+        };
+        let program = request.program();
+        let transition = program
+            .transitions()
+            .values()
+            .next()
+            .expect("transition receipt");
+        let function = &program.functions()[&transition.owner];
+        let mut session =
+            super::SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).expect("solver");
+        let mut initial = super::initial_state(function, program.type_catalog(), &mut session)
+            .expect("canonical source symbols");
+        let entry = initial.values.clone();
+        let mut returns = Vec::new();
+        let mut traps = Vec::new();
+        super::explore_block(
+            function,
+            program,
+            program.type_catalog(),
+            &mut initial,
+            &function.entry,
+            &mut std::collections::BTreeSet::new(),
+            &mut returns,
+            &mut traps,
+        )
+        .expect("real typed failure paths");
+        let failure = returns
+            .into_iter()
+            .find(|path| {
+                matches!(&path.value,
+            super::SymbolicValue::Variant { active_variant: Some(variant), .. }
+                if variant.0 == "builtin:variant:Result::Err")
+            })
+            .expect("actual Err return path");
+        let unchanged = super::recoverable_source_unchanged(
+            function,
+            transition,
+            program.type_catalog(),
+            &entry,
+            &failure.value,
+        )
+        .expect("exact rollback equation");
+        let solver = Solver::new();
+        solver.assert(super::conjunction(&failure.constraints));
+        solver.assert(unchanged.not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "real failure must preserve source payload"
+        );
+
+        // Corrupt the produced symbolic payload, preserving every canonical
+        // type and path receipt. The proof boundary must compare values.
+        let mut changed = failure.value.clone();
+        let super::SymbolicValue::Variant { payload, .. } = &mut changed else {
+            unreachable!()
+        };
+        let super::SymbolicValue::Tuple(pair) = payload.values_mut().next().expect("Err payload")
+        else {
+            unreachable!()
+        };
+        let super::SymbolicValue::Record { fields, .. } = &mut pair[0] else {
+            unreachable!()
+        };
+        let field = fields.values_mut().next().expect("source state field");
+        let super::SymbolicValue::Int(value) = field else {
+            unreachable!()
+        };
+        *value = z3::ast::Int::add(&[&*value, &z3::ast::Int::from_i64(1)]);
+        let unchanged = super::recoverable_source_unchanged(
+            function,
+            transition,
+            program.type_catalog(),
+            &entry,
+            &changed,
+        )
+        .expect("same types, changed value");
+        let solver = Solver::new();
+        solver.assert(super::conjunction(&failure.constraints));
+        solver.assert(unchanged.not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Sat,
+            "changed failure payload must be disproven"
+        );
+    }
+
+    #[test]
+    fn owned_get_symbolic_string_literal_preserves_nul_and_unicode_lookup() {
+        let literal = SymbolicString::Literal("key\0🧪值".into())
+            .as_z3()
+            .expect("NUL-safe exact SMT String literal");
+        let same_key = SymbolicString::Literal("key\0🧪值".into())
+            .as_z3()
+            .expect("same NUL-safe lookup key");
+        let missing_nul = SymbolicString::Literal("key🧪值".into())
+            .as_z3()
+            .expect("lookup key without embedded NUL");
+        let different_unicode = SymbolicString::Literal("key\0🧫值".into())
+            .as_z3()
+            .expect("lookup key with different Unicode sequence");
+        let backslash_escape_text = SymbolicString::Literal("key\0\\u{41}".into())
+            .as_z3()
+            .expect("NUL-safe literal must preserve following backslash text");
+        let decoded_escape = SymbolicString::Literal("key\0A".into())
+            .as_z3()
+            .expect("NUL-safe literal with a distinct scalar");
+        let plain_unicode = SymbolicString::Literal("🧪值".into())
+            .as_z3()
+            .expect("Unicode literal without NUL");
+        let plain_backslash_text = SymbolicString::Literal("\\u{41}".into())
+            .as_z3()
+            .expect("literal backslash text without NUL");
+        let plain_decoded_escape = SymbolicString::Literal("A".into())
+            .as_z3()
+            .expect("distinct ASCII literal");
+        let present = z3::ast::Bool::from_bool(true);
+
+        let exact_hit = ordinary_map_owned_get_entry_matches(&present, &literal, &same_key);
+        let no_nul_hit = ordinary_map_owned_get_entry_matches(&present, &literal, &missing_nul);
+        let different_unicode_hit =
+            ordinary_map_owned_get_entry_matches(&present, &literal, &different_unicode);
+
+        let solver = Solver::new();
+        solver.assert(exact_hit.not());
+        assert_eq!(solver.check(), SatResult::Unsat, "identical key must match");
+
+        let solver = Solver::new();
+        solver.assert(no_nul_hit);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "NUL must affect exact lookup"
+        );
+
+        let solver = Solver::new();
+        solver.assert(different_unicode_hit);
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Unicode sequence must affect exact lookup"
+        );
+
+        let solver = Solver::new();
+        solver.assert(literal.length().eq(6));
+        assert_eq!(
+            solver.check(),
+            SatResult::Sat,
+            "NUL and non-ASCII scalars must each occupy one SMT String element"
+        );
+
+        let solver = Solver::new();
+        solver.assert(backslash_escape_text.eq(&decoded_escape));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "literal backslash escape text must not be reinterpreted"
+        );
+
+        let solver = Solver::new();
+        solver.assert(plain_unicode.length().ne(2));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "Unicode length counts scalars"
+        );
+
+        let solver = Solver::new();
+        solver.assert(plain_backslash_text.length().ne(6));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "backslash text keeps all scalars"
+        );
+
+        let solver = Solver::new();
+        solver.assert(plain_backslash_text.eq(&plain_decoded_escape));
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "backslash text stays distinct without NUL"
+        );
+
+        for character in ['\u{30000}', '\u{10ffff}'] {
+            let error = SymbolicString::Literal(character.to_string())
+                .as_z3()
+                .expect_err("higher Unicode scalars cannot enter the host SMT constructor");
+            assert!(error.contains("U+2FFFF"), "{error}");
+        }
+    }
 
     #[test]
     fn verifier_untyped_handwritten_division_contract_fails_closed() {
@@ -10140,15 +19500,34 @@ func predicate(x: i32, y: i32) -> bool {
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("non-Copy record contract must fail before verifier");
-        assert!(matches!(
-            error,
-            crate::core::mir::reference::MirProgramBuildError::Validation(errors)
-                if errors.iter().any(|error| error
-                    .message
-                    .contains("outside the canonical Copy aggregate contract"))
-        ));
+        // Canonical MIR construction preserves the record update structurally;
+        // this shape is rejected by the verifier capability gate, not by an
+        // unrelated producer constructor. A raw MIR proof attempt must still
+        // fail closed until a validated move receipt is present.
+        let canonical = MirProgram::from_checked_program(&checked)
+            .expect("structurally valid record update must reach the proof gate");
+        let errors = crate::verifier::validate_mir_capabilities(&canonical)
+            .expect_err("non-Copy update without a move receipt is outside the proof capability");
+        assert!(errors.iter().any(|error| {
+            error.contains("non-Copy record update requires a validated move receipt")
+        }));
+
+        let results = verify_program(
+            &canonical,
+            blake3::hash(source.as_bytes()).to_hex().to_string(),
+        )
+        .expect("unsupported update returns a fail-closed proof observation");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == "function:rewrite")
+            .expect("record update contract owner is reported");
+        assert_eq!(
+            result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset,
+            "a non-Copy update cannot produce a proof before its move contract is validated"
+        );
+        assert_eq!(result.constraint_count, 0);
+        assert!(result.artifact.is_none());
     }
 
     #[test]
@@ -10570,5 +19949,1265 @@ func predicate(x: i32, y: i32) -> bool {
             .expect("overflow verification result");
         assert_eq!(result.status, crate::verifier::VerifStatus::Disproven);
         assert!(result.message.contains("can reach trap 'E0802'"));
+    }
+
+    #[test]
+    fn proof_worklist_presence_alone_is_not_an_obligation_but_invalid_seal_cannot_hide_one() {
+        let source = r#"
+            func plain(value: i32) -> i32 { value }
+
+            func math_only(value: i32) -> i32 {
+                math: { value >= 0 }
+                value
+            }
+
+            func invariant_only(limit: i32) -> i32 {
+                let mut i = 0
+                while i < limit {
+                    invariant: i >= 0
+                    i = i + 1
+                }
+                i
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex proof relevance source");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse proof relevance source");
+        let checked = crate::core::check_program(&file).expect("check proof relevance source");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let plain = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("plain"))
+            .expect("plain MIR function");
+        assert!(plain.contracts.is_empty());
+        if let Some(worklist) = plain.proof_worklist.as_ref() {
+            assert!(worklist.has_valid_source_witness());
+        }
+        assert!(!super::has_scoped_proof_obligation(plain, &program));
+        assert!(!super::function_has_verification_obligation(
+            plain, &program
+        ));
+
+        let invariant_only = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("invariant_only"))
+            .expect("invariant-only MIR function");
+        assert!(invariant_only.contracts.is_empty());
+        let worklist = invariant_only
+            .proof_worklist
+            .as_ref()
+            .expect("complete proof worklist");
+        assert!(!worklist.expected_loop_invariants.is_empty());
+        assert!(super::function_has_verification_obligation(
+            invariant_only,
+            &program
+        ));
+
+        let invariant_owner = invariant_only.owner.clone();
+        let mut missing_loop_worklist = program.clone();
+        assert!(missing_loop_worklist.clear_proof_worklist_for_test(&invariant_owner));
+        assert!(matches!(
+            missing_loop_worklist.validate_owner_proof_worklist(&invariant_owner),
+            Err(crate::core::mir::MirProofCensusError::OwnerCoverageGap(
+                crate::core::mir::MirProofOwnerCoverageGap {
+                    kind: crate::core::mir::MirProofOwnerCoverageGapKind::MissingWorklist { .. },
+                    ..
+                }
+            ))
+        ));
+        let missing_loop_results = verify_program(
+            &missing_loop_worklist,
+            "missing-loop-worklist-source-hash".into(),
+        )
+        .expect("missing loop worklist becomes an owner-scoped NITS result");
+        let missing_loop_result = missing_loop_results
+            .iter()
+            .find(|result| result.func_name == invariant_owner.0)
+            .expect("missing loop worklist result");
+        assert_eq!(
+            missing_loop_result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert_eq!(missing_loop_result.constraint_count, 0);
+        assert!(missing_loop_result.artifact.is_none());
+        assert!(!missing_loop_results.iter().any(|result| {
+            result.func_name.ends_with("plain") || result.func_name.ends_with("main")
+        }));
+
+        let math_only = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("math_only"))
+            .expect("math-only MIR function");
+        assert!(program.requires_proof_worklist(&math_only.owner));
+        let math_owner = math_only.owner.clone();
+        let mut missing_math_worklist = program.clone();
+        assert!(missing_math_worklist.clear_proof_worklist_for_test(&math_owner));
+        let missing_math_results = verify_program(
+            &missing_math_worklist,
+            "missing-math-worklist-source-hash".into(),
+        )
+        .expect("missing Math worklist becomes an owner-scoped NITS result");
+        let missing_math_result = missing_math_results
+            .iter()
+            .find(|result| result.func_name == math_owner.0)
+            .expect("missing Math worklist result");
+        assert_eq!(
+            missing_math_result.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset
+        );
+        assert_eq!(missing_math_result.constraint_count, 0);
+        assert!(missing_math_result.artifact.is_none());
+
+        let mut forged = invariant_only.clone();
+        let worklist = forged
+            .proof_worklist
+            .as_mut()
+            .expect("mutable proof worklist clone");
+        worklist.expected_loop_invariants.clear();
+        assert!(!worklist.has_valid_source_witness());
+        assert!(super::function_has_verification_obligation(
+            &forged, &program
+        ));
+        assert!(
+            super::preflight_proof_source_integrity(&forged, program.type_catalog())
+                .expect_err("forged proof census must fail before solver creation")
+                .contains("private source witness")
+        );
+    }
+
+    #[test]
+    fn protocol_method_requires_remains_a_caller_verification_obligation() {
+        let source = r#"
+            trait Read {
+                func read() -> i32
+            }
+
+            type Counter { value: i32 }
+
+            impl Read for Counter {
+                func read() -> i32 {
+                    requires: self.value >= 0
+                    self.value
+                }
+            }
+
+            func main() -> i32 {
+                let counter = Counter { value: 1 }
+                counter.read()
+            }
+        "#;
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex protocol contract");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse protocol contract");
+        let checked = crate::core::check_program(&file).expect("check protocol contract");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("canonical protocol contract MIR");
+        let main = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("main"))
+            .expect("main MIR function");
+        assert!(main.contracts.is_empty());
+        assert!(main.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::Call {
+                        callee: crate::core::ir::ResolvedCallee::ProtocolMethod { .. },
+                        ..
+                    }
+                )
+            })
+        }));
+        assert!(super::has_call_precondition_obligation(main, &program));
+        assert!(super::function_has_verification_obligation(main, &program));
+    }
+
+    #[test]
+    fn mutable_loop_rejects_forged_same_typed_loop_edge_arguments() {
+        let source = r#"
+            func all_loop_edges(limit: i32) -> i32 {
+                requires: limit >= 0 && limit <= 5
+                ensures: result >= 0 && result <= 3 && result <= old(limit)
+                let mut i = 0
+                while i < limit {
+                    invariant: i >= 0 && i <= limit && i <= 3 && limit == old(limit)
+                    if i == 0 {
+                        i = i + 1
+                        continue
+                    }
+                    i = i + 1
+                    if i == 3 { break }
+                }
+                i
+            }
+
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex mutable loop");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse mutable loop");
+        let checked = crate::core::check_program(&file).expect("check mutable loop");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical loop MIR");
+        let function = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("all_loop_edges"))
+            .cloned()
+            .expect("all_loop_edges MIR function");
+        let worklist = function
+            .proof_worklist
+            .as_ref()
+            .expect("loop proof worklist")
+            .clone();
+
+        fn find_loop<'a>(
+            block: &'a MirProofBlock,
+        ) -> Option<(
+            &'a MirBlockId,
+            &'a MirBlockId,
+            &'a MirBlockId,
+            &'a MirProofLoopReceipt,
+        )> {
+            for operation in &block.operations {
+                match operation {
+                    MirProofOperation::Loop {
+                        header,
+                        body_entry,
+                        exit,
+                        body,
+                        receipt: Some(receipt),
+                        ..
+                    } => return Some((header, body_entry, exit, receipt)),
+                    MirProofOperation::Branch {
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        if let Some(found) = find_loop(then_block).or_else(|| find_loop(else_block))
+                        {
+                            return Some(found);
+                        }
+                    }
+                    MirProofOperation::Scope(inner) => {
+                        if let Some(found) = find_loop(inner) {
+                            return Some(found);
+                        }
+                    }
+                    MirProofOperation::Loop { body, .. } => {
+                        if let Some(found) = find_loop(body) {
+                            return Some(found);
+                        }
+                    }
+                    MirProofOperation::Bind { .. }
+                    | MirProofOperation::Call(_)
+                    | MirProofOperation::Eval { .. }
+                    | MirProofOperation::Assign { .. }
+                    | MirProofOperation::Math(_)
+                    | MirProofOperation::Break { .. }
+                    | MirProofOperation::Continue { .. }
+                    | MirProofOperation::Return { .. }
+                    | MirProofOperation::Exit => {}
+                }
+            }
+            None
+        }
+
+        let (header, body_entry, exit, receipt) =
+            find_loop(&worklist.root).expect("receipt-backed while loop");
+        let header = header.clone();
+        let body_entry = body_entry.clone();
+        let exit = exit.clone();
+        let receipt = receipt.clone();
+        let (argument_index, binding) = receipt
+            .bindings
+            .iter()
+            .enumerate()
+            .find(|(_, binding)| {
+                receipt
+                    .typed
+                    .state_locals
+                    .iter()
+                    .any(|local| local.local == binding.local && local.written_in_loop)
+            })
+            .expect("loop carries its assigned counter");
+        let body_region =
+            super::loop_region_blocks(&function, &header, &body_entry, &exit).expect("body CFG");
+
+        for kind in [
+            MirProofLoopEdgeKind::Entry,
+            MirProofLoopEdgeKind::ConditionFalse,
+            MirProofLoopEdgeKind::BodyFallthrough,
+            MirProofLoopEdgeKind::Continue,
+            MirProofLoopEdgeKind::Break,
+        ] {
+            let edge = receipt
+                .edges
+                .iter()
+                .find(|edge| edge.kind == kind)
+                .expect("source fixture exposes every loop edge kind");
+            let edge_id = edge.mir_edge.clone().expect("concrete CFG edge");
+            let mut forged = function.clone();
+            let block = forged
+                .blocks
+                .get_mut(&edge.from_block)
+                .expect("receipted edge source block");
+            let stale = if kind == MirProofLoopEdgeKind::Entry {
+                binding.header_parameter.clone()
+            } else {
+                binding.preheader_value.clone()
+            };
+            match (&mut block.terminator, kind) {
+                (
+                    MirTerminator::Goto {
+                        edge, arguments, ..
+                    },
+                    MirProofLoopEdgeKind::Entry
+                    | MirProofLoopEdgeKind::BodyFallthrough
+                    | MirProofLoopEdgeKind::Continue
+                    | MirProofLoopEdgeKind::Break,
+                ) if edge == &edge_id => arguments[argument_index] = stale,
+                (
+                    MirTerminator::Branch {
+                        else_edge,
+                        else_arguments,
+                        ..
+                    },
+                    MirProofLoopEdgeKind::ConditionFalse,
+                ) if else_edge == &edge_id => else_arguments[argument_index] = stale,
+                (other, _) => panic!("receipted loop edge has an unexpected terminator: {other:?}"),
+            }
+
+            let error = super::validate_mutable_loop_current_values(
+                &forged,
+                program.type_catalog(),
+                &receipt.typed.loop_node,
+                &receipt,
+                &header,
+                &body_entry,
+                &exit,
+                &body_region,
+            )
+            .expect_err("same-typed stale local value must be rejected on each edge kind");
+            assert!(
+                error.contains("stale"),
+                "edge kind {kind:?} had a non-specific rejection: {error}"
+            );
+        }
+
+        let write = receipt
+            .typed
+            .writes
+            .first()
+            .expect("loop contains one source assignment");
+        let binary_id = format!("inst:binary:{}", write.value.0);
+        let binary_block = function
+            .blocks
+            .iter()
+            .find(|(_, block)| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| instruction.id.as_str() == binary_id)
+            })
+            .map(|(block, _)| block.clone())
+            .expect("assignment RHS has a canonical Binary");
+
+        for forge_operator in [false, true] {
+            let mut forged = function.clone();
+            let instruction = forged
+                .blocks
+                .get_mut(&binary_block)
+                .expect("assignment binary block")
+                .instructions
+                .iter_mut()
+                .find(|instruction| instruction.id.as_str() == binary_id)
+                .expect("assignment binary instruction");
+            let MirInstructionKind::Binary { op, left, .. } = &mut instruction.kind else {
+                panic!("source assignment expression is not a Binary");
+            };
+            if forge_operator {
+                *op = crate::core::ir::ResolvedBinaryOp::Subtract;
+            } else {
+                // Preserve i32 TypeDesc and every receipt ID while making the
+                // increment read the stale preheader value instead of the
+                // current header/branch-join SSA value.
+                *left = binding.preheader_value.clone();
+            }
+            let error = super::validate_mutable_loop_current_values(
+                &forged,
+                program.type_catalog(),
+                &receipt.typed.loop_node,
+                &receipt,
+                &header,
+                &body_entry,
+                &exit,
+                &body_region,
+            )
+            .expect_err("typed RHS must match the actual MIR operator and current operands");
+            assert!(
+                error.contains("source") || error.contains("MIR"),
+                "forged operator={forge_operator} had a non-specific rejection: {error}"
+            );
+        }
+
+        let mut bindings = BTreeMap::new();
+        super::collect_mutable_loop_bindings(&worklist.root, &mut bindings)
+            .expect("unique source Bind points");
+        let (bind_point, source_binding) = bindings
+            .iter()
+            .find(|(_, source_binding)| source_binding.local_identity == binding.local.0)
+            .expect("loop counter has a source Bind");
+        let bind_instruction_id = format!("inst:bind:{}", bind_point.0);
+        let mut forged = function.clone();
+        let bind_instruction = forged
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| instruction.id.as_str() == bind_instruction_id)
+            .expect("canonical MIR Bind Move");
+        let MirInstructionKind::Move { result, source } = &mut bind_instruction.kind else {
+            panic!("canonical Bind instruction is not a Move");
+        };
+        assert_eq!(result, &source_binding.local);
+        *source = binding.header_parameter.clone();
+        let error = super::validate_mutable_loop_current_values(
+            &forged,
+            program.type_catalog(),
+            &receipt.typed.loop_node,
+            &receipt,
+            &header,
+            &body_entry,
+            &exit,
+            &body_region,
+        )
+        .expect_err("typed preheader initialization must match the actual Bind Move");
+        assert!(error.contains("Bind"), "forged Bind rejection: {error}");
+
+        let mut branches = BTreeMap::new();
+        super::collect_mutable_loop_branches(
+            match super::proof_loop_at_header(&worklist, &header)
+                .expect("source loop worklist operation")
+            {
+                MirProofOperation::Loop { body, .. } => body,
+                _ => panic!("header does not identify a loop operation"),
+            },
+            &mut branches,
+        )
+        .expect("unique source Branch points");
+        let (_, source_branch) = branches
+            .iter()
+            .next()
+            .expect("fixture exposes a source Branch point");
+        let condition_id = format!("inst:binary:{}", source_branch.condition.origin.0);
+        let mut forged = function.clone();
+        let condition_instruction = forged
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| instruction.id.as_str() == condition_id)
+            .expect("source branch Binary instruction");
+        let MirInstructionKind::Binary { op, .. } = &mut condition_instruction.kind else {
+            panic!("source branch condition is not a Binary");
+        };
+        *op = crate::core::ir::ResolvedBinaryOp::NotEqual;
+        let error = super::validate_mutable_loop_current_values(
+            &forged,
+            program.type_catalog(),
+            &receipt.typed.loop_node,
+            &receipt,
+            &header,
+            &body_entry,
+            &exit,
+            &body_region,
+        )
+        .expect_err("typed branch condition must match actual MIR operator and operands");
+        assert!(
+            error.contains("source") || error.contains("MIR"),
+            "forged branch condition rejection: {error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod managed_any_verifier_tests {
+    use super::*;
+    use crate::core::mir::reference::{MirReferenceInterpreter, MirRuntimeValue};
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn canonical(source: &str) -> MirProgram {
+        let tokens = Lexer::new(source).tokenize().expect("lex snapshot program");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse snapshot program");
+        let checked = crate::core::check_program(&file).expect("Checker snapshot authority");
+        MirProgram::from_checked_program(&checked).expect("canonical snapshot MIR")
+    }
+
+    #[test]
+    fn proof_relevant_unmaterialized_generic_loop_owner_reports_nits() {
+        let program = canonical(
+            r#"
+            func bounded<T>(n: i32, marker: T) -> i32 {
+                let mut i = 0
+                while i < n {
+                    invariant: i >= 0 && i <= n
+                    i = i + 1
+                }
+                i
+            }
+            func main() -> i32 { 0 }
+            "#,
+        );
+        let owner = crate::core::NodeId("function:bounded".into());
+        assert!(
+            !program.functions().contains_key(&owner),
+            "uninstantiated generic templates are not executable MIR owners"
+        );
+        assert!(program
+            .proof_source_census()
+            .missing_mir_verification_owners()
+            .contains(&owner));
+
+        let results = verify_program(&program, "missing-generic-loop-owner".into())
+            .expect("missing source owner is an owner-scoped coverage result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name == owner.0)
+            .expect("generic proof owner NITS result");
+        assert_eq!(result.status, VerifStatus::NotInTrustedSubset);
+        assert_eq!(result.constraint_count, 0);
+        assert!(result.artifact.is_none());
+    }
+
+    fn assert_contract(program: &MirProgram, name: &str, expected: VerifStatus) {
+        crate::verifier::validate_mir_capabilities(program).expect("snapshot capability gate");
+        let results = verify_program(program, "managed-any-verifier-regression".into())
+            .expect("snapshot symbolic verification");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with(name))
+            .expect("snapshot contract result");
+        assert_eq!(result.status, expected, "{}", result.message);
+    }
+
+    #[test]
+    fn managed_any_verifier_present_zero_and_missing_false_are_distinct_with_symbolic_key() {
+        let program = canonical(
+            r#"
+            func observe(key: string) -> bool {
+                ensures: result
+                let empty = map_new()
+                let missing_pair = map_get(empty, key)
+                let full = map_set(empty, key, 0)
+                let found_pair = map_get(full, key)
+                let missing = missing_pair.0
+                let missing_any = missing_pair.1
+                let found = found_pair.0
+                let any = found_pair.1
+                drop(missing_any)
+                drop(any)
+                drop(missing_pair)
+                drop(found_pair)
+                drop(empty)
+                drop(full)
+                // Presence is carried by the boolean slot; the payload stays
+                // erased so a zero value cannot be mistaken for a miss.
+                let present_zero = if found { 0 } else { 1 }
+                found && !missing && present_zero == 0
+            }
+            func main() -> i32 { 0 }
+        "#,
+        );
+        assert_contract(&program, "observe", VerifStatus::Proven);
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("observe"))
+            .expect("observe owner");
+        assert_eq!(
+            MirReferenceInterpreter::new(&program)
+                .execute(owner, &[MirRuntimeValue::String("key\0🧪值".into())])
+                .expect("independent runtime result"),
+            MirRuntimeValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn managed_any_verifier_string_snapshot_reports_capacity_trap_before_source_drop() {
+        let program = canonical(
+            r#"
+            func main() -> bool {
+                ensures: result
+                let empty = map_new()
+                let full = map_set(empty, "key", "owned")
+                let snapshot = map_get_string(full, "key")
+                drop(empty)
+                drop(full)
+                let text = snapshot.unwrap()
+                let equal = text == "owned"
+                drop(text)
+                drop(snapshot)
+                equal
+            }
+        "#,
+        );
+        // The typed getter models allocator/capacity failure as a real Err
+        // variant.  `unwrap` must therefore remain Disproven unless a caller
+        // supplies an explicit capacity assumption; the reference success
+        // path below still proves the snapshot is independent after drops.
+        assert_contract(&program, "main", VerifStatus::Disproven);
+        assert_eq!(
+            MirReferenceInterpreter::new(&program)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("snapshot survives source destruction"),
+            MirRuntimeValue::Bool(true)
+        );
+    }
+
+    #[test]
+    fn managed_any_verifier_wrong_unpack_records_reachable_e0800_instead_of_false_proven() {
+        let program = canonical(
+            r#"
+            func main() -> i32 {
+                ensures: result == 0
+                let empty = map_new()
+                let full = map_set(empty, "number", 42)
+                let pair = map_get(full, "number")
+                let found = pair.0
+                let any = pair.1
+                let wrong = map_get_string(full, "number")
+                drop(empty)
+                drop(full)
+                drop(pair)
+                drop(any)
+                let text = wrong.unwrap()
+                drop(text)
+                drop(wrong)
+                if found { 1 } else { 0 }
+            }
+        "#,
+        );
+        assert_contract(&program, "main", VerifStatus::Disproven);
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("i32 to String must trap");
+        assert!(error.message.contains("E0800"), "{}", error.message);
+    }
+
+    #[test]
+    fn managed_any_verifier_owned_snapshot_helper_return_and_parameter_transfer_compose() {
+        let program = canonical(
+            r#"
+            func snapshot() -> i32 {
+                ensures: result == 42
+                let empty = map_new()
+                let full = map_set(empty, "n", 42)
+                let pair = map_get(full, "n")
+                drop(empty)
+                drop(full)
+                let found = pair.0
+                let any = pair.1
+                drop(pair)
+                drop(any)
+                let value = if found { 42 } else { 0 }
+                value
+            }
+            func carry<T>(value: T) -> T { value }
+            func main() -> i32 {
+                let snapshot_value = snapshot()
+                let empty = map_new()
+                let full = map_set(empty, "n", 42)
+                let source_pair = map_get(full, "n")
+                let any = source_pair.1
+                let carried = carry(any)
+                drop(source_pair)
+                drop(empty)
+                drop(full)
+                let value = snapshot_value
+                drop(carried)
+                value
+            }
+        "#,
+        );
+        assert_contract(&program, "snapshot", VerifStatus::Proven);
+        assert_eq!(
+            MirReferenceInterpreter::new(&program)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("owned helper call transfer"),
+            MirRuntimeValue::Int(42)
+        );
+    }
+
+    #[test]
+    fn managed_any_verifier_caller_owned_snapshot_survives_unrelated_trap() {
+        let program = canonical(
+            r#"
+            func divide_trap() -> i32 {
+                let zero = 0
+                1 / zero
+            }
+            func carry<T>(value: T) -> T { value }
+            func main() -> i32 {
+                ensures: result == 0
+                let empty = map_new()
+                let full = map_set(empty, "s", 42)
+                let pair = map_get(full, "s")
+                let carried = carry(pair.1)
+                drop(empty)
+                drop(full)
+                drop(pair)
+                let trap_result = divide_trap()
+                drop(carried)
+                trap_result
+            }
+        "#,
+        );
+        assert_contract(&program, "main", VerifStatus::Disproven);
+    }
+
+    #[test]
+    fn managed_any_verifier_owned_generic_callee_parameter_is_cleaned_on_trap() {
+        for (body, trap_code) in [
+            ("let zero = 0; 1 / zero", "E0801"),
+            ("let largest = 2147483647; largest + 1", "E0802"),
+        ] {
+            let source = format!(
+                r#"
+                func fail<T>(value: T) -> i32 {{ {body} }}
+                func main() -> i32 {{
+                    ensures: result == 0
+                    let empty = map_new()
+                    let full = map_set(empty, "s", 42)
+                    let pair = map_get(full, "s")
+                    let payload = pair.1
+                    drop(pair)
+                    drop(empty)
+                    drop(full)
+                    fail(payload)
+                }}
+            "#
+            );
+            let program = canonical(&source);
+            assert_contract(&program, "main", VerifStatus::Disproven);
+            let error = MirReferenceInterpreter::new(&program)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect_err("generic callee trap must propagate through owned Any call");
+            // The reference executor carries the stable human-readable trap
+            // text; E0801/E0802 are attached by the symbolic verifier and
+            // native/bytecode consumers.  Accept either representation while
+            // still requiring the exact arithmetic failure class.
+            let matches_trap = error.message.contains(trap_code)
+                || (trap_code == "E0801" && error.message.contains("division by zero"))
+                || (trap_code == "E0802" && error.message.contains("overflow"));
+            assert!(matches_trap, "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn managed_any_verifier_forged_callee_parameter_permissions_reject_before_constraints() {
+        let mut program = canonical(
+            r#"
+            func carry<T>(value: T) -> T { value }
+            func main() -> i32 {
+                ensures: result == 42
+                let empty = map_new()
+                let full = map_set(empty, "n", 42)
+                let pair = map_get(full, "n")
+                let found = pair.0
+                let any = pair.1
+                let carried = carry(any)
+                drop(empty)
+                drop(full)
+                drop(pair)
+                let value = if found { carried } else { 0 }
+                drop(carried)
+                value
+            }
+        "#,
+        );
+        // The ordinary concrete owned parameter remains admissible. Only
+        // the forged permission table changes in the two negative cases.
+        assert_contract(&program, "main", VerifStatus::Proven);
+        let helper = program
+            .functions()
+            .values()
+            .find(|function| {
+                function.parameters.len() == 1
+                    && function.parameters.first().is_some_and(|parameter| {
+                        function.values.get(parameter).is_some_and(|value| {
+                            program.type_catalog().contains_managed_any(&value.ty)
+                        })
+                    })
+                    && function.owner != crate::core::NodeId("function:main".into())
+            })
+            .map(|function| function.owner.clone())
+            .expect("materialized owned ManagedAny identity helper");
+        let original = program
+            .functions()
+            .get(&helper)
+            .expect("owned Any helper")
+            .clone();
+        assert!(
+            original.parameter_permissions.is_some(),
+            "Checked signature must install the complete permission table before sealing"
+        );
+        for missing_permissions in [true, false] {
+            let mut forged = original.clone();
+            forged.parameter_permissions = if missing_permissions {
+                None
+            } else {
+                Some(vec![Some(crate::core::ir::Permission::View)])
+            };
+            program.replace_function_for_test_only(forged);
+            crate::verifier::validate_mir_capabilities(&program).expect_err(
+                "missing or rewritten callee permissions cannot authorize owned Any transfer",
+            );
+            let result =
+                verify_program(&program, "forged-managed-any-parameter-permissions".into())
+                    .expect("public verifier returns a rejected caller result")
+                    .into_iter()
+                    .find(|result| result.func_name == "function:main")
+                    .expect("main contract result");
+            assert_eq!(
+                result.status,
+                VerifStatus::NotInTrustedSubset,
+                "{}",
+                result.message
+            );
+            assert_eq!(result.constraint_count, 0);
+            assert!(result.artifact.is_none());
+        }
+    }
+
+    #[test]
+    fn managed_any_verifier_forged_operation_receipt_rejects_before_constraints() {
+        let mut program = canonical(
+            r#"
+            func main() -> i32 {
+                ensures: result == 42
+                let empty = map_new()
+                let full = map_set(empty, "n", 42)
+                let (found, any) = map_get(full, "n")
+                let value = if found { any } else { 0 }
+                drop(any)
+                drop(empty)
+                drop(full)
+                value
+            }
+        "#,
+        );
+        let owner = crate::core::NodeId("function:main".into());
+        let original = program
+            .functions()
+            .get(&owner)
+            .expect("main snapshot MIR")
+            .clone();
+        for mutation in 0..4 {
+            let mut forged = original.clone();
+            let instruction = forged
+                .blocks
+                .values_mut()
+                .flat_map(|block| &mut block.instructions)
+                .find(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::ManagedAny {
+                            operation: MirManagedAnyOperation::UnpackI32,
+                            ..
+                        }
+                    )
+                })
+                .expect("exact unpack receipt");
+            let MirInstructionKind::ManagedAny { contract, .. } = &mut instruction.kind else {
+                unreachable!()
+            };
+            match mutation {
+                0 => *contract = None,
+                1 => {
+                    contract.as_mut().expect("receipt").origin =
+                        crate::core::NodeId("forged:conversion".into())
+                }
+                2 => contract.as_mut().expect("receipt").descriptor_version = 2,
+                3 => contract.as_mut().expect("receipt").expected_kind = Some(2),
+                _ => unreachable!(),
+            }
+            program.replace_function_for_test_only(forged);
+            crate::verifier::validate_mir_capabilities(&program).expect_err(
+                "public descriptor and plausible contract cannot replace Checker authority",
+            );
+            let result = verify_program(&program, "forged-managed-any".into())
+                .expect("reject with explicit verifier result")
+                .into_iter()
+                .find(|result| result.func_name == owner.0)
+                .expect("main result");
+            assert_eq!(
+                result.status,
+                VerifStatus::NotInTrustedSubset,
+                "{}",
+                result.message
+            );
+            assert_eq!(result.constraint_count, 0);
+            assert!(result.artifact.is_none());
+        }
+    }
+
+    #[test]
+    fn managed_any_ffi_verifier_forged_caller_receipt_rejects_before_constraints() {
+        let source = r#"
+            extern "C" {
+                func foreign(value: i32) -> i32 ensures: result == value;
+            }
+            func main() -> i32 {
+                requires: true
+                invariant: true
+                let empty = map_new()
+                let root = map_set(empty, "key", 42)
+                let (found, payload) = map_get(root, "key")
+                let typed = map_get_i32(root, "key")
+                let value = typed.unwrap()
+                drop(payload)
+                drop(root)
+                drop(empty)
+                foreign(value)
+            }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex FFI ManagedAny fixture");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse FFI ManagedAny fixture");
+        let checked = crate::core::check_program(&file).expect("Checker FFI authority");
+        let mut program = MirProgram::from_checked_program(&checked).expect("canonical FFI MIR");
+        let caller_owner = crate::core::NodeId("function:main".into());
+        let original = program
+            .functions()
+            .get(&caller_owner)
+            .expect("FFI caller MIR")
+            .clone();
+        let forged = original
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::ManagedAny {
+                    contract: Some(_), ..
+                } => Some(instruction.id.clone()),
+                _ => None,
+            })
+            .expect("Checker-owned Map Any receipt");
+        let mut caller = original;
+        let instruction = caller
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| instruction.id == forged)
+            .expect("same sealed Any instruction");
+        let MirInstructionKind::ManagedAny { contract, .. } = &mut instruction.kind else {
+            unreachable!()
+        };
+        *contract = None;
+        program.replace_function_for_test_only(caller);
+
+        let route_receipt = program.route_receipt("verifier-mir-v1");
+        let error = verify_ffi_program_with_route_receipt(
+            &program,
+            "managed-any-ffi-preflight-forgery".into(),
+            &route_receipt,
+        )
+        .expect_err("forged ManagedAny receipt must fail at the direct FFI entry");
+        assert!(error.contains("ManagedAny"), "{error}");
+        assert!(
+            !error.contains("caller 'function:main' invariant semantics"),
+            "the ManagedAny boundary must run before caller-contract processing: {error}"
+        );
+        // The direct FFI API returns an error rather than a partial proof
+        // result. Therefore this preflight failure carries no constraint count
+        // and cannot contain a ProofArtifact.
+    }
+}
+
+#[cfg(test)]
+mod managed_any_println_verifier_tests {
+    use super::*;
+    use crate::core::ir::PrimitiveType;
+    use crate::core::mir::reference::MirProgram;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn canonical(source: &str) -> MirProgram {
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex Any println program");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse Any println program");
+        let checked = crate::core::check_program(&file).expect("Checker Any println authority");
+        MirProgram::from_checked_program(&checked).expect("canonical Any println MIR")
+    }
+
+    fn print_fixture() -> MirProgram {
+        canonical(
+            r#"
+            func observe(key: string) -> i32 {
+                ensures: result == 0
+                let empty = map_new()
+                let numbers = map_set(empty, "number", 42)
+                let mixed = map_set(numbers, "text", 7)
+                let pair = map_get(mixed, key)
+                let any = pair.1
+                println(any)
+                drop(pair)
+                drop(any)
+                drop(mixed)
+                drop(numbers)
+                drop(empty)
+                0
+            }
+            func main() -> i32 { 0 }
+            "#,
+        )
+    }
+
+    fn print_operation(
+        program: &MirProgram,
+    ) -> (
+        MirFunction,
+        crate::core::mir::MirInstruction,
+        MirValueId,
+        MirValueId,
+    ) {
+        let function = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("observe"))
+            .expect("observe MIR function")
+            .clone();
+        let instruction = function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::ManagedAny {
+                        operation: MirManagedAnyOperation::Println,
+                        ..
+                    }
+                )
+            })
+            .expect("sealed ManagedAny println instruction")
+            .clone();
+        let MirInstructionKind::ManagedAny {
+            result: Some(result),
+            source,
+            operation: MirManagedAnyOperation::Println,
+            ..
+        } = &instruction.kind
+        else {
+            unreachable!()
+        };
+        let source = source.clone();
+        let result = result.clone();
+        (function, instruction, source, result)
+    }
+
+    #[test]
+    fn managed_any_println_accepts_only_the_checker_sealed_dynamic_any_receipt() {
+        if !crate::verifier::is_z3_available() {
+            return;
+        }
+        let mut program = print_fixture();
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("canonical Any println preflight");
+        let results = verify_program(&program, "managed-any-println-valid".into())
+            .expect("symbolically verify exact Any println");
+        let observed = results
+            .iter()
+            .find(|result| result.func_name.ends_with("observe"))
+            .expect("observe contract result");
+        assert_eq!(observed.status, VerifStatus::Proven, "{}", observed.message);
+
+        let original = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("observe"))
+            .expect("observe function")
+            .clone();
+        for mutation in 0..3 {
+            let mut forged = original.clone();
+            let instruction = forged
+                .blocks
+                .values_mut()
+                .flat_map(|block| &mut block.instructions)
+                .find(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::ManagedAny {
+                            operation: MirManagedAnyOperation::Println,
+                            ..
+                        }
+                    )
+                })
+                .expect("same sealed Println instruction");
+            let MirInstructionKind::ManagedAny { contract, .. } = &mut instruction.kind else {
+                panic!("Println contract exists before forgery")
+            };
+            match mutation {
+                0 => *contract = None,
+                1 => {
+                    contract
+                        .as_mut()
+                        .expect("Println contract")
+                        .checker_source_type = None
+                }
+                2 => {
+                    contract
+                        .as_mut()
+                        .expect("Println contract")
+                        .checker_source_type =
+                        Some(crate::core::ir::primitive_type_id(PrimitiveType::I32));
+                }
+                _ => unreachable!(),
+            }
+            program.replace_function_for_test_only(forged);
+            crate::verifier::validate_mir_capabilities(&program)
+                .expect_err("missing or wrong Checker source identity must fail preflight");
+            let result = verify_program(&program, "managed-any-println-forgery".into())
+                .expect("preflight returns an explicit rejected proof result")
+                .into_iter()
+                .find(|result| result.func_name.ends_with("observe"))
+                .expect("observe rejection result");
+            assert_eq!(result.status, VerifStatus::NotInTrustedSubset);
+            assert_eq!(result.constraint_count, 0);
+            assert!(result.artifact.is_none());
+        }
+    }
+
+    #[test]
+    fn managed_any_println_cannot_be_rewritten_as_an_unreceipted_scalar_builtin() {
+        if !crate::verifier::is_z3_available() {
+            return;
+        }
+        let mut program = print_fixture();
+        let original = program
+            .functions()
+            .values()
+            .find(|function| function.owner.0.ends_with("observe"))
+            .expect("observe function")
+            .clone();
+        let mut forged = original;
+        let instruction = forged
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::ManagedAny {
+                        operation: MirManagedAnyOperation::Println,
+                        ..
+                    }
+                )
+            })
+            .expect("sealed ManagedAny println instruction");
+        let (result, source) = match &instruction.kind {
+            MirInstructionKind::ManagedAny {
+                result: Some(result),
+                source,
+                ..
+            } => (result.clone(), source.clone()),
+            _ => unreachable!(),
+        };
+        instruction.kind = MirInstructionKind::BuiltinCall {
+            result,
+            kind: MirBuiltinKind::PrintlnInt,
+            arguments: vec![source],
+            string_field_contract: None,
+        };
+        program.replace_function_for_test_only(forged);
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect_err("type-only PrintlnInt cannot authorize a ManagedAny owner");
+        let result = verify_program(&program, "managed-any-println-builtin-forgery".into())
+            .expect("preflight returns a rejected proof result")
+            .into_iter()
+            .find(|result| result.func_name.ends_with("observe"))
+            .expect("observe rejection result");
+        assert_eq!(result.status, VerifStatus::NotInTrustedSubset);
+        assert_eq!(result.constraint_count, 0);
+        assert!(result.artifact.is_none());
+    }
+
+    #[test]
+    fn managed_any_println_invalid_descriptor_fails_without_partial_symbolic_output() {
+        if !crate::verifier::is_z3_available() {
+            return;
+        }
+        let program = print_fixture();
+        let (function, instruction, source, result) = print_operation(&program);
+        let MirInstructionKind::ManagedAny {
+            operation: MirManagedAnyOperation::Println,
+            contract: Some(contract),
+            ..
+        } = &instruction.kind
+        else {
+            unreachable!()
+        };
+        for (kind, descriptor_version) in [(9, 1), (2, 2)] {
+            let mut state = SymbolicState {
+                values: BTreeMap::from([(
+                    source.clone(),
+                    SymbolicValue::ManagedAnyI32StringV1 {
+                        kind: Int::from_i64(kind),
+                        descriptor_version: Int::from_i64(descriptor_version),
+                        i32_payload: Int::from_i64(42),
+                        string_payload: SymbolicString::Literal("payload".into()),
+                    },
+                )]),
+                constraints: Vec::new(),
+                callable_entry_values: None,
+                callable_entry_constraints: None,
+                traps: Vec::new(),
+                list_shapes: BTreeMap::new(),
+                known_ints: BTreeMap::new(),
+                known_strings: BTreeMap::new(),
+                ffi_checks: Vec::new(),
+                normal_path_terminated: false,
+            };
+            let error = eval_managed_any_instruction(
+                &function,
+                program.type_catalog(),
+                &mut state,
+                &Some(result.clone()),
+                &source,
+                MirManagedAnyOperation::Println,
+                Some(contract),
+            )
+            .expect_err("invalid descriptor must stop before Unit/output state");
+            assert!(error.contains("E0800"), "{error}");
+            assert_eq!(state.values.len(), 1);
+            assert!(state.values.contains_key(&source));
+            assert!(!state.values.contains_key(&result));
+            assert!(state.constraints.is_empty());
+            assert!(state.traps.is_empty());
+            assert!(state.list_shapes.is_empty());
+            assert!(state.known_ints.is_empty());
+            assert!(state.known_strings.is_empty());
+            assert!(state.ffi_checks.is_empty());
+        }
     }
 }

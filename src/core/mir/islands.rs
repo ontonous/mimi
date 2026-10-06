@@ -1285,6 +1285,7 @@ fn has_closed_scalar_contract_candidate(program: &CheckedProgram) -> bool {
                         | ResolvedBinaryOp::Multiply
                         | ResolvedBinaryOp::Divide
                         | ResolvedBinaryOp::Remainder
+                        | ResolvedBinaryOp::Power
                         | ResolvedBinaryOp::Equal
                         | ResolvedBinaryOp::NotEqual
                         | ResolvedBinaryOp::Less
@@ -6024,6 +6025,14 @@ impl<'a> ScalarCollectionValidator<'a> {
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }
                 | MirGenericInstanceContract::ScalarVariantProjection { .. }
                 | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {}
+                MirGenericInstanceContract::ManagedAnyIdentity => self.error(format!(
+                    "instance '{}' ManagedAny identity is outside the Copy scalar contract",
+                    instance.id
+                )),
+                MirGenericInstanceContract::ManagedAnyTrapCleanup { .. } => self.error(format!(
+                    "instance '{}' ManagedAny trap-cleanup is outside the Copy scalar contract",
+                    instance.id
+                )),
             }
             // The program constructor and the generic MIR validator already
             // prove the exact instance body.  Keep the island gate explicit
@@ -6224,6 +6233,14 @@ impl<'a> ScalarCollectionValidator<'a> {
         subject: &str,
     ) {
         match instruction {
+            MirInstructionKind::Actor { .. } => self.error(format!(
+                "{subject} Actor operation is outside this MIR island"
+            )),
+            MirInstructionKind::ClosureBind { .. } | MirInstructionKind::ClosureInvoke { .. } => {
+                self.error(format!(
+                    "{subject} Closure operation is outside this MIR island"
+                ))
+            }
             MirInstructionKind::MapRootNew { .. }
             | MirInstructionKind::MapRootSet { .. }
             | MirInstructionKind::MapRootRemove { .. }
@@ -6234,6 +6251,29 @@ impl<'a> ScalarCollectionValidator<'a> {
                     "{subject} MapRoot operation is outside this MIR island"
                 ));
             }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. } => {
+                self.error(format!(
+                    "{subject} OrdinaryMapOwnerLifecycle operation is outside this MIR island"
+                ));
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+            | MirInstructionKind::ManagedAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. } => self.error(format!(
+                "{subject} OrdinaryMapOwnedGet operation is outside this MIR island"
+            )),
             MirInstructionKind::Const { result, literal } => {
                 let Some(result_ty) = self.value_type(function, result, subject) else {
                     return;
@@ -7245,7 +7285,7 @@ fn binary_supported(
         | ResolvedBinaryOp::Subtract
         | ResolvedBinaryOp::Multiply
         | ResolvedBinaryOp::Divide => (integer || float) && left == result,
-        ResolvedBinaryOp::Remainder => integer && left == result,
+        ResolvedBinaryOp::Remainder | ResolvedBinaryOp::Power => integer && left == result,
         ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual => {
             (integer || boolean || float) && result_is_bool
         }

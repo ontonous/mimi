@@ -14,6 +14,7 @@
 //! for eligible functions and eliminates AST match dispatch, HashMap scope
 //! lookups, and per-expression recursion overhead.
 
+pub mod actor;
 pub mod builtins;
 pub mod compiler;
 pub mod disasm;
@@ -38,11 +39,392 @@ pub use vm::BytecodeVM;
 mod tests {
     use super::*;
     use crate::interp::Value;
+    use crate::lexer::Lexer;
 
     /// Helper: compile a simple program and run it.
     fn run_program(prog: std::sync::Arc<BytecodeProgram>) -> Result<i64, String> {
         let mut vm = BytecodeVM::new(prog);
         vm.run().map_err(|e| e.to_string())
+    }
+
+    fn owned_get_result_shapes() -> Vec<instr::VariantShape> {
+        let nominal = crate::core::ir::NominalTypeId::new("builtin:type:Result")
+            .expect("builtin Result nominal");
+        vec![
+            instr::VariantShape {
+                nominal: nominal.clone(),
+                variant: crate::core::NodeId("builtin:variant:Result::Ok".into()),
+                tag: "Ok".into(),
+                discriminant: 0,
+                arity: 1,
+            },
+            instr::VariantShape {
+                nominal,
+                variant: crate::core::NodeId("builtin:variant:Result::Err".into()),
+                tag: "Err".into(),
+                discriminant: 1,
+                arity: 1,
+            },
+        ]
+    }
+
+    fn owned_get_bytecode_program(main: FunctionProto) -> std::sync::Arc<BytecodeProgram> {
+        use instr::{CanonicalMapAnyOwnerV1BytecodeReceipt, CanonicalMapRootBytecodeReceipt};
+
+        let functions = vec![main];
+        let entry = 0;
+        let canonical_map_root_receipt =
+            Some(CanonicalMapRootBytecodeReceipt::capture(entry, &functions));
+        let canonical_map_any_owner_v1_receipt = Some(
+            CanonicalMapAnyOwnerV1BytecodeReceipt::capture_with_ordinary_map_owner_lifecycle_i32_string_v1(
+                entry,
+                &functions,
+            ),
+        );
+        std::sync::Arc::new(BytecodeProgram {
+            extern_names: Vec::new(),
+            canonical_ffi: Vec::new(),
+            canonical_ffi_bindings: Vec::new(),
+            canonical_map_root_receipt,
+            canonical_map_any_owner_v1_receipt,
+            canonical_ffi_route_receipt: None,
+            functions,
+            entry,
+            builtin_names: Vec::new(),
+            canonical_actors: None,
+            actor_defs: std::collections::HashMap::new(),
+            flow_defs: std::collections::HashMap::new(),
+            flow_transition_funcs: std::collections::HashMap::new(),
+            flow_fails_transitions: std::collections::HashSet::new(),
+            actor_method_funcs: std::collections::HashMap::new(),
+            max_children: None,
+            flow_persistent: std::collections::HashMap::new(),
+            flow_fault_type: std::collections::HashMap::new(),
+            type_defs: std::collections::HashMap::new(),
+            ast: None,
+            record_fields: std::collections::HashMap::new(),
+        })
+    }
+
+    fn owned_get_query_program(
+        string_get: bool,
+        invalid_root: bool,
+        invalid_key: bool,
+    ) -> std::sync::Arc<BytecodeProgram> {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let root = main.alloc_reg();
+        let key = main.alloc_reg();
+        let payload = main.alloc_reg();
+        let queried_root = main.alloc_reg();
+        let result = main.alloc_reg();
+        let shapes = main.add_const(ConstValue::VariantShapes(owned_get_result_shapes()));
+        let key_string = main.add_const(ConstValue::Str("owned-key".into()));
+        let key_integer = main.add_const(ConstValue::Int(17));
+        let stored_string = main.add_const(ConstValue::Str("owned-value".into()));
+        let invalid_root_value = main.add_const(ConstValue::Str("not-a-map-root".into()));
+
+        if invalid_root {
+            main.emit(Op::LoadConst {
+                rd: queried_root,
+                idx: invalid_root_value,
+            });
+        } else {
+            main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1New { rd: root });
+            main.emit(Op::LoadConst {
+                rd: key,
+                idx: key_string,
+            });
+            main.emit(Op::LoadConst {
+                rd: payload,
+                idx: stored_string,
+            });
+            main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Set {
+                rd: queried_root,
+                ra: root,
+                key,
+                value: payload,
+            });
+        }
+        if invalid_key {
+            main.emit(Op::LoadConst {
+                rd: key,
+                idx: key_integer,
+            });
+        } else if invalid_root {
+            main.emit(Op::LoadConst {
+                rd: key,
+                idx: key_string,
+            });
+        }
+        main.emit(if string_get {
+            Op::MirOrdinaryMapOwnedGetI32StringV1GetString {
+                rd: result,
+                ra: queried_root,
+                key,
+                shapes,
+            }
+        } else {
+            Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+                rd: result,
+                ra: queried_root,
+                key,
+                shapes,
+            }
+        });
+        if !invalid_root {
+            main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Drop { ra: root });
+            main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Drop { ra: queried_root });
+        }
+        main.emit(Op::Ret { ra: result });
+        owned_get_bytecode_program(main)
+    }
+
+    fn assert_owned_get_result(value: &Value, tag: &str, payload: &Value) {
+        let Value::CanonicalVariant {
+            nominal,
+            variant,
+            tag: actual_tag,
+            payload: actual_payload,
+        } = value
+        else {
+            panic!("expected canonical Result, got {value}");
+        };
+        assert_eq!(nominal.as_str(), "builtin:type:Result");
+        assert_eq!(actual_tag, tag);
+        assert_eq!(variant.0, format!("builtin:variant:Result::{tag}"));
+        assert_eq!(actual_payload, std::slice::from_ref(payload));
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_is_persistent_typed_and_returns_owned_results() {
+        let mut main = FunctionProto::new("main".into(), 0);
+        let r0 = main.alloc_reg(); // empty source root
+        let r1 = main.alloc_reg(); // i32 key with embedded NUL and Unicode
+        let r2 = main.alloc_reg(); // i32 payload
+        let r3 = main.alloc_reg(); // root after i32 Set
+        let r4 = main.alloc_reg(); // String key with embedded NUL
+        let r5 = main.alloc_reg(); // owned String payload
+        let r6 = main.alloc_reg(); // root after String Set
+        let r7 = main.alloc_reg(); // size(source)
+        let r8 = main.alloc_reg(); // size(root1)
+        let r9 = main.alloc_reg(); // size(root2)
+        let r10 = main.alloc_reg(); // contains(root2, i32 key)
+        let r11 = main.alloc_reg(); // GetI32 success
+        let r12 = main.alloc_reg(); // GetString success
+        let r13 = main.alloc_reg(); // GetI32 type mismatch
+        let r14 = main.alloc_reg(); // GetString type mismatch
+        let r15 = main.alloc_reg(); // missing key
+        let r16 = main.alloc_reg(); // GetI32 missing
+        let r17 = main.alloc_reg(); // root after Remove
+        let r18 = main.alloc_reg(); // size(root after Remove)
+        let r19 = main.alloc_reg(); // source still returns i32 after Remove
+        let r20 = main.alloc_reg(); // removed root misses i32 key
+        let tuple_base = main.alloc_reg();
+        let mut tuple_fields = vec![tuple_base];
+        tuple_fields.extend((0..11).map(|_| main.alloc_reg()));
+        let tuple_result = main.alloc_reg();
+
+        let i32_shapes = main.add_const(ConstValue::VariantShapes(owned_get_result_shapes()));
+        let string_shapes = main.add_const(ConstValue::VariantShapes(owned_get_result_shapes()));
+        let key_i32 = main.add_const(ConstValue::Str("κ\0key".into()));
+        let key_string = main.add_const(ConstValue::Str("s\0key".into()));
+        let missing_key = main.add_const(ConstValue::Str("missing".into()));
+        let int_value = main.add_const(ConstValue::Int(42));
+        let string_value = main.add_const(ConstValue::Str("owned\0é".into()));
+
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1New { rd: r0 });
+        main.emit(Op::LoadConst {
+            rd: r1,
+            idx: key_i32,
+        });
+        main.emit(Op::LoadConst {
+            rd: r2,
+            idx: int_value,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Set {
+            rd: r3,
+            ra: r0,
+            key: r1,
+            value: r2,
+        });
+        main.emit(Op::LoadConst {
+            rd: r4,
+            idx: key_string,
+        });
+        main.emit(Op::LoadConst {
+            rd: r5,
+            idx: string_value,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Set {
+            rd: r6,
+            ra: r3,
+            key: r4,
+            value: r5,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Size { rd: r7, ra: r0 });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Size { rd: r8, ra: r3 });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Size { rd: r9, ra: r6 });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Contains {
+            rd: r10,
+            ra: r6,
+            key: r1,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+            rd: r11,
+            ra: r6,
+            key: r1,
+            shapes: i32_shapes,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1GetString {
+            rd: r12,
+            ra: r6,
+            key: r4,
+            shapes: string_shapes,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+            rd: r13,
+            ra: r6,
+            key: r4,
+            shapes: i32_shapes,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1GetString {
+            rd: r14,
+            ra: r6,
+            key: r1,
+            shapes: string_shapes,
+        });
+        main.emit(Op::LoadConst {
+            rd: r15,
+            idx: missing_key,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+            rd: r16,
+            ra: r6,
+            key: r15,
+            shapes: i32_shapes,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Remove {
+            rd: r17,
+            ra: r6,
+            key: r1,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Size { rd: r18, ra: r17 });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+            rd: r19,
+            ra: r6,
+            key: r1,
+            shapes: i32_shapes,
+        });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+            rd: r20,
+            ra: r17,
+            key: r1,
+            shapes: i32_shapes,
+        });
+        // These results own their payload independently of all four roots.
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Drop { ra: r0 });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Drop { ra: r3 });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Drop { ra: r6 });
+        main.emit(Op::MirOrdinaryMapOwnedGetI32StringV1Drop { ra: r17 });
+
+        let source_values = [r7, r8, r9, r10, r11, r12, r13, r14, r16, r18, r19, r20];
+        for (offset, (target, source)) in tuple_fields.iter().zip(source_values).enumerate() {
+            main.emit(if offset == 3 {
+                Op::Mov {
+                    rd: *target,
+                    rs: source,
+                }
+            } else if offset == 0 || offset == 1 || offset == 2 || offset == 9 {
+                Op::Mov {
+                    rd: *target,
+                    rs: source,
+                }
+            } else {
+                Op::Move {
+                    rd: *target,
+                    rs: source,
+                }
+            });
+        }
+        main.emit(Op::NewTupleMove {
+            rd: tuple_result,
+            base: tuple_base,
+            arity: tuple_fields.len() as u16,
+        });
+        main.emit(Op::Ret { ra: tuple_result });
+
+        let mut vm = BytecodeVM::new(owned_get_bytecode_program(main));
+        let value = vm.run_value().expect("owned-Get bytecode executes");
+        let Value::Tuple(values) = value else {
+            panic!("expected result tuple, got {value}");
+        };
+        assert_eq!(values[0], Value::Int(0));
+        assert_eq!(values[1], Value::Int(1));
+        assert_eq!(values[2], Value::Int(2));
+        assert_eq!(values[3], Value::Bool(true));
+        assert_owned_get_result(&values[4], "Ok", &Value::Int(42));
+        assert_owned_get_result(
+            &values[5],
+            "Ok",
+            &Value::String(std::sync::Arc::new("owned\0é".into())),
+        );
+        assert_owned_get_result(&values[6], "Err", &Value::Int(2));
+        assert_owned_get_result(&values[7], "Err", &Value::Int(2));
+        assert_owned_get_result(&values[8], "Err", &Value::Int(1));
+        assert_eq!(values[9], Value::Int(1));
+        assert_owned_get_result(&values[10], "Ok", &Value::Int(42));
+        assert_owned_get_result(&values[11], "Err", &Value::Int(1));
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_reports_fallible_string_staging_as_capacity() {
+        // GetI32 owns its UTF-8 lookup key too, so its input staging failure
+        // follows the same canonical Err(3) branch as GetString.
+        let mut vm = BytecodeVM::new(owned_get_query_program(false, false, false));
+        let result =
+            vm::with_ordinary_map_owned_get_allocation_failure_for_test(0, || vm.run_value())
+                .expect("GetI32 staging failure remains a Result value");
+        assert_owned_get_result(&result, "Err", &Value::Int(3));
+
+        // GetString has three independently fallible String staging steps:
+        // copy the key, snapshot the stored value, then stage the canonical
+        // NUL-terminated result. Each allocation failure maps to Err(3).
+        for stages_before_failure in 0..3 {
+            let mut vm = BytecodeVM::new(owned_get_query_program(true, false, false));
+            let result = vm::with_ordinary_map_owned_get_allocation_failure_for_test(
+                stages_before_failure,
+                || vm.run_value(),
+            )
+            .expect("GetString staging failure remains a Result value");
+            assert_owned_get_result(&result, "Err", &Value::Int(3));
+        }
+
+        let mut vm = BytecodeVM::new(owned_get_query_program(true, false, false));
+        let result = vm
+            .run_value()
+            .expect("GetString succeeds when staging allocations succeed");
+        assert_owned_get_result(
+            &result,
+            "Ok",
+            &Value::String(std::sync::Arc::new("owned-value".into())),
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_capacity_does_not_mask_bad_operands() {
+        let mut wrong_root = BytecodeVM::new(owned_get_query_program(true, true, false));
+        let error = vm::with_ordinary_map_owned_get_allocation_failure_for_test(0, || {
+            wrong_root.run_value()
+        })
+        .expect_err("wrong root remains a VM error");
+        assert!(error.to_string().contains("expected Map owner"));
+
+        let mut wrong_key = BytecodeVM::new(owned_get_query_program(true, false, true));
+        let error = vm::with_ordinary_map_owned_get_allocation_failure_for_test(0, || {
+            wrong_key.run_value()
+        })
+        .expect_err("wrong key remains a VM error");
+        assert!(error.to_string().contains("expected String key"));
     }
 
     #[test]
@@ -59,10 +441,12 @@ mod tests {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -104,10 +488,12 @@ mod tests {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -167,10 +553,12 @@ mod tests {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -229,10 +617,12 @@ mod tests {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![add_fn, main],
             entry: 1,
             builtin_names: vec![],
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -353,10 +743,12 @@ mod tests {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![fib, main],
             entry: 1,
             builtin_names: vec![],
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -444,10 +836,12 @@ mod tests {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: vec![],
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -481,6 +875,203 @@ mod tests {
             .compile_file(&file)
             .map_err(|e| format!("compiler: {}", e))?;
         run_program(prog.clone())
+    }
+
+    /// Build the same validated Checker -> canonical MIR -> bytecode path as
+    /// the production adapter, keeping the Any Println fixtures independent
+    /// from the compatibility AST compiler.
+    fn compile_canonical_mir_source(src: &str) -> std::sync::Arc<BytecodeProgram> {
+        let tokens = crate::lexer::Lexer::new(src)
+            .tokenize()
+            .expect("canonical MIR fixture lexes");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("canonical MIR fixture parses");
+        let checked = crate::core::check_program(&file)
+            .unwrap_or_else(|errors| panic!("canonical MIR fixture checks: {errors:?}"));
+        let mir = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+            .expect("canonical MIR fixture lowers");
+        mir::compile_mir_program(&mir).expect("canonical MIR fixture emits bytecode")
+    }
+
+    #[test]
+    fn canonical_mir_managed_any_println_formats_i32_and_preserves_the_source_owner() {
+        // This is the checked join shape: the integer literal is packed into
+        // DynamicAny before the join, and Println borrows the resulting local.
+        let source = r#"
+            func carry<T>(value: T) -> T { value }
+            func main() -> i32 {
+                let empty = map_new()
+                let root = map_set(empty, "zero", 0)
+                let number_pair = map_get(root, "zero")
+                drop(empty)
+                drop(root)
+                let number_found = number_pair.0
+                let zero_payload = number_pair.1
+                let zero_carried = carry(zero_payload)
+                let zero = if number_found { zero_carried } else { 0 }
+                println(number_found)
+                println(zero)
+                drop(number_pair)
+                drop(zero_payload)
+                drop(zero_carried)
+                0
+            }
+        "#;
+        let bytecode = compile_canonical_mir_source(source);
+        let println_ops = bytecode
+            .functions
+            .iter()
+            .flat_map(|function| function.code.iter())
+            .filter(|op| {
+                matches!(
+                    **op,
+                    Op::MirManagedAnyOp {
+                        operation: crate::core::mir::MirManagedAnyOperation::Println,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(println_ops, 1, "only the Any argument uses the typed op");
+
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value().expect("checked Any Println"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.stdout(), "true\n0\n");
+    }
+
+    #[test]
+    fn canonical_mir_managed_any_println_preserves_string_nul_and_utf8_bytes() {
+        let source = r#"
+            func main() -> i32 {
+                let empty = map_new()
+                let root = map_set(empty, "k", "owned\0🧪值")
+                let pair = map_get(root, "k")
+                drop(empty)
+                drop(root)
+                let payload = pair.1
+                println(payload)
+                drop(pair)
+                drop(payload)
+                0
+            }
+        "#;
+        let bytecode = compile_canonical_mir_source(source);
+        assert!(bytecode
+            .functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .any(|op| matches!(
+                *op,
+                Op::MirManagedAnyOp {
+                    operation: crate::core::mir::MirManagedAnyOperation::Println,
+                    ..
+                }
+            )));
+
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value().expect("checked String Any Println"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.stdout(), "owned\0🧪值\n");
+    }
+
+    #[test]
+    fn canonical_mir_managed_any_println_missing_or_forged_receipt_fails_before_stdout() {
+        let source = r#"
+            func main() -> i32 {
+                println("prefix must not escape preflight")
+                let empty = map_new()
+                let root = map_set(empty, "k", "payload")
+                let pair = map_get(root, "k")
+                drop(empty)
+                drop(root)
+                let payload = pair.1
+                println(payload)
+                drop(pair)
+                drop(payload)
+                0
+            }
+        "#;
+
+        let mut missing = compile_canonical_mir_source(source);
+        std::sync::Arc::make_mut(&mut missing).canonical_map_any_owner_v1_receipt = None;
+        let mut missing_vm = BytecodeVM::new(missing);
+        let missing_error = missing_vm
+            .run_value()
+            .expect_err("Any Println without its receipt must fail preflight");
+        assert!(missing_error
+            .message()
+            .contains("no independent Checker receipt"));
+        assert_eq!(missing_vm.stdout(), "");
+
+        let mut forged = compile_canonical_mir_source(source);
+        let program = std::sync::Arc::make_mut(&mut forged);
+        let (function_index, contract_index) = program
+            .functions
+            .iter()
+            .enumerate()
+            .find_map(|(function_index, function)| {
+                function.code.iter().find_map(|op| match op {
+                    Op::MirManagedAnyOp {
+                        operation: crate::core::mir::MirManagedAnyOperation::Println,
+                        contract,
+                        ..
+                    } => Some((function_index, *contract)),
+                    _ => None,
+                })
+            })
+            .expect("Any Println contract constant");
+        let Some(ConstValue::ManagedAnyContract(contract)) = program.functions[function_index]
+            .constants
+            .get_mut(contract_index as usize)
+        else {
+            panic!("Any Println checker receipt constant")
+        };
+        contract.contract.checker_source_type = None;
+        let mut forged_vm = BytecodeVM::new(forged);
+        let forged_error = forged_vm
+            .run_value()
+            .expect_err("mutated Println Checker source receipt must fail preflight");
+        assert!(forged_error.message().contains("snapshot"));
+        assert_eq!(forged_vm.stdout(), "");
+    }
+
+    #[test]
+    fn canonical_mir_managed_any_println_invalid_runtime_descriptor_emits_no_partial_output() {
+        let source = r#"
+            func main() -> i32 {
+                let empty = map_new()
+                let root = map_set(empty, "k", "payload")
+                let pair = map_get(root, "k")
+                drop(empty)
+                drop(root)
+                let payload = pair.1
+                println(payload)
+                drop(pair)
+                drop(payload)
+                0
+            }
+        "#;
+        let bytecode = compile_canonical_mir_source(source);
+        let main = bytecode.entry;
+        let forged_any = crate::interp::value::CanonicalManagedAnyI32StringV1::from_string(
+            "must not print".into(),
+        )
+        .with_descriptor_version_for_test(2);
+        let mut vm = BytecodeVM::new(bytecode);
+        let error = vm
+            .execute_managed_any_println_for_test(
+                main,
+                Value::CanonicalManagedAnyI32StringV1(forged_any),
+            )
+            .expect_err("invalid runtime descriptor must trap before printing");
+        assert!(error.message().contains("descriptor version"));
+        assert_eq!(vm.stdout(), "");
     }
 
     #[test]
@@ -633,6 +1224,79 @@ mod tests {
             .expect_err("compatibility bytecode has no authority to emit MIR MapRoot ops");
         assert!(error.message().contains("has no Checker-owned MIR receipt"));
         assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
+    }
+
+    #[test]
+    fn compatibility_bytecode_rejects_injected_map_any_owner_v1_before_stdout() {
+        let tokens = Lexer::new("func main() -> i32 { println(\"before injected Any owner\"); 0 }")
+            .tokenize()
+            .unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        let mut program = compiler.compile_file(&file).unwrap();
+        assert!(program.canonical_map_any_owner_v1_receipt.is_none());
+        let entry = program.entry as usize;
+        std::sync::Arc::make_mut(&mut program).functions[entry]
+            .code
+            .insert(0, Op::MirMapAnyOwnerV1New { rd: 0 });
+
+        let mut vm = BytecodeVM::new(program);
+        let error = vm
+            .run_value()
+            .expect_err("compatibility bytecode has no MapAnyOwner v1 authority");
+        assert!(error
+            .message()
+            .contains("has no independent Checker receipt"));
+        assert!(vm.take_stdout().is_empty(), "preflight must precede stdout");
+    }
+
+    #[test]
+    fn map_root_and_map_any_owner_v1_receipts_cannot_cross_authorize() {
+        use super::instr::{
+            CanonicalMapAnyOwnerV1BytecodeReceipt, CanonicalMapRootBytecodeReceipt,
+        };
+
+        let tokens = Lexer::new("func main() -> i32 { 0 }").tokenize().unwrap();
+        let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+        let mut compiler = BytecodeCompiler::new();
+
+        let mut raw_receipt_program = compiler.compile_file(&file).unwrap();
+        let program = std::sync::Arc::make_mut(&mut raw_receipt_program);
+        let entry = program.entry as usize;
+        program.functions[entry]
+            .code
+            .insert(0, Op::MirMapRootNew { rd: 0 });
+        let raw_receipt =
+            CanonicalMapRootBytecodeReceipt::capture(program.entry, &program.functions);
+        program.functions[entry].code[0] = Op::MirMapAnyOwnerV1New { rd: 0 };
+        program.canonical_map_root_receipt = Some(raw_receipt);
+        let error = BytecodeVM::new(raw_receipt_program)
+            .run_value()
+            .expect_err("raw MapRoot receipt must not authorize the v1 opcode");
+        assert!(error
+            .message()
+            .contains("cannot authorize MapAnyOwner v1 bytecode"));
+
+        let mut v1_receipt_program = compiler.compile_file(&file).unwrap();
+        let program = std::sync::Arc::make_mut(&mut v1_receipt_program);
+        let entry = program.entry as usize;
+        program.functions[entry]
+            .code
+            .insert(0, Op::MirMapAnyOwnerV1New { rd: 0 });
+        let v1_receipt =
+            CanonicalMapAnyOwnerV1BytecodeReceipt::capture(program.entry, &program.functions);
+        program.functions[entry].code[0] = Op::MirMapRootNew { rd: 0 };
+        program.canonical_map_root_receipt = Some(CanonicalMapRootBytecodeReceipt::capture(
+            program.entry,
+            &program.functions,
+        ));
+        program.canonical_map_any_owner_v1_receipt = Some(v1_receipt);
+        let error = BytecodeVM::new(v1_receipt_program)
+            .run_value()
+            .expect_err("MapAnyOwner v1 receipt must not authorize a raw MapRoot opcode");
+        assert!(error
+            .message()
+            .contains("cannot authorize legacy MapRoot bytecode"));
     }
 
     #[test]
@@ -1238,10 +1902,12 @@ mod bench {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -1697,10 +2363,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -1739,10 +2407,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -1782,10 +2452,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -1825,10 +2497,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -1869,10 +2543,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -1911,10 +2587,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -1957,10 +2635,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2003,10 +2683,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2201,6 +2883,7 @@ func main() -> i32 {
                 rd: result + 1,
                 flow: 0,
                 method: 0,
+                checked_source_state: None,
                 args_base: result,
                 argc: 0,
             },
@@ -2234,6 +2917,7 @@ func main() -> i32 {
             rd: result,
             flow: 0,
             method: 0,
+            checked_source_state: None,
             args_base: result + 1,
             argc: 1,
         });
@@ -2485,10 +3169,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![target],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2562,10 +3248,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![owner],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2585,10 +3273,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![current],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2637,10 +3327,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2680,10 +3372,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2724,10 +3418,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -2767,10 +3463,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),
@@ -3317,6 +4015,10 @@ func main() -> i32 {
         );
         expect_ternary_source_errors(|ra, rb, rc| Op::ListSet { ra, rb, rc }, "list-set");
         expect_unary_register_errors(|rd, ra| Op::Len { rd, ra }, "len");
+        expect_unary_register_errors(
+            |rd, ra| Op::StringScalarLen { rd, ra },
+            "checked string scalar length",
+        );
 
         expect_register_error(
             |result| Op::MirSetNew { rd: result + 1 },
@@ -3799,10 +4501,12 @@ func main() -> i32 {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
             functions: vec![main],
             entry: 0,
             builtin_names: Vec::new(),
+            canonical_actors: None,
             actor_defs: std::collections::HashMap::new(),
             flow_defs: std::collections::HashMap::new(),
             flow_transition_funcs: std::collections::HashMap::new(),

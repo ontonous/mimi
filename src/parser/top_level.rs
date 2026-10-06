@@ -540,6 +540,7 @@ impl Parser {
         self.skip_newlines();
         self.expect(TokenKind::LBrace, "`{`")?;
         let mut funcs = Vec::new();
+        let mut explicit_errno_funcs = Vec::new();
         self.skip_newlines();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             self.skip_newlines();
@@ -548,6 +549,7 @@ impl Parser {
             }
             // SD-3: parse optional per-function #[errno] attribute
             let mut func_errno = block_errno;
+            let mut func_errno_explicit = false;
             while self.at(&TokenKind::Hash)
                 && self.pos + 1 < self.tokens().len()
                 && self.tokens()[self.pos + 1].kind == TokenKind::LBracket
@@ -557,6 +559,7 @@ impl Parser {
                 if self.at(&TokenKind::Ident("errno".to_string())) {
                     self.advance(); // skip "errno"
                     func_errno = true;
+                    func_errno_explicit = true;
                 } else {
                     let token = self.peek().clone();
                     return Err(self.attribute_error(
@@ -643,6 +646,7 @@ impl Parser {
                 }
             }
             self.match_semi();
+            let function_name = name.clone();
             funcs.push(ExternFunc {
                 meta: self.consumed_meta(func_start, AstOrigin::User),
                 name,
@@ -654,12 +658,16 @@ impl Parser {
                 no_panic,
                 returns_errno: func_errno,
             });
+            if func_errno_explicit {
+                explicit_errno_funcs.push(function_name);
+            }
         }
         self.expect(TokenKind::RBrace, "`}`")?;
         Ok(ExternBlock {
             meta: self.consumed_meta(start_pos, AstOrigin::User),
             abi,
             funcs,
+            explicit_errno_funcs,
             no_panic,
             unsafe_: false,
             returns_errno: block_errno,

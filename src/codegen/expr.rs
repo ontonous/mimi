@@ -22,7 +22,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Ident(name) => self.compile_ident_expr(name, vars),
             Expr::Binary(op, lhs, rhs) => self.compile_binary_expr(*op, lhs, rhs, vars),
             Expr::Unary(op, inner) => self.compile_unary_expr(*op, inner, vars),
-            Expr::Call(callee, args) => self.compile_call_expr(callee, args, vars),
+            Expr::Call(callee, args) => self.compile_call_expr(callee, args, vars, expr.meta()),
             Expr::Turbofish(name, type_args, args) => self.compile_turbofish_expr(name, type_args, args, vars),
             Expr::Match(scrutinee, arms) => {
                 self.compile_match_expr(scrutinee, arms, vars, false)
@@ -974,7 +974,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                     // type here — the print formatter then displayed the raw
                     // struct `(true, 1.5, 0)` instead of `Ok(1.5)`. Infer the
                     // declared return type from type_impls.
-                    self.infer_impl_method_return_type(&obj_type, method)
+                    self.infer_impl_method_return_type(&obj_type, method, expr.meta())
                 } else {
                     String::new()
                 }
@@ -1550,7 +1550,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// (type_impls: type → trait → method FuncDefs), rendered the same way
     /// checker types render (fmt_type) so print/dispatch string gates like
     /// `starts_with("Result")` recognize it.
-    pub(super) fn infer_impl_method_return_type(&self, type_name: &str, method: &str) -> String {
+    pub(super) fn infer_impl_method_return_type(
+        &self,
+        type_name: &str,
+        method: &str,
+        call_meta: Option<crate::ast::AstNodeMeta>,
+    ) -> String {
         // 0.36.48: strip generic args before lookup — `impl<T> ListExt<T> for
         // List<T>` registers under the BASE name ("List"), so both concrete
         // ("List<i64>") and placeholder ("List<T>") obj shapes must resolve to
@@ -1558,11 +1563,39 @@ impl<'ctx> CodeGenerator<'ctx> {
         // placeholder params are substituted downstream by
         // register_qualified_var_type (bare uppercase → i64 slot name).
         let base = type_name.split('<').next().unwrap_or(type_name);
-        if let Some(trait_impls) = self.type_impls.get(base) {
+        if self.checked_native_declarations.is_some() {
+            if let Some(meta) = call_meta {
+                let span = meta.span;
+                let key = (
+                    span.source_id.raw(),
+                    span.start_line,
+                    span.start_col,
+                    span.end_line,
+                    span.end_col,
+                );
+                if let Some(targets) = self.checked_trait_method_dispatch.call_targets.get(&key) {
+                    if targets.len() == 1 {
+                        let target = &targets[0];
+                        // The callsite receipt already names the exact impl
+                        // and callable. The source spelling validates the
+                        // selected declaration but never selects it.
+                        return self
+                            .checked_impl_method_result_display(
+                                &target.key.impl_owner,
+                                &target.key.callable,
+                                method,
+                            )
+                            .unwrap_or_default();
+                    }
+                }
+            }
+        } else if let Some(trait_impls) = self.type_impls.get(base) {
             for methods in trait_impls.values() {
-                if let Some(m) = methods.iter().find(|m| m.name == method) {
-                    if let Some(ret) = &m.ret {
-                        return crate::core::fmt_type(ret);
+                if let Some(method_def) =
+                    methods.iter().find(|method_def| method_def.name == method)
+                {
+                    if let Some(result) = &method_def.ret {
+                        return crate::core::fmt_type(result);
                     }
                 }
             }
@@ -1582,6 +1615,195 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         String::new()
+    }
+
+    fn checked_impl_method_result_display(
+        &self,
+        impl_owner: &crate::core::NodeId,
+        owner: &crate::core::NodeId,
+        method_name: &str,
+    ) -> Option<String> {
+        let catalog = self.checked_native_declarations.as_ref()?;
+        let implementation = catalog.impls.get(impl_owner)?;
+        if &implementation.owner != impl_owner {
+            return None;
+        }
+        let mut bindings = implementation
+            .methods
+            .iter()
+            .filter(|binding| &binding.callable == owner);
+        let binding = bindings.next()?;
+        if bindings.next().is_some() || binding.name != method_name {
+            return None;
+        }
+        self.checked_native_type_display(
+            &binding.signature.result,
+            &mut std::collections::BTreeSet::new(),
+        )
+    }
+
+    fn checked_native_type_display(
+        &self,
+        id: &crate::core::ResolvedTypeId,
+        active: &mut std::collections::BTreeSet<crate::core::ResolvedTypeId>,
+    ) -> Option<String> {
+        if !active.insert(id.clone()) {
+            return None;
+        }
+        let types = self.checked_native_types.as_ref()?;
+        let ty = types.get(id)?;
+        let display = match ty {
+            crate::core::ResolvedType::Primitive(primitive) => match primitive {
+                crate::core::PrimitiveType::Unit => "unit".to_owned(),
+                other => other.language_name().to_owned(),
+            },
+            crate::core::ResolvedType::GenericParameter(parameter) => {
+                self.checked_generic_binder_names.get(parameter)?.clone()
+            }
+            crate::core::ResolvedType::Nominal {
+                item, arguments, ..
+            } => {
+                let owner = crate::core::NodeId(item.as_str().to_owned());
+                let name = self
+                    .checked_native_declarations
+                    .as_ref()
+                    .and_then(|catalog| catalog.types.get(&owner))
+                    .map(|declaration| declaration.name.clone())
+                    .or_else(|| {
+                        item.as_str()
+                            .strip_prefix("builtin:type:")
+                            .map(str::to_owned)
+                    })
+                    .or_else(|| item.as_str().strip_prefix("type:").map(str::to_owned))
+                    .or_else(|| {
+                        item.as_str()
+                            .strip_prefix("state:")
+                            .map(|state| format!("flow::{state}"))
+                    })?;
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| self.checked_native_type_display(argument, active))
+                    .collect::<Option<Vec<_>>>()?;
+                if arguments.is_empty() {
+                    name
+                } else {
+                    format!("{}<{}>", name, arguments.join(", "))
+                }
+            }
+            crate::core::ResolvedType::FlowStateSet { flow, states } => {
+                let flow = flow.as_str().strip_prefix("flow:").unwrap_or(flow.as_str());
+                let states = states
+                    .iter()
+                    .map(|state| {
+                        state
+                            .as_str()
+                            .strip_prefix("state:")
+                            .unwrap_or(state.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                format!("flow_state_set<{}:{}>", flow, states.join("|"))
+            }
+            crate::core::ResolvedType::Reference {
+                lifetime,
+                mutable,
+                target,
+            } => {
+                let target = self.checked_native_type_display(target, active)?;
+                let lifetime = lifetime
+                    .as_ref()
+                    .map(|lifetime| format!("'{} ", lifetime))
+                    .unwrap_or_default();
+                if *mutable {
+                    format!("&{}mut {}", lifetime, target)
+                } else {
+                    format!("&{}{}", lifetime, target)
+                }
+            }
+            crate::core::ResolvedType::Option(inner) => {
+                format!(
+                    "Option<{}>",
+                    self.checked_native_type_display(inner, active)?
+                )
+            }
+            crate::core::ResolvedType::Result { ok, error } => format!(
+                "Result<{}, {}>",
+                self.checked_native_type_display(ok, active)?,
+                self.checked_native_type_display(error, active)?
+            ),
+            crate::core::ResolvedType::Tuple(members) => format!(
+                "({})",
+                members
+                    .iter()
+                    .map(|member| self.checked_native_type_display(member, active))
+                    .collect::<Option<Vec<_>>>()?
+                    .join(", ")
+            ),
+            crate::core::ResolvedType::Function {
+                parameters, result, ..
+            } => format!(
+                "fn({}) -> {}",
+                parameters
+                    .iter()
+                    .map(|parameter| self.checked_native_type_display(parameter, active))
+                    .collect::<Option<Vec<_>>>()?
+                    .join(", "),
+                self.checked_native_type_display(result, active)?
+            ),
+            crate::core::ResolvedType::CBuffer(inner) => format!(
+                "CBuffer<{}>",
+                self.checked_native_type_display(inner, active)?
+            ),
+            crate::core::ResolvedType::Capability(item) => {
+                format!("cap {}", item.as_str())
+            }
+            crate::core::ResolvedType::Ownership { kind, target } => {
+                let target = self.checked_native_type_display(target, active)?;
+                match kind {
+                    crate::core::OwnershipTypeKind::Shared => format!("shared {}", target),
+                    crate::core::OwnershipTypeKind::Weak => format!("weak {}", target),
+                }
+            }
+            crate::core::ResolvedType::Newtype { inner, .. } => {
+                self.checked_native_type_display(inner, active)?
+            }
+            crate::core::ResolvedType::Array { element, length } => format!(
+                "[{}; {}]",
+                self.checked_native_type_display(element, active)?,
+                length
+            ),
+            crate::core::ResolvedType::Slice(element) => {
+                format!("[{}]", self.checked_native_type_display(element, active)?)
+            }
+            crate::core::ResolvedType::Trait { kind, traits } => {
+                let traits = traits
+                    .iter()
+                    .map(|trait_id| {
+                        let owner = crate::core::NodeId(trait_id.as_str().to_owned());
+                        self.checked_native_declarations
+                            .as_ref()?
+                            .traits
+                            .get(&owner)
+                            .map(|declaration| declaration.qualified_name.clone())
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                match kind {
+                    crate::core::TraitTypeKind::Opaque => {
+                        format!("impl {}", traits.join(" + "))
+                    }
+                    crate::core::TraitTypeKind::Dynamic => {
+                        format!("dyn {}", traits.join(" + "))
+                    }
+                }
+            }
+            crate::core::ResolvedType::RawPointer { mutable, target } => format!(
+                "*{} {}",
+                if *mutable { "mut" } else { "const" },
+                self.checked_native_type_display(target, active)?
+            ),
+            crate::core::ResolvedType::DynamicAny { .. } => "Any".to_owned(),
+        };
+        active.remove(id);
+        Some(display)
     }
 
     fn infer_call_return_type_name(&self, name: &str) -> Option<String> {

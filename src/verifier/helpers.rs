@@ -388,12 +388,14 @@ pub(crate) fn collect_idents_in_stmt(stmt: &Stmt, idents: &mut Vec<String>) {
 }
 
 /// Return Unknown for all functions when Z3 is not available.
+#[cfg(test)]
 pub(crate) fn mock_verify_file(file: &crate::ast::File) -> Vec<VerificationResult> {
     let mut results = Vec::new();
     mock_verify_items(&file.items, &mut results);
     results
 }
 
+#[cfg(test)]
 fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationResult>) {
     for item in items {
         match item {

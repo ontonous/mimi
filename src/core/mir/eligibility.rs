@@ -48,13 +48,43 @@ pub fn is_scalar_ffi_candidate(program: &CheckedProgram) -> bool {
     is_scalar_ffi_candidate_excluding_sources(program, None)
 }
 
-/// Whether the checked program contains a defined C-export body. Canonical
-/// MIR currently rejects these callables because it does not carry the
-/// export-wrapper ABI receipt; default dispatch can therefore select the
-/// explicit compatibility route before attempting MIR materialization.
+/// Whether the checked program contains a defined C-export body outside the
+/// checker-owned scalar wrapper receipt. Default and explicit MIR dispatch
+/// use this boundary to reject unsupported export shapes before any legacy
+/// body consumer can observe them.
 pub fn exported_abi_body_boundary_reason(program: &CheckedProgram) -> Option<&'static str> {
-    has_exported_abi_body(program, None)
-        .then_some("defined extern-ABI functions need the legacy C export-wrapper emitter")
+    has_exported_abi_body(program, None).then_some(
+        "defined extern-ABI functions use an export ABI outside the canonical scalar wrapper",
+    )
+}
+
+/// Whether the checker catalog contains at least one closed scalar C export
+/// that can be represented by the canonical MIR wrapper. Unsupported exports
+/// remain an explicit coverage rejection through
+/// `exported_abi_body_boundary_reason`.
+pub fn is_scalar_export_candidate(program: &CheckedProgram) -> bool {
+    is_scalar_export_candidate_excluding_sources(program, None)
+}
+
+pub(crate) fn is_scalar_export_candidate_excluding_sources(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<SourceId>>,
+) -> bool {
+    !program.native_declarations().exports.is_empty()
+        && program
+            .native_declarations()
+            .exports
+            .values()
+            .any(|declaration| {
+                !excluded_sources.is_some_and(|excluded| {
+                    program
+                        .callable(&declaration.owner)
+                        .is_some_and(|callable| {
+                            excluded.contains(&callable.body.root.origin.user_span().source_id)
+                        })
+                })
+            })
+        && !has_exported_abi_body(program, excluded_sources)
 }
 
 fn has_exported_abi_body(
@@ -64,6 +94,10 @@ fn has_exported_abi_body(
     program.functions().values().any(|function| {
         function.extern_abi.is_some()
             && program.callables().contains_key(&function.node_id)
+            && !program
+                .native_declarations()
+                .exports
+                .contains_key(&function.node_id)
             && !excluded_sources
                 .is_some_and(|excluded| excluded.contains(&function.origin.user_span().source_id))
     })
@@ -1699,6 +1733,89 @@ pub fn is_s8_flow_transition_candidate(program: &CheckedProgram) -> bool {
             .is_some_and(|(_, ty)| is_concrete_i32_type(ty))
 }
 
+/// Whether `program` is a closed, checker-owned set of direct scalar
+/// transitions (local or synchronous boundary) that the canonical MIR
+/// adapter can consume as one graph.
+///
+/// The original S8 profile intentionally covered one self-loop only. This
+/// adjacent profile admits a scalar multi-transition graph while keeping
+/// parameters, failure effects, persistent fields, imports, helpers, fallback
+/// edges, and non-scalar payloads outside the receipt. Unsupported Flow syntax
+/// therefore fails at the shared MIR gates instead of reaching the AST emitter.
+pub fn is_closed_silent_local_flow_candidate(program: &CheckedProgram) -> bool {
+    if program.has_imports() || program.flows().len() != 1 || !program.actors().is_empty() {
+        return false;
+    }
+    // Keep this first broad slice rooted in the executable entry plus the
+    // transition bodies themselves.  A helper call would require a separate
+    // callable receipt and is deliberately left for a later profile.
+    if program.functions().values().any(|function| {
+        function.qualified_name != "main"
+            && !program
+                .transitions()
+                .values()
+                .any(|transition| transition.node_id == function.node_id)
+            && !program
+                .source_registry()
+                .key(function.origin.user_span().source_id)
+                .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
+    }) {
+        return false;
+    }
+    let Some(flow) = program.flows().values().next() else {
+        return false;
+    };
+    if !flow.persistent_fields.is_empty() {
+        return false;
+    }
+    // FFI-pinned transitions have a distinct dispatch/ABI contract.  Generated
+    // fallback edges are filtered below: every Flow receives those edges even
+    // when the source declares no fallback body, so they are not evidence that
+    // the user transition graph is incomplete.
+    if program
+        .transitions()
+        .values()
+        .any(|transition| transition.is_ffi_pinned)
+    {
+        return false;
+    }
+    let transitions = program
+        .transitions()
+        .values()
+        .filter(|transition| !transition.is_fallback)
+        .collect::<Vec<_>>();
+    if transitions.is_empty() {
+        return false;
+    }
+    if transitions.iter().any(|transition| {
+        transition.targets.len() != 1
+            || !transition.params.is_empty()
+            || transition.fails.is_some()
+            || program.resolved_body(&transition.node_id).is_none()
+    }) {
+        return false;
+    }
+    for (name, state) in &flow.states {
+        // Fault is a generated recovery state owned by the Flow dispatcher;
+        // its payload is not part of the user transition ABI in this closed
+        // no-fails slice.
+        if name == "Fault" {
+            continue;
+        }
+        match state.payload.as_slice() {
+            [] => {}
+            [(_, ty)] if is_concrete_i32_type(ty) => {}
+            _ => return false,
+        }
+    }
+    transitions.iter().all(|transition| {
+        let Some(target) = transition.targets.first() else {
+            return false;
+        };
+        flow.states.contains_key(&target.name)
+    })
+}
+
 /// Whether `program` is the exact S8 production island already closed by all
 /// four consumers. This is stricter than the candidate predicate: the
 /// admitted bodies contain only typed scalar/record expressions and the one
@@ -1888,7 +2005,7 @@ mod tests {
     use super::{
         exported_abi_body_boundary_reason, is_exact_cross_state_f64_failure_receipt,
         is_exact_s8_flow_transition, is_flow_failure_retry_candidate,
-        is_s8_flow_transition_candidate, is_scalar_ffi_candidate,
+        is_s8_flow_transition_candidate, is_scalar_export_candidate, is_scalar_ffi_candidate,
     };
 
     fn checked(source: &str) -> crate::core::CheckedProgram {
@@ -1900,7 +2017,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_ffi_import_with_exported_body_stays_outside_mir_profile() {
+    fn scalar_ffi_import_with_scalar_export_uses_shared_export_profile() {
         let program = checked(
             r#"
                 extern "C" { func abs(value: i32) -> i32; }
@@ -1908,10 +2025,11 @@ mod tests {
                 func main() -> i32 { abs(internal_export(-3)) }
             "#,
         );
-        assert!(!is_scalar_ffi_candidate(&program));
-        assert_eq!(
-            exported_abi_body_boundary_reason(&program),
-            Some("defined extern-ABI functions need the legacy C export-wrapper emitter")
+        assert!(is_scalar_ffi_candidate(&program));
+        assert!(is_scalar_export_candidate(&program));
+        assert!(
+            exported_abi_body_boundary_reason(&program).is_none(),
+            "a scalar export receipt removes the legacy export boundary"
         );
     }
 

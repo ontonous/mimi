@@ -1462,19 +1462,20 @@ mod tests {
     }
 
     #[test]
-    fn canonical_actor_direct_native_does_not_trim_unused_user_contracts() {
+    fn canonical_actor_direct_native_rejects_unused_user_contracts_without_legacy_access() {
         for predicate in ["result == x", "result != x"] {
             let source = format!("{CAPTURE}\nfunc guarded(x: i32) -> i32 {{\nrequires: x > 0\nensures: {predicate}\nx\n}}");
             let checked = checked_source(&source);
             let context = Context::create();
             let mut generator = CodeGenerator::new(&context, "actor_user_proof_compatibility");
             crate::core::CheckedProgram::reset_test_legacy_body_access();
-            // This source is outside the execution-only Actor profile. The
-            // retained native owner may reject its unsupported capture, but it
-            // must never report a canonical receipt for a trimmed proof graph.
-            let _compatibility_result = generator.compile_checked(&checked);
+            // This source is outside the execution-only Actor profile.  The
+            // canonical owner rejects the unsupported proof graph before code
+            // generation; it must not reopen any retained AST owner.
+            let compatibility_result = generator.compile_checked(&checked);
+            assert!(compatibility_result.is_err());
             assert!(generator.test_mir_native_route_receipt().is_none());
-            assert!(!crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+            assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
         }
     }
 

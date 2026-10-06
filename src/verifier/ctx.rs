@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::ast::{File, Item};
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
@@ -100,14 +101,30 @@ impl VerifStatus {
     /// Used by CLI display and LSP hover.
     pub fn plain_language(&self) -> &'static str {
         match self {
-            VerifStatus::Proven => "contract verified — the function always satisfies its ensures clause when the requires clause holds",
-            VerifStatus::Disproven => "contract violated — there exist inputs satisfying requires that break ensures",
-            VerifStatus::NotInTrustedSubset => "not verifiable — the function uses features outside the verified subset (loops, heap, FFI, actors, etc.)",
-            VerifStatus::SolverUnknown => "inconclusive — the solver could not determine correctness (try simplifying the contract or adding lemmas)",
-            VerifStatus::Timeout => "timed out — the solver exceeded its time budget (try simplifying the contract or increasing the timeout)",
-            VerifStatus::InfrastructureError => "infrastructure error — the solver is unavailable or crashed (check Z3 installation)",
-            VerifStatus::RuntimeOnlyContract => "runtime-only contract — the contract references mutable state that cannot be verified statically",
-            VerifStatus::NoObligations => "no obligations — the function has no requires/ensures to verify",
+            VerifStatus::Proven => {
+                "contract verified — the function always satisfies its ensures clause when the requires clause holds"
+            }
+            VerifStatus::Disproven => {
+                "contract violated — there exist inputs satisfying requires that break ensures"
+            }
+            VerifStatus::NotInTrustedSubset => {
+                "not verifiable — the function uses features outside the verified subset (loops, heap, FFI, actors, etc.)"
+            }
+            VerifStatus::SolverUnknown => {
+                "inconclusive — the solver could not determine correctness (try simplifying the contract or adding lemmas)"
+            }
+            VerifStatus::Timeout => {
+                "timed out — the solver exceeded its time budget (try simplifying the contract or increasing the timeout)"
+            }
+            VerifStatus::InfrastructureError => {
+                "infrastructure error — the solver is unavailable or crashed (check Z3 installation)"
+            }
+            VerifStatus::RuntimeOnlyContract => {
+                "runtime-only contract — the contract references mutable state that cannot be verified statically"
+            }
+            VerifStatus::NoObligations => {
+                "no obligations — the function has no requires/ensures to verify"
+            }
         }
     }
 
@@ -117,12 +134,24 @@ impl VerifStatus {
     pub fn hint(&self) -> Option<&'static str> {
         match self {
             VerifStatus::Proven | VerifStatus::NoObligations => None,
-            VerifStatus::Disproven => Some("check the counterexample below — it shows specific inputs that violate the contract"),
-            VerifStatus::NotInTrustedSubset => Some("consider extracting the verifiable logic into a pure helper function"),
-            VerifStatus::SolverUnknown => Some("try adding intermediate assertions (math:) to guide the solver"),
-            VerifStatus::Timeout => Some("try breaking the contract into smaller lemmas or increasing --timeout"),
-            VerifStatus::InfrastructureError => Some("install Z3: apt install z3 / brew install z3"),
-            VerifStatus::RuntimeOnlyContract => Some("consider using a pure function for the verifiable invariant"),
+            VerifStatus::Disproven => Some(
+                "check the counterexample below — it shows specific inputs that violate the contract",
+            ),
+            VerifStatus::NotInTrustedSubset => {
+                Some("consider extracting the verifiable logic into a pure helper function")
+            }
+            VerifStatus::SolverUnknown => {
+                Some("try adding intermediate assertions (math:) to guide the solver")
+            }
+            VerifStatus::Timeout => {
+                Some("try breaking the contract into smaller lemmas or increasing --timeout")
+            }
+            VerifStatus::InfrastructureError => {
+                Some("install Z3: apt install z3 / brew install z3")
+            }
+            VerifStatus::RuntimeOnlyContract => {
+                Some("consider using a pure function for the verifiable invariant")
+            }
         }
     }
 
@@ -199,9 +228,8 @@ impl ProofArtifact {
     /// Current semantics version. Bump when verification semantics change.
     pub const SEMANTICS_VERSION: u32 = 1;
 
-    /// Engine identity: Flow/VIR verifier (encodes surface AST bodies via
-    /// `legacy_body_file`; ADR-008 demotes this engine to the `math:` channel,
-    /// retirement registered on the 0.2 track).
+    /// Test-only engine identity for the retained Flow/VIR oracle. Production
+    /// proof artifacts use the Resolved or canonical MIR engines.
     pub const ENGINE_FLOW_AST: &'static str = "flow_ast";
     /// Engine identity: Resolved IR verifier (`verify_checked_contracts`,
     /// verifies from CheckedProgram's Resolved IR — the primary engine per
@@ -369,13 +397,7 @@ pub(crate) fn mock_verify_checked(
         if is_stdlib_prelude_callable(program, node_id) {
             continue;
         }
-        let has_contracts = !callable.contracts.is_empty()
-            || callable
-                .body
-                .root
-                .statements
-                .iter()
-                .any(|s| matches!(s.kind, crate::core::ir::ResolvedStmtKind::Math(_)));
+        let has_contracts = callable.has_proof_obligations();
         let func_name = program
             .functions()
             .values()
@@ -475,6 +497,7 @@ pub fn normalize_vir_for_hash(vir: &str) -> String {
     result
 }
 
+#[derive(Clone, Default)]
 pub(crate) struct Z3VarMap {
     pub(crate) int_vars: HashMap<String, Z3Int>,
     pub(crate) bool_vars: HashMap<String, Z3Bool>,
@@ -711,10 +734,11 @@ impl SolverSession {
                 let old = std::mem::replace(&mut self.solver, new_solver);
                 std::mem::forget(old);
                 self.replaced = true; // skip next pop() — push was on old solver
-                self.poisoned = true; // B6: assertions lost, future checks unreliable
-                                      // batch4 P2-1: only classify a Z3 Unknown as a real timeout when
-                                      // the configured budget was actually exhausted; otherwise report
-                                      // a generic SolverUnknown rather than a misleading Timeout.
+                self.poisoned = true;
+                // B6: assertions lost, future checks unreliable.
+                // batch4 P2-1: only classify a Z3 Unknown as a real timeout when
+                // the configured budget was actually exhausted; otherwise report
+                // a generic SolverUnknown rather than a misleading Timeout.
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 self.timeout_observed = self.timeout_ms != 0 && elapsed_ms >= self.timeout_ms;
                 SatResult::Unknown
@@ -864,13 +888,17 @@ impl SolverSession {
     }
 }
 
-/// Context for verification lookups (func_defs, func_status).
-/// Owned by VerifierState in the Flow path — contains no Z3 solver state.
+/// Context for the test-only surface-AST verifier lookup tables
+/// (`func_defs`, `func_status`). Production verification uses checker-owned
+/// callable directories and canonical MIR; the two legacy maps are compiled
+/// only with the Flow/VIR equivalence harness.
 #[derive(Default)]
 pub struct VerifierCtx {
+    #[cfg(test)]
     pub(crate) func_defs: HashMap<String, crate::ast::FuncDef>,
     /// V-C4: status of each verified function. Callee ensures are only
     /// admitted as axioms when the callee status is `Verified`.
+    #[cfg(test)]
     pub(crate) func_status: HashMap<String, VerifStatus>,
     /// P1-24: BLAKE3 hash of the source file (tamper detection).
     /// Computed at the verify_source / verify_checked entry point.
@@ -996,10 +1024,93 @@ impl Verifier {
         self.ctx.source_hash = hash;
     }
 
+    /// Actor declaration queries are part of the checked verifier directory,
+    /// so they must survive the canonical ScalarActor NoContracts fast path.
+    /// Install them before route selection can return early.
+    fn install_checked_actor_metadata(&mut self, program: &crate::core::CheckedProgram) {
+        self.ctx.checked_actors = program
+            .actors()
+            .values()
+            .map(|actor| actor.qualified_name.clone())
+            .collect();
+        let mut actor_method_signatures = std::collections::HashMap::new();
+        let mut actor_method_params = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            for method in &actor.method_signatures {
+                let key = format!("{}.{}", actor.qualified_name, method.name);
+                actor_method_signatures
+                    .insert(key.clone(), (method.params.len(), method.ret.clone()));
+                actor_method_params.insert(key.clone(), method.params.clone());
+            }
+        }
+        self.ctx.checked_actor_method_signatures = actor_method_signatures;
+        self.ctx.checked_actor_method_params = actor_method_params;
+        let mut actor_fields = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            if !actor.fields.is_empty() {
+                actor_fields.insert(
+                    actor.qualified_name.clone(),
+                    actor
+                        .fields
+                        .iter()
+                        .map(|(name, ty, mut_)| (name.clone(), crate::core::fmt_type(ty), *mut_))
+                        .collect(),
+                );
+            }
+        }
+        self.ctx.checked_actor_fields = actor_fields;
+    }
+
     pub fn verify_checked(
         &mut self,
         program: &crate::core::CheckedProgram,
     ) -> Vec<VerificationResult> {
+        let mut results = self.verify_checked_without_actor_ffi(program);
+        if crate::core::mir::scalar_actor_contract_boundary_reason(program).is_some() {
+            // Foreign postconditions are owned by the dedicated FFI adapter.
+            // The Resolved body pass can also discover those call-site
+            // Ensures through its generic call-site census; retaining both
+            // observations would report a spurious compatibility proof (and
+            // duplicate the deferred result).  Keep the called Requires
+            // observation, then append exactly one checker-owned Ensures
+            // boundary from the Actor compatibility adapter.
+            results.retain(|result| !result.func_name.contains("Ensures"));
+            results.extend(super::actor_ffi_results_or_boundary(
+                program,
+                self.ctx.source_hash.clone(),
+            ));
+        }
+        results
+    }
+
+    /// Verify checked callables without appending the Actor compatibility
+    /// route's separately-owned FFI call-site results. The dual verifier uses
+    /// this entry so it can merge ordinary callable engines first and then add
+    /// exactly one FFI observation set.
+    pub(crate) fn verify_checked_without_actor_ffi(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+    ) -> Vec<VerificationResult> {
+        self.install_checked_actor_metadata(program);
+        match super::verify_scalar_actor_checked(program, self.ctx.source_hash.clone()) {
+            Ok(Some(results)) => return results,
+            Ok(None) => {}
+            Err(message) => {
+                return vec![VerificationResult {
+                    func_name: "scalar-actor-domain-v1".into(),
+                    status: VerifStatus::NotInTrustedSubset,
+                    diagnostic: Some(crate::diagnostic::mir_route_error_diagnostic(
+                        message.clone(),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )),
+                    message,
+                    duration_us: 0,
+                    constraint_count: 0,
+                    artifact: None,
+                    trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                }];
+            }
+        }
         self.ctx.checked_function_names = program
             .functions()
             .values()
@@ -1250,37 +1361,6 @@ impl Verifier {
         }
         self.ctx.checked_method_signatures = method_signatures;
         self.ctx.checked_method_params = method_params;
-        self.ctx.checked_actors = program
-            .actors()
-            .values()
-            .map(|actor| actor.qualified_name.clone())
-            .collect();
-        let mut actor_method_signatures = std::collections::HashMap::new();
-        let mut actor_method_params = std::collections::HashMap::new();
-        for actor in program.actors().values() {
-            for method in &actor.method_signatures {
-                let key = format!("{}.{}", actor.qualified_name, method.name);
-                actor_method_signatures
-                    .insert(key.clone(), (method.params.len(), method.ret.clone()));
-                actor_method_params.insert(key.clone(), method.params.clone());
-            }
-        }
-        self.ctx.checked_actor_method_signatures = actor_method_signatures;
-        self.ctx.checked_actor_method_params = actor_method_params;
-        let mut actor_fields = std::collections::HashMap::new();
-        for actor in program.actors().values() {
-            if !actor.fields.is_empty() {
-                actor_fields.insert(
-                    actor.qualified_name.clone(),
-                    actor
-                        .fields
-                        .iter()
-                        .map(|(name, ty, mut_)| (name.clone(), crate::core::fmt_type(ty), *mut_))
-                        .collect(),
-                );
-            }
-        }
-        self.ctx.checked_actor_fields = actor_fields;
         let mut mailbox_depths = std::collections::HashMap::new();
         for flow in program.flows().values() {
             if let Some(depth) = flow.mailbox_depth {
@@ -1802,6 +1882,7 @@ impl Verifier {
             .cloned()
     }
 
+    #[cfg(test)]
     pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
         let mut results = Vec::new();
         VerifierCtx::verify_items(&mut self.ctx, &mut self.session, &file.items, &mut results);
@@ -1814,8 +1895,8 @@ impl Verifier {
     /// Iterates `program.callables()` and uses `verify_contracts_from_resolved`
     /// from `resolved_expr.rs` to encode requires/ensures/math as Z3 constraints.
     ///
-    /// Does NOT handle extern block contracts (those still use the AST path
-    /// through `verify_ffi_checked` / `flow_verify_ffi_call_sites_with_externs`).
+    /// Does NOT handle extern block contracts (those are handled separately by
+    /// `verify_ffi_checked`).
     ///
     /// AU-V1 (full-audit-2026-08-05 §11, VERIFIED CRITICAL): the solver scope
     /// is reset before EACH callable. `verify_contracts_from_resolved` asserts
@@ -1840,8 +1921,12 @@ impl Verifier {
             if is_stdlib_prelude_callable(program, node_id) {
                 continue;
             }
-            if callable.contracts.is_empty()
-                && !crate::verifier::resolved_expr::has_math_obligations(callable)
+            if !callable.has_proof_obligations()
+                && !crate::verifier::resolved_expr::has_resolved_callsite_obligations(
+                    callable,
+                    program.callables(),
+                    program.resolved_types(),
+                )
             {
                 continue;
             }
@@ -1850,6 +1935,12 @@ impl Verifier {
                 .values()
                 .find(|f| f.node_id == *node_id)
                 .map(|f| f.qualified_name.clone())
+                .or_else(|| {
+                    program.transitions().values().find_map(|transition| {
+                        (transition.node_id == *node_id)
+                            .then(|| format!("{}::{}", transition.id.flow.0, transition.id.event))
+                    })
+                })
                 .unwrap_or_else(|| format!("{:?}", node_id));
 
             // AU-V1: per-callable isolation — see doc comment above.
@@ -1858,15 +1949,52 @@ impl Verifier {
             // state (same primitive the other engines use per function).
             self.session.reset();
 
+            if callable.has_unmodeled_proof_roots() {
+                results.push(VerificationResult {
+                    func_name,
+                    status: VerifStatus::NotInTrustedSubset,
+                    message:
+                        "embedded, default or closure proof roots require a scoped contract model"
+                            .into(),
+                    diagnostic: None,
+                    duration_us: 0,
+                    constraint_count: 0,
+                    artifact: None,
+                    trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                });
+                continue;
+            }
             let start = std::time::Instant::now();
-            let outcome = crate::verifier::resolved_expr::verify_contracts_from_resolved(
-                callable,
-                program.resolved_types(),
-                &mut self.session,
-            );
+            let outcome =
+                crate::verifier::resolved_expr::verify_contracts_from_resolved_with_catalog(
+                    callable,
+                    program.resolved_types(),
+                    program.callables(),
+                    program.resolved_variants(),
+                    &mut self.session,
+                );
             let duration_us = start.elapsed().as_micros() as u64;
 
             let Some((status, message)) = outcome else {
+                if !callable.has_proof_obligations() {
+                    // This callable was visited only because one of its
+                    // callees has a checked call-site obligation. Once all
+                    // such internal VCs prove, it does not create a new
+                    // public contract result of its own.
+                    continue;
+                }
+                results.push(VerificationResult {
+                    func_name,
+                    status: VerifStatus::NotInTrustedSubset,
+                    message:
+                        "checked typed proof obligations are outside the resolved contract model"
+                            .into(),
+                    diagnostic: None,
+                    duration_us,
+                    constraint_count: 0,
+                    artifact: None,
+                    trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                });
                 continue;
             };
 
@@ -1881,11 +2009,14 @@ impl Verifier {
             // identities are plumbed through. `source_hash` is also empty on
             // the LSP path (no source text handed to the Verifier there), so
             // tamper detection degrades to `resolved_ir_hash` identity only.
-            let artifact = Some(ProofArtifact {
+            let artifact = (status != VerifStatus::NotInTrustedSubset).then(|| ProofArtifact {
                 semantics_version: ProofArtifact::SEMANTICS_VERSION,
-                // H-24 (audit): i32 definedness VCs are now enforced on this
-                // path, so "checked_i32" is honest here (i64 stays unbounded).
-                integer_model: "checked_i32".to_string(),
+                // Resolved definedness checks both i32 and i64 arithmetic at
+                // each expression's typed width. Power additionally follows
+                // the phase-local checked-i64 then i32-wrap compatibility
+                // profile; retain that distinction in this engine's cache
+                // identity.
+                integer_model: "checked_i32_i64_power_i64_then_i32_wrap_0_1_11".to_string(),
                 // H-21 (audit): f64 is rejected fail-closed on this path —
                 // no float model is ever assumed.
                 float_model: "f64_rejected".to_string(),
@@ -1910,6 +2041,46 @@ impl Verifier {
                 trusted_subset_domain: None,
             });
         }
+        // Contracts embedded in declaration expression bodies have no callable
+        // proof model. Retain an explicit owner obligation rather than returning
+        // an empty batch. Extern Requires/Ensures remain call-site scoped and
+        // are handled by the dedicated FFI verifier.
+        use crate::core::ir::lower::ResolvedDeclarationExpressionKind as K;
+        for root in program.declaration_expression_bodies().values() {
+            if matches!(root.kind, K::ExternRequires | K::ExternEnsures) {
+                continue;
+            }
+            let source = program
+                .node_meta()
+                .get(&root.node_id)
+                .or_else(|| program.node_meta().get(&root.owner))
+                .map(|meta| meta.origin.user_span().source_id)
+                .or_else(|| {
+                    root.body
+                        .as_ref()
+                        .ok()
+                        .map(|body| body.root.origin.user_span().source_id)
+                });
+            if source.is_some_and(|source| {
+                program.source_registry().records().iter().any(|record| {
+                    record.id == source && record.key.as_str() == "stdlib:prelude.mimi"
+                })
+            }) {
+                continue;
+            }
+            let has_obligations = match &root.body {
+                Ok(body) => body.has_proof_obligations(),
+                Err(_) => true,
+            };
+            if has_obligations {
+                results.push(VerificationResult {
+                    func_name: root.display_name.clone(), status: VerifStatus::NotInTrustedSubset,
+                    message: "checked declaration expression proof obligations have no trusted contract model".into(),
+                    diagnostic: None, duration_us: 0, constraint_count: 0,
+                    artifact: None, trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+                });
+            }
+        }
         results
     }
 
@@ -1932,6 +2103,7 @@ impl Verifier {
 
 /// V-3 (audit 2026-08-05): join a module prefix and an item name into the
 /// qualified name used as the `func_defs` / `func_status` key.
+#[cfg(test)]
 fn qualified_item_name(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -1941,6 +2113,7 @@ fn qualified_item_name(prefix: &str, name: &str) -> String {
 }
 
 impl VerifierCtx {
+    #[cfg(test)]
     pub fn collect_func_defs(&mut self, items: &[Item]) {
         self.collect_func_defs_prefixed(items, "");
     }
@@ -1954,6 +2127,7 @@ impl VerifierCtx {
     /// produced fake Proven. Module-nested callees are not reachable through
     /// bare identifiers anyway; qualified keys keep their axioms inert until
     /// a qualified call mechanism exists.
+    #[cfg(test)]
     fn collect_func_defs_prefixed(&mut self, items: &[Item], prefix: &str) {
         let _ = prefix;
         for item in items {
@@ -2105,6 +2279,37 @@ mod tests {
     }
 
     // ── 0.31.43: Resolved IR contract extraction consistency ──
+
+    #[test]
+    fn resolved_not_in_trusted_subset_never_carries_a_proof_artifact() {
+        let source = r#"
+func helper(x: i32) -> i32 { x + 1 }
+func caller(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result >= 0
+    helper(x)
+}
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let mut verifier = Verifier::with_timeout(DEFAULT_TIMEOUT_MS).expect("solver");
+        verifier.set_source_hash("resolved-nits-no-proof-artifact".into());
+        let result = verifier
+            .verify_checked_contracts(&program)
+            .into_iter()
+            .find(|result| result.func_name == "caller")
+            .expect("caller has a proof result");
+        assert_eq!(
+            result.status,
+            VerifStatus::NotInTrustedSubset,
+            "{result:#?}"
+        );
+        assert!(result.artifact.is_none(), "{result:#?}");
+    }
 
     #[test]
     fn resolved_contracts_match_ast_extraction() {

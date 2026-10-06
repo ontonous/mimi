@@ -102,8 +102,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                         .map(|display| crate::codegen::parse_inner_type(display))
                 })
                 .is_some_and(|ty| {
-                    crate::codegen::abi::ownership::classify_surface(&ty, &self.type_defs)
-                        .contains_heap_collection()
+                    crate::codegen::abi::ownership::classify_surface(
+                        &ty,
+                        &self.type_defs,
+                        &self.checked_alias_primitives,
+                    )
+                    .contains_heap_collection()
                 })
         }))
     }
@@ -122,90 +126,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         let mut free_vars = BTreeMap::new();
         self.collect_free_vars(&f.body, &param_names, vars, &mut free_vars);
 
-        if free_vars.is_empty() {
-            // V-11 (audit 2026-08-05): a nested func whose bare name already
-            // resolves to another definition (same-named global or earlier
-            // sibling) SHADOWS it for the rest of the enclosing body — the
-            // checker registers the nested signature in its bare-name
-            // directory at the declaration (check_stmt.rs Stmt::Func). The
-            // LLVM symbol namespace is flat, so the shadow is emitted under
-            // a mangled symbol; `nested_shadow_symbols` redirects bare-name
-            // calls and the displaced func_defs entry is swapped so argument
-            // coercion/named-arg helpers see the NESTED signature. Both are
-            // restored by the compile_func_legacy frame guard.
-            let shadows_existing =
-                self.func_defs.contains_key(&f.name) || self.module.get_function(&f.name).is_some();
-            let compile_target: FuncDef = if shadows_existing {
-                self.nested_shadow_counter += 1;
-                let enclosing = if self.current_legacy_fn.is_empty() {
-                    "module".to_string()
-                } else {
-                    self.current_legacy_fn.clone()
-                };
-                let mangled = format!(
-                    "{}#nested#{}#{}",
-                    enclosing, f.name, self.nested_shadow_counter
-                );
-                let mut renamed = f.clone();
-                renamed.name = mangled.clone();
-                let prior = self.func_defs.insert(f.name.clone(), renamed.clone());
-                self.func_defs.insert(mangled.clone(), renamed.clone());
-                self.nested_shadow_symbols
-                    .insert(f.name.clone(), (mangled, prior));
-                renamed
-            } else {
-                // Capture-free, unshadowed: keep prior dual-backend path
-                // (named LLVM function).
-                self.func_defs
-                    .entry(f.name.clone())
-                    .or_insert_with(|| f.clone());
-                f.clone()
-            };
-            let saved_block = self.builder.get_insert_block();
-            let saved_type_map = self.type_map.clone();
-            let saved_var_types = std::mem::take(&mut self.var_types);
-            let saved_var_type_names = std::mem::take(&mut self.var_type_names);
-            let saved_list_elem = std::mem::take(&mut self.list_elem_llvm_types);
-            // H2 (audit-codegen): same standalone-function guard as
-            // compile_lambda_expr — a nested func compiled inside a fallible
-            // transition must not inherit the fault-return context.
-            let saved_mt = self.in_multi_target_transition;
-            let saved_states = std::mem::take(&mut self.multi_target_states);
-            let saved_from = std::mem::take(&mut self.current_from_state);
-            self.in_multi_target_transition = false;
-            let result = self.compile_func_legacy(&compile_target);
-            self.in_multi_target_transition = saved_mt;
-            self.multi_target_states = saved_states;
-            self.current_from_state = saved_from;
-            result?;
-            self.var_types = saved_var_types;
-            self.var_type_names = saved_var_type_names;
-            self.list_elem_llvm_types = saved_list_elem;
-            self.type_map = saved_type_map;
-            if let Some(bb) = saved_block {
-                self.builder.position_at_end(bb);
-            }
-            return Ok(());
-        }
-
-        // Capturing nested func → closure value in local scope.
-        let closure_val = self.compile_lambda_expr(&f.params, &f.ret, &f.body, vars)?;
-        let closure_ty = types::closure_struct_type(self.context);
-        let alloca = self.build_alloca(BasicTypeEnum::StructType(closure_ty), &f.name)?;
-        self.build_store(alloca, closure_val)?;
-        vars.insert(
-            f.name.clone(),
-            (alloca, BasicTypeEnum::StructType(closure_ty)),
-        );
-
-        let param_tys: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
-        let ret_ty = f
-            .ret
-            .clone()
-            .unwrap_or_else(|| Type::Name("i32".into(), vec![]));
-        self.var_types
-            .insert(f.name.clone(), Type::Func(param_tys, Box::new(ret_ty)));
-        Ok(())
+        // Ordinary nested declarations are admitted only through the
+        // checker-owned canonical MIR receipt.  The LLVM compatibility owner
+        // must never synthesize a standalone function or closure here: if the
+        // route gate missed a shape, fail closed before any legacy body is
+        // emitted.  Captures, branch-local declarations and every other
+        // unsupported nested shape share this diagnostic.
+        let shape = if free_vars.is_empty() {
+            "capture-free nested callable"
+        } else {
+            "capturing nested callable"
+        };
+        Err(CompileError::Unsupported(format!(
+            "MIR-COVERAGE-001: {shape} '{}' requires the canonical scalar nested-callable route",
+            f.name
+        )))
     }
 
     /// Load captured variables from the env struct into the lambda's local scope.

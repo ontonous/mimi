@@ -2,7 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::span::Span;
 
-use super::cfg::{BasicBlockId, CallableCfg, EdgeId};
+use super::cfg::{
+    BasicBlockId, CallableCfg, CfgEdge, CfgPoint, CfgPointKind, CfgSource, EdgeId, Terminator,
+};
+use super::ir::{
+    ResolvedBlock, ResolvedBody, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart,
+    ResolvedPatternKind, ResolvedStmt, ResolvedStmtKind,
+};
 use super::{NodeId, Origin, ResolvedLocalId, ResolvedTypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -193,8 +199,387 @@ pub struct ResourceAnalysis {
     /// Checker New receipts so one complete lifecycle cannot mask an
     /// additional unreceipted temporary root.
     pub(crate) map_root_new_attempts: BTreeSet<NodeId>,
+    /// Independently recomputed Checker-owned lifecycle facts for the
+    /// versioned MapAnyOwner profile. These are not inferred from the
+    /// MapRoot ledger: the profile has a separate schema marker, root
+    /// identity namespace, and construction-attempt coverage set.
+    pub(crate) map_any_owner_actions: Vec<MapAnyOwnerAction>,
+    /// Every `map_new()` construction attempt observed by the independent
+    /// MapAnyOwner analysis, including unsupported temporary roots.
+    pub(crate) map_any_owner_new_attempts: BTreeSet<NodeId>,
+    /// Independently recomputed Checker-owned facts for the first ordinary
+    /// Map owner lifecycle slice. This profile has its own version marker,
+    /// root identity namespace, and attempt ledger; it is not derived from
+    /// either MapRoot or MapAnyOwner actions.
+    pub(crate) ordinary_map_owner_lifecycle_v1_actions: Vec<OrdinaryMapOwnerLifecycleAction>,
+    /// Every `map_new()` call found while scanning this callable, including
+    /// temporary or otherwise unsupported roots.
+    pub(crate) ordinary_map_owner_lifecycle_v1_new_attempts: BTreeSet<NodeId>,
+    /// Every recognized Map operation call, including operations outside the
+    /// admitted lifecycle slice. Kept when the receipt is withheld so later
+    /// route selection can account for the whole callable.
+    pub(crate) ordinary_map_owner_lifecycle_v1_operation_attempts:
+        BTreeSet<OrdinaryMapOwnerLifecycleAttempt>,
+    /// Independent Checker receipt for the typed owned Map getter profile.
+    /// This ledger has a distinct root namespace and operation-attempt set;
+    /// neither the older ordinary lifecycle receipt nor MapRoot/MapAnyOwner
+    /// actions can authorize it.
+    pub(crate) ordinary_map_owned_get_i32_string_v1_actions:
+        Vec<OrdinaryMapOwnedGetI32StringV1Action>,
+    /// Every `map_new()` construction attempt scanned for the independent
+    /// typed owned-get profile, including temporary/unsupported roots.
+    pub(crate) ordinary_map_owned_get_i32_string_v1_new_attempts: BTreeSet<NodeId>,
+    /// Every recognized Map operation scanned for the typed owned-get
+    /// profile, including old tuple `map_get` and unsupported operations.
+    pub(crate) ordinary_map_owned_get_i32_string_v1_operation_attempts:
+        BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+    /// Versioned source-CFG proof for the currently admitted entry-closed
+    /// Map lifecycle with a Map-free control-flow tail.  The MIR validator
+    /// binds this graph snapshot to the actual reachable MIR graph before a
+    /// consumer may rely on the flat per-operation receipt.
+    pub(crate) ordinary_map_owned_get_i32_string_v1_cfg_receipt:
+        Option<OrdinaryMapOwnedGetI32StringV1CfgReceipt>,
+    /// Checker-owned source-CFG snapshot shared by ownership-sensitive MIR
+    /// validators. Unlike operation-specific Map receipts, this only commits
+    /// the exact reachable source blocks, points, terminators, and edges.
+    pub(crate) managed_any_cfg_receipt: Option<ManagedAnyCfgReceipt>,
     pub in_states: BTreeMap<BasicBlockId, BTreeMap<ResourceId, ResourceFact>>,
     pub out_states: BTreeMap<BasicBlockId, BTreeMap<ResourceId, ResourceFact>>,
+}
+
+/// One reachable Checker CFG block in the general source-CFG commitment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedAnyCfgBlock {
+    pub(crate) source: CfgSource,
+    pub(crate) points: Vec<CfgPoint>,
+    pub(crate) terminator: Terminator,
+}
+
+/// Exact Checker source-CFG snapshot for a callable. This receipt is
+/// deliberately operation-neutral: a MIR consumer must still prove every
+/// owner, transfer, borrow, and cleanup obligation on each path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedAnyCfgReceipt {
+    pub(crate) owner: NodeId,
+    pub(crate) entry: BasicBlockId,
+    pub(crate) reachable_blocks: BTreeMap<BasicBlockId, ManagedAnyCfgBlock>,
+    pub(crate) reachable_edges: BTreeMap<EdgeId, CfgEdge>,
+    /// Exact source match-arm dispatch cases keyed by the Checker block that
+    /// owns the match terminator. Edge topology alone does not establish which
+    /// MIR switch case selects a given source arm.
+    pub(crate) match_arms: BTreeMap<BasicBlockId, Vec<ManagedAnyCfgMatchArm>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedAnyCfgMatchArm {
+    pub(crate) edge: EdgeId,
+    pub(crate) source_arm: NodeId,
+    pub(crate) case: ManagedAnyCfgMatchCase,
+    pub(crate) guarded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ManagedAnyCfgMatchCase {
+    Default,
+    Literal(crate::core::ir::ResolvedLiteral),
+    Variant(NodeId),
+    Unsupported,
+}
+
+impl ManagedAnyCfgReceipt {
+    pub(crate) fn from_cfg(cfg: &CallableCfg, body: &ResolvedBody) -> Self {
+        let mut source_match_arms = BTreeMap::new();
+        collect_managed_any_match_arms_body(body, &mut source_match_arms);
+        let reachable_blocks = cfg
+            .reachable
+            .iter()
+            .filter_map(|id| {
+                cfg.blocks.get(id).map(|block| {
+                    (
+                        id.clone(),
+                        ManagedAnyCfgBlock {
+                            source: block.source.clone(),
+                            points: block.points.clone(),
+                            terminator: block.terminator.clone(),
+                        },
+                    )
+                })
+            })
+            .collect();
+        let reachable_edges = cfg
+            .edges
+            .iter()
+            .filter(|(_, edge)| {
+                cfg.reachable.contains(&edge.from) && cfg.reachable.contains(&edge.to)
+            })
+            .map(|(id, edge)| (id.clone(), edge.clone()))
+            .collect();
+        let match_arms = cfg
+            .reachable
+            .iter()
+            .filter_map(|block_id| {
+                let block = cfg.blocks.get(block_id)?;
+                let Terminator::Match { arms, .. } = &block.terminator else {
+                    return None;
+                };
+                let receipt_arms = arms
+                    .iter()
+                    .map(|edge_id| {
+                        let source_arm = cfg
+                            .edges
+                            .get(edge_id)
+                            .map(|edge| edge.source.node.clone())
+                            .unwrap_or_else(|| NodeId("missing-match-arm-edge".into()));
+                        let (case, guarded) = source_match_arms
+                            .get(&source_arm)
+                            .cloned()
+                            .unwrap_or((ManagedAnyCfgMatchCase::Unsupported, false));
+                        ManagedAnyCfgMatchArm {
+                            edge: edge_id.clone(),
+                            source_arm,
+                            case,
+                            guarded,
+                        }
+                    })
+                    .collect();
+                Some((block_id.clone(), receipt_arms))
+            })
+            .collect();
+        Self {
+            owner: cfg.owner.clone(),
+            entry: cfg.entry.clone(),
+            reachable_blocks,
+            reachable_edges,
+            match_arms,
+        }
+    }
+}
+
+fn collect_managed_any_match_arms_body(
+    body: &ResolvedBody,
+    output: &mut BTreeMap<NodeId, (ManagedAnyCfgMatchCase, bool)>,
+) {
+    for expression in body
+        .place_inputs
+        .values()
+        .chain(body.default_values.values())
+    {
+        collect_managed_any_match_arms_expr(expression, output);
+    }
+    collect_managed_any_match_arms_block(&body.root, output);
+}
+
+fn collect_managed_any_match_arms_block(
+    block: &ResolvedBlock,
+    output: &mut BTreeMap<NodeId, (ManagedAnyCfgMatchCase, bool)>,
+) {
+    for statement in &block.statements {
+        collect_managed_any_match_arms_stmt(statement, output);
+    }
+    if let Some(result) = &block.result {
+        collect_managed_any_match_arms_expr(result, output);
+    }
+}
+
+fn collect_managed_any_match_arms_stmt(
+    statement: &ResolvedStmt,
+    output: &mut BTreeMap<NodeId, (ManagedAnyCfgMatchCase, bool)>,
+) {
+    match &statement.kind {
+        ResolvedStmtKind::Bind { initializer, .. } => {
+            if let Some(initializer) = initializer {
+                collect_managed_any_match_arms_expr(initializer, output);
+            }
+        }
+        ResolvedStmtKind::Assign { value, .. } => {
+            collect_managed_any_match_arms_expr(value, output)
+        }
+        ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+            if let Some(value) = value {
+                collect_managed_any_match_arms_expr(value, output);
+            }
+        }
+        ResolvedStmtKind::Continue
+        | ResolvedStmtKind::Drop(_)
+        | ResolvedStmtKind::NestedCallable(_) => {}
+        ResolvedStmtKind::Expr(expression) => {
+            collect_managed_any_match_arms_expr(expression, output)
+        }
+        ResolvedStmtKind::While { condition, body } => {
+            collect_managed_any_match_arms_expr(condition, output);
+            collect_managed_any_match_arms_block(body, output);
+        }
+        ResolvedStmtKind::WhileLet {
+            initializer, body, ..
+        } => {
+            collect_managed_any_match_arms_expr(initializer, output);
+            collect_managed_any_match_arms_block(body, output);
+        }
+        ResolvedStmtKind::IfLet {
+            initializer,
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_managed_any_match_arms_expr(initializer, output);
+            collect_managed_any_match_arms_block(then_block, output);
+            if let Some(else_block) = else_block {
+                collect_managed_any_match_arms_block(else_block, output);
+            }
+        }
+        ResolvedStmtKind::Loop(body)
+        | ResolvedStmtKind::Scope { body, .. }
+        | ResolvedStmtKind::Pinned { body, .. } => {
+            if let ResolvedStmtKind::Pinned { value, .. } = &statement.kind {
+                collect_managed_any_match_arms_expr(value, output);
+            }
+            collect_managed_any_match_arms_block(body, output);
+        }
+        ResolvedStmtKind::For { iterable, body, .. } => {
+            collect_managed_any_match_arms_expr(iterable, output);
+            collect_managed_any_match_arms_block(body, output);
+        }
+        ResolvedStmtKind::Contract { condition, .. } => {
+            collect_managed_any_match_arms_expr(condition, output)
+        }
+        ResolvedStmtKind::Math(expressions) => {
+            for expression in expressions {
+                collect_managed_any_match_arms_expr(expression, output);
+            }
+        }
+    }
+}
+
+fn collect_managed_any_match_arms_expr(
+    expression: &ResolvedExpr,
+    output: &mut BTreeMap<NodeId, (ManagedAnyCfgMatchCase, bool)>,
+) {
+    match &expression.kind {
+        ResolvedExprKind::Literal(_)
+        | ResolvedExprKind::Load(_)
+        | ResolvedExprKind::Constant(_)
+        | ResolvedExprKind::Callable(_)
+        | ResolvedExprKind::DefaultArgument { .. }
+        | ResolvedExprKind::ComptimeValue(_)
+        | ResolvedExprKind::TypeValue(_) => {}
+        ResolvedExprKind::FString(parts) => {
+            for part in parts {
+                if let ResolvedFStringPart::Interpolation(value) = part {
+                    collect_managed_any_match_arms_expr(value, output);
+                }
+            }
+        }
+        ResolvedExprKind::Project { value, projection } => {
+            collect_managed_any_match_arms_expr(value, output);
+            if let crate::core::ir::ResolvedValueProjection::Index(index) = projection {
+                collect_managed_any_match_arms_expr(index, output);
+            }
+        }
+        ResolvedExprKind::Binary { left, right, .. } => {
+            collect_managed_any_match_arms_expr(left, output);
+            collect_managed_any_match_arms_expr(right, output);
+        }
+        ResolvedExprKind::Unary { operand, .. }
+        | ResolvedExprKind::TypeOf(operand)
+        | ResolvedExprKind::Old(operand)
+        | ResolvedExprKind::Try { value: operand, .. }
+        | ResolvedExprKind::Spawn(operand)
+        | ResolvedExprKind::Await(operand) => collect_managed_any_match_arms_expr(operand, output),
+        ResolvedExprKind::Call(call) => {
+            for argument in &call.arguments {
+                collect_managed_any_match_arms_expr(&argument.value, output);
+            }
+        }
+        ResolvedExprKind::Tuple(values)
+        | ResolvedExprKind::List(values)
+        | ResolvedExprKind::Set(values) => {
+            for value in values {
+                collect_managed_any_match_arms_expr(value, output);
+            }
+        }
+        ResolvedExprKind::Map(entries) => {
+            for (key, value) in entries {
+                collect_managed_any_match_arms_expr(key, output);
+                collect_managed_any_match_arms_expr(value, output);
+            }
+        }
+        ResolvedExprKind::Comprehension {
+            value,
+            iterable,
+            guard,
+            ..
+        } => {
+            collect_managed_any_match_arms_expr(value, output);
+            collect_managed_any_match_arms_expr(iterable, output);
+            if let Some(guard) = guard {
+                collect_managed_any_match_arms_expr(guard, output);
+            }
+        }
+        ResolvedExprKind::OptionalChain { receiver, .. } => {
+            collect_managed_any_match_arms_expr(receiver, output)
+        }
+        ResolvedExprKind::Record { fields, rest, .. } => {
+            for field in fields {
+                collect_managed_any_match_arms_expr(&field.value, output);
+            }
+            if let Some(rest) = rest {
+                collect_managed_any_match_arms_expr(rest, output);
+            }
+        }
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Quote(block) => collect_managed_any_match_arms_block(block, output),
+        ResolvedExprKind::Scope { body, .. } => collect_managed_any_match_arms_block(body, output),
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_managed_any_match_arms_expr(condition, output);
+            collect_managed_any_match_arms_block(then_block, output);
+            collect_managed_any_match_arms_block(else_block, output);
+        }
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            collect_managed_any_match_arms_expr(scrutinee, output);
+            for arm in arms {
+                let case = match &arm.pattern.kind {
+                    ResolvedPatternKind::Wildcard => ManagedAnyCfgMatchCase::Default,
+                    ResolvedPatternKind::Binding { .. } => ManagedAnyCfgMatchCase::Unsupported,
+                    ResolvedPatternKind::Literal(literal) => {
+                        ManagedAnyCfgMatchCase::Literal(literal.clone())
+                    }
+                    ResolvedPatternKind::Constructor { variant, .. } => {
+                        ManagedAnyCfgMatchCase::Variant(variant.clone())
+                    }
+                    ResolvedPatternKind::Tuple(_)
+                    | ResolvedPatternKind::Array(_)
+                    | ResolvedPatternKind::Slice { .. } => ManagedAnyCfgMatchCase::Unsupported,
+                };
+                output.insert(arm.node_id.clone(), (case, arm.guard.is_some()));
+                if let Some(guard) = &arm.guard {
+                    collect_managed_any_match_arms_expr(guard, output);
+                }
+                collect_managed_any_match_arms_expr(&arm.body, output);
+            }
+        }
+        ResolvedExprKind::Range { start, end } => {
+            collect_managed_any_match_arms_expr(start, output);
+            collect_managed_any_match_arms_expr(end, output);
+        }
+        ResolvedExprKind::Slice { target, start, end } => {
+            collect_managed_any_match_arms_expr(target, output);
+            if let Some(start) = start {
+                collect_managed_any_match_arms_expr(start, output);
+            }
+            if let Some(end) = end {
+                collect_managed_any_match_arms_expr(end, output);
+            }
+        }
+        ResolvedExprKind::Cast { value, .. } => collect_managed_any_match_arms_expr(value, output),
+        ResolvedExprKind::Lambda(lambda) => {
+            collect_managed_any_match_arms_block(&lambda.body, output)
+        }
+    }
 }
 
 /// Closed checker observation of one Map-root lifecycle operation.
@@ -233,6 +618,318 @@ pub(crate) struct MapRootAction {
     /// Previous local consumed by persistent `Set`.
     pub(crate) source_local: Option<ResolvedLocalId>,
     pub(crate) source: Option<ResourceId>,
+}
+
+/// Schema/profile version for the separately materialized MapAnyOwner
+/// identity. A type, action, or MIR receipt from MapRoot cannot stand in for
+/// this marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MapAnyOwnerProfileVersion {
+    V1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MapAnyOwnerActionKind {
+    New,
+    Set,
+    Remove,
+    Size,
+    Contains,
+    Drop,
+}
+
+impl MapAnyOwnerProfileVersion {
+    pub(crate) const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::V1 => "map_any_owner_v1",
+        }
+    }
+}
+
+impl MapAnyOwnerActionKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Set => "set",
+            Self::Remove => "remove",
+            Self::Size => "size",
+            Self::Contains => "contains",
+            Self::Drop => "drop",
+        }
+    }
+}
+
+/// Checker-owned root identity and operation point for the closed
+/// MapAnyOwner v1 lifecycle. The fields intentionally mirror MapRoot so the
+/// first MIR adapter can compare the same typed facts while retaining an
+/// independent ledger and synthetic TypeDesc identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MapAnyOwnerAction {
+    pub(crate) profile_version: MapAnyOwnerProfileVersion,
+    pub(crate) kind: MapAnyOwnerActionKind,
+    pub(crate) point: NodeId,
+    pub(crate) local: ResolvedLocalId,
+    pub(crate) root: ResourceId,
+    pub(crate) key: Option<String>,
+    pub(crate) value: Option<NodeId>,
+    /// Exact Checker-resolved payload type for a Set. MapAnyOwner v1 admits
+    /// only the primitive i32 and owned String payload descriptors.
+    pub(crate) value_type: Option<ResolvedTypeId>,
+    pub(crate) source_local: Option<ResolvedLocalId>,
+    pub(crate) source: Option<ResourceId>,
+}
+
+/// Schema/profile version for the typed ordinary Map owner lifecycle slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnerLifecycleProfileVersion {
+    V1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnerLifecycleActionKind {
+    New,
+    Clone,
+    Set,
+    Remove,
+    Size,
+    HasKey,
+    Drop,
+}
+
+impl OrdinaryMapOwnerLifecycleProfileVersion {
+    pub(crate) const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::V1 => "ordinary-map-owner-lifecycle-i32-string-v1",
+        }
+    }
+}
+
+impl OrdinaryMapOwnerLifecycleActionKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Clone => "clone",
+            Self::Set => "set",
+            Self::Remove => "remove",
+            Self::Size => "size",
+            Self::HasKey => "has_key",
+            Self::Drop => "drop",
+        }
+    }
+}
+
+/// One independently Checker-recognized operation in the i32/String ordinary
+/// Map owner lifecycle. Keys retain the typed String expression identity so
+/// dynamic UTF-8 keys have the same evidence shape as literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnerLifecycleAction {
+    pub(crate) profile_version: OrdinaryMapOwnerLifecycleProfileVersion,
+    pub(crate) kind: OrdinaryMapOwnerLifecycleActionKind,
+    pub(crate) point: NodeId,
+    pub(crate) local: ResolvedLocalId,
+    pub(crate) root: ResourceId,
+    pub(crate) key: Option<NodeId>,
+    pub(crate) key_type: Option<ResolvedTypeId>,
+    /// Direct local backing a borrowed String key, if the source key is an
+    /// unprojected `Load`. The expression node above remains the semantic
+    /// origin; this local is the exact storage identity used by MIR.
+    pub(crate) key_local: Option<ResolvedLocalId>,
+    pub(crate) value: Option<NodeId>,
+    pub(crate) value_type: Option<ResolvedTypeId>,
+    pub(crate) source_local: Option<ResolvedLocalId>,
+    pub(crate) source: Option<ResourceId>,
+}
+
+/// Full operation-attempt vocabulary for ordinary Map expressions. Only a
+/// subset can currently produce profile actions; unsupported kinds stay in
+/// the independent attempt ledger and therefore cannot be hidden by a valid
+/// local lifecycle elsewhere in the callable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnerLifecycleAttemptKind {
+    New,
+    Clone,
+    Get,
+    Set,
+    Remove,
+    Size,
+    HasKey,
+    Drop,
+    ScopeDrop,
+    Keys,
+    Values,
+    FromList,
+    MapLiteral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct OrdinaryMapOwnerLifecycleAttempt {
+    pub(crate) kind: OrdinaryMapOwnerLifecycleAttemptKind,
+    pub(crate) point: NodeId,
+    pub(crate) arguments: Vec<NodeId>,
+}
+
+/// Schema/profile version for the owned-result typed getters over ordinary
+/// Map roots. This version is intentionally disjoint from the owner lifecycle
+/// v1 profile, MapRoot, and MapAnyOwner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedGetI32StringV1ProfileVersion {
+    V1,
+}
+
+impl OrdinaryMapOwnedGetI32StringV1ProfileVersion {
+    pub(crate) const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::V1 => "ordinary-map-owned-get-i32-string-v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedGetI32StringV1ActionKind {
+    New,
+    Clone,
+    Set,
+    Remove,
+    Size,
+    HasKey,
+    GetI32,
+    GetString,
+    GetAny,
+    /// Borrow the live Map root and publish an owned, deterministic snapshot
+    /// of all heterogeneous values as `List<Any>`. The root remains live;
+    /// every list element owns an independent ManagedAny token.
+    Values,
+    Drop,
+}
+
+impl OrdinaryMapOwnedGetI32StringV1ActionKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Clone => "clone",
+            Self::Set => "set",
+            Self::Remove => "remove",
+            Self::Size => "size",
+            Self::HasKey => "has_key",
+            Self::GetI32 => "get_i32",
+            Self::GetString => "get_string",
+            Self::GetAny => "get_any",
+            Self::Values => "values",
+            Self::Drop => "drop",
+        }
+    }
+}
+
+/// One Checker-recognized operation in the independently sealed typed owned
+/// Map getter lifecycle. `key` is the full typed expression identity; the
+/// action never reduces a dynamic key to a literal or C-string prefix.
+/// Getter result types are exactly Result<i32, i32> and Result<string, i32>;
+/// the profile's runtime contract assigns Missing=1, TypeMismatch=2, and
+/// Capacity=3 to the error payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedGetI32StringV1Action {
+    pub(crate) profile_version: OrdinaryMapOwnedGetI32StringV1ProfileVersion,
+    pub(crate) kind: OrdinaryMapOwnedGetI32StringV1ActionKind,
+    pub(crate) point: NodeId,
+    /// The local that owns the root for New/Set/Remove, or observes/drops it
+    /// for the remaining actions.
+    pub(crate) local: ResolvedLocalId,
+    pub(crate) root: ResourceId,
+    /// Full key expression identity for Set/Remove/HasKey/GetI32/GetString.
+    pub(crate) key: Option<NodeId>,
+    pub(crate) key_type: Option<ResolvedTypeId>,
+    /// Direct local backing a borrowed String key, if the source key is an
+    /// unprojected `Load`. The expression node above remains the semantic
+    /// origin; this local is the exact storage identity used by MIR.
+    pub(crate) key_local: Option<ResolvedLocalId>,
+    /// Payload expression consumed by Set and its exact Checker type.
+    pub(crate) value: Option<NodeId>,
+    pub(crate) value_type: Option<ResolvedTypeId>,
+    /// Exact Checker result type for observations, including the typed
+    /// Result<i32, i32> / Result<string, i32> getter result.
+    pub(crate) result_type: Option<ResolvedTypeId>,
+    /// Persistent update source local, present only for Set/Remove.
+    pub(crate) source_local: Option<ResolvedLocalId>,
+    pub(crate) source: Option<ResourceId>,
+}
+
+/// Attempt vocabulary is deliberately wider than the admitted action set.
+/// In particular, old tuple-valued `map_get` is distinct from both typed
+/// getters and blocks this profile's receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedGetI32StringV1AttemptKind {
+    New,
+    Clone,
+    UntypedGet,
+    GetI32,
+    GetString,
+    Set,
+    Remove,
+    Size,
+    HasKey,
+    Drop,
+    ScopeDrop,
+    Keys,
+    Values,
+    FromList,
+    MapLiteral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct OrdinaryMapOwnedGetI32StringV1Attempt {
+    pub(crate) kind: OrdinaryMapOwnedGetI32StringV1AttemptKind,
+    pub(crate) point: NodeId,
+    pub(crate) arguments: Vec<NodeId>,
+}
+
+/// Version one keeps all owned Map operations in the entry block and closes
+/// every root before control flow branches. Version two carries exact live
+/// root facts on every edge of a supported acyclic CFG. Cycles still require
+/// a separate fixed-point proof and remain rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedGetI32StringV1CfgProfileVersion {
+    EntryClosedTailV1,
+    AcyclicPerEdgeRootsV2,
+}
+
+impl OrdinaryMapOwnedGetI32StringV1CfgProfileVersion {
+    pub(crate) const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::EntryClosedTailV1 => "ordinary-map-owned-get-entry-closed-tail-cfg-v1",
+            Self::AcyclicPerEdgeRootsV2 => "ordinary-map-owned-get-acyclic-per-edge-roots-cfg-v2",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedGetI32StringV1CfgBlock {
+    pub(crate) points: Vec<(NodeId, CfgPointKind)>,
+    pub(crate) terminator: Terminator,
+}
+
+/// Checker-owned exact control-flow commitment for a typed owned-get Map
+/// candidate. `reachable_blocks` and `reachable_edges` are the graph the
+/// validator later projects onto MIR; attempts/actions close the source Map
+/// operation inventory and v2 root facts prove path-local ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedGetI32StringV1CfgReceipt {
+    /// The callable whose checker-derived body and CFG were scanned. This is
+    /// explicit so a closure receipt cannot be replayed as its enclosing
+    /// function's authority (or vice versa).
+    pub(crate) owner: NodeId,
+    pub(crate) profile_version: OrdinaryMapOwnedGetI32StringV1CfgProfileVersion,
+    pub(crate) entry: BasicBlockId,
+    pub(crate) map_operation_block: BasicBlockId,
+    pub(crate) reachable_blocks: BTreeMap<BasicBlockId, OrdinaryMapOwnedGetI32StringV1CfgBlock>,
+    pub(crate) reachable_edges: BTreeMap<EdgeId, CfgEdge>,
+    pub(crate) attempts: BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+    pub(crate) action_points: BTreeSet<NodeId>,
+    /// Exact path-sensitive Map-root facts at each reachable source block.
+    /// The v2 profile requires these maps to cover all blocks/edges and the
+    /// consumer independently replays every receipted action.
+    pub(crate) live_roots_in: BTreeMap<BasicBlockId, BTreeSet<String>>,
+    pub(crate) live_roots_out: BTreeMap<BasicBlockId, BTreeSet<String>>,
+    pub(crate) live_roots_on_edge: BTreeMap<EdgeId, BTreeSet<String>>,
 }
 
 impl CanonicalActionKind {
@@ -274,7 +971,304 @@ pub struct BranchMerge {
     pub span: Span,
 }
 
+fn map_any_v1_action_covers_ordinary_attempt(
+    analysis: &ResourceAnalysis,
+    action: &MapAnyOwnerAction,
+    attempt: &OrdinaryMapOwnerLifecycleAttempt,
+) -> bool {
+    use MapAnyOwnerActionKind as MapAny;
+    use OrdinaryMapOwnerLifecycleActionKind as Ordinary;
+    use OrdinaryMapOwnerLifecycleAttemptKind as Attempt;
+
+    if action.profile_version != MapAnyOwnerProfileVersion::V1 || action.point != attempt.point {
+        return false;
+    }
+    let (map_any_kind, ordinary_kind) = match attempt.kind {
+        Attempt::New => (MapAny::New, Ordinary::New),
+        Attempt::Set => (MapAny::Set, Ordinary::Set),
+        Attempt::Remove => (MapAny::Remove, Ordinary::Remove),
+        Attempt::Size => (MapAny::Size, Ordinary::Size),
+        Attempt::HasKey => (MapAny::Contains, Ordinary::HasKey),
+        Attempt::Drop => (MapAny::Drop, Ordinary::Drop),
+        Attempt::Clone
+        | Attempt::ScopeDrop
+        | Attempt::Get
+        | Attempt::Keys
+        | Attempt::Values
+        | Attempt::FromList
+        | Attempt::MapLiteral => return false,
+    };
+    if action.kind != map_any_kind {
+        return false;
+    }
+    let mut ordinary_actions = analysis
+        .ordinary_map_owner_lifecycle_v1_actions
+        .iter()
+        .filter(|ordinary_action| {
+            ordinary_action.profile_version == OrdinaryMapOwnerLifecycleProfileVersion::V1
+                && ordinary_action.point == attempt.point
+                && ordinary_action.kind == ordinary_kind
+        });
+    let Some(ordinary_action) = ordinary_actions.next() else {
+        return false;
+    };
+    let map_any_root_matches_local =
+        action.root.0 .0 == format!("map-any-owner-v1:{}", action.local.0 .0);
+    let ordinary_root_matches_local = ordinary_action.root.0 .0
+        == format!(
+            "ordinary-map-owner-lifecycle-i32-string-v1:{}",
+            ordinary_action.local.0 .0
+        );
+    let map_any_source_matches_local = match (&action.source_local, &action.source) {
+        (Some(local), Some(source)) => source.0 .0 == format!("map-any-owner-v1:{}", local.0 .0),
+        (None, None) => true,
+        _ => false,
+    };
+    let ordinary_source_matches_local =
+        match (&ordinary_action.source_local, &ordinary_action.source) {
+            (Some(local), Some(source)) => {
+                source.0 .0 == format!("ordinary-map-owner-lifecycle-i32-string-v1:{}", local.0 .0)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+    if ordinary_actions.next().is_some()
+        || action.local != ordinary_action.local
+        || action.source_local != ordinary_action.source_local
+        || !map_any_root_matches_local
+        || !ordinary_root_matches_local
+        || !map_any_source_matches_local
+        || !ordinary_source_matches_local
+    {
+        return false;
+    }
+
+    let arguments = &attempt.arguments;
+    match attempt.kind {
+        Attempt::New => {
+            arguments.is_empty()
+                && action.key.is_none()
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && ordinary_action.key.is_none()
+                && ordinary_action.key_type.is_none()
+                && ordinary_action.value.is_none()
+                && ordinary_action.value_type.is_none()
+                && ordinary_action.source_local.is_none()
+                && ordinary_action.source.is_none()
+        }
+        Attempt::Set => {
+            arguments.len() == 3
+                && action.key.is_some()
+                && ordinary_action.key.as_ref() == arguments.get(1)
+                && ordinary_action.value.as_ref() == arguments.get(2)
+                && action.value == ordinary_action.value
+                && action.value_type == ordinary_action.value_type
+                && action.value.is_some()
+                && action.value_type.is_some()
+                && ordinary_action.key_type.is_some()
+                && ordinary_action.source_local.is_some()
+                && ordinary_action.source.is_some()
+        }
+        Attempt::Remove => {
+            arguments.len() == 2
+                && action.key.is_some()
+                && ordinary_action.key.as_ref() == arguments.get(1)
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && ordinary_action.key_type.is_some()
+                && ordinary_action.value.is_none()
+                && ordinary_action.value_type.is_none()
+                && ordinary_action.source_local.is_some()
+                && ordinary_action.source.is_some()
+        }
+        Attempt::Size => {
+            arguments.len() == 1
+                && action.key.is_none()
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && ordinary_action.key.is_none()
+                && ordinary_action.key_type.is_none()
+                && ordinary_action.value.is_none()
+                && ordinary_action.value_type.is_none()
+        }
+        Attempt::HasKey => {
+            arguments.len() == 2
+                && action.key.is_some()
+                && ordinary_action.key.as_ref() == arguments.get(1)
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && ordinary_action.key_type.is_some()
+                && ordinary_action.value.is_none()
+                && ordinary_action.value_type.is_none()
+        }
+        Attempt::Drop => {
+            arguments.len() == 1
+                && action.local.0 == arguments[0]
+                && ordinary_action.local.0 == arguments[0]
+                && action.key.is_none()
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && ordinary_action.key.is_none()
+                && ordinary_action.key_type.is_none()
+                && ordinary_action.value.is_none()
+                && ordinary_action.value_type.is_none()
+        }
+        _ => false,
+    }
+}
+
 impl ResourceAnalysis {
+    /// TypeDesc registration asks this helper instead of consulting the
+    /// legacy MapRoot ledger. Only a sealed MapAnyOwner v1 `New` receipt can
+    /// authorize its synthetic descriptor.
+    pub(crate) fn has_map_any_owner_v1_receipt(&self) -> bool {
+        self.map_any_owner_actions.iter().any(|action| {
+            action.profile_version == MapAnyOwnerProfileVersion::V1
+                && action.kind == MapAnyOwnerActionKind::New
+        })
+    }
+
+    /// Ordinary Map route admission must consult this profile's own sealed
+    /// Checker receipt, never a MapRoot or MapAnyOwner action.
+    pub(crate) fn has_ordinary_map_owner_lifecycle_v1_receipt(&self) -> bool {
+        self.ordinary_map_owner_lifecycle_v1_actions
+            .iter()
+            .any(|action| {
+                action.profile_version == OrdinaryMapOwnerLifecycleProfileVersion::V1
+                    && action.kind == OrdinaryMapOwnerLifecycleActionKind::New
+            })
+    }
+
+    /// Whether this callable contains any recognized ordinary Map operation
+    /// attempt, including shapes that do not receive lifecycle actions. This
+    /// prevents a partial ordinary Map from borrowing a legacy MapRoot/V1
+    /// receipt for its supported-looking subset.
+    pub(crate) fn has_ordinary_map_owner_lifecycle_v1_attempts(&self) -> bool {
+        !self
+            .ordinary_map_owner_lifecycle_v1_operation_attempts
+            .is_empty()
+    }
+
+    /// Typed owned-get admission consults only its own sealed Checker receipt.
+    /// A New action in another Map profile cannot satisfy this predicate.
+    pub(crate) fn has_ordinary_map_owned_get_i32_string_v1_receipt(&self) -> bool {
+        self.ordinary_map_owned_get_i32_string_v1_actions
+            .iter()
+            .any(|action| {
+                action.profile_version == OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1
+                    && action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::New
+            })
+    }
+
+    /// Whether the older MapAnyOwner v1 receipt independently covers every
+    /// recognized ordinary Map operation attempt in this callable. This is a
+    /// narrow compatibility bridge for the pre-existing consuming-root
+    /// island; any unsupported operation (Get, Values, Map literal, dynamic
+    /// root use, or future call kind) blocks that route.
+    pub(crate) fn ordinary_map_attempts_fully_covered_by_map_any_owner_v1(&self) -> bool {
+        use OrdinaryMapOwnerLifecycleAttemptKind as Attempt;
+
+        if self
+            .ordinary_map_owner_lifecycle_v1_operation_attempts
+            .is_empty()
+            || self.map_any_owner_actions.is_empty()
+            || self
+                .map_any_owner_actions
+                .iter()
+                .any(|action| action.profile_version != MapAnyOwnerProfileVersion::V1)
+        {
+            return false;
+        }
+
+        let mut unmatched_actions = self.map_any_owner_actions.iter().collect::<Vec<_>>();
+        for attempt in &self.ordinary_map_owner_lifecycle_v1_operation_attempts {
+            if attempt.kind == Attempt::ScopeDrop {
+                if !self.ordinary_scope_drop_is_settled_by_map_any_owner_v1(attempt) {
+                    return false;
+                }
+                continue;
+            }
+            let Some(index) = unmatched_actions.iter().position(|action| {
+                map_any_v1_action_covers_ordinary_attempt(self, action, attempt)
+            }) else {
+                return false;
+            };
+            unmatched_actions.remove(index);
+        }
+        unmatched_actions.is_empty()
+    }
+
+    /// Every MapAnyOwner v1 action is covered by exactly one same-point
+    /// ordinary source attempt. Combined with the forward predicate above,
+    /// this proves a non-vacuous one-to-one action census for the profile
+    /// arbitration exception.
+    pub(crate) fn map_any_owner_v1_actions_are_within_ordinary_map_profile(&self) -> bool {
+        if self.map_any_owner_actions.is_empty()
+            || self
+                .map_any_owner_actions
+                .iter()
+                .any(|action| action.profile_version != MapAnyOwnerProfileVersion::V1)
+        {
+            return false;
+        }
+        let mut unmatched_attempts = self
+            .ordinary_map_owner_lifecycle_v1_operation_attempts
+            .iter()
+            .filter(|attempt| attempt.kind != OrdinaryMapOwnerLifecycleAttemptKind::ScopeDrop)
+            .collect::<Vec<_>>();
+        for action in &self.map_any_owner_actions {
+            let Some(index) = unmatched_attempts.iter().position(|attempt| {
+                map_any_v1_action_covers_ordinary_attempt(self, action, attempt)
+            }) else {
+                return false;
+            };
+            unmatched_attempts.remove(index);
+        }
+        true
+    }
+
+    /// Preserve the older consume-update optimization only when its sealed
+    /// ledger has already transferred the exact local's root obligation.
+    /// A scope destructor is scheduling evidence, distinct from an explicit
+    /// source Drop; it cannot manufacture an older operation receipt.
+    pub(crate) fn ordinary_scope_drop_is_settled_by_map_any_owner_v1(
+        &self,
+        attempt: &OrdinaryMapOwnerLifecycleAttempt,
+    ) -> bool {
+        if attempt.kind != OrdinaryMapOwnerLifecycleAttemptKind::ScopeDrop
+            || attempt.arguments.len() != 1
+        {
+            return false;
+        }
+        self.map_any_owner_actions.iter().any(|action| {
+            action.profile_version == MapAnyOwnerProfileVersion::V1
+                && matches!(
+                    action.kind,
+                    MapAnyOwnerActionKind::Set | MapAnyOwnerActionKind::Remove
+                )
+                && action
+                    .source_local
+                    .as_ref()
+                    .is_some_and(|local| local.0 == attempt.arguments[0])
+        })
+    }
+
+    /// Exact primitive payload type ids carried by sealed MapAnyOwner v1 Set
+    /// receipts. This helper keeps consumers from reconstructing the payload
+    /// identity from source syntax.
+    #[cfg(test)]
+    pub(crate) fn map_any_owner_v1_set_payload_types(&self) -> Vec<ResolvedTypeId> {
+        self.map_any_owner_actions
+            .iter()
+            .filter(|action| {
+                action.profile_version == MapAnyOwnerProfileVersion::V1
+                    && action.kind == MapAnyOwnerActionKind::Set
+            })
+            .filter_map(|action| action.value_type.clone())
+            .collect()
+    }
+
     /// Count actions of a given canonical kind.
     pub fn action_count(&self, kind: CanonicalActionKind) -> usize {
         self.actions.iter().filter(|a| a.kind == kind).count()

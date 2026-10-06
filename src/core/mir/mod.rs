@@ -11,8 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
 use crate::core::ir::{
-    NominalTypeId, ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedTypeId,
-    ResolvedUnaryOp,
+    CheckedConversionKind, EffectId, NominalTypeId, ResolvedBinaryOp, ResolvedCallee,
+    ResolvedFfiParameterMode, ResolvedLiteral, ResolvedLocalId, ResolvedParameterId,
+    ResolvedTypeId, ResolvedUnaryOp, TypedCallEffectAuthority, TypedCallExecutionDisposition,
+    TypedProofScopeFrame,
 };
 use crate::core::{NodeId, Place, ResolvedPlace};
 
@@ -30,9 +32,16 @@ pub(crate) fn canonical_ffi_symbol_is_manifest_safe(symbol: &str) -> bool {
 }
 
 fn is_reserved_canonical_mir_runtime_symbol(symbol: &str) -> bool {
-    // These entry points operate on Checker-owned opaque values. Source-level
-    // FFI imports must not bypass the private receipt and ownership chain.
+    // These entry points operate on Checker-owned opaque values or execution
+    // roots. Source-level FFI imports must not bypass their private receipts
+    // and ownership chains.
     symbol.starts_with("mimi_mir_map_root_")
+        || symbol.starts_with("mimi_mir_map_any_owner_v1_")
+        || symbol.starts_with("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_")
+        || symbol.starts_with("mimi_mir_ordinary_map_owned_get_i32_string_v1_")
+        || symbol.starts_with("mimi_mir_managed_any_i32_string_v1_")
+        || symbol.starts_with("mimi_mir_ordinary_map_domain_")
+        || symbol.starts_with("mimi_mir_actor_domain_")
 }
 
 /// Return the canonical diagnostic for a symbol that cannot safely cross the
@@ -45,6 +54,14 @@ pub(crate) fn validate_ffi_symbol_manifest_safety(symbol: &str) -> Result<(), St
     }
     let reason = if symbol.trim().is_empty() {
         "FFI symbol is empty"
+    } else if symbol.starts_with("mimi_mir_actor_domain_") {
+        "FFI symbol names a reserved Canonical MIR ActorExecutionDomain runtime helper"
+    } else if symbol.starts_with("mimi_mir_ordinary_map_domain_") {
+        "FFI symbol names a reserved Canonical MIR ordinary Map execution-domain runtime helper"
+    } else if symbol.starts_with("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_") {
+        "FFI symbol names a reserved Canonical MIR ordinary Map lifecycle runtime helper"
+    } else if symbol.starts_with("mimi_mir_ordinary_map_owned_get_i32_string_v1_") {
+        "FFI symbol names a reserved Canonical MIR ordinary Map owned-get runtime helper"
     } else if is_reserved_canonical_mir_runtime_symbol(symbol) {
         "FFI symbol names a reserved Canonical MIR MapRoot runtime helper"
     } else if symbol.chars().any(char::is_control) {
@@ -423,27 +440,66 @@ pub(crate) fn validate_materialized_call_result_presence(
 }
 
 mod contracts;
+pub(crate) use contracts::validate_entry_invariant_shapes;
 pub(crate) use contracts::{
     evaluate_ffi_ensures, evaluate_ffi_requires, ffi_contract_error_message,
     validate_ffi_runtime_contracts, MirContractScalar, MirFfiContractError,
 };
+mod actor;
+mod actor_execution;
+mod actor_lower;
+mod actor_reference;
+#[cfg(test)]
+mod actor_tests;
+mod closure_callable;
+mod closure_environment;
 mod copy_option_island;
 mod copy_result_island;
 mod eligibility;
+mod ffi_source_census;
 mod identity_island;
 mod islands;
+mod managed_any;
+mod managed_any_interprocedural;
+mod managed_any_reference;
+pub(crate) use ffi_source_census::validate_ffi_source_census;
+pub use managed_any::{MirManagedAnyContract, MirManagedAnyOperation};
 pub mod lower;
 mod nested_callable;
 mod option_island;
 mod option_nested_tuple_island;
+mod proof_source_census;
 mod receipt;
 pub mod reference;
 mod route;
 mod session_island;
 pub mod types;
+pub mod verification;
 
+pub use actor::{
+    MirActorCatalog, MirActorContract, MirActorFieldContract, MirActorMethodContract,
+    MirActorOperation, MIR_SCALAR_ACTOR_SCHEMA,
+};
+pub(crate) use actor_execution::actor_trap_status;
+pub use actor_execution::{
+    MirActorExecutionPlan, MirActorNativeCallableAbi, MIR_ACTOR_STATUS_ABI_SCHEMA,
+};
+pub use closure_callable::{
+    MirClosureCallableAbiV1, MirClosureCallableReceiptV1, MIR_CLOSURE_CALLABLE_ABI_V1_SCHEMA,
+    MIR_CLOSURE_CALLABLE_RECEIPT_V1_SCHEMA,
+};
+pub use closure_environment::{
+    MirActorEnvironmentReceipt, MirActorEnvironmentSlot, MIR_ACTOR_ENVIRONMENT_SCHEMA,
+};
 pub use contracts::{
     MirContract, MirContractBinaryOp, MirContractExpr, MirContractKind, MirContractUnaryOp,
+    MirProofAssertion, MirProofBlock, MirProofBoundary, MirProofBoundaryArgument,
+    MirProofBoundaryGuard, MirProofBoundaryMathId, MirProofCallArgument, MirProofCallBoundary,
+    MirProofCallGuard, MirProofCallPoint, MirProofCallPointId, MirProofDefaultBoundary,
+    MirProofDefaultRootId, MirProofDefaultUseId, MirProofExpression, MirProofLoopBinding,
+    MirProofLoopEdge, MirProofLoopEdgeKind, MirProofLoopReceipt, MirProofOperation,
+    MirProofPlaceInputId, MirProofPointId, MirProofScopeFrame, MirProofSourceBoundary,
+    MirProofWorklist,
 };
 pub use copy_option_island::{
     classify_copy_option_i32_variant_admission, classify_copy_option_variant_admission,
@@ -460,8 +516,9 @@ pub use copy_result_island::{
     COPY_RESULT_I32_VARIANT_ISLAND,
 };
 pub use eligibility::{
-    exported_abi_body_boundary_reason, is_exact_cross_state_f64_failure_receipt,
-    is_exact_s8_flow_transition, is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+    exported_abi_body_boundary_reason, is_closed_silent_local_flow_candidate,
+    is_exact_cross_state_f64_failure_receipt, is_exact_s8_flow_transition,
+    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, is_scalar_export_candidate,
     is_scalar_ffi_candidate, scalar_ffi_boundary_reason,
 };
 pub use identity_island::{
@@ -509,6 +566,7 @@ pub use islands::{
     GENERIC_RESULT_PROJECTION_FALLBACK_ISLAND, GENERIC_RESULT_PROJECTION_ISLAND,
     GENERIC_VARIANT_PREDICATE_ISLAND, MANAGED_RESULT_CALL_ISLAND, SCALAR_COLLECTION_ISLAND,
 };
+pub use nested_callable::unsupported_nested_callable_boundary_reason;
 pub use nested_callable::{MirNestedCallableScopeReceipt, MIR_NESTED_CALLABLE_SCOPE_SCHEMA};
 pub use option_island::{
     classify_option_string_variant_admission, contains_option_string_variant_candidate,
@@ -520,6 +578,14 @@ pub use option_nested_tuple_island::{
     validate_option_nested_tuple_variant_island, OptionNestedTupleVariantAdmission,
     NON_COPY_OPTION_NESTED_TUPLE_VARIANT_ISLAND,
 };
+pub use proof_source_census::{
+    MirProofCensusError, MirProofCensusIntegrityError, MirProofOwnerCensus,
+    MirProofOwnerCoverageGap, MirProofOwnerCoverageGapKind, MirProofSourceCall,
+    MirProofSourceCallArgument, MirProofSourceCallIdentity, MirProofSourceCallOrigin,
+    MirProofSourceCallableCensus, MirProofSourceCensus, MirProofSourceDeclaration,
+    MirProofSourceDefault, MirProofSourceFfiParameterMode, MirProofSourcePlaceInput,
+    MirProofSourceRoot, MirProofSourceRootKind, MirProofSourceScopeFrame, MirProofWorklistCoverage,
+};
 pub use receipt::{
     CanonicalMirRouteReceipt, MIR_BYTECODE_DIRECT_ROUTE_PROFILE,
     MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE, MIR_FFI_ROUTE_MANIFEST_ERROR_CODE,
@@ -530,10 +596,17 @@ pub use receipt::{
     MIR_ROUTE_VALIDATOR_CONTRACT_ID,
 };
 pub use route::{
-    classify_canonical_mir_route_admission, materialize_canonical_mir_route,
+    classify_canonical_mir_route_admission, has_scalar_actor_nested_callable_candidate,
+    map_any_owner_v1_actions_are_within_ordinary_map_profile, materialize_canonical_mir_route,
+    ordinary_map_attempts_fully_covered_by_map_any_owner_v1, scalar_actor_contract_boundary_reason,
+    scalar_ffi_map_owner_composition_failure, validate_scalar_actor_island,
     CanonicalMirRouteAdmission, CanonicalMirRouteFailureStage, CanonicalMirRouteMaterialization,
-    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile, MapRootAdmission,
-    S8FlowAdmission, MAP_ROOT_ISLAND,
+    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile, MapAnyOwnerAdmission,
+    MapRootAdmission, OrdinaryMapOwnedGetI32StringV1Admission,
+    OrdinaryMapOwnerLifecycleI32StringV1Admission, S8FlowAdmission, MAP_ANY_OWNER_V1_ISLAND,
+    MAP_ROOT_ISLAND, ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND,
+    ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND, SCALAR_ACTOR_ISLAND, SCALAR_EXPORT_ISLAND,
+    SCALAR_NESTED_ISLAND,
 };
 #[cfg(test)]
 pub(crate) use route::{reset_test_route_materialization_count, test_route_materialization_count};
@@ -954,6 +1027,20 @@ impl MirTransitionContract {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MirGenericInstanceContract {
     ScalarIdentity,
+    /// The exact direct generic identity body specialized to the canonical
+    /// managed-Any owner.  This remains separate from both scalar identity
+    /// and arbitrary Any forwarding: its private Checker seal binds the
+    /// template, instance key, type argument, owner values, and Clone/Drop
+    /// instruction sequence.
+    ManagedAnyIdentity,
+    /// An exact callee-owned cleanup instance for a generic parameter that
+    /// was specialized to ManagedAny before a guaranteed checked i32 trap.
+    /// Only the two arithmetic trap bodies represented by this kind are
+    /// materialized; this is not a general permission for Any-typed generic
+    /// functions.
+    ManagedAnyTrapCleanup {
+        trap: MirManagedAnyTrapKind,
+    },
     /// `identity<T>(T) -> T` specialized to the canonical move-owned String
     /// ABI.  This is separate from the Copy/flat-variant identity island so
     /// consumers cannot accidentally treat an owned handle as a no-op value.
@@ -1056,6 +1143,23 @@ pub enum MirGenericInstanceContract {
     },
 }
 
+/// Exact guaranteed arithmetic traps whose generic callee cleanup is
+/// checker-sealed for a ManagedAny parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirManagedAnyTrapKind {
+    DivisionByZeroI32,
+    SignedOverflowI32,
+}
+
+impl MirManagedAnyTrapKind {
+    pub const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::DivisionByZeroI32 => "division_by_zero_i32",
+            Self::SignedOverflowI32 => "signed_overflow_i32",
+        }
+    }
+}
+
 impl MirSetOperation {
     /// Stable spelling used by canonical instance identity text.  The
     /// semantic route digest must not inherit Rust's derived `Debug` format.
@@ -1123,12 +1227,19 @@ fn canonical_variant_projection_contract(contract: &types::MirVariantProjectionC
 fn canonical_instance_contract_text(contract: &MirGenericInstanceContract) -> String {
     match contract {
         MirGenericInstanceContract::ScalarIdentity => "scalar_identity".into(),
+        MirGenericInstanceContract::ManagedAnyIdentity => "managed_any_identity".into(),
+        MirGenericInstanceContract::ManagedAnyTrapCleanup { trap } => {
+            format!("managed_any_trap_cleanup trap={}", trap.canonical_text())
+        }
         MirGenericInstanceContract::OwnedStringIdentity => "owned_string_identity".into(),
         MirGenericInstanceContract::ScalarSetFacade { operation } => {
             format!("scalar_set_facade operation={}", operation.canonical_text())
         }
         MirGenericInstanceContract::ScalarListFacade { operation } => {
-            format!("scalar_list_facade operation={}", operation.canonical_text())
+            format!(
+                "scalar_list_facade operation={}",
+                operation.canonical_text()
+            )
         }
         MirGenericInstanceContract::ScalarListConstruct { contract } => format!(
             "scalar_list_construct list_ty={} element_ty={} result_ty={} element_count={}",
@@ -1288,6 +1399,32 @@ fn canonical_instance_contract_text(contract: &MirGenericInstanceContract) -> St
 /// operations remain fail-closed until their own effect summary is materialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirInstructionKind {
+    /// Explicit checker-receipted state and mailbox boundary.
+    Actor {
+        operation: MirActorOperation,
+    },
+    /// Bind a Checker-identified source closure local to a static callable
+    /// identity. V1 has no runtime environment or function pointer: the
+    /// whole-program closure receipt binds this local and its function value
+    /// to one exact nested callable owner.
+    ClosureBind {
+        closure_local: ResolvedLocalId,
+        function_value: MirValueId,
+        callee: NodeId,
+        abi: MirClosureCallableAbiV1,
+    },
+    /// Invoke a statically resolved closure target through an independent MIR
+    /// operation. Consumers must preserve direct-call result, trap, and
+    /// ownership behavior after shared receipt validation.
+    ClosureInvoke {
+        result: Option<MirValueId>,
+        closure_local: ResolvedLocalId,
+        function_value: MirValueId,
+        callee: NodeId,
+        type_arguments: Vec<ResolvedTypeId>,
+        arguments: Vec<MirValueId>,
+        abi: MirClosureCallableAbiV1,
+    },
     /// Checker-authorized construction of an opaque runtime Map table root.
     MapRootNew {
         result: MirValueId,
@@ -1321,6 +1458,112 @@ pub enum MirInstructionKind {
     },
     /// Consume and release a Map table root.
     MapRootDrop {
+        root: MirValueId,
+    },
+    /// Create an ordinary source-Map owner root for the independent
+    /// persistent i32/String lifecycle profile.
+    OrdinaryMapOwnerLifecycleNew {
+        result: MirValueId,
+    },
+    /// Persistent Set: borrow `source`, copy one typed payload and key, and
+    /// create a distinct result root. The source remains observable.
+    OrdinaryMapOwnerLifecycleSet {
+        result: MirValueId,
+        source: MirValueId,
+        key: MirValueId,
+        value: MirValueId,
+    },
+    /// Persistent Remove: borrow `source` and create a distinct root without
+    /// `key`; the source remains observable.
+    OrdinaryMapOwnerLifecycleRemove {
+        result: MirValueId,
+        source: MirValueId,
+        key: MirValueId,
+    },
+    /// Borrowing size query on a live ordinary Map root.
+    OrdinaryMapOwnerLifecycleSize {
+        result: MirValueId,
+        root: MirValueId,
+    },
+    /// Borrowing membership query with a typed dynamic String key.
+    OrdinaryMapOwnerLifecycleContains {
+        result: MirValueId,
+        root: MirValueId,
+        key: MirValueId,
+    },
+    /// Release exactly one owner root admitted by the ordinary Map profile.
+    OrdinaryMapOwnerLifecycleDrop {
+        root: MirValueId,
+    },
+    /// Create an ordinary Map root for the independent typed owned-get v1
+    /// profile.
+    OrdinaryMapOwnedGetI32StringV1New {
+        result: MirValueId,
+    },
+    /// Persistent typed-profile Set: preserve the source root and create the
+    /// distinct successor root in `result`.
+    OrdinaryMapOwnedGetI32StringV1Set {
+        result: MirValueId,
+        source: MirValueId,
+        key: MirValueId,
+        value: MirValueId,
+    },
+    /// Persistent typed-profile Remove: preserve the source root and create
+    /// the distinct successor root in `result`.
+    OrdinaryMapOwnedGetI32StringV1Remove {
+        result: MirValueId,
+        source: MirValueId,
+        key: MirValueId,
+    },
+    /// Read the size of one live typed-profile root.
+    OrdinaryMapOwnedGetI32StringV1Size {
+        result: MirValueId,
+        root: MirValueId,
+    },
+    /// Test a dynamic String key against one live typed-profile root.
+    OrdinaryMapOwnedGetI32StringV1Contains {
+        result: MirValueId,
+        root: MirValueId,
+        key: MirValueId,
+    },
+    /// Return an owned `Result<i32, i32>` payload from a live typed-profile
+    /// root, preserving the Map root itself.
+    OrdinaryMapOwnedGetI32StringV1GetI32 {
+        result: MirValueId,
+        root: MirValueId,
+        key: MirValueId,
+    },
+    /// Return an owned `Result<string, i32>` payload from a live
+    /// typed-profile root, preserving the Map root itself.
+    OrdinaryMapOwnedGetI32StringV1GetString {
+        result: MirValueId,
+        root: MirValueId,
+        key: MirValueId,
+    },
+    /// Borrow the Map and publish a separately owned snapshot. Missing keys
+    /// return (false, fresh owned I32 zero), never an unowned token.
+    OrdinaryMapOwnedGetI32StringV1GetAny {
+        result: MirValueId,
+        root: MirValueId,
+        key: MirValueId,
+    },
+    /// Borrow a live typed-profile root and return a move-owned canonical
+    /// `List<ManagedAny>` snapshot. Each element is an independent owner;
+    /// dropping the list releases those element tokens while preserving the
+    /// source Map root.
+    OrdinaryMapOwnedGetI32StringV1Values {
+        result: MirValueId,
+        root: MirValueId,
+    },
+    /// Clone/drop or borrowed checked unpack of a generation-bearing Any.
+    ManagedAny {
+        result: Option<MirValueId>,
+        source: MirValueId,
+        operation: MirManagedAnyOperation,
+        contract: Option<MirManagedAnyContract>,
+    },
+    /// Release one live root admitted by the typed owned-get v1 profile.
+    OrdinaryMapOwnedGetI32StringV1Drop {
         root: MirValueId,
     },
     Const {
@@ -1612,7 +1855,13 @@ pub struct MirInstruction {
 pub struct MirFfiCallContract {
     pub caller: NodeId,
     pub instruction: MirInstructionId,
+    /// Exact Resolved Call expression that produced this MIR instruction.
+    pub call_node: NodeId,
     pub callee: NodeId,
+    /// Checker-owned extern declaration and block identities. Consumers use
+    /// these to cross-check the independent source declaration census.
+    pub declaration: NodeId,
+    pub declaration_block: NodeId,
     /// Checker-resolved C symbol. Consumers must use this identity directly;
     /// they must not recover an extern name from retained surface syntax.
     pub symbol: String,
@@ -1621,10 +1870,44 @@ pub struct MirFfiCallContract {
     /// islands cannot silently infer it from a backend declaration.
     pub abi: String,
     pub arguments: Vec<MirValueId>,
-    /// Checker-canonical declaration parameter TypeDesc identities. These
-    /// are kept alongside the call value identities so a consumer cannot
-    /// accept a forged MIR call whose physical signature merely agrees with
-    /// itself while disagreeing with the extern declaration.
+    /// Exact source call shape retained alongside the physical MIR argument
+    /// vector. This prevents a same-NodeId/value substitution from erasing
+    /// checker parameter, conversion, or overload evidence.
+    pub selected_signature: String,
+    pub source_expression_type: ResolvedTypeId,
+    pub source_type_arguments: Vec<ResolvedTypeId>,
+    pub source_result_type: ResolvedTypeId,
+    pub source_effects: Vec<EffectId>,
+    pub source_arguments: Vec<MirFfiSourceArgument>,
+    /// Checker-authenticated execution event for this exact call. Its
+    /// disposition may remain Deferred for proof consumers, but its scope,
+    /// guards, and order cannot be reconstructed from the call NodeId.
+    pub source_body_owner: NodeId,
+    pub source_statement: NodeId,
+    pub source_order: u64,
+    pub source_scope: Vec<TypedProofScopeFrame>,
+    pub source_guards: Vec<(NodeId, bool)>,
+    pub source_disposition: TypedCallExecutionDisposition,
+    /// Empty `source_effects` is not evidence of purity. The currently
+    /// supported external effect authority always invalidates mutable state.
+    pub source_effect_authority: TypedCallEffectAuthority,
+    /// Number of fixed declaration parameters before the C ellipsis. This is
+    /// distinct from the call-site argument count for variadic declarations.
+    pub fixed_argument_count: usize,
+    /// Whether the checked declaration uses a C variadic tail. It remains
+    /// true when this particular call supplies no tail arguments.
+    pub variadic: bool,
+    /// Complete fixed declaration identity, including ABI parameter modes.
+    pub fixed_parameter_ids: Vec<ResolvedParameterId>,
+    pub fixed_parameter_modes: Vec<ResolvedFfiParameterMode>,
+    /// One checker-authenticated default-promotion receipt per actual tail
+    /// argument, in source evaluation order and indexed in the full argument
+    /// vector.
+    pub variadic_arguments: Vec<MirFfiVariadicArgument>,
+    /// Call-specific physical argument TypeDesc identities. Fixed entries
+    /// are the checked declaration types; variadic entries are the promoted
+    /// C ABI types. This lets each call carry its own tail while the symbol
+    /// shape validator compares only the fixed declaration prefix.
     pub parameter_types: Vec<ResolvedTypeId>,
     /// ABI conversion receipt for each call-site argument. The `from` class is
     /// the MIR value ABI and the `to` class is the declaration ABI; consumers
@@ -1636,17 +1919,81 @@ pub struct MirFfiCallContract {
     /// declaration carries the canonical unit TypeDesc even when the backend
     /// ABI lowers it as a void result.
     pub result_type: ResolvedTypeId,
+    /// Invocation metadata is preserved even where the current backend
+    /// profile rejects a field. No consumer may infer errno/no-unwind behavior
+    /// from the symbol name or an empty effect list.
+    pub block_no_panic: bool,
+    pub declaration_no_panic: bool,
+    pub block_returns_errno: bool,
+    pub declaration_returns_errno: bool,
+    pub unsafe_block: bool,
     /// ABI conversion receipt for the returned value, from declaration ABI to
     /// the MIR result ABI. Calls without a MIR result identity carry `None`;
     /// a stable Unit result carries an explicit Unit→Unit conversion.
     pub result_conversion: Option<MirFfiAbiConversion>,
     pub requires: Option<MirContractExpr>,
+    pub requires_root: Option<NodeId>,
     /// Canonical postcondition attached to the foreign call.  The declaration
     /// `result` leaf is lowered to this call's MIR result value identity so
     /// every consumer observes the same returned scalar rather than a
     /// backend-local result placeholder.
     pub ensures: Option<MirContractExpr>,
+    pub ensures_root: Option<NodeId>,
     pub span: crate::span::Span,
+    /// Private seal minted only after the CheckedProgram call source and the
+    /// exact lowered caller body have both been validated. Public NodeIds and
+    /// ABI fields alone cannot authorize a substituted same-ID MIR argument.
+    source_witness: Option<MirFfiCallSourceWitness>,
+}
+
+/// Source-level argument receipt for one exact checked extern invocation.
+/// `source_type` and the checked conversion are deliberately separate from a
+/// variadic argument's C default-promotion target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirFfiSourceArgument {
+    pub index: usize,
+    pub parameter: ResolvedParameterId,
+    pub source_node: NodeId,
+    pub source_type: ResolvedTypeId,
+    pub conversion: CheckedConversionKind,
+    pub conversion_from: ResolvedTypeId,
+    pub target_type: ResolvedTypeId,
+}
+
+impl MirFfiSourceArgument {
+    fn canonical_text(&self) -> String {
+        format!(
+            "{}:{}:{}:{}:{:?}:{}:{}",
+            self.index,
+            self.parameter.0 .0.as_str(),
+            self.source_node.0,
+            self.source_type.as_str(),
+            self.conversion,
+            self.conversion_from.as_str(),
+            self.target_type.as_str(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MirFfiCallSourceWitness {
+    checked_source_fingerprint: [u8; 32],
+    lowered_mir_fingerprint: [u8; 32],
+}
+
+impl MirFfiCallSourceWitness {
+    fn validates(&self, contract: &MirFfiCallContract, function: &MirFunction) -> bool {
+        self.lowered_mir_fingerprint == Self::lowered_mir_fingerprint(contract, function)
+    }
+
+    fn lowered_mir_fingerprint(contract: &MirFfiCallContract, function: &MirFunction) -> [u8; 32] {
+        let material = format!(
+            "ffi-receipt={}\ncaller-mir={}",
+            contract.canonical_text(),
+            function.canonical_text()
+        );
+        *blake3::hash(material.as_bytes()).as_bytes()
+    }
 }
 
 impl MirFfiCallContract {
@@ -1658,12 +2005,64 @@ impl MirFfiCallContract {
         text.push_str(self.caller.0.as_str());
         text.push(' ');
         text.push_str(self.instruction.as_str());
+        text.push_str(" call_node=");
+        text.push_str(&self.call_node.0);
         text.push(' ');
         text.push_str(self.callee.0.as_str());
+        text.push_str(" declaration=");
+        text.push_str(&self.declaration.0);
+        text.push_str(" declaration_block=");
+        text.push_str(&self.declaration_block.0);
         text.push_str(" symbol=");
         text.push_str(&self.symbol);
         text.push_str(" abi=");
         text.push_str(&self.abi);
+        text.push_str(" selected_signature=");
+        text.push_str(&self.selected_signature);
+        text.push_str(" source_expression_type=");
+        text.push_str(self.source_expression_type.as_str());
+        text.push_str(" source_type_arguments=");
+        for ty in &self.source_type_arguments {
+            text.push_str(ty.as_str());
+            text.push(',');
+        }
+        text.push_str(" source_result_type=");
+        text.push_str(self.source_result_type.as_str());
+        text.push_str(" source_effects=");
+        for effect in &self.source_effects {
+            text.push_str(effect.as_str());
+            text.push(',');
+        }
+        text.push_str(" source_arguments=");
+        for argument in &self.source_arguments {
+            text.push_str(&argument.canonical_text());
+            text.push(';');
+        }
+        text.push_str(" source_event=");
+        text.push_str(&format!(
+            "{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
+            self.source_body_owner.0,
+            self.source_statement.0,
+            self.source_order,
+            self.source_scope,
+            self.source_guards,
+            self.source_disposition,
+            self.source_effect_authority
+        ));
+        text.push_str(" fixed_argument_count=");
+        text.push_str(&self.fixed_argument_count.to_string());
+        text.push_str(" fixed_parameter_ids=");
+        for parameter in &self.fixed_parameter_ids {
+            text.push_str(parameter.0 .0.as_str());
+            text.push(',');
+        }
+        text.push_str(" fixed_parameter_modes=");
+        for mode in &self.fixed_parameter_modes {
+            text.push_str(&format!("{mode:?}"));
+            text.push(',');
+        }
+        text.push_str(" variadic=");
+        text.push_str(if self.variadic { "true" } else { "false" });
         text.push_str(" args=");
         for argument in &self.arguments {
             text.push_str(argument.as_str());
@@ -1679,6 +2078,11 @@ impl MirFfiCallContract {
             text.push_str(&conversion.canonical_text());
             text.push(';');
         }
+        text.push_str(" variadic_arguments=");
+        for argument in &self.variadic_arguments {
+            text.push_str(&argument.canonical_text());
+            text.push(';');
+        }
         text.push_str(" result=");
         text.push_str(
             self.result
@@ -1688,6 +2092,15 @@ impl MirFfiCallContract {
         );
         text.push_str(" result_type=");
         text.push_str(self.result_type.as_str());
+        text.push_str(" invocation_flags=");
+        text.push_str(&format!(
+            "{},{},{},{},{}",
+            self.block_no_panic,
+            self.declaration_no_panic,
+            self.block_returns_errno,
+            self.declaration_returns_errno,
+            self.unsafe_block
+        ));
         text.push_str(" result_conversion=");
         if let Some(conversion) = self.result_conversion {
             text.push_str(&conversion.canonical_text());
@@ -1695,18 +2108,110 @@ impl MirFfiCallContract {
             text.push_str("none");
         }
         text.push_str(" requires=");
+        text.push_str(
+            self.requires_root
+                .as_ref()
+                .map(|root| root.0.as_str())
+                .unwrap_or("none"),
+        );
+        text.push(':');
         if let Some(condition) = &self.requires {
             text.push_str(&condition.canonical_text());
         } else {
             text.push_str("none");
         }
         text.push_str(" ensures=");
+        text.push_str(
+            self.ensures_root
+                .as_ref()
+                .map(|root| root.0.as_str())
+                .unwrap_or("none"),
+        );
+        text.push(':');
         if let Some(condition) = &self.ensures {
             text.push_str(&condition.canonical_text());
         } else {
             text.push_str("none");
         }
+        text.push_str(" source_fingerprint=");
+        if let Some(witness) = &self.source_witness {
+            for byte in witness.checked_source_fingerprint {
+                let _ = write!(text, "{byte:02x}");
+            }
+        } else {
+            text.push_str("missing");
+        }
         text
+    }
+
+    pub(crate) fn seal_checked_source(
+        &mut self,
+        function: &MirFunction,
+        checked_source_fingerprint: [u8; 32],
+    ) {
+        self.source_witness = Some(MirFfiCallSourceWitness {
+            checked_source_fingerprint,
+            lowered_mir_fingerprint: [0; 32],
+        });
+        let lowered_mir_fingerprint =
+            MirFfiCallSourceWitness::lowered_mir_fingerprint(self, function);
+        if let Some(witness) = self.source_witness.as_mut() {
+            witness.lowered_mir_fingerprint = lowered_mir_fingerprint;
+        }
+    }
+
+    fn has_valid_source_witness(&self, function: &MirFunction) -> bool {
+        self.source_witness
+            .as_ref()
+            .is_some_and(|witness| witness.validates(self, function))
+    }
+}
+
+/// C's default-promotion class for one checker-resolved variadic operand.
+/// The source/promoted TypeDesc pair is separately sealed in the containing
+/// receipt; consumers must validate the pair against this closed rule before
+/// creating a physical call interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirFfiDefaultPromotion {
+    Identity,
+    IntegerToI32,
+    FloatToF64,
+}
+
+impl MirFfiDefaultPromotion {
+    pub(crate) const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::IntegerToI32 => "integer_to_i32",
+            Self::FloatToF64 => "float_to_f64",
+        }
+    }
+}
+
+/// Checker-owned provenance and physical type for one actual variadic tail
+/// operand. `source_node` must decode from the actual MIR argument identity;
+/// the type and promotion fields are rederived from the checked source call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirFfiVariadicArgument {
+    pub argument_index: usize,
+    pub parameter: ResolvedParameterId,
+    pub source_node: NodeId,
+    pub source_type: ResolvedTypeId,
+    pub promoted_type: ResolvedTypeId,
+    pub promotion: MirFfiDefaultPromotion,
+}
+
+impl MirFfiVariadicArgument {
+    fn canonical_text(&self) -> String {
+        format!(
+            "{}:{}:{}:{}->{}:{}",
+            self.argument_index,
+            self.parameter.0 .0.as_str(),
+            self.source_node.0,
+            self.source_type.as_str(),
+            self.promoted_type.as_str(),
+            self.promotion.canonical_text(),
+        )
     }
 }
 
@@ -1741,6 +2246,8 @@ pub(crate) enum MirFfiConversionKind {
     Identity { abi: types::MirAbiClass },
     SignedIntegerWiden { from_bits: u16, to_bits: u16 },
     SignedIntegerToFloat { from_bits: u16 },
+    IntegerPromotionToI32 { from: types::MirAbiClass },
+    FloatWiden { from_bits: u16, to_bits: u16 },
     SignedIntegerNarrow { from_bits: u16, to_bits: u16 },
     FloatToSignedInteger { to_bits: u16 },
 }
@@ -1780,6 +2287,29 @@ impl MirFfiAbiConversion {
                 types::MirAbiClass::Float { bits: 64 },
             ) => Some(MirFfiConversionKind::SignedIntegerToFloat { from_bits }),
             (
+                from @ types::MirAbiClass::Integer {
+                    bits: 8 | 16,
+                    signed: _,
+                },
+                types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            )
+            | (
+                from @ types::MirAbiClass::Bool,
+                types::MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            ) => Some(MirFfiConversionKind::IntegerPromotionToI32 { from }),
+            (types::MirAbiClass::Float { bits: 32 }, types::MirAbiClass::Float { bits: 64 }) => {
+                Some(MirFfiConversionKind::FloatWiden {
+                    from_bits: 32,
+                    to_bits: 64,
+                })
+            }
+            (
                 types::MirAbiClass::Integer {
                     bits: 64,
                     signed: true,
@@ -1813,7 +2343,9 @@ impl MirFfiAbiConversion {
             MirFfiConversionKind::Identity { abi } if abi == types::MirAbiClass::Unit => None,
             MirFfiConversionKind::Identity { .. }
             | MirFfiConversionKind::SignedIntegerWiden { .. }
-            | MirFfiConversionKind::SignedIntegerToFloat { .. } => Some(kind),
+            | MirFfiConversionKind::SignedIntegerToFloat { .. }
+            | MirFfiConversionKind::IntegerPromotionToI32 { .. }
+            | MirFfiConversionKind::FloatWiden { .. } => Some(kind),
             _ => None,
         }
     }
@@ -1897,6 +2429,86 @@ impl MirFfiAbiConversion {
             to: declared_desc.abi,
         };
         conversion.argument_kind().map(|_| conversion)
+    }
+
+    /// Resolve one variadic operand's physical conversion from its exact
+    /// checked source type and default-promotion receipt. Unlike the fixed
+    /// parameter helper, this deliberately admits narrow integer/bool/f32
+    /// *sources* whose physical call arguments are the promoted C types.
+    pub(crate) fn for_variadic_argument(
+        catalog: &types::MirTypeCatalog,
+        source: &ResolvedTypeId,
+        promoted: &ResolvedTypeId,
+        promotion: MirFfiDefaultPromotion,
+    ) -> Option<Self> {
+        let source_desc = catalog.get(source)?;
+        let promoted_desc = catalog.get(promoted)?;
+        if !promoted_desc.is_canonical_ffi_scalar() {
+            return None;
+        }
+        let valid = match promotion {
+            MirFfiDefaultPromotion::Identity => {
+                source == promoted
+                    && source_desc.is_canonical_ffi_scalar()
+                    && !matches!(
+                        &source_desc.kind,
+                        types::MirTypeKind::Primitive(
+                            crate::core::ir::PrimitiveType::Bool
+                                | crate::core::ir::PrimitiveType::F32
+                        )
+                    )
+            }
+            MirFfiDefaultPromotion::IntegerToI32 => {
+                matches!(
+                    &promoted_desc.kind,
+                    types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::I32)
+                ) && matches!(
+                    (&source_desc.kind, source_desc.abi),
+                    (
+                        types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::Bool),
+                        types::MirAbiClass::Bool
+                    ) | (
+                        types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::I8),
+                        types::MirAbiClass::Integer {
+                            bits: 8,
+                            signed: true
+                        }
+                    ) | (
+                        types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::I16),
+                        types::MirAbiClass::Integer {
+                            bits: 16,
+                            signed: true
+                        }
+                    ) | (
+                        types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::U8),
+                        types::MirAbiClass::Integer {
+                            bits: 8,
+                            signed: false
+                        }
+                    ) | (
+                        types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::U16),
+                        types::MirAbiClass::Integer {
+                            bits: 16,
+                            signed: false
+                        }
+                    )
+                ) && source_desc.layout == types::MirLayout::Scalar
+                    && source_desc.has_canonical_copy_noop_metadata()
+            }
+            MirFfiDefaultPromotion::FloatToF64 => {
+                matches!(
+                    &source_desc.kind,
+                    types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::F32)
+                ) && matches!(
+                    &promoted_desc.kind,
+                    types::MirTypeKind::Primitive(crate::core::ir::PrimitiveType::F64)
+                ) && source_desc.is_canonical_copy_scalar(true)
+            }
+        };
+        valid.then_some(Self {
+            from: source_desc.abi,
+            to: promoted_desc.abi,
+        })
     }
 
     /// Resolve the checker-approved result conversion (C declaration to MIR
@@ -2033,10 +2645,12 @@ fn validate_ffi_call_contract_receipt_with_options(
     if result.is_some_and(|result| arguments.iter().any(|argument| argument == result)) {
         errors.push("extern call FFI result identity overlaps an argument identity".into());
     }
+    if contract.fixed_argument_count > arguments.len() {
+        errors.push("extern call FFI fixed argument count exceeds the MIR argument count".into());
+    }
     if contract.parameter_types.len() != arguments.len() {
         errors.push(
-            "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments"
-                .into(),
+            "extern call FFI physical parameter TypeDesc count disagrees with MIR arguments".into(),
         );
     }
     if contract.parameter_conversions.len() != arguments.len() {
@@ -2045,12 +2659,50 @@ fn validate_ffi_call_contract_receipt_with_options(
                 .into(),
         );
     }
+    let fixed_count_is_valid = contract.fixed_argument_count <= arguments.len();
+    let expected_tail_count = arguments
+        .len()
+        .saturating_sub(contract.fixed_argument_count);
+    if contract.variadic {
+        if contract.fixed_argument_count == 0 {
+            errors
+                .push("extern call FFI variadic declaration has no fixed parameter prefix".into());
+        }
+        if contract.variadic_arguments.len() != expected_tail_count {
+            errors.push(
+                "extern call FFI variadic promotion receipt count disagrees with actual tail arguments"
+                    .into(),
+            );
+        }
+    } else if contract.fixed_argument_count != arguments.len()
+        || !contract.variadic_arguments.is_empty()
+    {
+        errors.push("extern call FFI non-variadic receipt contains variadic tail metadata".into());
+    }
     if enforce_scalar_abi {
-        for (index, declared_type) in contract.parameter_types.iter().enumerate() {
+        for (index, declared_type) in contract
+            .parameter_types
+            .iter()
+            .take(
+                contract
+                    .fixed_argument_count
+                    .min(contract.parameter_types.len()),
+            )
+            .enumerate()
+        {
             if !type_catalog.is_canonical_ffi_endpoint(declared_type, false) {
                 errors.push(format!(
                     "{}: extern call FFI declaration parameter {index} TypeDesc is outside the complete scalar endpoint contract",
                     crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
+                ));
+            }
+        }
+        for tail in &contract.variadic_arguments {
+            if !type_catalog.is_canonical_ffi_endpoint(&tail.promoted_type, false) {
+                errors.push(format!(
+                    "{}: extern call FFI variadic argument {} promoted TypeDesc is outside the complete scalar endpoint contract",
+                    crate::diagnostic::codes::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
+                    tail.argument_index
                 ));
             }
         }
@@ -2070,8 +2722,15 @@ fn validate_ffi_call_contract_receipt_with_options(
             );
         }
     }
-    for (index, (argument, declared_type)) in
-        arguments.iter().zip(&contract.parameter_types).enumerate()
+    for (index, (argument, declared_type)) in arguments
+        .iter()
+        .take(
+            contract
+                .fixed_argument_count
+                .min(contract.parameter_types.len()),
+        )
+        .zip(&contract.parameter_types)
+        .enumerate()
     {
         let Some(argument_value) = function.values.get(argument) else {
             errors.push(format!(
@@ -2097,6 +2756,72 @@ fn validate_ffi_call_contract_receipt_with_options(
             if expected.as_ref() != Some(receipt_conversion) {
                 errors.push(format!(
                     "extern call FFI parameter {index} ABI conversion receipt disagrees with MIR value"
+                ));
+            }
+        }
+    }
+    if fixed_count_is_valid && contract.variadic {
+        for (tail_offset, tail) in contract.variadic_arguments.iter().enumerate() {
+            let index = contract.fixed_argument_count + tail_offset;
+            if tail.argument_index != index {
+                errors.push(format!(
+                    "extern call FFI variadic receipt ordinal {} appears at index {}, expected {index}",
+                    tail.argument_index, tail_offset
+                ));
+            }
+            let Some(argument) = arguments.get(index) else {
+                errors.push(format!(
+                    "extern call FFI variadic receipt {index} is outside the MIR argument list"
+                ));
+                continue;
+            };
+            let actual_source_node = argument
+                .as_str()
+                .strip_prefix("expr:")
+                .map(|node| NodeId(node.to_owned()));
+            if actual_source_node.as_ref() != Some(&tail.source_node) {
+                errors.push(format!(
+                    "extern call FFI variadic argument {index} source node disagrees with its MIR argument identity"
+                ));
+            }
+            let Some(argument_value) = function.values.get(argument) else {
+                errors.push(format!(
+                    "extern call FFI variadic argument {index} value identity is absent (MIR value '{}' is absent)",
+                    argument
+                ));
+                continue;
+            };
+            if argument_value.ty != tail.source_type {
+                errors.push(format!(
+                    "extern call FFI variadic argument {index} source TypeDesc disagrees with MIR value"
+                ));
+            }
+            if contract.parameter_types.get(index) != Some(&tail.promoted_type) {
+                errors.push(format!(
+                    "extern call FFI variadic argument {index} promoted TypeDesc disagrees with physical parameter type"
+                ));
+            }
+            let Some(receipt_conversion) = contract.parameter_conversions.get(index) else {
+                errors.push(format!(
+                    "extern call FFI variadic argument {index} has no ABI conversion receipt"
+                ));
+                continue;
+            };
+            let expected_conversion = MirFfiAbiConversion::for_variadic_argument(
+                type_catalog,
+                &tail.source_type,
+                &tail.promoted_type,
+                tail.promotion,
+            );
+            if expected_conversion.as_ref() != Some(receipt_conversion) {
+                errors.push(format!(
+                    "extern call FFI variadic argument {index} promotion conversion receipt disagrees with the checked source/promotion TypeDescs"
+                ));
+            }
+            if enforce_scalar_abi && !receipt_conversion.is_supported_argument() {
+                errors.push(format!(
+                    "extern call FFI variadic argument {index} ABI conversion from {:?} to {:?} is unsupported",
+                    receipt_conversion.from, receipt_conversion.to
                 ));
             }
         }
@@ -2139,6 +2864,12 @@ fn validate_ffi_call_contract_receipt_with_options(
     }
     if let Err(message) = contracts::validate_ffi_ensures(function, type_catalog, contract) {
         errors.push(message);
+    }
+    if !contract.has_valid_source_witness(function) {
+        errors.push(
+            "extern call FFI checked-source witness disagrees with the conversion receipt, checked source, or lowered caller MIR"
+                .into(),
+        );
     }
     errors
 }
@@ -2287,21 +3018,29 @@ pub(crate) fn validate_ffi_receipt_table(
 pub(crate) fn validate_ffi_symbol_declaration_shapes(
     ffi_calls: &BTreeMap<MirInstructionId, MirFfiCallContract>,
 ) -> Vec<String> {
-    let mut shapes = BTreeMap::<String, (Vec<ResolvedTypeId>, ResolvedTypeId, String)>::new();
+    let mut shapes =
+        BTreeMap::<String, (usize, Vec<ResolvedTypeId>, ResolvedTypeId, String, bool)>::new();
     let mut errors = Vec::new();
     for contract in ffi_calls.values() {
         if validate_ffi_symbol_manifest_safety(&contract.symbol).is_err() {
             continue;
         }
         let shape = (
-            contract.parameter_types.clone(),
+            contract.fixed_argument_count,
+            contract
+                .parameter_types
+                .iter()
+                .take(contract.fixed_argument_count)
+                .cloned()
+                .collect(),
             contract.result_type.clone(),
             contract.abi.clone(),
+            contract.variadic,
         );
         if let Some(previous) = shapes.get(&contract.symbol) {
             if previous != &shape {
                 errors.push(format!(
-                    "FFI symbol '{}' is used with incompatible declaration TypeDescs",
+                    "FFI symbol '{}' is used with incompatible declaration TypeDescs or variadic ABI shape",
                     contract.symbol
                 ));
             }
@@ -2408,6 +3147,10 @@ pub struct MirFunction {
     /// Canonical scalar contract predicates.  Conditions use MIR value
     /// identities rather than source expressions or display names.
     pub contracts: Vec<MirContract>,
+    /// Ordered, checker-owned Math and stationary loop proof points. The
+    /// expressions contain canonical MIR identities/TypeDesc paths, not a
+    /// ResolvedBody or surface-AST node.
+    pub proof_worklist: Option<MirProofWorklist>,
     /// Checker-owned resource facts projected into a backend-neutral event
     /// stream.  Consumers must use this stream together with TypeDesc rather
     /// than infer ownership from a physical register or pointer shape.
@@ -2507,6 +3250,71 @@ pub(super) struct MirCheckerMapRootAction {
     pub(super) instruction: MirInstructionId,
 }
 
+/// Independent Checker receipt for the typed Any-owner Map profile. This
+/// shares the source operation vocabulary with MapRoot, but its version and
+/// TypeDesc identity are distinct so an old raw-ValueHandle receipt cannot
+/// authorize typed owner-token storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MirCheckerMapAnyOwnerAction {
+    pub(super) profile_version: crate::core::MapAnyOwnerProfileVersion,
+    pub(super) kind: crate::core::MapAnyOwnerActionKind,
+    pub(super) point: NodeId,
+    pub(super) local: MirValueId,
+    pub(super) result: Option<MirValueId>,
+    pub(super) root: String,
+    pub(super) key: Option<String>,
+    pub(super) value: Option<MirValueId>,
+    pub(super) value_type: Option<crate::core::ResolvedTypeId>,
+    pub(super) source_local: Option<MirValueId>,
+    pub(super) source: Option<String>,
+    pub(super) instruction: MirInstructionId,
+}
+
+/// Independent Checker receipt for persistent ordinary Map roots. Unlike
+/// MapRoot/MapAnyOwnerV1, Set and Remove leave the source root live and create
+/// a distinct root whose entries own heterogeneous typed snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MirCheckerOrdinaryMapOwnerLifecycleAction {
+    pub(super) profile_version: crate::core::OrdinaryMapOwnerLifecycleProfileVersion,
+    pub(super) kind: crate::core::OrdinaryMapOwnerLifecycleActionKind,
+    pub(super) point: NodeId,
+    pub(super) local: MirValueId,
+    pub(super) result: Option<MirValueId>,
+    pub(super) root: String,
+    pub(super) key_node: Option<NodeId>,
+    pub(super) key: Option<MirValueId>,
+    pub(super) key_type: Option<crate::core::ResolvedTypeId>,
+    pub(super) key_local: Option<crate::core::ir::ResolvedLocalId>,
+    pub(super) value: Option<MirValueId>,
+    pub(super) value_type: Option<crate::core::ResolvedTypeId>,
+    pub(super) source_local: Option<MirValueId>,
+    pub(super) source: Option<String>,
+    pub(super) instruction: MirInstructionId,
+}
+
+/// Independent Checker receipt for the ordinary Map profile with typed,
+/// owned `Result` getters. It has its own root identity namespace and is not
+/// interchangeable with any older Map owner receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MirCheckerOrdinaryMapOwnedGetI32StringV1Action {
+    pub(super) profile_version: crate::core::OrdinaryMapOwnedGetI32StringV1ProfileVersion,
+    pub(super) kind: crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind,
+    pub(super) point: NodeId,
+    pub(super) local: MirValueId,
+    pub(super) result: Option<MirValueId>,
+    pub(super) root: String,
+    pub(super) key_node: Option<NodeId>,
+    pub(super) key: Option<MirValueId>,
+    pub(super) key_type: Option<crate::core::ResolvedTypeId>,
+    pub(super) key_local: Option<crate::core::ir::ResolvedLocalId>,
+    pub(super) value: Option<MirValueId>,
+    pub(super) value_type: Option<crate::core::ResolvedTypeId>,
+    pub(super) result_type: Option<crate::core::ResolvedTypeId>,
+    pub(super) source_local: Option<MirValueId>,
+    pub(super) source: Option<String>,
+    pub(super) instruction: MirInstructionId,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Checker ownership facts projected into canonical MIR.
 ///
@@ -2515,6 +3323,7 @@ pub(super) struct MirCheckerMapRootAction {
 /// ownership events, but a borrow instruction without this checker evidence
 /// fails `MirFunction::validate` closed.
 pub struct MirOwnershipSummary {
+    checker_managed_any: Option<managed_any::MirCheckerManagedAnySeal>,
     pub events: Vec<MirOwnershipEvent>,
     /// Independent projection of Checker `ResourceAnalysis.loans/actions`.
     /// Kept private so consumers can validate that the public event stream
@@ -2523,6 +3332,28 @@ pub struct MirOwnershipSummary {
     /// Exact, private Checker Map-root action sequence. Public MIR operations
     /// are accepted only when this receipt binds them one-to-one.
     pub(super) checker_map_roots: Vec<MirCheckerMapRootAction>,
+    /// Independent, versioned Checker receipt for production typed Any-owner
+    /// Map entries. It is intentionally not inferred from `checker_map_roots`.
+    pub(super) checker_map_any_owners: Vec<MirCheckerMapAnyOwnerAction>,
+    /// Independent, versioned Checker receipt for source-compatible persistent
+    /// ordinary Map roots. This identity is not inferred from either prior
+    /// Map profile.
+    pub(super) checker_ordinary_map_owner_lifecycle_v1:
+        Vec<MirCheckerOrdinaryMapOwnerLifecycleAction>,
+    /// Independent Checker receipts for the typed owned-get Map profile.
+    /// The separate ledger prevents an older Map profile from authorizing a
+    /// getter whose result transfers owned payload data to the caller.
+    pub(super) checker_ordinary_map_owned_get_i32_string_v1:
+        Vec<MirCheckerOrdinaryMapOwnedGetI32StringV1Action>,
+    /// Exact Checker source-CFG commitment for the admitted ordinary Map
+    /// owned-get profile. MIR validation maps reachable blocks/edges and, in
+    /// v2, replays path-local root facts before accepting the operation ledger.
+    pub(super) checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt:
+        Option<crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt>,
+    /// Exact Checker source CFG projection for path-sensitive ManagedAny
+    /// ownership validation. This topology receipt grants no operation or
+    /// transfer authority by itself.
+    pub(super) checker_managed_any_cfg_receipt: Option<crate::core::ManagedAnyCfgReceipt>,
 }
 
 impl MirOwnershipSummary {
@@ -2533,51 +3364,48 @@ impl MirOwnershipSummary {
         !self.checker_map_roots.is_empty()
     }
 
-    #[cfg(test)]
-    pub(crate) fn forge_checker_map_root_set_key_for_test_only(&mut self, key: String) -> bool {
-        let Some(receipt) = self
-            .checker_map_roots
-            .iter_mut()
-            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Set)
-        else {
-            return false;
-        };
-        receipt.key = Some(key);
-        true
+    /// Whether this function carries the independent typed-owner Map receipt.
+    pub(crate) fn has_checker_map_any_owner_actions(&self) -> bool {
+        !self.checker_map_any_owners.is_empty()
+    }
+
+    /// Whether this function carries the independent ordinary Map lifecycle
+    /// receipt.
+    pub(crate) fn has_checker_ordinary_map_owner_lifecycle_v1_actions(&self) -> bool {
+        !self.checker_ordinary_map_owner_lifecycle_v1.is_empty()
+    }
+
+    /// Whether this function carries an independent Checker receipt for the
+    /// ordinary Map owned-get profile.
+    pub(crate) fn has_checker_ordinary_map_owned_get_i32_string_v1_actions(&self) -> bool {
+        !self.checker_ordinary_map_owned_get_i32_string_v1.is_empty()
     }
 
     #[cfg(test)]
-    pub(crate) fn forge_checker_map_root_remove_key_for_test_only(&mut self, key: String) -> bool {
-        let Some(receipt) = self
-            .checker_map_roots
-            .iter_mut()
-            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Remove)
-        else {
-            return false;
-        };
-        receipt.key = Some(key);
-        true
+    pub(crate) fn clear_checker_map_any_owner_actions_for_test_only(&mut self) {
+        self.checker_map_any_owners.clear();
     }
 
     #[cfg(test)]
-    pub(crate) fn forge_checker_map_root_set_value_type_for_test_only(
-        &mut self,
-        value_type: crate::core::ResolvedTypeId,
-    ) -> bool {
-        let Some(receipt) = self
-            .checker_map_roots
-            .iter_mut()
-            .find(|receipt| receipt.kind == crate::core::MapRootActionKind::Set)
-        else {
-            return false;
-        };
-        receipt.value_type = Some(value_type);
-        true
+    pub(crate) fn clear_checker_ordinary_map_clone_actions_for_test_only(&mut self) {
+        self.checker_ordinary_map_owner_lifecycle_v1
+            .retain(|action| {
+                action.kind != crate::core::OrdinaryMapOwnerLifecycleActionKind::Clone
+            });
+        self.checker_ordinary_map_owned_get_i32_string_v1
+            .retain(|action| {
+                action.kind != crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Clone
+            });
     }
 
     #[cfg(test)]
-    pub(crate) fn clear_checker_map_root_actions_for_test_only(&mut self) {
-        self.checker_map_roots.clear();
+    pub(crate) fn clear_checker_ordinary_map_owner_lifecycle_v1_for_test_only(&mut self) {
+        self.checker_ordinary_map_owner_lifecycle_v1.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_checker_ordinary_map_owned_get_i32_string_v1_for_test_only(&mut self) {
+        self.checker_ordinary_map_owned_get_i32_string_v1.clear();
     }
 
     /// Validate identities and required metadata within this summary.
@@ -2874,6 +3702,299 @@ impl MirOwnershipSummary {
                 action.instruction
             );
         }
+        for (index, action) in self.checker_map_any_owners.iter().enumerate() {
+            let profile_version = action.profile_version.canonical_text();
+            let kind = match action.kind {
+                crate::core::MapAnyOwnerActionKind::New => "new",
+                crate::core::MapAnyOwnerActionKind::Set => "set",
+                crate::core::MapAnyOwnerActionKind::Remove => "remove",
+                crate::core::MapAnyOwnerActionKind::Size => "size",
+                crate::core::MapAnyOwnerActionKind::Contains => "contains",
+                crate::core::MapAnyOwnerActionKind::Drop => "drop",
+            };
+            let result = action
+                .result
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let key = action
+                .key
+                .as_ref()
+                .map(|value| format_mir_literal(&ResolvedLiteral::String(value.clone())))
+                .unwrap_or_else(|| "none".into());
+            let value = action
+                .value
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let value_type = action
+                .value_type
+                .as_ref()
+                .map(|ty| format!("some:{}", ty.as_str()))
+                .unwrap_or_else(|| "none".into());
+            let source_local = action
+                .source_local
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let source = action
+                .source
+                .as_ref()
+                .map(|value| format_mir_literal(&ResolvedLiteral::String(value.clone())))
+                .unwrap_or_else(|| "none".into());
+            let _ = writeln!(
+                output,
+                "    checker_map_any_owner[{index}] profile={} {kind} point={} local={} result={} root={} key={} value={} value_ty={} source_local={} source={} instruction={}",
+                profile_version,
+                action.point.0,
+                action.local,
+                result,
+                format_mir_literal(&ResolvedLiteral::String(action.root.clone())),
+                key,
+                value,
+                value_type,
+                source_local,
+                source,
+                action.instruction
+            );
+        }
+        for (index, action) in self
+            .checker_ordinary_map_owner_lifecycle_v1
+            .iter()
+            .enumerate()
+        {
+            let profile = action.profile_version.canonical_text();
+            let kind = action.kind.as_str();
+            let result = action
+                .result
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let key_node = action
+                .key_node
+                .as_ref()
+                .map(|node| format!("some:{}", node.0))
+                .unwrap_or_else(|| "none".into());
+            let key = action
+                .key
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let key_type = action
+                .key_type
+                .as_ref()
+                .map(|ty| format!("some:{}", ty.as_str()))
+                .unwrap_or_else(|| "none".into());
+            let key_local = action
+                .key_local
+                .as_ref()
+                .map(|local| format!("some:{}", local.0 .0))
+                .unwrap_or_else(|| "none".into());
+            let value = action
+                .value
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let value_type = action
+                .value_type
+                .as_ref()
+                .map(|ty| format!("some:{}", ty.as_str()))
+                .unwrap_or_else(|| "none".into());
+            let source_local = action
+                .source_local
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let source = action
+                .source
+                .as_ref()
+                .map(|value| format_mir_literal(&ResolvedLiteral::String(value.clone())))
+                .unwrap_or_else(|| "none".into());
+            let _ = writeln!(
+                output,
+                "    checker_ordinary_map_owner_lifecycle[{index}] profile={profile} {kind} point={} local={} result={} root={} key_node={} key={} key_ty={} key_local={} value={} value_ty={} source_local={} source={} instruction={}",
+                action.point.0,
+                action.local,
+                result,
+                format_mir_literal(&ResolvedLiteral::String(action.root.clone())),
+                key_node,
+                key,
+                key_type,
+                key_local,
+                value,
+                value_type,
+                source_local,
+                source,
+                action.instruction
+            );
+        }
+        for (index, action) in self
+            .checker_ordinary_map_owned_get_i32_string_v1
+            .iter()
+            .enumerate()
+        {
+            let profile = action.profile_version.canonical_text();
+            let kind = action.kind.as_str();
+            let result = action
+                .result
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let key_node = action
+                .key_node
+                .as_ref()
+                .map(|node| format!("some:{}", node.0))
+                .unwrap_or_else(|| "none".into());
+            let key = action
+                .key
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let key_type = action
+                .key_type
+                .as_ref()
+                .map(|ty| format!("some:{}", ty.as_str()))
+                .unwrap_or_else(|| "none".into());
+            let key_local = action
+                .key_local
+                .as_ref()
+                .map(|local| format!("some:{}", local.0 .0))
+                .unwrap_or_else(|| "none".into());
+            let value = action
+                .value
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let value_type = action
+                .value_type
+                .as_ref()
+                .map(|ty| format!("some:{}", ty.as_str()))
+                .unwrap_or_else(|| "none".into());
+            let result_type = action
+                .result_type
+                .as_ref()
+                .map(|ty| format!("some:{}", ty.as_str()))
+                .unwrap_or_else(|| "none".into());
+            let source_local = action
+                .source_local
+                .as_ref()
+                .map(|value| format!("some:{value}"))
+                .unwrap_or_else(|| "none".into());
+            let source = action
+                .source
+                .as_ref()
+                .map(|value| format_mir_literal(&ResolvedLiteral::String(value.clone())))
+                .unwrap_or_else(|| "none".into());
+            let _ = writeln!(
+                output,
+                "    checker_ordinary_map_owned_get_i32_string_v1[{index}] profile={profile} {kind} point={} local={} result={} root={} key_node={} key={} key_ty={} key_local={} value={} value_ty={} result_ty={} source_local={} source={} instruction={}",
+                action.point.0,
+                action.local,
+                result,
+                format_mir_literal(&ResolvedLiteral::String(action.root.clone())),
+                key_node,
+                key,
+                key_type,
+                key_local,
+                value,
+                value_type,
+                result_type,
+                source_local,
+                source,
+                action.instruction
+            );
+        }
+        if let Some(receipt) = &self.checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt {
+            let _ = writeln!(
+                output,
+                "    checker_ordinary_map_owned_get_i32_string_v1_cfg profile={} owner={} entry={} map_block={} blocks={} edges={} attempts={} actions={}",
+                receipt.profile_version.canonical_text(),
+                receipt.owner.0,
+                receipt.entry.0 .0,
+                receipt.map_operation_block.0 .0,
+                receipt.reachable_blocks.len(),
+                receipt.reachable_edges.len(),
+                receipt.attempts.len(),
+                receipt.action_points.len(),
+            );
+            for (block, fact) in &receipt.reachable_blocks {
+                let points = fact
+                    .points
+                    .iter()
+                    .map(|(point, kind)| format!("{}:{kind:?}", point.0))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let roots_in = receipt
+                    .live_roots_in
+                    .get(block)
+                    .map(|roots| {
+                        roots
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                let roots_out = receipt
+                    .live_roots_out
+                    .get(block)
+                    .map(|roots| {
+                        roots
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    output,
+                    "      cfg_block {} points=[{}] roots_in=[{}] roots_out=[{}] terminator={:?}",
+                    block.0 .0, points, roots_in, roots_out, fact.terminator
+                );
+            }
+            for (edge_id, edge) in &receipt.reachable_edges {
+                let roots = receipt
+                    .live_roots_on_edge
+                    .get(edge_id)
+                    .map(|roots| {
+                        roots
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    output,
+                    "      cfg_edge {} {} -> {} kind={:?} source={} live_roots=[{}]",
+                    edge_id.0 .0,
+                    edge.from.0 .0,
+                    edge.to.0 .0,
+                    edge.kind,
+                    edge.source.node.0,
+                    roots
+                );
+            }
+            for attempt in &receipt.attempts {
+                let arguments = attempt
+                    .arguments
+                    .iter()
+                    .map(|node| node.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _ = writeln!(
+                    output,
+                    "      cfg_attempt {:?} point={} args=[{}]",
+                    attempt.kind, attempt.point.0, arguments
+                );
+            }
+            for point in &receipt.action_points {
+                let _ = writeln!(output, "      cfg_action point={}", point.0);
+            }
+        }
+        if let Some(receipt) = &self.checker_managed_any_cfg_receipt {
+            let _ = writeln!(output, "    checker_managed_any_cfg receipt={receipt:?}");
+        }
         output
     }
 }
@@ -2926,6 +4047,12 @@ impl MirFunction {
         let mut errors = validator.finish().err().unwrap_or_default();
         errors.extend(validate_ownership_event_receipts(self));
         errors.extend(validate_map_root_action_receipts(self));
+        errors.extend(validate_map_any_owner_action_receipts(self));
+        errors.extend(validate_ordinary_map_owner_lifecycle_v1_action_receipts(
+            self,
+        ));
+        errors.extend(validate_ordinary_map_owned_get_i32_string_v1_action_receipts(self));
+        errors.extend(managed_any::validate_managed_any_receipts(self));
         if errors.is_empty() {
             Ok(())
         } else {
@@ -2991,12 +4118,86 @@ impl MirFunction {
         for contract in &self.contracts {
             let _ = writeln!(output, "{}", contract.canonical_text());
         }
+        if let Some(worklist) = &self.proof_worklist {
+            output.push_str(&worklist.canonical_text());
+        }
         output.push_str(&self.ownership.canonical_text());
+        if let Some(seal) = &self.ownership.checker_managed_any {
+            let _ = writeln!(output, "  checker_managed_any schema=1 descriptor_version=1 owner={} parameters={:?} result={}", seal.owner.0, seal.parameters, seal.result.as_str());
+            let _ = writeln!(
+                output,
+                "    checker_managed_any_permissions {:?}",
+                seal.parameter_permissions
+            );
+            for (index, (block, origin, instruction)) in seal.instructions.iter().enumerate() {
+                let _ = writeln!(
+                    output,
+                    "    checker_managed_any[{index}] block={} origin={} instruction={} operation={}",
+                    block,
+                    origin.0,
+                    instruction.id,
+                    format_instruction(&instruction.kind)
+                );
+            }
+            for (block, terminator) in &seal.terminators {
+                let _ = writeln!(
+                    output,
+                    "    checker_managed_any_escape block={} {}",
+                    block,
+                    format_terminator(terminator)
+                );
+            }
+            if let Some(identity) = &seal.generic_identity {
+                let _ = writeln!(
+                    output,
+                    "    checker_managed_any_generic_identity template={} instance={} type_argument={} managed_type_argument={} parameter={} return_value={} clone_instruction={} drop_instruction={} clone_origin={} drop_origin={}",
+                    identity.template.0,
+                    identity.instance.as_str(),
+                    identity.type_argument.as_str(),
+                    identity.managed_type_argument.as_str(),
+                    identity.parameter,
+                    identity.return_value,
+                    identity.clone_instruction,
+                    identity.drop_instruction,
+                    identity.clone_origin.0,
+                    identity.drop_origin.0,
+                );
+            }
+            if let Some(trap_cleanup) = &seal.generic_trap_cleanup {
+                let _ = writeln!(
+                    output,
+                    "    checker_managed_any_generic_trap_cleanup template={} instance={} type_argument={} managed_type_argument={} parameter={} trap={} setup_instructions=[{}] drop_instruction={} trap_instruction={} trap_result={} drop_origin={} trap_origin={}",
+                    trap_cleanup.template.0,
+                    trap_cleanup.instance.as_str(),
+                    trap_cleanup.type_argument.as_str(),
+                    trap_cleanup.managed_type_argument.as_str(),
+                    trap_cleanup.parameter,
+                    trap_cleanup.trap.canonical_text(),
+                    trap_cleanup
+                        .setup_instructions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    trap_cleanup.drop_instruction,
+                    trap_cleanup.trap_instruction,
+                    trap_cleanup.trap_result,
+                    trap_cleanup.drop_origin.0,
+                    trap_cleanup.trap_origin.0,
+                );
+            }
+        }
         output
     }
 }
 
 fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidationError> {
+    // The shared MapRoot instruction vocabulary is also used by the separately
+    // typed MapAnyOwner v1 profile. Its independent, versioned Checker ledger
+    // is validated below and must be the sole authority for such a function.
+    if function.ownership.has_checker_map_any_owner_actions() {
+        return Vec::new();
+    }
     let mut errors = Vec::new();
     let mut observed = Vec::<(usize, &MirInstruction)>::new();
     let has_receipts = !function.ownership.checker_map_roots.is_empty();
@@ -3446,6 +4647,2216 @@ fn validate_map_root_action_receipts(function: &MirFunction) -> Vec<MirValidatio
     errors
 }
 
+/// Validate the independent versioned receipt for the typed MapAnyOwner v1
+/// profile. The MIR operation vocabulary is shared with the older MapRoot
+/// profile, so this validator checks the new namespace/version/type identity
+/// first, then reuses the full MapRoot lifecycle proof on a normalized clone.
+/// The original function is never rewritten and backends continue to observe
+/// its distinct synthetic TypeDesc and private Checker receipt.
+fn validate_map_any_owner_action_receipts(function: &MirFunction) -> Vec<MirValidationError> {
+    let receipts = &function.ownership.checker_map_any_owners;
+    let mut errors = Vec::new();
+    let has_any_owner_type = function.result == types::map_any_owner_v1_type_id()
+        || function
+            .values
+            .values()
+            .any(|value| value.ty == types::map_any_owner_v1_type_id());
+    if receipts.is_empty() {
+        if has_any_owner_type {
+            errors.push(MirValidationError {
+                subject: function.owner.0.clone(),
+                message: "MapAnyOwner v1 TypeDesc has no independent Checker receipt".into(),
+            });
+        }
+        return errors;
+    }
+    if !function.ownership.checker_map_roots.is_empty() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "MapRoot and MapAnyOwner v1 receipts cannot authorize the same function"
+                .into(),
+        });
+        return errors;
+    }
+
+    let mut normalized = function.clone();
+    normalized.ownership.checker_map_roots.clear();
+    normalized.ownership.checker_map_any_owners.clear();
+    let mut seen_instructions = BTreeSet::new();
+    for receipt in receipts {
+        if receipt.profile_version != crate::core::MapAnyOwnerProfileVersion::V1 {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapAnyOwner receipt has an unsupported profile version".into(),
+            });
+            continue;
+        }
+        let local_name = receipt
+            .local
+            .as_str()
+            .strip_prefix("local:")
+            .unwrap_or_default();
+        let root_name = receipt
+            .root
+            .strip_prefix("map-any-owner-v1:")
+            .unwrap_or_default();
+        if local_name.is_empty()
+            || root_name.is_empty()
+            || local_name != root_name
+            || receipt.point.0.trim().is_empty()
+            || !seen_instructions.insert(receipt.instruction.clone())
+        {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapAnyOwner v1 receipt has an invalid namespaced root/local identity or duplicate instruction".into(),
+            });
+        }
+        let expected_id = format!(
+            "inst:map_any_owner_v1_{}:{}:{}",
+            receipt.kind.as_str(),
+            receipt.local.0,
+            receipt.point.0
+        );
+        if receipt.instruction.as_str() != expected_id {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapAnyOwner v1 Checker receipt instruction identity is forged".into(),
+            });
+        }
+        for local in std::iter::once(&receipt.local).chain(receipt.source_local.iter()) {
+            if !function
+                .values
+                .get(local)
+                .is_some_and(|value| value.ty == types::map_any_owner_v1_type_id())
+            {
+                errors.push(MirValidationError {
+                    subject: local.to_string(),
+                    message: "MapAnyOwner v1 action local does not have the canonical v1 TypeDesc identity".into(),
+                });
+            }
+        }
+        if receipt.kind == crate::core::MapAnyOwnerActionKind::Set {
+            let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+            let string_type =
+                crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+            if !receipt
+                .value_type
+                .as_ref()
+                .is_some_and(|ty| ty == &i32_type || ty == &string_type)
+            {
+                errors.push(MirValidationError {
+                    subject: receipt.instruction.to_string(),
+                    message: "MapAnyOwner v1 Set receipt is outside the closed i32/String payload profile".into(),
+                });
+            }
+        }
+        if matches!(
+            receipt.kind,
+            crate::core::MapAnyOwnerActionKind::Set
+                | crate::core::MapAnyOwnerActionKind::Remove
+                | crate::core::MapAnyOwnerActionKind::Contains
+        ) && receipt.key.as_ref().is_none_or(|key| key.contains('\0'))
+        {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapAnyOwner v1 key must be a static UTF-8 string without NUL".into(),
+            });
+        }
+
+        let legacy_kind = match receipt.kind {
+            crate::core::MapAnyOwnerActionKind::New => crate::core::MapRootActionKind::New,
+            crate::core::MapAnyOwnerActionKind::Set => crate::core::MapRootActionKind::Set,
+            crate::core::MapAnyOwnerActionKind::Remove => crate::core::MapRootActionKind::Remove,
+            crate::core::MapAnyOwnerActionKind::Size => crate::core::MapRootActionKind::Size,
+            crate::core::MapAnyOwnerActionKind::Contains => {
+                crate::core::MapRootActionKind::Contains
+            }
+            crate::core::MapAnyOwnerActionKind::Drop => crate::core::MapRootActionKind::Drop,
+        };
+        let legacy_role = match legacy_kind {
+            crate::core::MapRootActionKind::New => "map_root_new",
+            crate::core::MapRootActionKind::Set => "map_root_set",
+            crate::core::MapRootActionKind::Remove => "map_root_remove",
+            crate::core::MapRootActionKind::Size => "map_root_size",
+            crate::core::MapRootActionKind::Contains => "map_root_contains",
+            crate::core::MapRootActionKind::Drop => "map_root_drop",
+        };
+        let legacy_instruction = match MirInstructionId::new(format!(
+            "inst:{legacy_role}:{}:{}",
+            receipt.local.0, receipt.point.0
+        )) {
+            Ok(id) => id,
+            Err(error) => {
+                errors.push(MirValidationError {
+                    subject: receipt.instruction.to_string(),
+                    message: format!("MapAnyOwner v1 receipt cannot be normalized: {error}"),
+                });
+                continue;
+            }
+        };
+        let actual_count = function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| instruction.id == receipt.instruction)
+            .count();
+        if actual_count != 1 {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "MapAnyOwner v1 receipt must bind exactly one MIR instruction".into(),
+            });
+        }
+        for block in normalized.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                if instruction.id == receipt.instruction {
+                    instruction.id = legacy_instruction.clone();
+                }
+            }
+        }
+        let normalized_root = local_name.to_owned();
+        let normalized_source = receipt.source.as_ref().map(|source| {
+            source
+                .strip_prefix("map-any-owner-v1:")
+                .unwrap_or(source)
+                .to_owned()
+        });
+        normalized
+            .ownership
+            .checker_map_roots
+            .push(MirCheckerMapRootAction {
+                kind: legacy_kind,
+                point: receipt.point.clone(),
+                local: receipt.local.clone(),
+                result: receipt.result.clone(),
+                root: normalized_root,
+                key: receipt.key.clone(),
+                value: receipt.value.clone(),
+                value_type: receipt.value_type.clone(),
+                source_local: receipt.source_local.clone(),
+                source: normalized_source,
+                instruction: legacy_instruction,
+            });
+    }
+
+    for value in normalized.values.values_mut() {
+        if value.ty == types::map_any_owner_v1_type_id() {
+            value.ty = types::map_root_type_id();
+        }
+    }
+    if normalized.result == types::map_any_owner_v1_type_id() {
+        normalized.result = types::map_root_type_id();
+    }
+    errors.extend(validate_map_root_action_receipts(&normalized));
+    errors
+}
+
+/// Validate the independent persistent ordinary Map owner lifecycle receipt.
+/// This profile deliberately has no normalization path to MapRoot or
+/// MapAnyOwner v1: source roots remain live after Set/Remove and every
+/// successor receives a fresh local/root identity.
+fn validate_ordinary_map_owner_lifecycle_v1_action_receipts(
+    function: &MirFunction,
+) -> Vec<MirValidationError> {
+    use crate::core::OrdinaryMapOwnerLifecycleActionKind as K;
+    use MirInstructionKind as I;
+
+    let owner_type = types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+    let receipts = &function.ownership.checker_ordinary_map_owner_lifecycle_v1;
+    let contains_owner_type = function.result == owner_type
+        || function.values.values().any(|value| value.ty == owner_type)
+        || function.parameters.iter().any(|parameter| {
+            function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_type)
+        })
+        || function.blocks.values().any(|block| {
+            block.parameters.iter().any(|parameter| {
+                function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_type)
+            })
+        });
+    let mut errors = Vec::new();
+    let mut observed = Vec::<(usize, &MirInstruction)>::new();
+    for (block_order, block) in function.blocks.values().enumerate() {
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            if matches!(
+                instruction.kind,
+                I::OrdinaryMapOwnerLifecycleNew { .. }
+                    | I::OrdinaryMapOwnerLifecycleSet { .. }
+                    | I::OrdinaryMapOwnerLifecycleRemove { .. }
+                    | I::OrdinaryMapOwnerLifecycleSize { .. }
+                    | I::OrdinaryMapOwnerLifecycleContains { .. }
+                    | I::OrdinaryMapOwnerLifecycleDrop { .. }
+            ) {
+                observed.push((block_order * 1_000_000 + index, instruction));
+            } else if let I::Clone { result, source } = &instruction.kind {
+                if [result, source].iter().any(|id| {
+                    function
+                        .values
+                        .get(*id)
+                        .is_some_and(|value| value.ty == owner_type)
+                }) {
+                    observed.push((block_order * 1_000_000 + index, instruction));
+                }
+            }
+        }
+    }
+    if receipts.is_empty() {
+        if contains_owner_type || !observed.is_empty() {
+            errors.push(MirValidationError {
+                subject: function.owner.0.clone(),
+                message: "ordinary Map owner lifecycle TypeDesc/operation has no independent Checker receipt".into(),
+            });
+        }
+        return errors;
+    }
+    if !function.ownership.checker_map_roots.is_empty()
+        || !function.ownership.checker_map_any_owners.is_empty()
+    {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "ordinary Map owner lifecycle receipts cannot share authority with MapRoot or MapAnyOwner v1".into(),
+        });
+        return errors;
+    }
+    // Ordinary owner lifecycle receipts carry the exact per-instruction
+    // Checker ledger.  The profile now admits the acyclic CFG shape whose
+    // edge-local obligations are represented by the receipt; rejecting every
+    // multi-block function here would discard the branch-safe lifecycle proof
+    // before consumers can validate its edge facts.
+    if receipts.len() != observed.len() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: format!(
+                "ordinary Map owner lifecycle receipt count {} disagrees with dedicated operation count {}",
+                receipts.len(),
+                observed.len()
+            ),
+        });
+    }
+
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+    let root_prefix = "ordinary-map-owner-lifecycle-i32-string-v1:";
+    let mut seen = BTreeSet::new();
+    let mut previous_order = None;
+    for receipt in receipts {
+        let local_name = receipt
+            .local
+            .as_str()
+            .strip_prefix("local:")
+            .unwrap_or_default();
+        let root_name = receipt.root.strip_prefix(root_prefix).unwrap_or_default();
+        if receipt.profile_version != crate::core::OrdinaryMapOwnerLifecycleProfileVersion::V1
+            || local_name.is_empty()
+            || local_name != root_name
+            || receipt.point.0.trim().is_empty()
+            || !seen.insert(receipt.instruction.clone())
+        {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map lifecycle receipt has an invalid profile/root identity or duplicate instruction".into(),
+            });
+        }
+        let expected_id = format!(
+            "inst:ordinary_map_owner_lifecycle_v1_{}:{}:{}",
+            receipt.kind.as_str(),
+            receipt.local.0,
+            receipt.point.0
+        );
+        if receipt.instruction.as_str() != expected_id {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map lifecycle Checker receipt instruction identity is forged"
+                    .into(),
+            });
+        }
+        let Some((order, instruction)) = observed
+            .iter()
+            .find(|(_, instruction)| instruction.id == receipt.instruction)
+        else {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map lifecycle receipt has no unique dedicated MIR instruction"
+                    .into(),
+            });
+            continue;
+        };
+        // Mutually exclusive branch arms have no single execution order. A
+        // read-only Size/HasKey query may therefore appear in either arm
+        // while New remains in the common prefix; path-local CFG admission
+        // below already forbids branch-local mutations or drops.
+        let branch_read = matches!(receipt.kind, K::Size | K::HasKey)
+            && matches!(
+                instruction.kind,
+                I::OrdinaryMapOwnerLifecycleSize { .. }
+                    | I::OrdinaryMapOwnerLifecycleContains { .. }
+            );
+        if !branch_read && previous_order.is_some_and(|previous| previous > *order) {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map lifecycle operations disagree with Checker CFG point order"
+                    .into(),
+            });
+        }
+        previous_order = Some(*order);
+
+        let value_has_type = |value: &MirValueId, ty: &crate::core::ResolvedTypeId| {
+            function
+                .values
+                .get(value)
+                .is_some_and(|actual| &actual.ty == ty)
+        };
+        let key_is_bound = || {
+            let key_id_matches_source = match (&receipt.key_local, &receipt.key_node) {
+                (Some(local), Some(_)) => {
+                    receipt.key.as_ref()
+                        == MirValueId::new(format!("local:{}", local.0 .0))
+                            .ok()
+                            .as_ref()
+                }
+                (None, Some(node)) => {
+                    receipt.key.as_ref()
+                        == MirValueId::new(format!("expr:{}", node.0)).ok().as_ref()
+                }
+                _ => false,
+            };
+            key_id_matches_source
+                && receipt.key_type.as_ref() == Some(&string_type)
+                && receipt
+                    .key
+                    .as_ref()
+                    .is_some_and(|key| value_has_type(key, &string_type))
+        };
+        let borrowed_key =
+            checker_borrowed_ordinary_map_key(receipt.key.as_ref(), receipt.key_local.as_ref());
+        let no_key_value_source = receipt.key_node.is_none()
+            && receipt.key.is_none()
+            && receipt.key_type.is_none()
+            && receipt.key_local.is_none()
+            && receipt.value.is_none()
+            && receipt.value_type.is_none()
+            && receipt.source_local.is_none()
+            && receipt.source.is_none();
+        let valid_string_operands = match &instruction.kind {
+            I::OrdinaryMapOwnerLifecycleSet { key, value, .. } => {
+                let mut operands = vec![key.clone()];
+                if value_has_type(value, &string_type) {
+                    operands.push(value.clone());
+                }
+                validate_ordinary_map_string_argument_lifetimes(
+                    function,
+                    &receipt.instruction,
+                    &operands,
+                    borrowed_key.as_ref(),
+                )
+            }
+            I::OrdinaryMapOwnerLifecycleRemove { key, .. }
+            | I::OrdinaryMapOwnerLifecycleContains { key, .. } => {
+                validate_ordinary_map_string_argument_lifetimes(
+                    function,
+                    &receipt.instruction,
+                    std::slice::from_ref(key),
+                    borrowed_key.as_ref(),
+                )
+            }
+            _ => true,
+        };
+
+        let expected = match (receipt.kind, &instruction.kind) {
+            (K::Clone, I::Clone { result, source }) => {
+                result == &receipt.local
+                    && source != result
+                    && receipt.result.as_ref() == Some(result)
+                    && receipt.key_node.is_none()
+                    && receipt.key.is_none()
+                    && receipt.key_type.is_none()
+                    && receipt.value.is_none()
+                    && receipt.value_type.is_none()
+                    && receipt.source_local.as_ref() == Some(source)
+                    && value_has_type(source, &owner_type)
+                    && receipt.source.as_ref().is_some_and(|root| {
+                        root == &format!(
+                            "{root_prefix}{}",
+                            source.as_str().strip_prefix("local:").unwrap_or_default()
+                        )
+                    })
+            }
+            (K::New, I::OrdinaryMapOwnerLifecycleNew { result }) => {
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && no_key_value_source
+            }
+            (
+                K::Set,
+                I::OrdinaryMapOwnerLifecycleSet {
+                    result,
+                    source,
+                    key,
+                    value,
+                },
+            ) => {
+                let source_matches = receipt.source_local.as_ref() == Some(source)
+                    && receipt.source.as_ref().is_some_and(|source_root| {
+                        source_root
+                            == &format!(
+                                "{root_prefix}{}",
+                                source.as_str().strip_prefix("local:").unwrap_or_default()
+                            )
+                    });
+                let payload_type = receipt.value_type.as_ref();
+                let payload_allowed = payload_type.is_some_and(|ty| {
+                    (ty == &i32_type || ty == &string_type)
+                        && receipt
+                            .value
+                            .as_ref()
+                            .is_some_and(|value| value_has_type(value, ty))
+                });
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && source_matches
+                    && source != result
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && receipt.value.as_ref() == Some(value)
+                    && payload_allowed
+                    && valid_string_operands
+            }
+            (
+                K::Remove,
+                I::OrdinaryMapOwnerLifecycleRemove {
+                    result,
+                    source,
+                    key,
+                },
+            ) => {
+                let source_matches = receipt.source_local.as_ref() == Some(source)
+                    && receipt.source.as_ref().is_some_and(|source_root| {
+                        source_root
+                            == &format!(
+                                "{root_prefix}{}",
+                                source.as_str().strip_prefix("local:").unwrap_or_default()
+                            )
+                    });
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && source_matches
+                    && source != result
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && receipt.value.is_none()
+                    && receipt.value_type.is_none()
+                    && valid_string_operands
+            }
+            (K::Size, I::OrdinaryMapOwnerLifecycleSize { result, root }) => {
+                root == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && value_has_type(result, &i32_type)
+                    && no_key_value_source
+            }
+            (K::HasKey, I::OrdinaryMapOwnerLifecycleContains { result, root, key }) => {
+                root == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && value_has_type(result, &bool_type)
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && receipt.value.is_none()
+                    && receipt.value_type.is_none()
+                    && receipt.source_local.is_none()
+                    && receipt.source.is_none()
+                    && valid_string_operands
+            }
+            (K::Drop, I::OrdinaryMapOwnerLifecycleDrop { root }) => {
+                root == &receipt.local && receipt.result.is_none() && no_key_value_source
+            }
+            _ => false,
+        };
+        if !expected {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map lifecycle operation disagrees with its private Checker identity/key/type receipt".into(),
+            });
+        }
+        if !function
+            .values
+            .get(&receipt.local)
+            .is_some_and(|value| value.ty == owner_type)
+        {
+            errors.push(MirValidationError {
+                subject: receipt.local.to_string(),
+                message: "ordinary Map lifecycle root does not use its distinct TypeDesc identity"
+                    .into(),
+            });
+        }
+    }
+
+    // Model the ordinary persistent lifecycle: New introduces a live root;
+    // Set/Remove retain their source and introduce a separate successor;
+    // queries borrow one live root; Drop settles exactly that root once.
+    let mut live_roots = BTreeMap::<String, MirValueId>::new();
+    for receipt in receipts {
+        match receipt.kind {
+            K::New => {
+                if live_roots.contains_key(&receipt.root)
+                    || live_roots.values().any(|local| local == &receipt.local)
+                {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "ordinary Map New duplicates a live root identity/local".into(),
+                    });
+                } else {
+                    live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                }
+            }
+            K::Set | K::Remove | K::Clone => {
+                let (Some(source_local), Some(source_root)) =
+                    (&receipt.source_local, &receipt.source)
+                else {
+                    continue;
+                };
+                if live_roots.get(source_root) != Some(source_local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message:
+                            "ordinary Map persistent update reads a source root that is not live"
+                                .into(),
+                    });
+                }
+                if live_roots.contains_key(&receipt.root)
+                    || live_roots.values().any(|local| local == &receipt.local)
+                {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "ordinary Map persistent update result duplicates a live root"
+                            .into(),
+                    });
+                } else {
+                    live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                }
+            }
+            K::Size | K::HasKey => {
+                if live_roots.get(&receipt.root) != Some(&receipt.local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "ordinary Map query does not borrow its current live root".into(),
+                    });
+                }
+            }
+            K::Drop => {
+                if live_roots.remove(&receipt.root).as_ref() != Some(&receipt.local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "ordinary Map Drop does not settle one live root exactly once"
+                            .into(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut expected_root_values = BTreeSet::new();
+    for receipt in receipts {
+        expected_root_values.insert(receipt.local.clone());
+        expected_root_values.extend(receipt.source_local.iter().cloned());
+    }
+    let actual_root_values = function
+        .values
+        .values()
+        .filter(|value| value.ty == owner_type)
+        .map(|value| value.id.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_root_values != expected_root_values {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "ordinary Map owner values must match exactly the Checker-receipted roots"
+                .into(),
+        });
+    }
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let allowed = match &instruction.kind {
+                I::OrdinaryMapOwnerLifecycleNew { .. } => true,
+                I::OrdinaryMapOwnerLifecycleSet { result, source, .. } => {
+                    actual_root_values.contains(result) && actual_root_values.contains(source)
+                }
+                I::OrdinaryMapOwnerLifecycleRemove { result, source, .. } => {
+                    actual_root_values.contains(result) && actual_root_values.contains(source)
+                }
+                I::OrdinaryMapOwnerLifecycleSize { root, .. }
+                | I::OrdinaryMapOwnerLifecycleContains { root, .. }
+                | I::OrdinaryMapOwnerLifecycleDrop { root } => actual_root_values.contains(root),
+                I::Clone { result, source }
+                    if actual_root_values.contains(source)
+                        || actual_root_values.contains(result) =>
+                {
+                    receipts.iter().any(|receipt| {
+                        receipt.kind == K::Clone
+                            && receipt.instruction == instruction.id
+                            && receipt.local == *result
+                            && receipt.source_local.as_ref() == Some(source)
+                    })
+                }
+                I::Copy { source, .. } | I::Move { source, .. } | I::Drop { value: source }
+                    if actual_root_values.contains(source) =>
+                {
+                    false
+                }
+                _ => !mir_instruction_value_uses(&instruction.kind)
+                    .iter()
+                    .any(|value| actual_root_values.contains(value)),
+            };
+            if !allowed {
+                errors.push(MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: "ordinary Map root is used outside its dedicated Checker-receipted lifecycle operation".into(),
+                });
+            }
+        }
+        if mir_terminator_value_uses(&block.terminator)
+            .iter()
+            .any(|value| actual_root_values.contains(value))
+        {
+            errors.push(MirValidationError {
+                subject: block.id.to_string(),
+                message:
+                    "ordinary Map root cannot escape through a MIR terminator or control-flow edge"
+                        .into(),
+            });
+        }
+    }
+    if function.result == owner_type || !live_roots.is_empty() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "ordinary Map lifecycle leaves a live root or returns an owner root".into(),
+        });
+    }
+    errors
+}
+
+/// Bind the independent typed owned-get Checker ledger one-to-one to its
+/// dedicated MIR instructions. This validates the structural receipt and
+/// root lifecycle only; route admission remains a separate decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OrdinaryMapOwnedGetCfgEdgeRole {
+    Goto,
+    Then,
+    Else,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrdinaryMapOwnedGetCfgTerminatorRole {
+    Goto,
+    Branch,
+    Return,
+}
+
+fn ordinary_map_owned_get_mir_block_id(
+    receipt: &crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+    block_id: &crate::core::cfg::BasicBlockId,
+) -> Option<MirBlockId> {
+    let (source_node, role) = block_id.0 .0.rsplit_once("/cfg:block:")?;
+    let mir_id = match role {
+        // MIR has one canonical entry identity per function. The source CFG
+        // entry is keyed by its resolved body-block NodeId, which is a child
+        // of the callable owner and intentionally is not used as the MIR ID.
+        "entry" => "bb.entry".to_string(),
+        "if-join" => {
+            let block = receipt.reachable_blocks.get(block_id)?;
+            let prefix = match block.points.iter().find_map(|(_, kind)| match kind {
+                crate::core::cfg::CfgPointKind::Statement => Some("if.stmt"),
+                crate::core::cfg::CfgPointKind::Expression => Some("if"),
+                _ => None,
+            })? {
+                "if.stmt" => "if.stmt.join",
+                "if" => "if.join",
+                _ => return None,
+            };
+            format!("bb:{prefix}:{source_node}")
+        }
+        "if-then" | "if-else" => {
+            let edge_kind = if role == "if-then" {
+                crate::core::cfg::EdgeKind::Then
+            } else {
+                crate::core::cfg::EdgeKind::Else
+            };
+            let mut incoming = receipt
+                .reachable_edges
+                .values()
+                .filter(|edge| edge.to == *block_id && edge.kind == edge_kind);
+            let edge = incoming.next()?;
+            if incoming.next().is_some() {
+                return None;
+            }
+            let join_id = crate::core::cfg::BasicBlockId(crate::core::NodeId(format!(
+                "{}/cfg:block:if-join",
+                edge.source.node.0
+            )));
+            let join = receipt.reachable_blocks.get(&join_id)?;
+            let prefix = match join.points.iter().find_map(|(_, kind)| match kind {
+                crate::core::cfg::CfgPointKind::Statement => Some("if.stmt"),
+                crate::core::cfg::CfgPointKind::Expression => Some("if"),
+                _ => None,
+            })? {
+                "if.stmt" if role == "if-then" => "if.stmt.then",
+                "if.stmt" => "if.stmt.else",
+                "if" if role == "if-then" => "if.then",
+                "if" => "if.else",
+                _ => return None,
+            };
+            format!("bb:{prefix}:{}", edge.source.node.0)
+        }
+        _ => return None,
+    };
+    MirBlockId::new(mir_id).ok()
+}
+
+fn ordinary_map_owned_get_attempt_action_kind(
+    kind: crate::core::OrdinaryMapOwnedGetI32StringV1AttemptKind,
+) -> Option<crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind> {
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind as Action;
+    use crate::core::OrdinaryMapOwnedGetI32StringV1AttemptKind as Attempt;
+    Some(match kind {
+        Attempt::New => Action::New,
+        Attempt::Clone => Action::Clone,
+        Attempt::UntypedGet => Action::GetAny,
+        Attempt::GetI32 => Action::GetI32,
+        Attempt::GetString => Action::GetString,
+        Attempt::Values => Action::Values,
+        Attempt::Set => Action::Set,
+        Attempt::Remove => Action::Remove,
+        Attempt::Size => Action::Size,
+        Attempt::HasKey => Action::HasKey,
+        Attempt::Drop | Attempt::ScopeDrop => Action::Drop,
+        Attempt::Keys | Attempt::FromList | Attempt::MapLiteral => return None,
+    })
+}
+
+fn ordinary_map_owned_get_mir_edge_id(
+    receipt: &crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+    edge: &crate::core::cfg::CfgEdge,
+) -> Option<MirEdgeId> {
+    use crate::core::cfg::EdgeKind;
+
+    let (parent, branch_kind) = match edge.kind {
+        EdgeKind::Then => (edge.source.node.clone(), EdgeKind::Then),
+        EdgeKind::Else => (edge.source.node.clone(), EdgeKind::Else),
+        EdgeKind::Fallthrough => ordinary_map_owned_get_fallthrough_arm(receipt, edge)?,
+        _ => return None,
+    };
+    let join_id = crate::core::cfg::BasicBlockId(crate::core::NodeId(format!(
+        "{}/cfg:block:if-join",
+        parent.0
+    )));
+    let join = receipt.reachable_blocks.get(&join_id)?;
+    let if_prefix = match join.points.iter().find_map(|(_, kind)| match kind {
+        crate::core::cfg::CfgPointKind::Statement => Some("if.stmt"),
+        crate::core::cfg::CfgPointKind::Expression => Some("if"),
+        _ => None,
+    })? {
+        "if.stmt" => "if.stmt",
+        "if" => "if",
+        _ => return None,
+    };
+    let role = match edge.kind {
+        EdgeKind::Then => format!("{if_prefix}.then"),
+        EdgeKind::Else => format!("{if_prefix}.else"),
+        EdgeKind::Fallthrough if branch_kind == EdgeKind::Then => {
+            format!("{if_prefix}.then.join")
+        }
+        EdgeKind::Fallthrough if branch_kind == EdgeKind::Else => {
+            format!("{if_prefix}.else.join")
+        }
+        _ => return None,
+    };
+    MirEdgeId::new(format!("edge:{role}:{}", parent.0)).ok()
+}
+
+/// Recover the enclosing If arm for a source fallthrough. In a nested If the
+/// source block may be the nested join, so its role suffix does not identify
+/// the outer arm. The source node on the edge is the outer arm body's stable
+/// ResolvedBlock identity; the unique Then/Else predecessor of that body's
+/// source block identifies the enclosing If and its semantic arm.
+fn ordinary_map_owned_get_fallthrough_arm(
+    receipt: &crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+    edge: &crate::core::cfg::CfgEdge,
+) -> Option<(crate::core::NodeId, crate::core::cfg::EdgeKind)> {
+    use crate::core::cfg::EdgeKind;
+
+    if edge.kind != EdgeKind::Fallthrough {
+        return None;
+    }
+    for (role, branch_kind) in [("if-then", EdgeKind::Then), ("if-else", EdgeKind::Else)] {
+        let arm = crate::core::cfg::BasicBlockId(crate::core::NodeId(format!(
+            "{}/cfg:block:{role}",
+            edge.source.node.0
+        )));
+        if !receipt.reachable_blocks.contains_key(&arm) {
+            continue;
+        }
+        let mut incoming = receipt
+            .reachable_edges
+            .values()
+            .filter(|candidate| candidate.to == arm && candidate.kind == branch_kind);
+        let branch = incoming.next()?;
+        if incoming.next().is_some() {
+            return None;
+        }
+        let join = crate::core::cfg::BasicBlockId(crate::core::NodeId(format!(
+            "{}/cfg:block:if-join",
+            branch.source.node.0
+        )));
+        if edge.to != join {
+            return None;
+        }
+        return Some((branch.source.node.clone(), branch_kind));
+    }
+    None
+}
+
+fn validate_ordinary_map_owned_get_cfg_receipt(
+    function: &MirFunction,
+    receipts: &[MirCheckerOrdinaryMapOwnedGetI32StringV1Action],
+    cfg_receipt: &crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+) -> Vec<MirValidationError> {
+    use crate::core::cfg::{EdgeKind as CfgEdgeKind, Terminator as CfgTerminator};
+
+    let mut errors = Vec::new();
+    let malformed = |message: &str| MirValidationError {
+        subject: function.owner.0.clone(),
+        message: format!("ordinary Map owned-get CFG receipt {message}"),
+    };
+    let entry_closed_profile = cfg_receipt.profile_version
+        == crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::EntryClosedTailV1;
+    let per_edge_profile = cfg_receipt.profile_version
+        == crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::AcyclicPerEdgeRootsV2;
+    if cfg_receipt.owner != function.owner
+        || (!entry_closed_profile && !per_edge_profile)
+        || cfg_receipt.entry != cfg_receipt.map_operation_block
+        || !cfg_receipt
+            .reachable_blocks
+            .contains_key(&cfg_receipt.entry)
+        || cfg_receipt.reachable_blocks.is_empty()
+    {
+        errors.push(malformed(
+            "has an invalid version, callable owner, or owner-entry identity",
+        ));
+        return errors;
+    }
+
+    let mut reachable_edges_by_source =
+        BTreeMap::<crate::core::cfg::BasicBlockId, BTreeSet<crate::core::cfg::EdgeId>>::new();
+    for (id, edge) in &cfg_receipt.reachable_edges {
+        if id != &edge.id
+            || !cfg_receipt.reachable_blocks.contains_key(&edge.from)
+            || !cfg_receipt.reachable_blocks.contains_key(&edge.to)
+        {
+            errors.push(malformed(
+                "contains an edge with an absent endpoint or forged identity",
+            ));
+        }
+        reachable_edges_by_source
+            .entry(edge.from.clone())
+            .or_default()
+            .insert(id.clone());
+    }
+    let mut source_outgoing = BTreeSet::new();
+    for (id, block) in &cfg_receipt.reachable_blocks {
+        let term_edges = block
+            .terminator
+            .outgoing_edges()
+            .into_iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if term_edges
+            != reachable_edges_by_source
+                .get(id)
+                .cloned()
+                .unwrap_or_default()
+        {
+            errors.push(malformed(
+                "does not bind every source terminator edge exactly once",
+            ));
+        }
+        source_outgoing.extend(term_edges.iter().cloned());
+        match &block.terminator {
+            CfgTerminator::Branch {
+                then_edge,
+                else_edge,
+                ..
+            } => {
+                let then_ok = cfg_receipt
+                    .reachable_edges
+                    .get(then_edge)
+                    .is_some_and(|edge| edge.from == *id && edge.kind == CfgEdgeKind::Then);
+                let else_ok = cfg_receipt
+                    .reachable_edges
+                    .get(else_edge)
+                    .is_some_and(|edge| edge.from == *id && edge.kind == CfgEdgeKind::Else);
+                if !then_ok || !else_ok {
+                    errors.push(malformed("does not bind a branch's Then/Else edges"));
+                }
+            }
+            CfgTerminator::Goto { edge } => {
+                if !cfg_receipt
+                    .reachable_edges
+                    .get(edge)
+                    .is_some_and(|edge| edge.from == *id && edge.kind == CfgEdgeKind::Fallthrough)
+                {
+                    errors.push(malformed("does not bind a Goto fallthrough edge"));
+                }
+            }
+            CfgTerminator::Return { .. } => {
+                if !term_edges.is_empty() {
+                    errors.push(malformed("attaches an outgoing edge to a Return"));
+                }
+            }
+            CfgTerminator::Break { .. }
+            | CfgTerminator::Continue { .. }
+            | CfgTerminator::Diverge
+            | CfgTerminator::Unreachable
+            | CfgTerminator::Match { .. } => {
+                errors.push(malformed(
+                    "contains a control-flow form outside this version",
+                ));
+            }
+        }
+    }
+    if source_outgoing != cfg_receipt.reachable_edges.keys().cloned().collect() {
+        errors.push(malformed(
+            "contains unreferenced or duplicated source edges",
+        ));
+    }
+
+    let mut reached = BTreeSet::new();
+    let mut pending = vec![cfg_receipt.entry.clone()];
+    while let Some(block) = pending.pop() {
+        if !reached.insert(block.clone()) {
+            continue;
+        }
+        if let Some(edges) = reachable_edges_by_source.get(&block) {
+            pending.extend(
+                edges
+                    .iter()
+                    .filter_map(|edge| cfg_receipt.reachable_edges.get(edge))
+                    .map(|edge| edge.to.clone()),
+            );
+        }
+    }
+    if reached != cfg_receipt.reachable_blocks.keys().cloned().collect() {
+        errors.push(malformed(
+            "does not exactly list the reachable source blocks",
+        ));
+    }
+    // This version has no ownership fixed point for loops, so reject cycles
+    // even if a malformed receipt disguises one with only supported labels.
+    let mut indegree = cfg_receipt
+        .reachable_blocks
+        .keys()
+        .cloned()
+        .map(|block| (block, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    for edge in cfg_receipt.reachable_edges.values() {
+        if let Some(degree) = indegree.get_mut(&edge.to) {
+            *degree += 1;
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(block, degree)| (*degree == 0).then_some(block.clone()))
+        .collect::<Vec<_>>();
+    let mut acyclic_blocks = 0usize;
+    while let Some(block) = ready.pop() {
+        acyclic_blocks += 1;
+        for edge in reachable_edges_by_source
+            .get(&block)
+            .into_iter()
+            .flatten()
+            .filter_map(|edge| cfg_receipt.reachable_edges.get(edge))
+        {
+            if let Some(degree) = indegree.get_mut(&edge.to) {
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.push(edge.to.clone());
+                }
+            }
+        }
+    }
+    if acyclic_blocks != cfg_receipt.reachable_blocks.len() {
+        errors.push(malformed(
+            "contains a loop or backedge without fixed-point ownership",
+        ));
+    }
+
+    let mut expected_blocks = BTreeMap::new();
+    for cfg_block in cfg_receipt.reachable_blocks.keys() {
+        let Some(mir_block) = ordinary_map_owned_get_mir_block_id(cfg_receipt, cfg_block) else {
+            errors.push(malformed(
+                "uses a source block identity not mapped by this version",
+            ));
+            continue;
+        };
+        if expected_blocks
+            .insert(mir_block, cfg_block.clone())
+            .is_some()
+        {
+            errors.push(malformed("maps two source blocks to one MIR block"));
+        }
+    }
+    let expected_mir_blocks = expected_blocks.keys().cloned().collect::<BTreeSet<_>>();
+    let actual_mir_blocks = function.blocks.keys().cloned().collect::<BTreeSet<_>>();
+    if expected_mir_blocks != actual_mir_blocks {
+        errors.push(malformed("reachable block set disagrees with MIR"));
+    }
+    let Some(expected_entry) = ordinary_map_owned_get_mir_block_id(cfg_receipt, &cfg_receipt.entry)
+    else {
+        errors.push(malformed("entry block has no MIR projection"));
+        return errors;
+    };
+    if expected_entry != function.entry {
+        errors.push(malformed("entry block does not project to the MIR entry"));
+    }
+
+    let mut expected_terminators = BTreeMap::new();
+    for (cfg_block_id, cfg_block) in &cfg_receipt.reachable_blocks {
+        let Some(mir_block) = ordinary_map_owned_get_mir_block_id(cfg_receipt, cfg_block_id) else {
+            continue;
+        };
+        let role = match cfg_block.terminator {
+            CfgTerminator::Goto { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Goto,
+            CfgTerminator::Branch { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Branch,
+            CfgTerminator::Return { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Return,
+            _ => continue,
+        };
+        expected_terminators.insert(mir_block, role);
+    }
+    let mut actual_terminators = BTreeMap::new();
+    let mut actual_edges = BTreeSet::new();
+    for (id, block) in &function.blocks {
+        let role = match &block.terminator {
+            MirTerminator::Goto { edge, target, .. } => {
+                actual_edges.insert((
+                    id.clone(),
+                    OrdinaryMapOwnedGetCfgEdgeRole::Goto,
+                    edge.clone(),
+                    target.clone(),
+                ));
+                OrdinaryMapOwnedGetCfgTerminatorRole::Goto
+            }
+            MirTerminator::Branch {
+                then_edge,
+                then_target,
+                else_edge,
+                else_target,
+                ..
+            } => {
+                actual_edges.insert((
+                    id.clone(),
+                    OrdinaryMapOwnedGetCfgEdgeRole::Then,
+                    then_edge.clone(),
+                    then_target.clone(),
+                ));
+                actual_edges.insert((
+                    id.clone(),
+                    OrdinaryMapOwnedGetCfgEdgeRole::Else,
+                    else_edge.clone(),
+                    else_target.clone(),
+                ));
+                OrdinaryMapOwnedGetCfgTerminatorRole::Branch
+            }
+            MirTerminator::Return { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Return,
+            _ => {
+                errors.push(malformed(
+                    "MIR contains an unsupported reachable terminator",
+                ));
+                continue;
+            }
+        };
+        actual_terminators.insert(id.clone(), role);
+    }
+    if expected_terminators != actual_terminators {
+        errors.push(malformed("reachable terminators disagree with MIR"));
+    }
+
+    let mut expected_edges = BTreeSet::new();
+    for edge in cfg_receipt.reachable_edges.values() {
+        let Some(from) = ordinary_map_owned_get_mir_block_id(cfg_receipt, &edge.from) else {
+            continue;
+        };
+        let Some(to) = ordinary_map_owned_get_mir_block_id(cfg_receipt, &edge.to) else {
+            continue;
+        };
+        let role = match edge.kind {
+            CfgEdgeKind::Then => OrdinaryMapOwnedGetCfgEdgeRole::Then,
+            CfgEdgeKind::Else => OrdinaryMapOwnedGetCfgEdgeRole::Else,
+            CfgEdgeKind::Fallthrough => OrdinaryMapOwnedGetCfgEdgeRole::Goto,
+            _ => {
+                errors.push(malformed("contains an unsupported source edge kind"));
+                continue;
+            }
+        };
+        let Some(edge_id) = ordinary_map_owned_get_mir_edge_id(cfg_receipt, edge) else {
+            errors.push(malformed(
+                "uses a source edge identity outside this version",
+            ));
+            continue;
+        };
+        expected_edges.insert((from, role, edge_id, to));
+    }
+    if expected_edges != actual_edges {
+        errors.push(malformed("reachable edges disagree with MIR"));
+    }
+
+    let action_points = receipts
+        .iter()
+        .map(|action| action.point.clone())
+        .collect::<BTreeSet<_>>();
+    if action_points != cfg_receipt.action_points {
+        errors.push(malformed(
+            "action-node set disagrees with MIR operation receipts",
+        ));
+    }
+    let attempt_points = cfg_receipt
+        .attempts
+        .iter()
+        .map(|attempt| attempt.point.clone())
+        .collect::<BTreeSet<_>>();
+    if attempt_points != cfg_receipt.action_points {
+        errors.push(malformed(
+            "attempt-node coverage is incomplete or contains unsupported Map work",
+        ));
+    }
+    let mut expected_events = BTreeMap::new();
+    for attempt in &cfg_receipt.attempts {
+        let Some(kind) = ordinary_map_owned_get_attempt_action_kind(attempt.kind) else {
+            errors.push(malformed("records an unsupported Map attempt"));
+            continue;
+        };
+        *expected_events
+            .entry((attempt.point.clone(), kind))
+            .or_insert(0usize) += 1;
+    }
+    let mut actual_events = BTreeMap::new();
+    for action in receipts {
+        *actual_events
+            .entry((action.point.clone(), action.kind))
+            .or_insert(0usize) += 1;
+    }
+    if expected_events != actual_events {
+        errors.push(malformed(
+            "operation-attempt kinds/counts disagree with action receipts",
+        ));
+    }
+    if entry_closed_profile {
+        if !cfg_receipt.live_roots_in.is_empty()
+            || !cfg_receipt.live_roots_out.is_empty()
+            || !cfg_receipt.live_roots_on_edge.is_empty()
+        {
+            errors.push(malformed(
+                "entry-closed profile carries unexpected per-edge root facts",
+            ));
+        }
+        let entry_points = cfg_receipt
+            .reachable_blocks
+            .get(&cfg_receipt.map_operation_block)
+            .map(|block| {
+                block
+                    .points
+                    .iter()
+                    .map(|(point, _)| point.clone())
+                    .collect::<BTreeSet<_>>()
+            });
+        if entry_points.as_ref().is_none_or(|points| {
+            cfg_receipt
+                .action_points
+                .iter()
+                .any(|point| !points.contains(point))
+                || attempt_points.iter().any(|point| !points.contains(point))
+        }) {
+            errors.push(malformed(
+                "Map attempts are not confined to the entry block",
+            ));
+        }
+        if receipts.iter().any(|action| {
+            function.blocks.iter().any(|(block_id, block)| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| instruction.id == action.instruction)
+                    && block_id != &function.entry
+            })
+        }) {
+            errors.push(malformed(
+                "Map operation was moved out of the owner entry block",
+            ));
+        }
+    } else {
+        errors.extend(validate_ordinary_map_owned_get_per_edge_root_facts(
+            function,
+            receipts,
+            cfg_receipt,
+        ));
+    }
+    errors
+}
+
+fn validate_ordinary_map_owned_get_per_edge_root_facts(
+    function: &MirFunction,
+    receipts: &[MirCheckerOrdinaryMapOwnedGetI32StringV1Action],
+    cfg_receipt: &crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+) -> Vec<MirValidationError> {
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind as Action;
+
+    let malformed = |message: &str| MirValidationError {
+        subject: function.owner.0.clone(),
+        message: format!("ordinary Map owned-get per-edge root receipt {message}"),
+    };
+    let block_ids = cfg_receipt
+        .reachable_blocks
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let edge_ids = cfg_receipt
+        .reachable_edges
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut errors = Vec::new();
+    if cfg_receipt
+        .live_roots_in
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        != block_ids
+        || cfg_receipt
+            .live_roots_out
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != block_ids
+        || cfg_receipt
+            .live_roots_on_edge
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != edge_ids
+    {
+        errors.push(malformed(
+            "does not cover every reachable block and edge with root facts",
+        ));
+        return errors;
+    }
+
+    let mut point_owner = BTreeMap::new();
+    let mut point_rank_by_block =
+        BTreeMap::<crate::core::cfg::BasicBlockId, BTreeMap<NodeId, usize>>::new();
+    for (block_id, block) in &cfg_receipt.reachable_blocks {
+        let mut ranks = BTreeMap::new();
+        for (rank, (point, _)) in block.points.iter().enumerate() {
+            if ranks.insert(point.clone(), rank).is_some()
+                || point_owner
+                    .insert(point.clone(), block_id.clone())
+                    .is_some()
+            {
+                errors.push(malformed("contains duplicate source point identities"));
+            }
+        }
+        point_rank_by_block.insert(block_id.clone(), ranks);
+    }
+
+    let mut action_by_point =
+        BTreeMap::<NodeId, Vec<&MirCheckerOrdinaryMapOwnedGetI32StringV1Action>>::new();
+    for action in receipts {
+        action_by_point
+            .entry(action.point.clone())
+            .or_default()
+            .push(action);
+        let Some(source_block) = point_owner.get(&action.point) else {
+            errors.push(malformed("action point is absent from the source CFG"));
+            continue;
+        };
+        let expected_mir_block = ordinary_map_owned_get_mir_block_id(cfg_receipt, source_block);
+        let actual_mir_block = function.blocks.iter().find_map(|(block_id, block)| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| instruction.id == action.instruction)
+                .then_some(block_id)
+        });
+        if expected_mir_block.as_ref() != actual_mir_block {
+            errors.push(malformed(
+                "Map operation was moved away from its source CFG block",
+            ));
+        }
+    }
+
+    let mut indegree = block_ids
+        .iter()
+        .cloned()
+        .map(|block| (block, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut outgoing =
+        BTreeMap::<crate::core::cfg::BasicBlockId, Vec<crate::core::cfg::EdgeId>>::new();
+    for (edge_id, edge) in &cfg_receipt.reachable_edges {
+        if let Some(degree) = indegree.get_mut(&edge.to) {
+            *degree += 1;
+        }
+        outgoing
+            .entry(edge.from.clone())
+            .or_default()
+            .push(edge_id.clone());
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(block, degree)| (*degree == 0).then_some(block.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(block_ids.len());
+    while let Some(block) = ready.pop_first() {
+        order.push(block.clone());
+        for edge_id in outgoing.get(&block).into_iter().flatten() {
+            let Some(edge) = cfg_receipt.reachable_edges.get(edge_id) else {
+                continue;
+            };
+            let Some(degree) = indegree.get_mut(&edge.to) else {
+                continue;
+            };
+            *degree = degree.saturating_sub(1);
+            if *degree == 0 {
+                ready.insert(edge.to.clone());
+            }
+        }
+    }
+    if order.len() != block_ids.len() {
+        errors.push(malformed("contains a cycle without a fixed-point proof"));
+        return errors;
+    }
+
+    let mut ever_created = BTreeSet::<String>::new();
+    for block_id in order {
+        let incoming_edges = cfg_receipt
+            .reachable_edges
+            .iter()
+            .filter(|(_, edge)| edge.to == block_id)
+            .map(|(edge_id, _)| edge_id)
+            .collect::<Vec<_>>();
+        let mut incoming_facts = incoming_edges
+            .iter()
+            .filter_map(|edge_id| cfg_receipt.live_roots_on_edge.get(*edge_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let live_in = if block_id == cfg_receipt.entry {
+            if !incoming_edges.is_empty() {
+                errors.push(malformed("entry unexpectedly has a predecessor"));
+            }
+            BTreeSet::new()
+        } else if incoming_facts.is_empty() {
+            errors.push(malformed("reachable block has no incoming edge root fact"));
+            BTreeSet::new()
+        } else {
+            let first = incoming_facts.remove(0);
+            if incoming_facts.iter().any(|fact| fact != &first) {
+                errors.push(malformed("predecessor root facts disagree at a join"));
+            }
+            first
+        };
+        if cfg_receipt.live_roots_in.get(&block_id) != Some(&live_in) {
+            errors.push(malformed(
+                "block entry root fact disagrees with predecessor edges",
+            ));
+        }
+
+        let mut live = live_in;
+        let mut ordered_actions = Vec::new();
+        if let Some(ranks) = point_rank_by_block.get(&block_id) {
+            for (point, rank) in ranks {
+                if let Some(point_actions) = action_by_point.get(point) {
+                    for action in point_actions {
+                        ordered_actions.push((*rank, action));
+                    }
+                }
+            }
+        }
+        ordered_actions.sort_by_key(|(rank, _)| *rank);
+
+        let mut actual_action_order = Vec::new();
+        let expected_mir_block = ordinary_map_owned_get_mir_block_id(cfg_receipt, &block_id);
+        if let Some(expected_mir_block) = expected_mir_block {
+            if let Some(block) = function.blocks.get(&expected_mir_block) {
+                for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+                    if let Some(action) = receipts
+                        .iter()
+                        .find(|action| action.instruction == instruction.id)
+                    {
+                        actual_action_order.push((instruction_index, action.point.clone()));
+                    }
+                }
+            }
+        }
+        let mut source_action_order = ordered_actions
+            .iter()
+            .map(|(rank, action)| (*rank, action.point.clone()))
+            .collect::<Vec<_>>();
+        source_action_order.sort_by_key(|(rank, _)| *rank);
+        actual_action_order.sort_by_key(|(rank, _)| *rank);
+        if source_action_order
+            .iter()
+            .map(|(_, point)| point)
+            .collect::<Vec<_>>()
+            != actual_action_order
+                .iter()
+                .map(|(_, point)| point)
+                .collect::<Vec<_>>()
+        {
+            errors.push(malformed(
+                "source action order disagrees with MIR instruction order",
+            ));
+        }
+
+        for (_, action) in ordered_actions {
+            let creates = matches!(
+                action.kind,
+                Action::New | Action::Clone | Action::Set | Action::Remove
+            );
+            if creates {
+                if action.root.is_empty()
+                    || live.contains(&action.root)
+                    || !ever_created.insert(action.root.clone())
+                {
+                    errors.push(malformed("root is created more than once or while live"));
+                    continue;
+                }
+                if matches!(action.kind, Action::Clone | Action::Set | Action::Remove) {
+                    if action
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| source == &action.root || !live.contains(source))
+                    {
+                        errors.push(malformed("root creation has no live source root"));
+                        continue;
+                    }
+                } else if action.source.is_some() {
+                    errors.push(malformed("new root unexpectedly names a source root"));
+                    continue;
+                }
+                live.insert(action.root.clone());
+            } else if action.kind == Action::Drop {
+                if !live.remove(&action.root) {
+                    errors.push(malformed("drop does not consume a live root"));
+                }
+            } else if !live.contains(&action.root) {
+                errors.push(malformed("operation reads a root that is not live"));
+            }
+        }
+        if let Some(source_block) = cfg_receipt.reachable_blocks.get(&block_id) {
+            if matches!(
+                &source_block.terminator,
+                crate::core::cfg::Terminator::Return { .. }
+            ) && !live.is_empty()
+            {
+                errors.push(malformed("return path leaves a live Map root"));
+            }
+        }
+        if cfg_receipt.live_roots_out.get(&block_id) != Some(&live) {
+            errors.push(malformed(
+                "block exit root fact disagrees with replayed actions",
+            ));
+        }
+        for edge_id in outgoing.get(&block_id).into_iter().flatten() {
+            if cfg_receipt.live_roots_on_edge.get(edge_id) != Some(&live) {
+                errors.push(malformed("edge root fact disagrees with its source block"));
+            }
+        }
+    }
+    errors
+}
+
+fn validate_ordinary_map_owned_get_i32_string_v1_action_receipts(
+    function: &MirFunction,
+) -> Vec<MirValidationError> {
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind as K;
+    use MirInstructionKind as I;
+
+    let owner_type = types::ordinary_map_owned_get_i32_string_v1_type_id();
+    let receipts = &function
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1;
+    let cfg_receipt = &function
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt;
+    let contains_owner_type = function.result == owner_type
+        || function.values.values().any(|value| value.ty == owner_type)
+        || function.parameters.iter().any(|parameter| {
+            function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_type)
+        })
+        || function.blocks.values().any(|block| {
+            block.parameters.iter().any(|parameter| {
+                function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_type)
+            })
+        });
+    let mut errors = Vec::new();
+    let mut observed = Vec::<(usize, &MirBlockId, &MirInstruction)>::new();
+    for (block_order, (block_id, block)) in function.blocks.iter().enumerate() {
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            if matches!(
+                instruction.kind,
+                I::OrdinaryMapOwnedGetI32StringV1New { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1Set { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1Size { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1Values { .. }
+                    | I::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+            ) {
+                observed.push((block_order * 1_000_000 + index, block_id, instruction));
+            } else if let I::Clone { result, source } = &instruction.kind {
+                if [result, source].iter().any(|id| {
+                    function
+                        .values
+                        .get(*id)
+                        .is_some_and(|value| value.ty == owner_type)
+                }) {
+                    observed.push((block_order * 1_000_000 + index, block_id, instruction));
+                }
+            }
+        }
+    }
+    if receipts.is_empty() {
+        if contains_owner_type || !observed.is_empty() || cfg_receipt.is_some() {
+            errors.push(MirValidationError {
+                subject: function.owner.0.clone(),
+                message:
+                    "ordinary Map owned-get TypeDesc/operation has no independent Checker receipt"
+                        .into(),
+            });
+        }
+        return errors;
+    }
+    let Some(cfg_receipt) = cfg_receipt.as_ref() else {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "ordinary Map owned-get actions have no independent CFG receipt".into(),
+        });
+        return errors;
+    };
+    errors.extend(validate_ordinary_map_owned_get_cfg_receipt(
+        function,
+        receipts,
+        cfg_receipt,
+    ));
+    if !function.ownership.checker_map_roots.is_empty()
+        || !function.ownership.checker_map_any_owners.is_empty()
+        || !function
+            .ownership
+            .checker_ordinary_map_owner_lifecycle_v1
+            .is_empty()
+    {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "ordinary Map owned-get receipts cannot share authority with another Map owner profile".into(),
+        });
+        return errors;
+    }
+    if receipts.len() != observed.len() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: format!(
+                "ordinary Map owned-get receipt count {} disagrees with dedicated operation count {}",
+                receipts.len(),
+                observed.len()
+            ),
+        });
+    }
+
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+    let result_i32_i32 = crate::core::ir::result_type_id(i32_type.clone(), i32_type.clone());
+    let result_string_i32 = crate::core::ir::result_type_id(string_type.clone(), i32_type.clone());
+    let root_prefix = "ordinary-map-owned-get-i32-string-v1:";
+    let mut seen = BTreeSet::new();
+    let mut previous_order = None;
+    for receipt in receipts {
+        let local_name = receipt
+            .local
+            .as_str()
+            .strip_prefix("local:")
+            .unwrap_or_default();
+        let root_name = receipt.root.strip_prefix(root_prefix).unwrap_or_default();
+        if receipt.profile_version != crate::core::OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1
+            || local_name.is_empty()
+            || local_name != root_name
+            || receipt.point.0.trim().is_empty()
+            || !seen.insert(receipt.instruction.clone())
+        {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map owned-get receipt has an invalid profile/root identity or duplicate instruction".into(),
+            });
+        }
+        let expected_id = format!(
+            "inst:ordinary_map_owned_get_i32_string_v1_{}:{}:{}",
+            receipt.kind.as_str(),
+            receipt.local,
+            receipt.point.0
+        );
+        if receipt.instruction.as_str() != expected_id {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map owned-get Checker receipt instruction identity is forged"
+                    .into(),
+            });
+        }
+        let matching = observed
+            .iter()
+            .filter(|(_, _, instruction)| instruction.id == receipt.instruction)
+            .collect::<Vec<_>>();
+        let Some((order, _, instruction)) = matching.first().copied() else {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map owned-get receipt has no dedicated MIR instruction".into(),
+            });
+            continue;
+        };
+        if matching.len() != 1 {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message:
+                    "ordinary Map owned-get receipt does not identify one unique MIR instruction"
+                        .into(),
+            });
+        }
+        if cfg_receipt.profile_version
+            == crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::EntryClosedTailV1
+            && previous_order.is_some_and(|previous| previous >= *order)
+        {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map owned-get operations disagree with Checker point order"
+                    .into(),
+            });
+        }
+        if cfg_receipt.profile_version
+            == crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::EntryClosedTailV1
+        {
+            previous_order = Some(*order);
+        }
+
+        let value_has_type = |value: &MirValueId, ty: &crate::core::ResolvedTypeId| {
+            function
+                .values
+                .get(value)
+                .is_some_and(|actual| &actual.ty == ty)
+        };
+        let key_is_bound = || {
+            let key_id_matches_source = match (&receipt.key_local, &receipt.key_node) {
+                (Some(local), Some(_)) => {
+                    receipt.key.as_ref()
+                        == MirValueId::new(format!("local:{}", local.0 .0))
+                            .ok()
+                            .as_ref()
+                }
+                (None, Some(node)) => {
+                    receipt.key.as_ref()
+                        == MirValueId::new(format!("expr:{}", node.0)).ok().as_ref()
+                }
+                _ => false,
+            };
+            key_id_matches_source
+                && receipt.key_type.as_ref() == Some(&string_type)
+                && receipt
+                    .key
+                    .as_ref()
+                    .is_some_and(|key| value_has_type(key, &string_type))
+        };
+        let no_key = receipt.key_node.is_none()
+            && receipt.key.is_none()
+            && receipt.key_type.is_none()
+            && receipt.key_local.is_none();
+        let no_value = receipt.value.is_none() && receipt.value_type.is_none();
+        let no_source = receipt.source_local.is_none() && receipt.source.is_none();
+        let no_key_value_source = no_key && no_value && no_source;
+        let result_is_bound = |result: &MirValueId, expected_type: &crate::core::ResolvedTypeId| {
+            receipt.result.as_ref() == Some(result)
+                && receipt.result_type.as_ref() == Some(expected_type)
+                && value_has_type(result, expected_type)
+        };
+        let borrowed_key =
+            checker_borrowed_ordinary_map_key(receipt.key.as_ref(), receipt.key_local.as_ref());
+        let valid_string_operands = match &instruction.kind {
+            I::OrdinaryMapOwnedGetI32StringV1Set { key, value, .. } => {
+                let mut operands = vec![key.clone()];
+                if value_has_type(value, &string_type) {
+                    operands.push(value.clone());
+                }
+                validate_ordinary_map_string_argument_lifetimes(
+                    function,
+                    &receipt.instruction,
+                    &operands,
+                    borrowed_key.as_ref(),
+                )
+            }
+            I::OrdinaryMapOwnedGetI32StringV1Remove { key, .. }
+            | I::OrdinaryMapOwnedGetI32StringV1Contains { key, .. }
+            | I::OrdinaryMapOwnedGetI32StringV1GetI32 { key, .. }
+            | I::OrdinaryMapOwnedGetI32StringV1GetString { key, .. }
+            | I::OrdinaryMapOwnedGetI32StringV1GetAny { key, .. } => {
+                validate_ordinary_map_string_argument_lifetimes(
+                    function,
+                    &receipt.instruction,
+                    std::slice::from_ref(key),
+                    borrowed_key.as_ref(),
+                )
+            }
+            _ => true,
+        };
+
+        let expected = match (receipt.kind, &instruction.kind) {
+            (K::Clone, I::Clone { result, source }) => {
+                result == &receipt.local
+                    && source != result
+                    && receipt.result.as_ref() == Some(result)
+                    && receipt.key_node.is_none()
+                    && receipt.key.is_none()
+                    && receipt.key_type.is_none()
+                    && receipt.value.is_none()
+                    && receipt.value_type.is_none()
+                    && receipt.result_type.is_none()
+                    && receipt.source_local.as_ref() == Some(source)
+                    && value_has_type(source, &owner_type)
+                    && receipt.source.as_ref().is_some_and(|root| {
+                        root == &format!(
+                            "{root_prefix}{}",
+                            source.as_str().strip_prefix("local:").unwrap_or_default()
+                        )
+                    })
+            }
+            (K::New, I::OrdinaryMapOwnedGetI32StringV1New { result }) => {
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && receipt.result_type.is_none()
+                    && no_key_value_source
+            }
+            (
+                K::Set,
+                I::OrdinaryMapOwnedGetI32StringV1Set {
+                    result,
+                    source,
+                    key,
+                    value,
+                },
+            ) => {
+                let source_matches = receipt.source_local.as_ref() == Some(source)
+                    && receipt.source.as_ref().is_some_and(|source_root| {
+                        source_root
+                            == &format!(
+                                "{root_prefix}{}",
+                                source.as_str().strip_prefix("local:").unwrap_or_default()
+                            )
+                    });
+                let payload_type = receipt.value_type.as_ref();
+                let payload_allowed = payload_type.is_some_and(|ty| {
+                    (ty == &i32_type || ty == &string_type)
+                        && receipt
+                            .value
+                            .as_ref()
+                            .is_some_and(|value| value_has_type(value, ty))
+                });
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && receipt.result_type.is_none()
+                    && source_matches
+                    && source != result
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && receipt.value.as_ref() == Some(value)
+                    && payload_allowed
+                    && valid_string_operands
+            }
+            (
+                K::Remove,
+                I::OrdinaryMapOwnedGetI32StringV1Remove {
+                    result,
+                    source,
+                    key,
+                },
+            ) => {
+                let source_matches = receipt.source_local.as_ref() == Some(source)
+                    && receipt.source.as_ref().is_some_and(|source_root| {
+                        source_root
+                            == &format!(
+                                "{root_prefix}{}",
+                                source.as_str().strip_prefix("local:").unwrap_or_default()
+                            )
+                    });
+                result == &receipt.local
+                    && receipt.result.as_ref() == Some(result)
+                    && receipt.result_type.is_none()
+                    && source_matches
+                    && source != result
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && no_value
+                    && valid_string_operands
+            }
+            (K::Size, I::OrdinaryMapOwnedGetI32StringV1Size { result, root }) => {
+                root == &receipt.local && result_is_bound(result, &i32_type) && no_key_value_source
+            }
+            (K::HasKey, I::OrdinaryMapOwnedGetI32StringV1Contains { result, root, key }) => {
+                root == &receipt.local
+                    && result_is_bound(result, &bool_type)
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && no_value
+                    && no_source
+                    && valid_string_operands
+            }
+            (K::GetI32, I::OrdinaryMapOwnedGetI32StringV1GetI32 { result, root, key }) => {
+                root == &receipt.local
+                    && result_is_bound(result, &result_i32_i32)
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && no_value
+                    && no_source
+                    && valid_string_operands
+            }
+            (K::GetString, I::OrdinaryMapOwnedGetI32StringV1GetString { result, root, key }) => {
+                root == &receipt.local
+                    && result_is_bound(result, &result_string_i32)
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && no_value
+                    && no_source
+                    && valid_string_operands
+            }
+            (K::GetAny, I::OrdinaryMapOwnedGetI32StringV1GetAny { result, root, key }) => {
+                root == &receipt.local
+                    && result_is_bound(
+                        result,
+                        &types::ordinary_map_get_any_tuple_i32_string_v1_type_id(),
+                    )
+                    && key_is_bound()
+                    && receipt.key.as_ref() == Some(key)
+                    && no_value
+                    && no_source
+                    && valid_string_operands
+            }
+            (K::Values, I::OrdinaryMapOwnedGetI32StringV1Values { result, root }) => {
+                root == &receipt.local
+                    && receipt.result_type.as_ref().is_some_and(|ty| {
+                        result_is_bound(result, ty)
+                            && function
+                                .values
+                                .get(result)
+                                .is_some_and(|value| value.ty == *ty)
+                    })
+                    && no_key_value_source
+            }
+            (K::Drop, I::OrdinaryMapOwnedGetI32StringV1Drop { root }) => {
+                root == &receipt.local
+                    && receipt.result.is_none()
+                    && receipt.result_type.is_none()
+                    && no_key_value_source
+            }
+            _ => false,
+        };
+        if !expected {
+            errors.push(MirValidationError {
+                subject: receipt.instruction.to_string(),
+                message: "ordinary Map owned-get operation disagrees with its private Checker root/key/type receipt".into(),
+            });
+        }
+        if !function
+            .values
+            .get(&receipt.local)
+            .is_some_and(|value| value.ty == owner_type)
+        {
+            errors.push(MirValidationError {
+                subject: receipt.local.to_string(),
+                message: "ordinary Map owned-get root does not use its distinct TypeDesc identity"
+                    .into(),
+            });
+        }
+    }
+
+    let mut live_roots = BTreeMap::<String, MirValueId>::new();
+    let mut ever_created = BTreeSet::new();
+    for receipt in receipts {
+        match receipt.kind {
+            K::New => {
+                if live_roots.contains_key(&receipt.root)
+                    || !ever_created.insert(receipt.local.clone())
+                    || live_roots.values().any(|local| local == &receipt.local)
+                {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "ordinary Map owned-get New duplicates a root identity/local"
+                            .into(),
+                    });
+                } else {
+                    live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                }
+            }
+            K::Set | K::Remove | K::Clone => {
+                let (Some(source_local), Some(source_root)) =
+                    (&receipt.source_local, &receipt.source)
+                else {
+                    continue;
+                };
+                if live_roots.get(source_root) != Some(source_local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "ordinary Map owned-get persistent update reads a source root that is not live".into(),
+                    });
+                }
+                if live_roots.contains_key(&receipt.root)
+                    || !ever_created.insert(receipt.local.clone())
+                    || live_roots.values().any(|local| local == &receipt.local)
+                {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message:
+                            "ordinary Map owned-get update result duplicates a root identity/local"
+                                .into(),
+                    });
+                } else {
+                    // Set/Remove are persistent: the source stays live.
+                    live_roots.insert(receipt.root.clone(), receipt.local.clone());
+                }
+            }
+            K::Size | K::HasKey | K::GetI32 | K::GetString | K::GetAny | K::Values => {
+                if live_roots.get(&receipt.root) != Some(&receipt.local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message: "ordinary Map owned-get observation does not borrow its current live root".into(),
+                    });
+                }
+            }
+            K::Drop => {
+                if live_roots.remove(&receipt.root).as_ref() != Some(&receipt.local) {
+                    errors.push(MirValidationError {
+                        subject: receipt.instruction.to_string(),
+                        message:
+                            "ordinary Map owned-get Drop does not settle one live root exactly once"
+                                .into(),
+                    });
+                }
+            }
+        }
+    }
+
+    let expected_root_values = receipts
+        .iter()
+        .flat_map(|receipt| {
+            std::iter::once(receipt.local.clone()).chain(receipt.source_local.iter().cloned())
+        })
+        .collect::<BTreeSet<_>>();
+    let actual_root_values = function
+        .values
+        .values()
+        .filter(|value| value.ty == owner_type)
+        .map(|value| value.id.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_root_values != expected_root_values {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "ordinary Map owned-get values must match exactly the Checker-receipted roots"
+                .into(),
+        });
+    }
+    for block in function.blocks.values() {
+        for instruction in &block.instructions {
+            let allowed = match &instruction.kind {
+                I::OrdinaryMapOwnedGetI32StringV1New { .. } => true,
+                I::OrdinaryMapOwnedGetI32StringV1Set { result, source, .. }
+                | I::OrdinaryMapOwnedGetI32StringV1Remove { result, source, .. } => {
+                    actual_root_values.contains(result) && actual_root_values.contains(source)
+                }
+                I::OrdinaryMapOwnedGetI32StringV1Size { root, .. }
+                | I::OrdinaryMapOwnedGetI32StringV1Contains { root, .. }
+                | I::OrdinaryMapOwnedGetI32StringV1GetI32 { root, .. }
+                | I::OrdinaryMapOwnedGetI32StringV1GetString { root, .. }
+                | I::OrdinaryMapOwnedGetI32StringV1GetAny { root, .. }
+                | I::OrdinaryMapOwnedGetI32StringV1Values { root, .. }
+                | I::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+                    actual_root_values.contains(root)
+                }
+                I::Clone { result, source }
+                    if actual_root_values.contains(source)
+                        || actual_root_values.contains(result) =>
+                {
+                    receipts.iter().any(|receipt| {
+                        receipt.kind == K::Clone
+                            && receipt.instruction == instruction.id
+                            && receipt.local == *result
+                            && receipt.source_local.as_ref() == Some(source)
+                    })
+                }
+                I::Copy { source, .. } | I::Move { source, .. } | I::Drop { value: source }
+                    if actual_root_values.contains(source) =>
+                {
+                    false
+                }
+                _ => !mir_instruction_value_uses(&instruction.kind)
+                    .iter()
+                    .any(|value| actual_root_values.contains(value)),
+            };
+            if !allowed {
+                errors.push(MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: "ordinary Map owned-get root is used outside its dedicated Checker-receipted operation".into(),
+                });
+            }
+        }
+        if mir_terminator_value_uses(&block.terminator)
+            .iter()
+            .any(|value| actual_root_values.contains(value))
+        {
+            errors.push(MirValidationError {
+                subject: block.id.to_string(),
+                message: "ordinary Map owned-get root cannot escape through a MIR terminator or control-flow edge".into(),
+            });
+        }
+    }
+    if function.result == owner_type || !live_roots.is_empty() {
+        errors.push(MirValidationError {
+            subject: function.owner.0.clone(),
+            message: "ordinary Map owned-get lifecycle leaves a live root or returns an owner root"
+                .into(),
+        });
+    }
+    errors
+}
+
+/// Ordinary Map operations pass String bytes by borrowed pointer and explicit
+/// length. A Checker-receipted direct local key stays borrowed and live across
+/// every operation that uses it; owned expression temporaries still require an
+/// immediate Drop because the runtime copies any bytes it retains.
+fn checker_borrowed_ordinary_map_key(
+    key: Option<&MirValueId>,
+    key_local: Option<&crate::core::ir::ResolvedLocalId>,
+) -> Option<MirValueId> {
+    let local = key_local?;
+    let value = MirValueId::new(format!("local:{}", local.0 .0)).ok()?;
+    (key == Some(&value)).then_some(value)
+}
+
+fn validate_ordinary_map_string_argument_lifetimes(
+    function: &MirFunction,
+    operation: &MirInstructionId,
+    operands: &[MirValueId],
+    checker_borrowed_key: Option<&MirValueId>,
+) -> bool {
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let Some((block, operation_index)) = function.blocks.values().find_map(|block| {
+        block
+            .instructions
+            .iter()
+            .position(|instruction| instruction.id == *operation)
+            .map(|index| (block, index))
+    }) else {
+        return false;
+    };
+    let mut unique = Vec::new();
+    for value in operands {
+        if function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == string_type)
+            && !unique.contains(value)
+        {
+            unique.push(value.clone());
+        }
+    }
+    let mut temporary_drop_offset = 0;
+    for value in &unique {
+        if Some(value) == checker_borrowed_key {
+            if !value.as_str().starts_with("local:")
+                || !function
+                    .values
+                    .get(value)
+                    .is_some_and(|value| value.ty == string_type)
+                || block.instructions[..operation_index]
+                    .iter()
+                    .any(|instruction| {
+                        matches!(
+                            &instruction.kind,
+                            MirInstructionKind::Drop { value: dropped } if dropped == value
+                        )
+                    })
+            {
+                return false;
+            }
+            continue;
+        }
+        let Some(next) = operation_index
+            .checked_add(1)
+            .and_then(|index| index.checked_add(temporary_drop_offset))
+        else {
+            return false;
+        };
+        if !matches!(
+            block.instructions.get(next).map(|instruction| &instruction.kind),
+            Some(MirInstructionKind::Drop { value: dropped }) if dropped == value
+        ) {
+            return false;
+        }
+        let fresh_owner_definition =
+            block.instructions[..operation_index]
+                .iter()
+                .any(|instruction| match &instruction.kind {
+                    MirInstructionKind::Const {
+                        result,
+                        literal: ResolvedLiteral::String(_),
+                    } => result == value,
+                    MirInstructionKind::Clone { result, source } => {
+                        result == value
+                            && source.as_str().starts_with("local:")
+                            && function
+                                .values
+                                .get(source)
+                                .is_some_and(|source| source.ty == string_type)
+                    }
+                    _ => false,
+                });
+        if !fresh_owner_definition {
+            return false;
+        }
+        let uses = function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| mir_instruction_value_uses(&instruction.kind).contains(value))
+            .map(|instruction| instruction.id.clone())
+            .collect::<BTreeSet<_>>();
+        if uses
+            != BTreeSet::from([
+                block.instructions[operation_index].id.clone(),
+                block.instructions[next].id.clone(),
+            ])
+            || function
+                .blocks
+                .values()
+                .any(|block| mir_terminator_value_uses(&block.terminator).contains(value))
+        {
+            return false;
+        }
+        temporary_drop_offset += 1;
+    }
+    true
+}
+
 /// Prove the lifetime of a String copied into the opaque Map owner. The only
 /// admitted source shapes are a String literal or a direct local read; MIR
 /// materializes those as an owned constant or an owned Clone respectively.
@@ -3531,12 +6942,45 @@ fn mir_instruction_value_uses(kind: &MirInstructionKind) -> Vec<MirValueId> {
     use MirInstructionKind as I;
     let mut uses = Vec::new();
     match kind {
-        I::Const { .. } | I::Nop | I::MapRootNew { .. } => {}
+        I::Actor { operation } => uses.extend(operation.uses().into_iter().cloned()),
+        I::Const { .. }
+        | I::Nop
+        | I::MapRootNew { .. }
+        | I::OrdinaryMapOwnerLifecycleNew { .. }
+        | I::ClosureBind { .. } => {}
         I::MapRootSet { source, value, .. } => uses.extend([source.clone(), value.clone()]),
         I::MapRootRemove { source, .. } => uses.push(source.clone()),
         I::MapRootSize { root, .. } | I::MapRootContains { root, .. } | I::MapRootDrop { root } => {
             uses.push(root.clone())
         }
+        I::OrdinaryMapOwnerLifecycleSet {
+            source, key, value, ..
+        } => uses.extend([source.clone(), key.clone(), value.clone()]),
+        I::OrdinaryMapOwnerLifecycleRemove { source, key, .. } => {
+            uses.extend([source.clone(), key.clone()])
+        }
+        I::OrdinaryMapOwnerLifecycleSize { root, .. }
+        | I::OrdinaryMapOwnerLifecycleDrop { root } => uses.push(root.clone()),
+        I::OrdinaryMapOwnerLifecycleContains { root, key, .. } => {
+            uses.extend([root.clone(), key.clone()])
+        }
+        I::ManagedAny { source, .. } => uses.push(source.clone()),
+        I::OrdinaryMapOwnedGetI32StringV1New { .. } => {}
+        I::OrdinaryMapOwnedGetI32StringV1Set {
+            source, key, value, ..
+        } => uses.extend([source.clone(), key.clone(), value.clone()]),
+        I::OrdinaryMapOwnedGetI32StringV1Remove { source, key, .. } => {
+            uses.extend([source.clone(), key.clone()])
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Size { root, .. }
+        | I::OrdinaryMapOwnedGetI32StringV1Drop { root } => uses.push(root.clone()),
+        I::OrdinaryMapOwnedGetI32StringV1Contains { root, key, .. }
+        | I::OrdinaryMapOwnedGetI32StringV1GetI32 { root, key, .. }
+        | I::OrdinaryMapOwnedGetI32StringV1GetString { root, key, .. }
+        | I::OrdinaryMapOwnedGetI32StringV1GetAny { root, key, .. } => {
+            uses.extend([root.clone(), key.clone()])
+        }
+        I::OrdinaryMapOwnedGetI32StringV1Values { root, .. } => uses.push(root.clone()),
         I::Load { place, .. } => {
             if let Ok(local) = MirValueId::new(format!("local:{}", place.base.0 .0)) {
                 uses.push(local);
@@ -3600,6 +7044,11 @@ fn mir_instruction_value_uses(kind: &MirInstructionKind) -> Vec<MirValueId> {
             uses.extend(payload.iter().cloned());
         }
         I::SessionPairBind { .. } => {}
+        I::ClosureInvoke {
+            function_value,
+            arguments,
+            ..
+        } => uses.extend(std::iter::once(function_value.clone()).chain(arguments.iter().cloned())),
     }
     uses
 }
@@ -3758,7 +7207,7 @@ pub(crate) fn validate_generic_identity_shape(
                     return Err(
                         "generic MIR identity branch body may only contain Const/Clone/Copy/Move"
                             .into(),
-                    )
+                    );
                 }
             }
         }
@@ -3823,17 +7272,17 @@ pub(crate) fn validate_generic_identity_shape(
                 }
             }
             MirTerminator::Return { value: None } => {
-                return Err("generic MIR identity branch must return a value".into())
+                return Err("generic MIR identity branch must return a value".into());
             }
             MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
-                return Err("generic MIR identity branch body only admits Goto/Branch CFG".into())
+                return Err("generic MIR identity branch body only admits Goto/Branch CFG".into());
             }
             MirTerminator::Trap { .. }
             | MirTerminator::Fault { .. }
             | MirTerminator::Unreachable => {
                 return Err(
                     "generic MIR identity branch body requires total non-trapping returns".into(),
-                )
+                );
             }
         }
         active.remove(block_id);
@@ -4396,10 +7845,10 @@ pub(crate) fn validate_owned_string_return_shape(
             }
         }
         MirTerminator::Return { value: Some(_) } => {
-            return Err("owned String return value does not match canonical String ABI".into())
+            return Err("owned String return value does not match canonical String ABI".into());
         }
         MirTerminator::Return { value: None } => {
-            return Err("owned String return requires a value Return".into())
+            return Err("owned String return requires a value Return".into());
         }
         _ => return Err("owned String return contract requires a value Return".into()),
     }
@@ -4463,20 +7912,20 @@ pub(crate) fn validate_variant_call_return_coverage(function: &MirFunction) -> R
                 }
             }
             MirTerminator::Return { value: None } => {
-                return Err("MIR variant call return merge requires value returns".into())
+                return Err("MIR variant call return merge requires value returns".into());
             }
             MirTerminator::Switch { .. } | MirTerminator::SwitchMove { .. } => {
                 return Err(
                     "MIR verifier direct variant call return merge only admits Goto/Branch CFG"
                         .into(),
-                )
+                );
             }
             MirTerminator::Trap { .. }
             | MirTerminator::Unreachable
             | MirTerminator::Fault { .. } => {
                 return Err(
                     "MIR variant call return merge requires total non-trapping returns".into(),
-                )
+                );
             }
         }
         active.remove(block_id);
@@ -4658,6 +8107,7 @@ pub(crate) fn validate_ownership_event_receipts(function: &MirFunction) -> Vec<M
                     drops.insert(value.clone());
                 }
                 MirInstructionKind::Call { arguments, .. }
+                | MirInstructionKind::ClosureInvoke { arguments, .. }
                 | MirInstructionKind::FlowTransition { arguments, .. } => {
                     moves.extend(arguments.iter().cloned());
                     transfers.extend(arguments.iter().cloned());
@@ -5509,12 +8959,27 @@ fn instruction_produces_owned_string(
     kind: &MirInstructionKind,
 ) -> bool {
     let result = match kind {
+        MirInstructionKind::Actor { operation } => operation.result(),
         MirInstructionKind::Load { result, .. }
         | MirInstructionKind::MapRootNew { result }
         | MirInstructionKind::MapRootSet { result, .. }
         | MirInstructionKind::MapRootRemove { result, .. }
         | MirInstructionKind::MapRootSize { result, .. }
         | MirInstructionKind::MapRootContains { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { result, .. }
         | MirInstructionKind::Copy { result, .. }
         | MirInstructionKind::Convert { result, .. }
         | MirInstructionKind::Borrow { result, .. }
@@ -5538,12 +9003,17 @@ fn instruction_produces_owned_string(
         | MirInstructionKind::BuiltinCall { result, .. }
         | MirInstructionKind::SessionCall { result, .. }
         | MirInstructionKind::FlowTransition { result, .. } => Some(result),
-        MirInstructionKind::Call { result, .. } => result.as_ref(),
+        MirInstructionKind::Call { result, .. }
+        | MirInstructionKind::ClosureInvoke { result, .. }
+        | MirInstructionKind::ManagedAny { result, .. } => result.as_ref(),
+        MirInstructionKind::ClosureBind { .. } => None,
         MirInstructionKind::Const { .. }
         | MirInstructionKind::Move { .. }
         | MirInstructionKind::Clone { .. }
         | MirInstructionKind::Drop { .. }
         | MirInstructionKind::MapRootDrop { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
         | MirInstructionKind::EndBorrow { .. }
         | MirInstructionKind::SessionPairBind { .. }
         | MirInstructionKind::Nop => None,
@@ -5563,6 +9033,9 @@ fn instruction_consumes_owned_string(
 ) -> bool {
     let mut sources = Vec::new();
     match kind {
+        MirInstructionKind::Actor { operation } => {
+            sources.extend(operation.uses().into_iter().cloned())
+        }
         MirInstructionKind::Load { place, .. } => {
             if let Ok(value) = MirValueId::new(format!("local:{}", place.base.0 .0)) {
                 sources.push(value);
@@ -5585,6 +9058,7 @@ fn instruction_consumes_owned_string(
         } => sources.extend([source.clone(), fallback.clone()]),
         MirInstructionKind::VariantProjectMove { base: source, .. } => sources.push(source.clone()),
         MirInstructionKind::Call { arguments, .. }
+        | MirInstructionKind::ClosureInvoke { arguments, .. }
         | MirInstructionKind::FlowTransition { arguments, .. }
         | MirInstructionKind::Construct {
             fields: arguments, ..
@@ -5647,10 +9121,28 @@ fn instruction_consumes_owned_string(
         }
         MirInstructionKind::Unary { operand, .. } => sources.push(operand.clone()),
         MirInstructionKind::Const { .. }
+        | MirInstructionKind::ClosureBind { .. }
         | MirInstructionKind::Move { .. }
         | MirInstructionKind::Clone { .. }
         | MirInstructionKind::Drop { .. }
         | MirInstructionKind::MapRootNew { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+        | MirInstructionKind::ManagedAny { .. }
         | MirInstructionKind::VariantProject { .. }
         | MirInstructionKind::SessionPairBind { .. }
         | MirInstructionKind::Nop => {}
@@ -5821,6 +9313,7 @@ fn format_mir_switch_case(case: &MirSwitchCase) -> String {
 
 fn format_instruction(kind: &MirInstructionKind) -> String {
     match kind {
+        MirInstructionKind::Actor { operation } => operation.canonical_text(),
         MirInstructionKind::MapRootNew { result } => format!("map_root_new {result}"),
         MirInstructionKind::MapRootSet {
             result,
@@ -5840,6 +9333,80 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             format!("map_root_contains {result} <- {root}[{key:?}]")
         }
         MirInstructionKind::MapRootDrop { root } => format!("map_root_drop {root}"),
+        MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result } => {
+            format!("ordinary_map_owner_lifecycle_v1_new {result}")
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleSet {
+            result,
+            source,
+            key,
+            value,
+        } => format!("ordinary_map_owner_lifecycle_v1_set {result} <- {source}[{key}] = {value}"),
+        MirInstructionKind::OrdinaryMapOwnerLifecycleRemove {
+            result,
+            source,
+            key,
+        } => format!("ordinary_map_owner_lifecycle_v1_remove {result} <- {source} - {key}"),
+        MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, root } => {
+            format!("ordinary_map_owner_lifecycle_v1_size {result} <- {root}")
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, root, key } => {
+            format!("ordinary_map_owner_lifecycle_v1_contains {result} <- {root}[{key}]")
+        }
+        MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root } => {
+            format!("ordinary_map_owner_lifecycle_v1_drop {root}")
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result } => {
+            format!("ordinary_map_owned_get_i32_string_v1_new {result}")
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set {
+            result,
+            source,
+            key,
+            value,
+        } => format!(
+            "ordinary_map_owned_get_i32_string_v1_set {result} <- {source}[{key}] = {value}"
+        ),
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove {
+            result,
+            source,
+            key,
+        } => format!("ordinary_map_owned_get_i32_string_v1_remove {result} <- {source} - {key}"),
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { result, root } => {
+            format!("ordinary_map_owned_get_i32_string_v1_size {result} <- {root}")
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { result, root, key } => {
+            format!("ordinary_map_owned_get_i32_string_v1_contains {result} <- {root}[{key}]")
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { result, root, key } => {
+            format!("ordinary_map_owned_get_i32_string_v1_get_i32 {result} <- {root}[{key}]")
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { result, root, key } => {
+            format!("ordinary_map_owned_get_i32_string_v1_get_string {result} <- {root}[{key}]")
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { result, root, key } => {
+            format!("ordinary_map_owned_get_i32_string_v1_get_any {result} <- {root}[{key}]")
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { result, root } => {
+            format!("ordinary_map_owned_get_i32_string_v1_values {result} <- values({root})")
+        }
+        MirInstructionKind::ManagedAny {
+            result,
+            source,
+            operation,
+            contract,
+        } => {
+            format!(
+                "managed_any_v1 {} {:?} <- {} receipt={:?}",
+                operation.canonical_text(),
+                result,
+                source,
+                contract
+            )
+        }
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+            format!("ordinary_map_owned_get_i32_string_v1_drop {root}")
+        }
         MirInstructionKind::Const { result, literal } => {
             format!("const {result} = {}", format_mir_literal(literal))
         }
@@ -6118,6 +9685,47 @@ fn format_instruction(kind: &MirInstructionKind) -> String {
             op,
             operand,
         } => format!("unary {result} = {} {operand}", format_mir_unary_op(*op)),
+        MirInstructionKind::ClosureBind {
+            closure_local,
+            function_value,
+            callee,
+            abi,
+        } => format!(
+            "closure_bind local={} value={} callee={} [{}]",
+            closure_local.0 .0,
+            function_value,
+            callee.0,
+            abi.canonical_text()
+        ),
+        MirInstructionKind::ClosureInvoke {
+            result,
+            closure_local,
+            function_value,
+            callee,
+            type_arguments,
+            arguments,
+            abi,
+        } => format!(
+            "closure_invoke {} local={} value={} callee={} type_args=[{}] args=[{}] [{}]",
+            result
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "_".into()),
+            closure_local.0 .0,
+            function_value,
+            callee.0,
+            type_arguments
+                .iter()
+                .map(ResolvedTypeId::as_str)
+                .collect::<Vec<_>>()
+                .join(","),
+            arguments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            abi.canonical_text()
+        ),
         MirInstructionKind::Call {
             result,
             callee,
@@ -6550,6 +10158,68 @@ impl<'a> MirValidator<'a> {
     ) {
         use MirInstructionKind::*;
         match &instruction.kind {
+            Actor { operation } => {
+                for value in operation.uses() {
+                    self.use_value(value);
+                }
+                if let Some(result) = operation.result() {
+                    self.result_at(result, &instruction.id, block, index);
+                }
+            }
+            ClosureBind {
+                closure_local,
+                function_value,
+                callee,
+                abi,
+            } => {
+                if closure_local.0 .0.trim().is_empty()
+                    || callee.0.trim().is_empty()
+                    || abi.schema != MIR_CLOSURE_CALLABLE_ABI_V1_SCHEMA
+                {
+                    self.error(
+                        instruction.id.to_string(),
+                        "ClosureBind has an empty identity or unsupported ABI schema",
+                    );
+                }
+                if self
+                    .function
+                    .values
+                    .get(function_value)
+                    .is_some_and(|value| value.ty != abi.source_function_type)
+                {
+                    self.error(
+                        instruction.id.to_string(),
+                        "ClosureBind function value disagrees with its source function TypeDesc",
+                    );
+                }
+                self.result_at(function_value, &instruction.id, block, index);
+            }
+            ClosureInvoke {
+                result,
+                closure_local,
+                function_value,
+                callee,
+                type_arguments: _,
+                arguments,
+                abi,
+            } => {
+                self.use_value(function_value);
+                for argument in arguments {
+                    self.use_value(argument);
+                }
+                if closure_local.0 .0.trim().is_empty()
+                    || callee.0.trim().is_empty()
+                    || abi.schema != MIR_CLOSURE_CALLABLE_ABI_V1_SCHEMA
+                {
+                    self.error(
+                        instruction.id.to_string(),
+                        "ClosureInvoke has an empty identity or unsupported ABI schema",
+                    );
+                }
+                if let Some(result) = result {
+                    self.result_at(result, &instruction.id, block, index);
+                }
+            }
             MapRootNew { result } => self.result_at(result, &instruction.id, block, index),
             MapRootSet {
                 result,
@@ -6587,6 +10257,99 @@ impl<'a> MirValidator<'a> {
                 self.result_at(result, &instruction.id, block, index);
             }
             MapRootDrop { root } => self.use_value(root),
+            OrdinaryMapOwnerLifecycleNew { result } => {
+                self.result_at(result, &instruction.id, block, index)
+            }
+            OrdinaryMapOwnerLifecycleSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.use_value(source);
+                self.use_value(key);
+                self.use_value(value);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            OrdinaryMapOwnerLifecycleRemove {
+                result,
+                source,
+                key,
+            } => {
+                self.use_value(source);
+                self.use_value(key);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            OrdinaryMapOwnerLifecycleSize { result, root } => {
+                self.use_value(root);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            OrdinaryMapOwnerLifecycleContains { result, root, key } => {
+                self.use_value(root);
+                self.use_value(key);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            OrdinaryMapOwnerLifecycleDrop { root } => self.use_value(root),
+            OrdinaryMapOwnedGetI32StringV1New { result } => {
+                self.result_at(result, &instruction.id, block, index)
+            }
+            OrdinaryMapOwnedGetI32StringV1Set {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.use_value(source);
+                self.use_value(key);
+                self.use_value(value);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            OrdinaryMapOwnedGetI32StringV1Remove {
+                result,
+                source,
+                key,
+            } => {
+                self.use_value(source);
+                self.use_value(key);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            OrdinaryMapOwnedGetI32StringV1Size { result, root }
+            | OrdinaryMapOwnedGetI32StringV1Contains { result, root, .. }
+            | OrdinaryMapOwnedGetI32StringV1GetI32 { result, root, .. }
+            | OrdinaryMapOwnedGetI32StringV1GetString { result, root, .. }
+            | OrdinaryMapOwnedGetI32StringV1GetAny { result, root, .. } => {
+                self.use_value(root);
+                if let OrdinaryMapOwnedGetI32StringV1Contains { key, .. }
+                | OrdinaryMapOwnedGetI32StringV1GetI32 { key, .. }
+                | OrdinaryMapOwnedGetI32StringV1GetString { key, .. }
+                | OrdinaryMapOwnedGetI32StringV1GetAny { key, .. } = &instruction.kind
+                {
+                    self.use_value(key);
+                }
+                self.result_at(result, &instruction.id, block, index);
+            }
+            OrdinaryMapOwnedGetI32StringV1Values { result, root } => {
+                self.use_value(root);
+                self.result_at(result, &instruction.id, block, index);
+            }
+            ManagedAny {
+                source,
+                result,
+                contract,
+                ..
+            } => {
+                self.use_value(source);
+                if contract.is_none() {
+                    self.error(
+                        instruction.id.to_string(),
+                        "ManagedAny operation has no exact owner/kind/version receipt",
+                    );
+                }
+                if let Some(result) = result {
+                    self.result_at(result, &instruction.id, block, index);
+                }
+            }
+            OrdinaryMapOwnedGetI32StringV1Drop { root } => self.use_value(root),
             Const { result, .. } | Load { result, .. } => {
                 self.result_at(result, &instruction.id, block, index)
             }
@@ -7255,7 +11018,12 @@ impl<'a> MirValidator<'a> {
     ) {
         let mut uses: Vec<MirValueId> = Vec::new();
         match &instruction.kind {
-            MirInstructionKind::Const { .. } | MirInstructionKind::Nop => {}
+            MirInstructionKind::Actor { operation } => {
+                uses.extend(operation.uses().into_iter().cloned())
+            }
+            MirInstructionKind::Const { .. }
+            | MirInstructionKind::ClosureBind { .. }
+            | MirInstructionKind::Nop => {}
             MirInstructionKind::MapRootNew { .. } => {}
             MirInstructionKind::MapRootSet { source, value, .. } => {
                 uses.extend([source.clone(), value.clone()])
@@ -7264,6 +11032,39 @@ impl<'a> MirValidator<'a> {
             MirInstructionKind::MapRootSize { root, .. }
             | MirInstructionKind::MapRootContains { root, .. }
             | MirInstructionKind::MapRootDrop { root } => uses.push(root.clone()),
+            MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. } => {}
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSet {
+                source, key, value, ..
+            } => uses.extend([source.clone(), key.clone(), value.clone()]),
+            MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { source, key, .. } => {
+                uses.extend([source.clone(), key.clone()])
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSize { root, .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root } => uses.push(root.clone()),
+            MirInstructionKind::OrdinaryMapOwnerLifecycleContains { root, key, .. } => {
+                uses.extend([root.clone(), key.clone()])
+            }
+            MirInstructionKind::ManagedAny { source, .. } => uses.push(source.clone()),
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. } => {}
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set {
+                source, key, value, ..
+            } => uses.extend([source.clone(), key.clone(), value.clone()]),
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { source, key, .. } => {
+                uses.extend([source.clone(), key.clone()])
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { root, .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+                uses.push(root.clone())
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { root, key, .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { root, key, .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { root, key, .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { root, key, .. } => {
+                uses.extend([root.clone(), key.clone()])
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { root, .. } => {
+                uses.push(root.clone())
+            }
             MirInstructionKind::Load { place, .. } => {
                 if let Ok(local) = MirValueId::new(format!("local:{}", place.base.0 .0)) {
                     uses.push(local);
@@ -7344,6 +11145,14 @@ impl<'a> MirValidator<'a> {
             | MirInstructionKind::FlowTransition { arguments, .. }
             | MirInstructionKind::BuiltinCall { arguments, .. } => {
                 uses.extend(arguments.iter().cloned())
+            }
+            MirInstructionKind::ClosureInvoke {
+                function_value,
+                arguments,
+                ..
+            } => {
+                uses.push(function_value.clone());
+                uses.extend(arguments.iter().cloned());
             }
             MirInstructionKind::SessionCall {
                 endpoint, payload, ..

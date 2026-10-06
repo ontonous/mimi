@@ -269,6 +269,10 @@ pub struct ResolvedCallSite {
     /// Return type display from callee function directory when known.
     pub ret: Option<String>,
     pub kind: ResolvedCallKind,
+    /// Canonical callable identity recovered from the typed body call node.
+    /// Surface call-site collection intentionally records only syntax facts;
+    /// body lowering closes the method/trait target before backend use.
+    pub resolved_callee: Option<crate::core::ir::ResolvedCallee>,
     pub origin: Origin,
 }
 
@@ -455,6 +459,8 @@ pub struct ResolvedTransition {
 pub struct ResolvedFlow {
     pub node_id: NodeId,
     pub id: FlowId,
+    /// Stable Flow-level type binders, in source declaration order.
+    pub generic_parameters: Vec<(String, NodeId)>,
     pub states: HashMap<String, ResolvedState>,
     pub transitions: Vec<TransitionId>,
     pub max_children: Option<usize>,
@@ -534,7 +540,27 @@ pub struct ResolvedCapability {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub combined_with: Option<String>,
+    /// Checker-owned component names in the historical construction order.
+    /// A plain declaration has one component; `cap A + B` has A then B.
+    pub components: Vec<String>,
     pub origin: Origin,
+}
+
+fn capability_components(name: &str, combined: Option<&str>) -> Vec<String> {
+    match combined {
+        Some(combined) => {
+            let parts = combined
+                .split(" + ")
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<_>>();
+            if parts.len() > 1 {
+                parts
+            } else {
+                vec![name.to_string(), combined.trim().to_string()]
+            }
+        }
+        None => vec![name.to_string()],
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -570,6 +596,8 @@ pub struct ResolvedTrait {
     pub node_id: NodeId,
     pub qualified_name: String,
     pub methods: Vec<String>,
+    /// Stable declaration owners in the same source order as `methods`.
+    pub method_owners: Vec<NodeId>,
     pub method_signatures: Vec<ResolvedMethodSig>,
     pub origin: Origin,
 }
@@ -580,7 +608,16 @@ pub struct ResolvedImpl {
     pub qualified_name: String,
     pub trait_name: String,
     pub type_name: String,
+    /// Checked generic declarations owned by this implementation. These
+    /// binders are distinct from method-level binders, while each method's
+    /// canonical signature carries the combined ordered binder identity.
+    pub generics: Vec<crate::ast::GenericParam>,
+    pub generic_parameters: Vec<(String, NodeId)>,
     pub methods: Vec<String>,
+    /// Exact callable identities in the same declaration order as `methods`.
+    /// Compatibility display signatures below must never be used to recover
+    /// these owners or their checker-finalized ABI types.
+    pub method_owners: Vec<NodeId>,
     pub method_signatures: Vec<ResolvedMethodSig>,
     pub origin: Origin,
 }
@@ -657,9 +694,13 @@ pub struct ResolvedExternFunc {
     pub requires: Option<Expr>,
     pub ensures: Option<Expr>,
     pub variadic: bool,
+    /// Effective flag after the enclosing block default is applied.
     pub no_panic: bool,
-    /// SD-3: explicit errno checking flag from #[errno] attribute.
+    /// Effective flag after the enclosing block default is applied.
     pub returns_errno: bool,
+    /// Whether this declaration itself carries `#[errno]`; unlike
+    /// `returns_errno`, this excludes an inherited block-level default.
+    pub declared_returns_errno: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -729,12 +770,18 @@ pub struct CheckedProgram {
     traits: HashMap<NodeId, ResolvedTrait>,
     impls: HashMap<NodeId, ResolvedImpl>,
     type_defs: HashMap<NodeId, ResolvedTypeDef>,
+    /// Canonical declaration and native ABI facts produced after the type
+    /// table, field identities, aliases, and variant schemas are finalized.
+    native_declarations: crate::core::ir::ResolvedNativeDeclarations,
     extern_blocks: HashMap<NodeId, ResolvedExternBlock>,
     backend_requirements: Vec<CapabilityRequirement>,
     type_schemes: HashMap<NodeId, TypeScheme>,
     zonked_function_types: HashMap<NodeId, (Vec<ZonkedTy>, ZonkedTy)>,
     resolved_types: crate::core::ResolvedTypeTable,
     resolved_signatures: BTreeMap<NodeId, crate::core::ResolvedSignature>,
+    /// Canonical ABI of trait declarations, separate from executable callable
+    /// signatures because trait methods have no body/callable CFG of their own.
+    resolved_trait_signatures: BTreeMap<NodeId, crate::core::ResolvedSignature>,
     resolved_node_types: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_type_operands: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_type_arguments: BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
@@ -744,6 +791,9 @@ pub struct CheckedProgram {
     resolved_type_targets: BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     resolved_session_actions: BTreeMap<NodeId, crate::core::ResolvedSessionAction>,
     resolved_bodies: BTreeMap<NodeId, crate::core::ResolvedBody>,
+    declaration_expression_bodies:
+        BTreeMap<NodeId, crate::core::ir::lower::ResolvedDeclarationExpressionBody>,
+    ffi_declarations: BTreeMap<NodeId, crate::core::ir::ResolvedFfiDeclarationContract>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
     callables: BTreeMap<NodeId, crate::core::ResolvedCallable>,
@@ -1042,7 +1092,8 @@ impl CheckedProgram {
             resolved_type_targets,
             resolved_type_arguments,
             resolved_state_field_types,
-        ) = build_canonical_function_signatures(&program, &stable_expression_types)?;
+            resolved_trait_signatures,
+        ) = build_canonical_function_signatures(&program, &stable_expression_types, file)?;
         for meta in program.node_meta.values_mut() {
             meta.expression_key = None;
             meta.shared_binding = None;
@@ -1052,6 +1103,7 @@ impl CheckedProgram {
         }
         program.resolved_types = resolved_types;
         program.resolved_signatures = resolved_signatures;
+        program.resolved_trait_signatures = resolved_trait_signatures;
         program.resolved_node_types = resolved_node_types;
         program.resolved_type_operands = resolved_type_operands;
         program.resolved_field_types = resolved_field_types;
@@ -1120,6 +1172,45 @@ impl CheckedProgram {
                         .collect());
                 }
             };
+        for body in program.resolved_bodies.values() {
+            for (call_node, callee) in &body.resolved_calls {
+                let Some(site) = program.call_sites.get_mut(call_node) else {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: typed call '{}' has no call-site record",
+                            call_node.0
+                        ),
+                        Span::UNKNOWN,
+                    ));
+                    continue;
+                };
+                if site.owner != body.owner.0 {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: typed call '{}' belongs to '{}' but body owner is '{}'",
+                            call_node.0, site.owner, body.owner.0
+                        ),
+                        site.origin.user_span(),
+                    ));
+                    continue;
+                }
+                if site.resolved_callee.replace(callee.clone()).is_some() {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: typed call '{}' has more than one canonical target",
+                            call_node.0
+                        ),
+                        site.origin.user_span(),
+                    ));
+                }
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        program.declaration_expression_bodies =
+            crate::core::ir::lower::lower_checked_declaration_expression_bodies(file, &program);
+        program.ffi_declarations = crate::core::ir::build_checked_ffi_declarations(&program)?;
         validate_resolved_callable_bodies(&program)?;
         program.callable_cfgs = crate::core::cfg::lower_resolved_bodies(&program.resolved_bodies)?;
         // RECORD-LIN-001 (0.1.9, Phase B): user records/unions with linear
@@ -1193,6 +1284,14 @@ impl CheckedProgram {
         if !errors.is_empty() {
             return Err(errors);
         }
+        // The complete declaration catalog includes checker-owned Actor
+        // descriptors, so it is assembled only after their signatures and
+        // ordered state schemas have been finalized.
+        program.native_declarations =
+            match crate::core::ir::build_checked_native_declarations(file, &program) {
+                Ok(catalog) => catalog,
+                Err(declaration_errors) => return Err(declaration_errors),
+            };
 
         program.trait_method_generics = trait_method_generics;
 
@@ -1395,12 +1494,14 @@ impl CheckedProgram {
             traits,
             impls,
             type_defs,
+            native_declarations: crate::core::ir::ResolvedNativeDeclarations::default(),
             extern_blocks,
             backend_requirements,
             type_schemes: HashMap::new(),
             zonked_function_types: HashMap::new(),
             resolved_types: crate::core::ResolvedTypeTable::new(),
             resolved_signatures: BTreeMap::new(),
+            resolved_trait_signatures: BTreeMap::new(),
             resolved_node_types: BTreeMap::new(),
             resolved_type_operands: BTreeMap::new(),
             resolved_type_arguments: BTreeMap::new(),
@@ -1410,6 +1511,8 @@ impl CheckedProgram {
             resolved_type_targets: BTreeMap::new(),
             resolved_session_actions: BTreeMap::new(),
             resolved_bodies: BTreeMap::new(),
+            declaration_expression_bodies: BTreeMap::new(),
+            ffi_declarations: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
             callables: BTreeMap::new(),
@@ -1417,40 +1520,15 @@ impl CheckedProgram {
         })
     }
 
-    /// Retained surface body file for an explicitly named compatibility owner.
+    /// Test-only retained surface body file for an explicitly named
+    /// compatibility oracle. Production code consumes checker-owned
+    /// catalogs, Resolved bodies, or canonical MIR and cannot call this
+    /// accessor because it is compiled under `cfg(test)`.
     ///
-    /// # Architecture (0.32.29, irreversible)
-    ///
-    /// This is NOT a transitional API. Four compatibility consumers currently
-    /// need the surface AST because their architecture is defined over it:
-    ///
-    /// - **C1 codegen fifth pass** (`compile_file_inner`): compiles ineligible
-    ///   body classes (capturing lambdas, generics, async, extern ABI wrappers,
-    ///   view/mutate borrow params). The resolved native emitter handles the
-    ///   eligible subset; the fifth pass handles the permanent remainder.
-    ///   The skip guard (`count_basic_blocks != 0`) prevents double-emission.
-    ///
-    /// - **C4 Flow verifier compatibility Z3 path**
-    ///   (`flow_verify_file_with_hashes`): unmigrated Flow verification still
-    ///   encodes function bodies as Z3 constraints from the surface AST.
-    /// - **C4 FFI verifier compatibility path**: extern call-site/body
-    ///   contracts still have an AST encoder for un-migrated inputs.
-    /// - **C4 dual-verifier compatibility path**: the secondary Flow/VIR
-    ///   engine remains AST-backed until its obligations are MIR-native.
-    ///
-    /// The closed S8 silent-local Flow island, flat Copy-record island, and
-    /// other admitted MIR islands bypass these compatibility paths through
-    /// canonical MIR; the remaining paths handle only compatibility shapes.
-    ///
-    /// # Prohibition
-    ///
-    /// New semantic consumers MUST NOT use this method. Declaration-level
-    /// data (signatures, Flow transitions, Actor/Session/Protocol catalogs,
-    /// ownership, CFG) is available through typed accessors on
-    /// `CheckedProgram`; body-level canonical data is available through
-    /// `resolved_body()` / `callables()`. A caller here is an explicit
-    /// compatibility boundary and must carry one of the four owner tags
-    /// above.
+    /// The four owner tags remain useful in unit-test traces while the old
+    /// AST consumers are compared against their canonical replacements. New
+    /// semantic consumers MUST use the typed directories or MIR; adding a
+    /// production caller here is a hard owner-audit failure.
     #[cfg(test)]
     pub(crate) fn reset_test_legacy_body_access() {
         TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().clear());
@@ -1476,6 +1554,10 @@ impl CheckedProgram {
         TEST_LEGACY_CODEGEN_FUNCTION_CALLS.with(|calls| calls.borrow().clone())
     }
 
+    /// Test-only compatibility snapshot adapter. Production consumers must use
+    /// checker-owned typed directories and canonical MIR; keeping this method
+    /// behind `cfg(test)` makes that boundary compile-time enforced.
+    #[cfg(test)]
     pub(crate) fn legacy_body_file(&self, _consumer: LegacyBodyConsumer) -> Arc<File> {
         #[cfg(test)]
         TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().push(_consumer));
@@ -1732,6 +1814,14 @@ impl CheckedProgram {
         &self.type_defs
     }
 
+    /// Checker-owned native declaration metadata. This catalog carries
+    /// declaration order, stable member/binder identities, canonical type
+    /// edges, and explicit constructor/drop ABI recipes without storing a
+    /// surface `TypeDef` or `FlowDef`.
+    pub fn native_declarations(&self) -> &crate::core::ir::ResolvedNativeDeclarations {
+        &self.native_declarations
+    }
+
     pub fn type_def(&self, qualified_name: &str) -> Option<&ResolvedTypeDef> {
         self.type_defs
             .values()
@@ -1926,6 +2016,17 @@ impl CheckedProgram {
         self.resolved_signatures.get(owner)
     }
 
+    pub fn resolved_trait_signatures(&self) -> &BTreeMap<NodeId, crate::core::ResolvedSignature> {
+        &self.resolved_trait_signatures
+    }
+
+    pub fn resolved_trait_signature(
+        &self,
+        owner: &NodeId,
+    ) -> Option<&crate::core::ResolvedSignature> {
+        self.resolved_trait_signatures.get(owner)
+    }
+
     pub fn resolved_node_types(&self) -> &BTreeMap<NodeId, crate::core::ResolvedTypeId> {
         &self.resolved_node_types
     }
@@ -2068,6 +2169,14 @@ impl CheckedProgram {
         self.resolved_session_actions.get(call)
     }
 
+    /// Checker-owned declaration expression roots, including exact Deferred
+    /// lowering boundaries. This directory carries no retained surface body.
+    pub fn declaration_expression_bodies(
+        &self,
+    ) -> &BTreeMap<NodeId, crate::core::ir::lower::ResolvedDeclarationExpressionBody> {
+        &self.declaration_expression_bodies
+    }
+
     pub fn resolved_bodies(&self) -> &BTreeMap<NodeId, crate::core::ResolvedBody> {
         &self.resolved_bodies
     }
@@ -2090,6 +2199,14 @@ impl CheckedProgram {
 
     pub fn resource_analysis(&self, owner: &NodeId) -> Option<&crate::core::ResourceAnalysis> {
         self.resource_analyses.get(owner)
+    }
+
+    /// Complete declaration facts, including dormant and Deferred extern contracts.
+    /// Consumers validate stable roots and canonical types instead of reopening AST.
+    pub fn ffi_declarations(
+        &self,
+    ) -> &BTreeMap<NodeId, crate::core::ir::ResolvedFfiDeclarationContract> {
+        &self.ffi_declarations
     }
 
     pub fn callables(&self) -> &BTreeMap<NodeId, crate::core::ResolvedCallable> {
@@ -2728,6 +2845,7 @@ fn collect_items(
                         node_id: node_id.clone(),
                         qualified_name: qualified.clone(),
                         combined_with: cap.combined_with.clone(),
+                        components: capability_components(&cap.name, cap.combined_with.as_deref()),
                         origin: resolve_named_origin(
                             ResolvedItemKind::Capability,
                             &qualified,
@@ -2780,8 +2898,17 @@ fn collect_items(
                     .iter()
                     .map(|method| method.name.clone())
                     .collect();
+                let mut method_owners = Vec::with_capacity(trait_def.methods.len());
                 let mut method_signatures = Vec::new();
                 for method in &trait_def.methods {
+                    let signature =
+                        method_signature_key(&method.name, &method.params, method.ret.as_ref());
+                    method_owners.push(NodeId(format!(
+                        "{}/method:{}:{:016x}",
+                        node_id.0,
+                        stable_id_fragment(&method.name),
+                        stable_text_hash(&signature)
+                    )));
                     for param in &method.params {
                         if contains_unresolved_type(&param.ty) {
                             errors.push(Diagnostic::error(
@@ -2827,6 +2954,7 @@ fn collect_items(
                         node_id: node_id.clone(),
                         qualified_name: qualified.clone(),
                         methods,
+                        method_owners,
                         method_signatures,
                         origin: resolve_named_origin(
                             ResolvedItemKind::Trait,
@@ -2863,8 +2991,10 @@ fn collect_items(
                     .map(|method| method.name.clone())
                     .collect();
                 let mut method_signatures = Vec::new();
+                let mut method_owners = Vec::with_capacity(impl_def.methods.len());
                 for method in &impl_def.methods {
                     let method_id = impl_method_owner(&qualified, method);
+                    method_owners.push(method_id.clone());
                     let mut generic_binders = impl_generic_binders.clone();
                     generic_binders.extend(callable_generic_binders(
                         &method.generics,
@@ -2990,7 +3120,10 @@ fn collect_items(
                         qualified_name: qualified.clone(),
                         trait_name: impl_def.trait_name.clone(),
                         type_name: impl_def.type_name.clone(),
+                        generics: impl_def.generics.clone(),
+                        generic_parameters: impl_generic_binders.clone(),
                         methods,
+                        method_owners,
                         method_signatures,
                         origin: resolve_named_origin(
                             ResolvedItemKind::Impl,
@@ -3082,6 +3215,10 @@ fn collect_items(
                         variadic: func.variadic,
                         no_panic: func.no_panic,
                         returns_errno: func.returns_errno,
+                        declared_returns_errno: block
+                            .explicit_errno_funcs
+                            .iter()
+                            .any(|name| name == &func.name),
                     });
                 }
                 extern_blocks.insert(
@@ -4957,7 +5094,11 @@ fn collect_session_type_meta(
     }
 }
 
-fn method_signature_key(name: &str, params: &[crate::ast::Param], ret: Option<&Type>) -> String {
+pub(crate) fn method_signature_key(
+    name: &str,
+    params: &[crate::ast::Param],
+    ret: Option<&Type>,
+) -> String {
     format!(
         "{}({})->{}",
         name,
@@ -5003,7 +5144,10 @@ fn extern_function_signature_key(function: &crate::ast::ExternFunc) -> String {
     )
 }
 
-fn extern_function_owner(block_owner: &NodeId, function: &crate::ast::ExternFunc) -> NodeId {
+pub(crate) fn extern_function_owner(
+    block_owner: &NodeId,
+    function: &crate::ast::ExternFunc,
+) -> NodeId {
     NodeId(format!(
         "{}/function:{}:{:016x}",
         block_owner.0,
@@ -6823,6 +6967,7 @@ fn collect_flow(
 ) {
     let flow_id = FlowId(qualified_name.to_string());
     let flow_node_id = NodeId(format!("flow:{}", qualified_name));
+    let generic_parameters = callable_generic_binders(&flow.generics, &flow_node_id, ids, errors);
     let flow_span = declaration_span(flow.meta, flow.meta.span);
     // Full audit 2026-08-05 (#12): duplicate state names were silently
     // last-wins through `HashMap::collect`. The checker guards this at the
@@ -7034,6 +7179,7 @@ fn collect_flow(
     let resolved_flow = ResolvedFlow {
         node_id: flow_node_id.clone(),
         id: flow_id.clone(),
+        generic_parameters,
         states,
         transitions: flow_transition_ids,
         max_children,
@@ -7059,7 +7205,7 @@ fn collect_flow(
     }
 }
 
-fn extern_block_key(block: &crate::ast::ExternBlock) -> String {
+pub(crate) fn extern_block_key(block: &crate::ast::ExternBlock) -> String {
     let mut symbols = block
         .funcs
         .iter()
@@ -7551,6 +7697,7 @@ fn record_expr_call_site(
         effects,
         ret,
         kind,
+        resolved_callee: None,
         origin: resolve_origin(ast_origin, &origin_parent, span),
     };
     if out.insert(node_id.clone(), call_site).is_some() {
@@ -8647,6 +8794,7 @@ type CanonicalFunctionArtifacts = (
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
     BTreeMap<NodeId, Vec<crate::core::ResolvedTypeId>>,
     BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    BTreeMap<NodeId, crate::core::ResolvedSignature>,
 );
 
 fn canonical_reference_binding_type(initializer: &ZonkedTy) -> Result<ZonkedTy, String> {
@@ -9011,6 +9159,7 @@ fn transparent_alias_primitive_inner(
 fn build_canonical_function_signatures(
     program: &CheckedProgram,
     expression_types: &StableExpressionTypes,
+    file: &File,
 ) -> Result<CanonicalFunctionArtifacts, Vec<Diagnostic>> {
     fn register_nominal(
         catalog: &mut BTreeMap<String, std::collections::BTreeSet<String>>,
@@ -9248,7 +9397,20 @@ fn build_canonical_function_signatures(
 
         let mut generic_names = BTreeMap::new();
         let mut generic_parameters = Vec::new();
+        let mut generic_intern_failed = false;
         for (name, id) in &function.generic_binders {
+            if let Err(error) =
+                types.intern_resolved(crate::core::ResolvedType::GenericParameter(id.clone()))
+            {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: generic parameter '{}' has no canonical identity: {}",
+                        id.0, error
+                    ),
+                    function.origin.user_span(),
+                ));
+                generic_intern_failed = true;
+            }
             if !program.node_meta.contains_key(id) {
                 errors.push(Diagnostic::error(
                     format!(
@@ -9300,7 +9462,7 @@ fn build_canonical_function_signatures(
         };
 
         let mut canonical_parameter_types = Vec::with_capacity(parameter_types.len());
-        let mut signature_failed = false;
+        let mut signature_failed = generic_intern_failed;
         for ty in parameter_types {
             match types.intern_zonked(ty, &capabilities, &mut resolve_name) {
                 Ok(ty) => canonical_parameter_types.push(ty),
@@ -9655,6 +9817,215 @@ fn build_canonical_function_signatures(
         }
     }
 
+    // Trait methods are declarations without executable bodies, but their
+    // source-level ABI is still checker-owned data. Keep them outside the
+    // executable signature directory so body/CFG consumers cannot mistake a
+    // vtable contract for a callable. Intern the complete signature here,
+    // while the canonical type table and checked name resolver are available.
+    let mut trait_signatures = BTreeMap::new();
+    for item in &file.items {
+        let Item::Trait(trait_def) = item else {
+            continue;
+        };
+        let Some(resolved_trait) = program.trait_def(&trait_def.name) else {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: trait '{}' has no checked declaration",
+                    trait_def.name
+                ),
+                trait_def.meta.span,
+            ));
+            continue;
+        };
+        if resolved_trait.methods.len() != trait_def.methods.len()
+            || resolved_trait.method_owners.len() != trait_def.methods.len()
+        {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: trait '{}' method identity coverage differs",
+                    trait_def.name
+                ),
+                trait_def.meta.span,
+            ));
+            continue;
+        }
+        let trait_owner = resolved_trait.node_id.clone();
+        let trait_binders =
+            callable_generic_binders(&trait_def.generics, &trait_owner, &ids, &mut errors);
+        for (method_index, method) in trait_def.methods.iter().enumerate() {
+            let method_owner = resolved_trait.method_owners[method_index].clone();
+            let mut generic_binders = trait_binders.clone();
+            generic_binders.extend(callable_generic_binders(
+                &method.generics,
+                &method_owner,
+                &ids,
+                &mut errors,
+            ));
+            let mut generic_names = BTreeMap::new();
+            let mut generic_parameters = Vec::with_capacity(generic_binders.len());
+            for (name, binder) in generic_binders {
+                if !program.node_meta.contains_key(&binder) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: trait generic parameter '{}' is absent from NodeMeta",
+                            binder.0
+                        ),
+                        method.meta.span,
+                    ));
+                }
+                generic_names.insert(name, binder.clone());
+                generic_parameters.push(binder);
+            }
+            let module = trait_def.name.rsplit_once("::").map(|(module, _)| module);
+            let mut resolve_name = |name: &str| {
+                if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
+                    return Some(primitive);
+                }
+                if let Some(parameter) = generic_names.get(name) {
+                    return Some(crate::core::ResolvedTypeName::GenericParameter(
+                        parameter.clone(),
+                    ));
+                }
+                if let Some(module) = module {
+                    let qualified = format!("{module}::{name}");
+                    if let Some(candidates) = nominal_catalog.get(&qualified) {
+                        if candidates.len() == 1 {
+                            let identity = candidates.iter().next()?.clone();
+                            return crate::core::NominalTypeId::new(identity)
+                                .ok()
+                                .map(crate::core::ResolvedTypeName::Nominal);
+                        }
+                    }
+                }
+                if let Some(primitive) = transparent_alias_primitive_inner(
+                    name,
+                    program,
+                    &mut std::collections::BTreeSet::new(),
+                ) {
+                    return Some(crate::core::ResolvedTypeName::Primitive(primitive));
+                }
+                if let Some(resolved) = resolve_nominal(&nominal_catalog, name) {
+                    return Some(resolved);
+                }
+                builtin_nominal(name).map(crate::core::ResolvedTypeName::Nominal)
+            };
+            let mut parameters = Vec::with_capacity(method.params.len());
+            let mut failed = false;
+            for parameter in &method.params {
+                let parameter_id = ids.anonymous(
+                    &method_owner,
+                    "decl.parameter",
+                    &format!("parameter.{}", stable_id_fragment(&parameter.name)),
+                    usable_span(parameter.meta.span),
+                    parameter.meta.origin,
+                    &mut errors,
+                );
+                if !program.node_meta.contains_key(&parameter_id) {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: trait method parameter '{}' is absent from NodeMeta",
+                            parameter_id.0
+                        ),
+                        parameter.meta.span,
+                    ));
+                }
+                let zonked = match ZonkedTy::from_resolved(parameter.ty.clone()) {
+                    Ok(zonked) => zonked,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: trait method '{}' parameter '{}' is not zonked: {error}",
+                                method.name, parameter.name
+                            ),
+                            parameter.meta.span,
+                        ));
+                        failed = true;
+                        continue;
+                    }
+                };
+                let ty = match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                    Ok(ty) => ty,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: trait method '{}' parameter '{}' is not canonical: {error}",
+                                method.name, parameter.name
+                            ),
+                            parameter.meta.span,
+                        ));
+                        failed = true;
+                        continue;
+                    }
+                };
+                parameters.push(crate::core::ResolvedParameter {
+                    id: crate::core::ResolvedParameterId(parameter_id),
+                    name: parameter.name.clone(),
+                    ty,
+                    mutable: parameter.mut_,
+                    permission: parameter.borrow.map(|permission| match permission {
+                        crate::ast::ParamBorrow::View => crate::core::Permission::View,
+                        crate::ast::ParamBorrow::Mutate => crate::core::Permission::Mutate,
+                    }),
+                    has_default: parameter.default_value.is_some(),
+                });
+            }
+            let result_type = method
+                .ret
+                .clone()
+                .unwrap_or_else(|| Type::Name("unit".into(), Vec::new()));
+            let result = match ZonkedTy::from_resolved(result_type) {
+                Ok(zonked) => {
+                    match types.intern_zonked(&zonked, &capabilities, &mut resolve_name) {
+                        Ok(result) => Some(result),
+                        Err(error) => {
+                            errors.push(Diagnostic::error(
+                                format!(
+                                    "TOOL-RESOLUTION-001: trait method '{}' result is not canonical: {error}",
+                                    method.name
+                                ),
+                                method.meta.span,
+                            ));
+                            None
+                        }
+                    }
+                }
+                Err(error) => {
+                    errors.push(Diagnostic::error(
+                        format!(
+                            "TOOL-RESOLUTION-001: trait method '{}' result is not zonked: {error}",
+                            method.name
+                        ),
+                        method.meta.span,
+                    ));
+                    None
+                }
+            };
+            if failed {
+                continue;
+            }
+            let Some(result) = result else {
+                continue;
+            };
+            let signature = crate::core::ResolvedSignature {
+                owner: method_owner.clone(),
+                generic_parameters,
+                parameters,
+                result,
+                effects: Vec::new(),
+            };
+            if let Err(signature_errors) = signature.validate(&types) {
+                errors.extend(signature_errors.into_iter().map(|error| {
+                    Diagnostic::error(format!("TOOL-RESOLUTION-001: {error}"), method.meta.span)
+                }));
+            } else if trait_signatures.insert(method_owner, signature).is_some() {
+                errors.push(Diagnostic::error(
+                    "TOOL-RESOLUTION-001: duplicate canonical trait method owner",
+                    method.meta.span,
+                ));
+            }
+        }
+    }
+
     // Extern declarations are callable signatures without a ResolvedBody, so
     // their ABI-only parameter types may never occur in expression_types (for
     // example an `f64` declaration called with an i32 widening argument).  The
@@ -9720,9 +10091,50 @@ fn build_canonical_function_signatures(
         }
     }
 
+    // Declaration expressions are typed roots even when no executable
+    // callable exists (extern predicates, constant/actor initializers).
+    // Optional capture failures leave their roots Deferred; never replace them
+    // with guessed i64 types or turn an old legal declaration into a rejection.
+    for (owner, expressions) in expression_types {
+        if program.functions.contains_key(owner)
+            || program
+                .transitions
+                .values()
+                .any(|transition| &transition.node_id == owner)
+        {
+            continue;
+        }
+        for (node, ty) in expressions {
+            if let Ok(canonical) = types.intern_zonked(ty, &capabilities, &mut resolve_extern_name)
+            {
+                node_types.insert(node.clone(), canonical);
+            }
+        }
+    }
+
     let mut transitions = program.transitions.values().collect::<Vec<_>>();
     transitions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     for transition in transitions {
+        let Some(flow_declaration) = program.flows.get(&transition.id.flow) else {
+            errors.push(Diagnostic::error(
+                format!(
+                    "TOOL-RESOLUTION-001: transition '{}' has no owning Flow declaration",
+                    transition.node_id.0
+                ),
+                transition.span,
+            ));
+            continue;
+        };
+        let flow_generic_names = flow_declaration
+            .generic_parameters
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        let flow_generic_binders = flow_declaration
+            .generic_parameters
+            .iter()
+            .map(|(_, binder)| binder.clone())
+            .collect::<Vec<_>>();
         if transition.params.len() != transition.parameter_ids.len() {
             errors.push(Diagnostic::error(
                 format!(
@@ -9755,6 +10167,11 @@ fn build_canonical_function_signatures(
         let mut resolve_name = |name: &str| {
             if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
                 return Some(primitive);
+            }
+            if let Some(parameter) = flow_generic_names.get(name) {
+                return Some(crate::core::ResolvedTypeName::GenericParameter(
+                    parameter.clone(),
+                ));
             }
             let flow_qualified = format!("{}::{name}", transition.id.flow.0);
             if let Some(candidates) = nominal_catalog.get(&flow_qualified) {
@@ -10177,7 +10594,7 @@ fn build_canonical_function_signatures(
         }
         let signature = crate::core::ResolvedSignature {
             owner: transition.node_id.clone(),
-            generic_parameters: Vec::new(),
+            generic_parameters: flow_generic_binders,
             parameters,
             result,
             effects: Vec::new(),
@@ -10495,10 +10912,20 @@ fn build_canonical_function_signatures(
     let mut flows = program.flows.values().collect::<Vec<_>>();
     flows.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     for flow in flows {
+        let flow_generic_names = flow
+            .generic_parameters
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
         let module = flow.id.0.rsplit_once("::").map(|(module, _)| module);
         let mut resolve_name = |name: &str| {
             if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
                 return Some(primitive);
+            }
+            if let Some(parameter) = flow_generic_names.get(name) {
+                return Some(crate::core::ResolvedTypeName::GenericParameter(
+                    parameter.clone(),
+                ));
             }
             if let Some(module) = module {
                 let qualified = format!("{module}::{name}");
@@ -10629,10 +11056,20 @@ fn build_canonical_function_signatures(
         let Some(target_states) = multi_target_states.get(&flow.id.0) else {
             continue;
         };
+        let flow_generic_names = flow
+            .generic_parameters
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
         let module = flow.id.0.rsplit_once("::").map(|(module, _)| module);
         let mut resolve_state_name = |name: &str| {
             if let Some(primitive) = crate::core::ResolvedTypeName::primitive(name) {
                 return Some(primitive);
+            }
+            if let Some(parameter) = flow_generic_names.get(name) {
+                return Some(crate::core::ResolvedTypeName::GenericParameter(
+                    parameter.clone(),
+                ));
             }
             let flow_qualified = format!("{}::{name}", flow.id.0);
             if let Some(candidates) = nominal_catalog.get(&flow_qualified) {
@@ -10709,6 +11146,7 @@ fn build_canonical_function_signatures(
             type_targets,
             type_arguments,
             state_field_types,
+            trait_signatures,
         ))
     } else {
         Err(errors)

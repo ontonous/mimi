@@ -570,6 +570,11 @@ pub struct ResolvedBody {
     pub place_inputs: BTreeMap<NodeId, ResolvedExpr>,
     /// Declaration-owned typed default expressions keyed by parameter identity.
     pub default_values: BTreeMap<ResolvedParameterId, ResolvedExpr>,
+    /// Checker-resolved callable identities indexed by their semantic call
+    /// expression node. This mirrors the `Call` nodes in `root` and lets
+    /// compatibility consumers correlate a source call with its exact
+    /// canonical target without rescanning declaration syntax.
+    pub resolved_calls: BTreeMap<NodeId, ResolvedCallee>,
     pub root: ResolvedBlock,
 }
 
@@ -601,6 +606,41 @@ impl std::fmt::Display for ResolvedBodyError {
 impl std::error::Error for ResolvedBodyError {}
 
 impl ResolvedBody {
+    /// Return the checker-lowered calls by their canonical expression node.
+    /// The same visitor used by body validation traverses statement values,
+    /// defaults, place inputs, nested blocks, and lambda bodies so consumers
+    /// can bind a call receipt to the actual typed argument terms in this
+    /// CheckedProgram body.
+    pub(crate) fn call_expressions(
+        &self,
+        types: &ResolvedTypeTable,
+        type_targets: &std::collections::BTreeMap<crate::core::NodeId, crate::core::ResolvedTypeId>,
+    ) -> Result<BTreeMap<NodeId, ResolvedExpr>, Vec<ResolvedBodyError>> {
+        // Do not let the extraction pass silently last-win duplicate NodeIds
+        // or invalid tree references. Receipts bind only a body that has
+        // passed the same structural/type validation as every other IR
+        // consumer.
+        self.validate(types, type_targets)?;
+        let mut validator = BodyValidator {
+            body: self,
+            types,
+            type_targets,
+            nodes: BTreeSet::new(),
+            pending_nodes: Vec::new(),
+            resolved_calls: BTreeMap::new(),
+            errors: Vec::new(),
+            call_expressions: BTreeMap::new(),
+        };
+        for input in self.place_inputs.values() {
+            validator.visit_expr(input);
+        }
+        for value in self.default_values.values() {
+            validator.visit_expr(value);
+        }
+        validator.visit_block(&self.root);
+        Ok(validator.call_expressions)
+    }
+
     pub fn validate(
         &self,
         types: &ResolvedTypeTable,
@@ -612,7 +652,9 @@ impl ResolvedBody {
             type_targets,
             nodes: BTreeSet::new(),
             pending_nodes: Vec::new(),
+            resolved_calls: BTreeMap::new(),
             errors: Vec::new(),
+            call_expressions: BTreeMap::new(),
         };
         if self.owner.0.trim().is_empty() {
             validator.error(&self.owner, "callable owner identity is empty");
@@ -670,6 +712,22 @@ impl ResolvedBody {
                 );
             }
         }
+        if validator.resolved_calls != self.resolved_calls {
+            let nodes = validator
+                .resolved_calls
+                .keys()
+                .chain(self.resolved_calls.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for node in nodes {
+                if validator.resolved_calls.get(&node) != self.resolved_calls.get(&node) {
+                    validator.error(
+                        &node,
+                        "resolved call target index disagrees with typed body calls",
+                    );
+                }
+            }
+        }
         if validator.errors.is_empty() {
             Ok(())
         } else {
@@ -688,7 +746,9 @@ struct BodyValidator<'a> {
     type_targets: &'a std::collections::BTreeMap<crate::core::NodeId, crate::core::ResolvedTypeId>,
     nodes: BTreeSet<NodeId>,
     pending_nodes: Vec<(NodeId, NodeId, &'static str)>,
+    resolved_calls: BTreeMap<NodeId, ResolvedCallee>,
     errors: Vec<ResolvedBodyError>,
+    call_expressions: BTreeMap<NodeId, ResolvedExpr>,
 }
 
 impl BodyValidator<'_> {
@@ -1026,6 +1086,18 @@ impl BodyValidator<'_> {
             | ResolvedExprKind::Spawn(operand)
             | ResolvedExprKind::Await(operand) => self.visit_expr(operand),
             ResolvedExprKind::Call(call) => {
+                if self
+                    .resolved_calls
+                    .insert(expression.node_id.clone(), call.callee.clone())
+                    .is_some()
+                {
+                    self.error(
+                        &expression.node_id,
+                        "resolved call node occurs more than once",
+                    );
+                }
+                self.call_expressions
+                    .insert(expression.node_id.clone(), expression.clone());
                 self.visit_call(&expression.node_id, call);
                 if call.result != expression.ty {
                     self.error(
@@ -1513,6 +1585,7 @@ mod tests {
             captures: Vec::new(),
             place_inputs: BTreeMap::new(),
             default_values: BTreeMap::new(),
+            resolved_calls: BTreeMap::new(),
             root: ResolvedBlock {
                 node_id: node("block.root"),
                 origin: origin(),

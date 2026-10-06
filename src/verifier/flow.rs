@@ -696,6 +696,42 @@ mod tests {
         assert!(state.is_done());
     }
 
+    fn verify_checked_transition_contract(source: &str) -> Result<Vec<VerificationResult>, String> {
+        let file = parse_source(source)?;
+        let checked = crate::core::check_program(&file).map_err(|errors| format!("{errors:?}"))?;
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        let original = flow_verify_file_with_hashes(&file, source_hash.clone(), String::new())?;
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let typed = crate::verifier::verify_checked(&checked, source_hash.clone())?;
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for result in &typed {
+            let reference = original
+                .iter()
+                .find(|reference| reference.func_name == result.func_name)
+                .expect("existing transition conclusion");
+            assert_eq!(result.status, reference.status);
+            let artifact = result
+                .artifact
+                .as_ref()
+                .expect("canonical transition proof");
+            assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+            assert_eq!(artifact.source_hash, source_hash);
+        }
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let dual = crate::verifier::verify_checked_dual(&checked, source_hash)?;
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        for result in &typed {
+            let merged = dual
+                .iter()
+                .find(|merged| merged.func_name == result.func_name)
+                .expect("independent dual transition owner");
+            if result.status == crate::verifier::VerifStatus::Disproven {
+                assert_eq!(merged.status, crate::verifier::VerifStatus::Disproven);
+            }
+        }
+        Ok(typed)
+    }
+
     // ── M5 (0.35.40): Flow transition typestate context ──
 
     #[test]
@@ -703,7 +739,7 @@ mod tests {
         if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
             return; // Z3 unavailable
         }
-        let results = flow_verify_source_unchecked(
+        let results = verify_checked_transition_contract(
             "flow Counter {
                 state Zero { count: i32 }
                 state Positive { count: i32 }
@@ -732,7 +768,7 @@ mod tests {
         if SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS).is_err() {
             return; // Z3 unavailable
         }
-        let results = flow_verify_source_unchecked(
+        let results = verify_checked_transition_contract(
             "flow Counter {
                 state Zero { count: i32 }
                 state Positive { count: i32 }

@@ -58,6 +58,20 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 self.emit_switch_move(scrutinee, arms, subject)?;
             }
             MirTerminator::Return { value } => {
+                if super::actor_status::is_actor_tagged(self.program, &self.function.owner) {
+                    let value = value.as_ref().ok_or_else(|| {
+                        NativeMirError::new(
+                            subject.to_string(),
+                            "tagged Actor return has no i32 result",
+                        )
+                    })?;
+                    let value = self.value(value, &subject.to_string())?.into_int_value();
+                    return self.emit_actor_status_return(
+                        self.generator.context.i32_type().const_zero(),
+                        value,
+                        &subject.to_string(),
+                    );
+                }
                 // Unit calls still carry a semantic MIR result identity so the
                 // reference/bytecode consumers can preserve call ordering, but
                 // their native ABI has no LLVM value to insert into the return.
@@ -855,6 +869,118 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(())
     }
 
+    /// Trap-only cleanup is derived from the MIR prefix and never updates the
+    /// emitter's normal-path values or the checked ownership ledger.
+    pub(super) fn emit_ordinary_map_trap_cleanup(
+        &mut self,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        if !self
+            .function
+            .ownership
+            .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+            && !self
+                .function
+                .ownership
+                .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+        {
+            return Ok(());
+        }
+        // Map/Any ownership is now admitted alongside ordinary scalar branch
+        // tails.  Trap sites can therefore live in a multi-block MIR graph;
+        // cleanup must use the current block's SSA prefix rather than reject
+        // the whole native route.  Values that cross a CFG edge are explicit
+        // block parameters, so seeding from those parameters plus the local
+        // prefix remains path-local and cannot invent a predecessor owner.
+        let block = self
+            .function
+            .blocks
+            .values()
+            .find(|candidate| {
+                candidate.id.to_string() == subject
+                    || candidate
+                        .instructions
+                        .iter()
+                        .any(|instruction| instruction.id.as_str() == subject)
+            })
+            .ok_or_else(|| {
+                NativeMirError::new(subject, "ordinary Map trap cleanup block is absent")
+            })?;
+        let mut live_roots = Vec::new();
+        let mut subject_found = subject == block.id.to_string();
+        for parameter in &block.parameters {
+            if self
+                .function
+                .values
+                .get(&parameter.value)
+                .is_some_and(|value| {
+                    value.ty
+                    == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+                    || value.ty
+                        == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                })
+            {
+                live_roots.push(parameter.value.clone());
+            }
+        }
+        for instruction in &block.instructions {
+            if instruction.id.as_str() == subject {
+                subject_found = true;
+                break;
+            }
+            match &instruction.kind {
+                MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result }
+                | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { result, .. }
+                | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { result, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { result, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { result, .. } => {
+                    live_roots.push(result.clone());
+                }
+                MirInstructionKind::Clone { result, .. }
+                    if self.function.values.get(result).is_some_and(|value| {
+                        value.ty == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+                            || value.ty == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                    }) =>
+                {
+                    live_roots.push(result.clone());
+                }
+                MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+                    live_roots.retain(|live| live != root);
+                }
+                _ => {}
+            }
+        }
+        if !subject_found {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map trap has no MIR prefix anchor",
+            ));
+        }
+        for root in live_roots.into_iter().rev() {
+            let ty = self.value_type(&root, subject)?;
+            let symbol = if ty
+                == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+            {
+                "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop"
+            } else {
+                "mimi_mir_ordinary_map_owned_get_i32_string_v1_drop"
+            };
+            let drop_fn = self
+                .generator
+                .get_runtime_fn(symbol)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let handle = self.value(&root, subject)?.into_int_value();
+            // Use the raw drop ABI so cleanup cannot recursively emit a guard.
+            self.generator
+                .builder
+                .build_call(drop_fn, &[handle.into()], "mir_ordinary_map_trap_drop")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn emit_overflow_trap(
         &mut self,
         block: BasicBlock<'ctx>,
@@ -862,6 +988,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<(), NativeMirError> {
         self.generator.builder.position_at_end(block);
+        if super::actor_status::is_actor_tagged(self.program, &self.function.owner) {
+            return self.emit_actor_trap_status(802, subject);
+        }
+        self.emit_ordinary_map_trap_cleanup(subject)?;
         let function = self
             .generator
             .get_runtime_fn("mimi_trap_overflow")
@@ -891,6 +1021,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         message: &str,
         subject: &str,
     ) -> Result<(), NativeMirError> {
+        if super::actor_status::is_actor_tagged(self.program, &self.function.owner) {
+            let status = crate::core::mir::actor_trap_status(message)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            return self.emit_actor_trap_status(status, subject);
+        }
+        self.emit_ordinary_map_trap_cleanup(subject)?;
         let function = self.generator.get_or_declare_abort_fn();
         let message = self
             .generator

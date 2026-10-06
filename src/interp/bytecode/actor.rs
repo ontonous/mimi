@@ -446,6 +446,7 @@ impl CanonicalActorManifest {
                 | Op::MulInt { .. }
                 | Op::DivInt { .. }
                 | Op::ModInt { .. }
+                | Op::PowInt { .. }
                 | Op::NegInt { .. }
                 | Op::EqInt { .. }
                 | Op::NeInt { .. }

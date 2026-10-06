@@ -10,15 +10,20 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
+use crate::core::ir::{
+    ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedTypeId, ResolvedUnaryOp,
+};
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
-    MirAbiClass, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeKind,
+    MirAbiClass, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog,
+    MirTypeKind,
 };
 use crate::core::mir::{
-    MirContractKind, MirFunction, MirGenericInstanceContract, MirInstructionKind, MirProjection,
-    MirSwitchCase, MirTerminator, MirValueId,
+    MirContractKind, MirFunction, MirGenericInstanceContract, MirInstance, MirInstructionKind,
+    MirManagedAnyOperation, MirProjection, MirProofLoopEdgeKind, MirSwitchCase, MirTerminator,
+    MirValueId,
 };
+use crate::verifier::checked_power::{CheckedPowerProfile, POWER_PROFILE_0_1_11_COMPAT};
 
 /// Validate the subset of canonical MIR that the MIR verifier can safely
 /// coexist with on the default route.
@@ -29,7 +34,73 @@ use crate::core::mir::{
 /// an unsupported body could silently enter a native/bytecode island merely
 /// because the verifier had no obligation to print.
 pub fn validate_mir_capabilities(program: &MirProgram) -> Result<(), Vec<String>> {
+    // The source census and canonical function shape are mandatory inputs to
+    // capability decisions. Run these before the Actor fast path, DFS cycle
+    // cuts, solver facts, or any per-function capability effects.
+    program.validate_proof_source_census().map_err(|error| {
+        vec![format!(
+            "canonical MIR proof source census rejected: {error:?}"
+        )]
+    })?;
+    let mut structural_errors = Vec::new();
+    for (owner, function) in program.functions() {
+        if let Err(errors) = function.validate() {
+            structural_errors.extend(errors.into_iter().map(|error| {
+                format!(
+                    "canonical MIR structural preflight rejected for '{}': {error}",
+                    owner.0
+                )
+            }));
+        }
+    }
+    if !structural_errors.is_empty() {
+        return Err(structural_errors);
+    }
+    for (owner, function) in program.functions() {
+        let Some(worklist) = function.proof_worklist.as_ref() else {
+            continue;
+        };
+        if worklist_has_mutable_loop(worklist) {
+            // A mutable-loop certificate authorizes CFG cycles. Recompute its
+            // owner coverage, typed receipt, and exact MIR edge correspondence
+            // from the independent source census before the DFS can cut them.
+            program
+                .validate_owner_proof_worklist(owner)
+                .map_err(|error| {
+                    vec![format!("canonical MIR loop preflight rejected: {error:?}")]
+                })?;
+        }
+    }
+    // ClosureBind is metadata only; ClosureInvoke is admitted only by the
+    // checked source seal and direct-call receipt.
+    program.validate_closure_callable_receipts()?;
+    program.validate_actor_contracts()?;
+    program.validate_managed_any_trap_cleanup_instances()?;
+    if program.actor_execution_plan().is_some() {
+        // The finite Actor receipt validates executable structure and lifetime
+        // boundaries. It does not introduce a symbolic mailbox effect model.
+        if program
+            .functions()
+            .values()
+            .any(|function| !function.contracts.is_empty())
+        {
+            return Err(vec![
+                "canonical Actor mailbox effects have no trusted contract proof model".into(),
+            ]);
+        }
+        // The Actor fast path does not enter the ordinary per-function gate,
+        // so run the recursive Any boundary preflight before returning its
+        // neutral capability result. Keep non-Actor diagnostic aggregation
+        // in CapabilityGate below unchanged.
+        program.validate_managed_any_identity_instances()?;
+        return Ok(());
+    }
     let mut gate = CapabilityGate::new(program);
+    if let Err(errors) = program.validate_managed_any_identity_instances() {
+        for message in errors {
+            gate.error(message);
+        }
+    }
     for message in
         crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
     {
@@ -44,6 +115,33 @@ pub fn validate_mir_capabilities(program: &MirProgram) -> Result<(), Vec<String>
     } else {
         Err(gate.errors.into_iter().collect())
     }
+}
+
+fn worklist_has_mutable_loop(worklist: &crate::core::mir::MirProofWorklist) -> bool {
+    fn block_has_mutable_loop(block: &crate::core::mir::MirProofBlock) -> bool {
+        block.operations.iter().any(|operation| match operation {
+            crate::core::mir::MirProofOperation::Loop {
+                stationary: false, ..
+            } => true,
+            crate::core::mir::MirProofOperation::Branch {
+                then_block,
+                else_block,
+                ..
+            } => block_has_mutable_loop(then_block) || block_has_mutable_loop(else_block),
+            crate::core::mir::MirProofOperation::Scope(inner) => block_has_mutable_loop(inner),
+            crate::core::mir::MirProofOperation::Loop { body, .. } => block_has_mutable_loop(body),
+            crate::core::mir::MirProofOperation::Bind { .. }
+            | crate::core::mir::MirProofOperation::Call(_)
+            | crate::core::mir::MirProofOperation::Eval { .. }
+            | crate::core::mir::MirProofOperation::Assign { .. }
+            | crate::core::mir::MirProofOperation::Math(_)
+            | crate::core::mir::MirProofOperation::Break { .. }
+            | crate::core::mir::MirProofOperation::Continue { .. }
+            | crate::core::mir::MirProofOperation::Return { .. }
+            | crate::core::mir::MirProofOperation::Exit => false,
+        })
+    }
+    block_has_mutable_loop(&worklist.root)
 }
 
 struct CapabilityGate<'a> {
@@ -62,6 +160,10 @@ struct CapabilityGate<'a> {
     /// contains the explicit nested tuple projection receipt.  This keeps a
     /// bare `Option<(...)>` constructor/drop body outside the profile.
     allow_nested_option_tuple_variant: bool,
+    /// Exact Result<string, i32> identities created by this profile's typed
+    /// String getter. This managed Result shape is admitted only for these
+    /// checked result values.
+    ordinary_map_owned_get_result_string_types: HashSet<crate::core::ResolvedTypeId>,
 }
 
 impl<'a> CapabilityGate<'a> {
@@ -69,15 +171,20 @@ impl<'a> CapabilityGate<'a> {
         let has_managed_result_call = program.functions().values().any(|function| {
             function.blocks.values().any(|block| {
                 block.instructions.iter().any(|instruction| {
-                    let MirInstructionKind::Call {
-                        result: Some(result),
-                        variant_call_contract: Some(receipt),
-                        ..
-                    } = &instruction.kind
-                    else {
-                        return false;
+                    let (result, has_move_receipt) = match &instruction.kind {
+                        MirInstructionKind::Call {
+                            result: Some(result),
+                            variant_call_contract: Some(receipt),
+                            ..
+                        } => (
+                            result,
+                            receipt.mode
+                                == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned,
+                        ),
+                        MirInstructionKind::ClosureInvoke { .. } => return false,
+                        _ => return false,
                     };
-                    receipt.mode == crate::core::mir::types::MirVariantCallAbiMode::MoveOwned
+                    has_move_receipt
                         && function.values.get(result).is_some_and(|value| {
                             program
                                 .type_catalog()
@@ -125,6 +232,24 @@ impl<'a> CapabilityGate<'a> {
                     )
                 })
             }),
+            ordinary_map_owned_get_result_string_types: program
+                .functions()
+                .values()
+                .flat_map(|function| {
+                    function.blocks.values().flat_map(move |block| {
+                        block.instructions.iter().filter_map(move |instruction| {
+                            let MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString {
+                                result,
+                                ..
+                            } = &instruction.kind
+                            else {
+                                return None;
+                            };
+                            function.values.get(result).map(|value| value.ty.clone())
+                        })
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -144,6 +269,115 @@ impl<'a> CapabilityGate<'a> {
                 "MapRoot TypeDesc presence must match Checker-owned MapRoot action receipts".into(),
             );
         }
+        let map_any_owner_type = crate::core::mir::types::map_any_owner_v1_type_id();
+        let has_map_any_owner_type = self.program.type_catalog().iter().any(|(id, descriptor)| {
+            id == &map_any_owner_type
+                || descriptor.kind == MirTypeKind::MapAnyOwnerV1
+                || descriptor.layout == MirLayout::MapAnyOwnerV1
+        });
+        let has_map_any_owner_receipt = self
+            .program
+            .functions()
+            .values()
+            .any(|function| function.ownership.has_checker_map_any_owner_actions());
+        if has_map_any_owner_type != has_map_any_owner_receipt {
+            self.error(
+                "MapAnyOwner v1 TypeDesc presence must match independent Checker owner receipts"
+                    .into(),
+            );
+        }
+        if has_map_any_owner_type {
+            self.validate_map_any_owner_descriptor();
+        }
+        let has_managed_any_type = self.program.type_catalog().iter().any(|(_, descriptor)| {
+            descriptor.kind == MirTypeKind::ManagedAnyI32StringV1
+                || descriptor.layout == MirLayout::ManagedAnyI32StringV1
+        });
+        // Both the tuple-valued `map_get` and the owned `values()` snapshot
+        // materialize the same checker-authorized ManagedAny element
+        // descriptor.  Keep the capability census aligned with the TypeDesc
+        // materializer: a values-only callable still has a legitimate
+        // ManagedAny producer even though it has no GetAny tuple instruction.
+        let has_get_any = self.program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+                    )
+                })
+            })
+        });
+        let has_checked_i32_pack = self.program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::ManagedAny {
+                            operation: MirManagedAnyOperation::PackI32,
+                            contract: Some(_),
+                            ..
+                        }
+                    )
+                })
+            })
+        });
+        if has_managed_any_type != (has_get_any || has_checked_i32_pack) {
+            self.error("ManagedAny TypeDesc presence must match a separately Checker-receipted GetAny/Values or exact i32-pack producer".into());
+        }
+        let ordinary_map_owner_ty =
+            crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+        let has_ordinary_map_owner_type = self.program.type_catalog().iter().any(|(id, desc)| {
+            id == &ordinary_map_owner_ty
+                || desc.kind == MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+                || desc.layout == MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
+        });
+        let has_ordinary_map_owner_receipt = self.program.functions().values().any(|function| {
+            function
+                .ownership
+                .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+        });
+        if has_ordinary_map_owner_type != has_ordinary_map_owner_receipt {
+            self.error(
+                "ordinary Map owner lifecycle v1 TypeDesc presence must match its independent Checker receipt".into(),
+            );
+        }
+        if has_ordinary_map_owner_type {
+            self.validate_ordinary_map_owner_descriptor();
+        }
+        let ordinary_map_owned_get_ty =
+            crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+        let has_ordinary_map_owned_get_type =
+            self.program.type_catalog().iter().any(|(id, descriptor)| {
+                id == &ordinary_map_owned_get_ty
+                    || descriptor.kind == MirTypeKind::OrdinaryMapOwnedGetI32StringV1
+                    || descriptor.layout == MirLayout::OrdinaryMapOwnedGetI32StringV1
+            });
+        let has_ordinary_map_owned_get_receipt =
+            self.program.functions().values().any(|function| {
+                function
+                    .ownership
+                    .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+            });
+        if has_ordinary_map_owned_get_type != has_ordinary_map_owned_get_receipt {
+            self.error(
+                "ordinary Map owned-get v1 TypeDesc presence must match its independent Checker receipt".into(),
+            );
+        }
+        if has_ordinary_map_owned_get_type {
+            self.validate_ordinary_map_owned_get_descriptor();
+        }
+        if (has_map_root_type && has_map_any_owner_type)
+            || (has_map_root_type && has_ordinary_map_owner_type)
+            || (has_map_any_owner_type && has_ordinary_map_owner_type)
+            || (has_ordinary_map_owned_get_type
+                && (has_map_root_type || has_map_any_owner_type || has_ordinary_map_owner_type))
+        {
+            self.error(
+                "MapRoot, MapAnyOwner v1, ordinary Map owner lifecycle v1, and ordinary Map owned-get v1 descriptors are independent profiles and cannot share one MIR program".into(),
+            );
+        }
         for function in self.program.functions().values() {
             self.validate_function(function);
         }
@@ -156,6 +390,30 @@ impl<'a> CapabilityGate<'a> {
                 continue;
             };
             match &instance.contract {
+                MirGenericInstanceContract::ManagedAnyIdentity => {
+                    if let Err(message) = self
+                        .program
+                        .type_catalog()
+                        .validate_managed_any_identity_instance(instance, function)
+                    {
+                        self.error(format!(
+                            "instance '{}' ManagedAny identity receipt rejected: {message}",
+                            instance.id
+                        ));
+                    }
+                }
+                MirGenericInstanceContract::ManagedAnyTrapCleanup { .. } => {
+                    if let Err(message) = self
+                        .program
+                        .type_catalog()
+                        .validate_managed_any_trap_cleanup_instance(instance, function)
+                    {
+                        self.error(format!(
+                            "instance '{}' ManagedAny trap-cleanup receipt rejected: {message}",
+                            instance.id
+                        ));
+                    }
+                }
                 MirGenericInstanceContract::ScalarIdentity
                 | MirGenericInstanceContract::OwnedStringIdentity => {
                     if let Err(message) = self
@@ -452,6 +710,48 @@ impl<'a> CapabilityGate<'a> {
     }
 
     fn validate_function(&mut self, function: &MirFunction) {
+        let has_managed_any = crate::verifier::mir::direct_call_uses_managed_any(
+            function,
+            self.program.type_catalog(),
+        );
+        if has_managed_any
+            || function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction.kind, MirInstructionKind::ManagedAny { .. })
+                })
+            })
+        {
+            if let Err(errors) = function.validate() {
+                for error in errors {
+                    self.error(format!(
+                        "function '{}' ManagedAny sealed Checker receipt rejected: {error}",
+                        function.owner.0
+                    ));
+                }
+            }
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_managed_any_function(function)
+            {
+                self.error(format!(
+                    "function '{}' ManagedAny owner ledger rejected: {message}",
+                    function.owner.0
+                ));
+            }
+        }
+        let map_any_owner_ty = crate::core::mir::types::map_any_owner_v1_type_id();
+        let has_map_any_owner = function.result == map_any_owner_ty
+            || function
+                .values
+                .values()
+                .any(|value| value.ty == map_any_owner_ty)
+            || function.ownership.has_checker_map_any_owner_actions()
+            || function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    instruction_touches_map_any_owner(function, &instruction.kind)
+                })
+            });
         let has_map_root = function.result == crate::core::mir::types::map_root_type_id()
             || function
                 .values
@@ -460,22 +760,136 @@ impl<'a> CapabilityGate<'a> {
             || function.ownership.has_checker_map_root_actions()
             || function.blocks.values().any(|block| {
                 block.instructions.iter().any(|instruction| {
-                    matches!(
-                        instruction.kind,
-                        MirInstructionKind::MapRootNew { .. }
-                            | MirInstructionKind::MapRootSet { .. }
-                            | MirInstructionKind::MapRootRemove { .. }
-                            | MirInstructionKind::MapRootSize { .. }
-                            | MirInstructionKind::MapRootContains { .. }
-                            | MirInstructionKind::MapRootDrop { .. }
-                    )
+                    is_map_root_operation(&instruction.kind)
+                        && !instruction_touches_map_any_owner(function, &instruction.kind)
                 })
             });
+        let ordinary_map_owner_ty =
+            crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+        let has_ordinary_map_owner = function.result == ordinary_map_owner_ty
+            || function
+                .values
+                .values()
+                .any(|value| value.ty == ordinary_map_owner_ty)
+            || function
+                .ownership
+                .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+            || function.blocks.values().any(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| instruction_touches_ordinary_map_owner(&instruction.kind))
+            });
+        let ordinary_map_owned_get_ty =
+            crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+        let has_ordinary_map_owned_get = function.result == ordinary_map_owned_get_ty
+            || function
+                .values
+                .values()
+                .any(|value| value.ty == ordinary_map_owned_get_ty)
+            || function
+                .ownership
+                .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+            || function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    instruction_touches_ordinary_map_owned_get(&instruction.kind)
+                })
+            });
+        if (has_map_any_owner && has_map_root)
+            || (has_ordinary_map_owner && has_map_any_owner)
+            || (has_ordinary_map_owner && has_map_root)
+            || (has_ordinary_map_owned_get
+                && (has_ordinary_map_owner || has_map_any_owner || has_map_root))
+        {
+            self.error(format!(
+                "function '{}' mixes independent MapRoot, MapAnyOwner v1, ordinary Map owner lifecycle v1, or ordinary Map owned-get v1 ownership profiles",
+                function.owner.0
+            ));
+        }
+        if has_map_any_owner {
+            if !function.ownership.has_checker_map_any_owner_actions() {
+                self.error(format!(
+                    "function '{}' uses MapAnyOwner v1 without an independent Checker owner receipt",
+                    function.owner.0
+                ));
+            }
+            if function.ownership.has_checker_map_root_actions() {
+                self.error(format!(
+                    "function '{}' raw MapRoot receipt cannot authorize MapAnyOwner v1 operations",
+                    function.owner.0
+                ));
+            }
+            if let Err(errors) = function.validate() {
+                for error in errors {
+                    self.error(format!(
+                        "function '{}' MapAnyOwner v1 MIR validation failed: {error}",
+                        function.owner.0
+                    ));
+                }
+            }
+        }
         if has_map_root {
             if let Err(errors) = function.validate() {
                 for error in errors {
                     self.error(format!(
                         "function '{}' MapRoot MIR validation failed: {error}",
+                        function.owner.0
+                    ));
+                }
+            }
+        }
+        if has_ordinary_map_owner {
+            if !function
+                .ownership
+                .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+            {
+                self.error(format!(
+                    "function '{}' uses ordinary Map owner lifecycle v1 without its independent Checker receipt",
+                    function.owner.0
+                ));
+            }
+            if function.ownership.has_checker_map_root_actions()
+                || function.ownership.has_checker_map_any_owner_actions()
+            {
+                self.error(format!(
+                    "function '{}' ordinary Map owner lifecycle v1 cannot borrow another Map profile receipt",
+                    function.owner.0
+                ));
+            }
+            if let Err(errors) = function.validate() {
+                for error in errors {
+                    self.error(format!(
+                        "function '{}' ordinary Map owner lifecycle v1 MIR validation failed: {error}",
+                        function.owner.0
+                    ));
+                }
+            }
+        }
+        if has_ordinary_map_owned_get {
+            if !function
+                .ownership
+                .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+            {
+                self.error(format!(
+                    "function '{}' uses ordinary Map owned-get v1 without its independent Checker receipt",
+                    function.owner.0
+                ));
+            }
+            if function.ownership.has_checker_map_root_actions()
+                || function.ownership.has_checker_map_any_owner_actions()
+                || function
+                    .ownership
+                    .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+            {
+                self.error(format!(
+                    "function '{}' ordinary Map owned-get v1 cannot borrow another Map profile receipt",
+                    function.owner.0
+                ));
+            }
+            if let Err(errors) = function.validate() {
+                for error in errors {
+                    self.error(format!(
+                        "function '{}' ordinary Map owned-get v1 MIR validation failed: {error}",
                         function.owner.0
                     ));
                 }
@@ -488,15 +902,8 @@ impl<'a> CapabilityGate<'a> {
             &function.result,
             &format!("function '{}' result", function.owner.0),
         );
-        if function
-            .contracts
-            .iter()
-            .any(|contract| contract.kind == MirContractKind::Invariant)
-        {
-            self.error(format!(
-                "function '{}' has an invariant contract outside the MIR verifier capability",
-                function.owner.0
-            ));
+        if let Err(message) = crate::core::mir::validate_entry_invariant_shapes(function) {
+            self.error(format!("function '{}' {message}", function.owner.0));
         }
         self.validate_acyclic_cfg(function);
         for block in function.blocks.values() {
@@ -548,6 +955,15 @@ impl<'a> CapabilityGate<'a> {
                 ));
             }
         }
+        if has_map_any_owner {
+            self.validate_map_any_owner_function(function);
+        }
+        if has_ordinary_map_owner {
+            self.validate_ordinary_map_owner_function(function);
+        }
+        if has_ordinary_map_owned_get {
+            self.validate_ordinary_map_owned_get_function(function);
+        }
     }
 
     fn validate_map_root_type(
@@ -564,6 +980,612 @@ impl<'a> CapabilityGate<'a> {
         {
             self.error(format!(
                 "{subject} MapRoot {role} does not use the canonical MapRoot TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_map_any_owner_descriptor(&mut self) {
+        let ty = crate::core::mir::types::map_any_owner_v1_type_id();
+        let catalog = self.program.type_catalog();
+        for operation in [MirGlueOperation::MoveOut, MirGlueOperation::Drop] {
+            if let Err(message) = catalog.validate_glue(&ty, operation) {
+                self.error(format!("MapAnyOwner v1 TypeDesc rejected: {message}"));
+            }
+        }
+        if catalog.validate_glue(&ty, MirGlueOperation::Clone).is_ok() {
+            self.error("MapAnyOwner v1 TypeDesc unexpectedly exposes generic Clone glue".into());
+        }
+    }
+
+    fn validate_ordinary_map_owner_descriptor(&mut self) {
+        let ty = crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+        let catalog = self.program.type_catalog();
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            if let Err(message) = catalog.validate_glue(&ty, operation) {
+                self.error(format!(
+                    "ordinary Map owner lifecycle v1 TypeDesc rejected: {message}"
+                ));
+            }
+        }
+    }
+
+    fn validate_ordinary_map_owned_get_descriptor(&mut self) {
+        let ty = crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+        let catalog = self.program.type_catalog();
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            if let Err(message) = catalog.validate_glue(&ty, operation) {
+                self.error(format!(
+                    "ordinary Map owned-get v1 TypeDesc rejected: {message}"
+                ));
+            }
+        }
+    }
+
+    fn validate_ordinary_map_owned_get_function(&mut self, function: &MirFunction) {
+        let owner_ty = crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+        if function.result == owner_ty {
+            self.error(format!(
+                "function '{}' cannot return an ordinary Map owned-get v1 root",
+                function.owner.0
+            ));
+        }
+        for parameter in &function.parameters {
+            if function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_ty)
+            {
+                self.error(format!(
+                    "function '{}' cannot receive an ordinary Map owned-get v1 root as a parameter",
+                    function.owner.0
+                ));
+            }
+        }
+        for block in function.blocks.values() {
+            for parameter in &block.parameters {
+                if function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_ty)
+                {
+                    self.error(format!(
+                        "function '{}' cannot receive an ordinary Map owned-get v1 root as a block parameter",
+                        function.owner.0
+                    ));
+                }
+            }
+            for instruction in &block.instructions {
+                if instruction_touches_ordinary_map_owned_get(&instruction.kind)
+                    || (matches!(&instruction.kind, MirInstructionKind::Clone { .. })
+                        && instruction_touches_ordinary_map_owned_get_type(
+                            function,
+                            &instruction.kind,
+                        ))
+                {
+                    self.validate_ordinary_map_owned_get_instruction(
+                        function,
+                        &instruction.kind,
+                        instruction.id.as_str(),
+                    );
+                } else if instruction_touches_ordinary_map_owned_get_type(
+                    function,
+                    &instruction.kind,
+                ) {
+                    self.error(format!(
+                        "{} ordinary Map owned-get v1 value is used outside its dedicated receipt-bound operation",
+                        instruction.id
+                    ));
+                }
+            }
+        }
+    }
+
+    fn validate_ordinary_map_owned_get_instruction(
+        &mut self,
+        function: &MirFunction,
+        instruction: &MirInstructionKind,
+        subject: &str,
+    ) {
+        match instruction {
+            MirInstructionKind::Clone { result, source } => {
+                self.validate_ordinary_map_owned_get_type(
+                    function,
+                    result,
+                    subject,
+                    "Clone result",
+                );
+                self.validate_ordinary_map_owned_get_type(
+                    function,
+                    source,
+                    subject,
+                    "Clone source",
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result } => {
+                self.validate_ordinary_map_owned_get_type(function, result, subject, "New result");
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.validate_ordinary_map_owned_get_type(function, result, subject, "Set result");
+                self.validate_ordinary_map_owned_get_type(function, source, subject, "Set source");
+                self.validate_owned_get_string_value(function, key, subject, "Set key");
+                self.validate_map_set_payload(
+                    function,
+                    value,
+                    subject,
+                    "ordinary Map owned-get v1",
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove {
+                result,
+                source,
+                key,
+            } => {
+                self.validate_ordinary_map_owned_get_type(
+                    function,
+                    result,
+                    subject,
+                    "Remove result",
+                );
+                self.validate_ordinary_map_owned_get_type(
+                    function,
+                    source,
+                    subject,
+                    "Remove source",
+                );
+                self.validate_owned_get_string_value(function, key, subject, "Remove key");
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { result, root } => {
+                self.validate_ordinary_map_owned_get_type(function, root, subject, "Size root");
+                self.validate_i32_value(
+                    function,
+                    result,
+                    subject,
+                    "ordinary Map owned-get v1 Size result",
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { result, root, key } => {
+                self.validate_ordinary_map_owned_get_type(function, root, subject, "Contains root");
+                self.validate_bool_value(
+                    function,
+                    result,
+                    subject,
+                    "ordinary Map owned-get v1 Contains result",
+                );
+                self.validate_owned_get_string_value(function, key, subject, "Contains key");
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { result, root, key } => {
+                self.validate_ordinary_map_owned_get_type(function, root, subject, "GetI32 root");
+                self.validate_owned_get_string_value(function, key, subject, "GetI32 key");
+                self.validate_owned_get_result(function, result, subject, false);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { result, root, key } => {
+                self.validate_ordinary_map_owned_get_type(
+                    function,
+                    root,
+                    subject,
+                    "GetString root",
+                );
+                self.validate_owned_get_string_value(function, key, subject, "GetString key");
+                self.validate_owned_get_result(function, result, subject, true);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { result, root, key } => {
+                self.validate_ordinary_map_owned_get_type(function, root, subject, "GetAny root");
+                self.validate_owned_get_string_value(function, key, subject, "GetAny key");
+                let validation = value_type(function, result)
+                    .ok_or_else(|| "GetAny result value is absent".to_string())
+                    .and_then(|ty| {
+                        self.program
+                            .type_catalog()
+                            .validate_ordinary_map_owned_get_any_result_type(&ty)
+                    });
+                if let Err(message) = validation {
+                    self.error(format!(
+                        "{subject} ordinary Map GetAny result rejected: {message}"
+                    ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { result, root } => {
+                self.validate_ordinary_map_owned_get_type(function, root, subject, "Values root");
+                self.validate_owned_get_values_result(function, result, subject);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+                self.validate_ordinary_map_owned_get_type(function, root, subject, "Drop operand");
+            }
+            _ => self.error(format!(
+                "{subject} is not a dedicated ordinary Map owned-get v1 operation"
+            )),
+        }
+    }
+
+    fn validate_ordinary_map_owned_get_type(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        if function.values.get(value).is_none_or(|value| {
+            value.ty != crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+        }) {
+            self.error(format!(
+                "{subject} ordinary Map owned-get v1 {role} does not use its distinct canonical TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_owned_get_string_value(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        let valid = function
+            .values
+            .get(value)
+            .and_then(|value| self.program.type_catalog().get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                    && self
+                        .program
+                        .type_catalog()
+                        .validate_owned_string(&descriptor.id)
+                        .is_ok()
+            });
+        if !valid {
+            self.error(format!(
+                "{subject} ordinary Map owned-get v1 {role} is not the canonical owned String TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_owned_get_result(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        subject: &str,
+        string_payload: bool,
+    ) {
+        let Some(ty) = value_type(function, result) else {
+            self.error(format!("{subject} ordinary Map owned-get result is absent"));
+            return;
+        };
+        let validation = if string_payload {
+            self.program
+                .type_catalog()
+                .validate_result_string_i32_variant(&ty)
+        } else {
+            self.program
+                .type_catalog()
+                .validate_copy_result_i32_variant(&ty)
+        };
+        if let Err(message) = validation {
+            let shape = if string_payload {
+                "Result<string, i32>"
+            } else {
+                "Result<i32, i32>"
+            };
+            self.error(format!(
+                "{subject} ordinary Map owned-get result must use canonical {shape}: {message}"
+            ));
+        }
+    }
+
+    fn validate_owned_get_values_result(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        subject: &str,
+    ) {
+        let Some(ty) = value_type(function, result) else {
+            self.error(format!("{subject} ordinary Map Values result is absent"));
+            return;
+        };
+        if !is_canonical_managed_any_list_type(self.program.type_catalog(), &ty) {
+            self.error(format!(
+                "{subject} ordinary Map Values result must use canonical owned List<ManagedAny> TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_ordinary_map_owner_function(&mut self, function: &MirFunction) {
+        let owner_ty =
+            crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+        if function.result == owner_ty {
+            self.error(format!(
+                "function '{}' cannot return an ordinary Map owner lifecycle v1 root",
+                function.owner.0
+            ));
+        }
+        for parameter in &function.parameters {
+            if function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_ty)
+            {
+                self.error(format!(
+                    "function '{}' cannot receive an ordinary Map owner lifecycle v1 root as a parameter",
+                    function.owner.0
+                ));
+            }
+        }
+        for block in function.blocks.values() {
+            for parameter in &block.parameters {
+                if function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_ty)
+                {
+                    self.error(format!(
+                        "function '{}' cannot receive an ordinary Map owner lifecycle v1 root as a block parameter",
+                        function.owner.0
+                    ));
+                }
+            }
+            for instruction in &block.instructions {
+                let is_owner_clone = matches!(&instruction.kind, MirInstructionKind::Clone { .. })
+                    && instruction_touches_ordinary_type(function, &instruction.kind);
+                if instruction_touches_ordinary_map_owner(&instruction.kind) || is_owner_clone {
+                    self.validate_ordinary_map_owner_instruction(
+                        function,
+                        &instruction.kind,
+                        instruction.id.as_str(),
+                    );
+                }
+                if instruction_touches_ordinary_type(function, &instruction.kind)
+                    && !instruction_touches_ordinary_map_owner(&instruction.kind)
+                    && !is_owner_clone
+                {
+                    self.error(format!(
+                        "{} ordinary Map owner lifecycle v1 value is used outside its dedicated receipt-bound operation",
+                        instruction.id
+                    ));
+                }
+            }
+        }
+    }
+
+    fn validate_ordinary_map_owner_instruction(
+        &mut self,
+        function: &MirFunction,
+        instruction: &MirInstructionKind,
+        subject: &str,
+    ) {
+        match instruction {
+            MirInstructionKind::Clone { result, source } => {
+                self.validate_ordinary_map_owner_type(function, result, subject, "Clone result");
+                self.validate_ordinary_map_owner_type(function, source, subject, "Clone source");
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result } => {
+                self.validate_ordinary_map_owner_type(function, result, subject, "New result");
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.validate_ordinary_map_owner_type(function, result, subject, "Set result");
+                self.validate_ordinary_map_owner_type(function, source, subject, "Set source");
+                self.validate_owned_string_value(function, key, subject, "Set key");
+                self.validate_map_set_payload(
+                    function,
+                    value,
+                    subject,
+                    "ordinary Map owner lifecycle v1",
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleRemove {
+                result,
+                source,
+                key,
+            } => {
+                self.validate_ordinary_map_owner_type(function, result, subject, "Remove result");
+                self.validate_ordinary_map_owner_type(function, source, subject, "Remove source");
+                self.validate_owned_string_value(function, key, subject, "Remove key");
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, root } => {
+                self.validate_ordinary_map_owner_type(function, root, subject, "Size root");
+                self.validate_i32_value(
+                    function,
+                    result,
+                    subject,
+                    "ordinary Map owner lifecycle v1 Size result",
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, root, key } => {
+                self.validate_ordinary_map_owner_type(function, root, subject, "Contains root");
+                self.validate_bool_value(
+                    function,
+                    result,
+                    subject,
+                    "ordinary Map owner lifecycle v1 Contains result",
+                );
+                self.validate_owned_string_value(function, key, subject, "Contains key");
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root } => {
+                self.validate_ordinary_map_owner_type(function, root, subject, "Drop operand");
+            }
+            _ => self.error(format!(
+                "{subject} is not a dedicated ordinary Map owner lifecycle v1 operation"
+            )),
+        }
+    }
+
+    fn validate_ordinary_map_owner_type(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        if function.values.get(value).is_none_or(|value| {
+            value.ty
+                != crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+        }) {
+            self.error(format!(
+                "{subject} ordinary Map owner lifecycle v1 {role} does not use its canonical TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_owned_string_value(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        let valid = function
+            .values
+            .get(value)
+            .and_then(|value| self.program.type_catalog().get(&value.ty))
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+                    && self
+                        .program
+                        .type_catalog()
+                        .validate_owned_string(&descriptor.id)
+                        .is_ok()
+            });
+        if !valid {
+            self.error(format!(
+                "{subject} ordinary Map owner lifecycle v1 {role} is not the canonical owned String TypeDesc"
+            ));
+        }
+    }
+
+    fn validate_map_any_owner_function(&mut self, function: &MirFunction) {
+        let owner_ty = crate::core::mir::types::map_any_owner_v1_type_id();
+        if function.result == owner_ty {
+            self.error(format!(
+                "function '{}' cannot return a MapAnyOwner v1 root",
+                function.owner.0
+            ));
+        }
+        for parameter in &function.parameters {
+            if function
+                .values
+                .get(parameter)
+                .is_some_and(|value| value.ty == owner_ty)
+            {
+                self.error(format!(
+                    "function '{}' cannot receive a MapAnyOwner v1 root as a parameter",
+                    function.owner.0
+                ));
+            }
+        }
+        for block in function.blocks.values() {
+            for parameter in &block.parameters {
+                if function
+                    .values
+                    .get(&parameter.value)
+                    .is_some_and(|value| value.ty == owner_ty)
+                {
+                    self.error(format!(
+                        "function '{}' cannot receive a MapAnyOwner v1 root as a block parameter",
+                        function.owner.0
+                    ));
+                }
+            }
+            for instruction in &block.instructions {
+                if instruction_touches_map_any_owner(function, &instruction.kind) {
+                    self.validate_map_any_owner_instruction(
+                        function,
+                        &instruction.kind,
+                        instruction.id.as_str(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn validate_map_any_owner_instruction(
+        &mut self,
+        function: &MirFunction,
+        instruction: &MirInstructionKind,
+        subject: &str,
+    ) {
+        match instruction {
+            MirInstructionKind::MapRootNew { result } => {
+                self.validate_map_any_owner_type(function, result, subject, "New result");
+            }
+            MirInstructionKind::MapRootSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.validate_map_any_owner_type(function, result, subject, "Set result");
+                self.validate_map_any_owner_type(function, source, subject, "Set source");
+                if key.contains('\0') {
+                    self.error(format!("{subject} MapAnyOwner v1 key contains NUL"));
+                }
+                self.validate_map_any_owner_set_payload(function, value, subject);
+            }
+            MirInstructionKind::MapRootRemove {
+                result,
+                source,
+                key,
+            } => {
+                self.validate_map_any_owner_type(function, result, subject, "Remove result");
+                self.validate_map_any_owner_type(function, source, subject, "Remove source");
+                if key.contains('\0') {
+                    self.error(format!("{subject} MapAnyOwner v1 key contains NUL"));
+                }
+            }
+            MirInstructionKind::MapRootSize { result, root } => {
+                self.validate_map_any_owner_type(function, root, subject, "Size root");
+                self.validate_i32_value(function, result, subject, "MapAnyOwner v1 Size result");
+            }
+            MirInstructionKind::MapRootContains { result, root, key } => {
+                self.validate_map_any_owner_type(function, root, subject, "Contains root");
+                self.validate_bool_value(
+                    function,
+                    result,
+                    subject,
+                    "MapAnyOwner v1 Contains result",
+                );
+                if key.contains('\0') {
+                    self.error(format!("{subject} MapAnyOwner v1 key contains NUL"));
+                }
+            }
+            MirInstructionKind::MapRootDrop { root } => {
+                self.validate_map_any_owner_type(function, root, subject, "Drop operand");
+            }
+            _ => self.error(format!(
+                "{subject} is not a dedicated MapAnyOwner v1 lifecycle operation"
+            )),
+        }
+    }
+
+    fn validate_map_any_owner_type(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+        role: &str,
+    ) {
+        if function
+            .values
+            .get(value)
+            .is_none_or(|value| value.ty != crate::core::mir::types::map_any_owner_v1_type_id())
+        {
+            self.error(format!(
+                "{subject} MapAnyOwner v1 {role} does not use the canonical v1 TypeDesc"
             ));
         }
     }
@@ -626,6 +1648,25 @@ impl<'a> CapabilityGate<'a> {
         value: &crate::core::mir::MirValueId,
         subject: &str,
     ) {
+        self.validate_map_set_payload(function, value, subject, "MapRoot");
+    }
+
+    fn validate_map_any_owner_set_payload(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+    ) {
+        self.validate_map_set_payload(function, value, subject, "MapAnyOwner v1");
+    }
+
+    fn validate_map_set_payload(
+        &mut self,
+        function: &MirFunction,
+        value: &crate::core::mir::MirValueId,
+        subject: &str,
+        profile: &str,
+    ) {
         let valid = function
             .values
             .get(value)
@@ -645,7 +1686,7 @@ impl<'a> CapabilityGate<'a> {
             });
         if !valid {
             self.error(format!(
-                "{subject} MapRoot Set payload is outside the receipted i32/String TypeDesc profile"
+                "{subject} {profile} Set payload is outside the receipted i32/String TypeDesc profile"
             ));
         }
     }
@@ -717,6 +1758,44 @@ impl<'a> CapabilityGate<'a> {
                 }
                 Ok(())
             }
+            MirLayout::MapAnyOwnerV1 => {
+                catalog.validate_glue(ty, MirGlueOperation::MoveOut)?;
+                catalog.validate_glue(ty, MirGlueOperation::Drop)?;
+                if catalog.validate_glue(ty, MirGlueOperation::Clone).is_ok() {
+                    return Err(
+                        "MapAnyOwner v1 TypeDesc unexpectedly exposes generic Clone glue".into(),
+                    );
+                }
+                Ok(())
+            }
+            MirLayout::OrdinaryMapOwnerLifecycleI32StringV1 => {
+                catalog.validate_glue(ty, MirGlueOperation::MoveOut)?;
+                catalog.validate_glue(ty, MirGlueOperation::Clone)?;
+                catalog.validate_glue(ty, MirGlueOperation::Drop)?;
+                Ok(())
+            }
+            MirLayout::OrdinaryMapOwnedGetI32StringV1 => {
+                catalog.validate_glue(ty, MirGlueOperation::MoveOut)?;
+                catalog.validate_glue(ty, MirGlueOperation::Clone)?;
+                catalog.validate_glue(ty, MirGlueOperation::Drop)?;
+                Ok(())
+            }
+            MirLayout::ManagedAnyI32StringV1 => {
+                if !catalog.is_managed_any_i32_string_v1(ty) {
+                    return Err(
+                        "ManagedAny TypeDesc identity does not match its canonical owner profile"
+                            .into(),
+                    );
+                }
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    catalog.validate_glue(ty, operation)?;
+                }
+                Ok(())
+            }
             MirLayout::List { element } => {
                 catalog
                     .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)?;
@@ -746,7 +1825,7 @@ impl<'a> CapabilityGate<'a> {
                             "record '{}' ownership {:?} is outside the verifier capability",
                             ty.as_str(),
                             ownership
-                        ))
+                        ));
                     }
                 }
                 for field in fields {
@@ -762,6 +1841,10 @@ impl<'a> CapabilityGate<'a> {
                         && matches!(descriptor.kind, MirTypeKind::Result)
                     {
                         catalog.validate_recoverable_result_variant(ty)
+                    } else if self.ordinary_map_owned_get_result_string_types.contains(ty)
+                        && matches!(descriptor.kind, MirTypeKind::Result)
+                    {
+                        catalog.validate_result_string_i32_variant(ty)
                     } else if self.allow_result_move_variant
                         && matches!(descriptor.kind, MirTypeKind::Result)
                     {
@@ -907,8 +1990,20 @@ impl<'a> CapabilityGate<'a> {
     ) {
         let catalog = self.program.type_catalog();
         match instruction {
+            MirInstructionKind::ManagedAny { result, source, operation, contract } => {
+                if let Err(message) = catalog.validate_managed_any_contract(
+                    function, source, result.as_ref(), *operation, contract.as_ref())
+                {
+                    self.error(format!("{subject} ManagedAny contract rejected: {message}"));
+                }
+            }
+            MirInstructionKind::Actor { .. } => self.error(format!("{subject}: Actor mailbox/state instruction requires its complete finite execution receipt and no proof obligations")),
             MirInstructionKind::MapRootNew { result } => {
-                self.validate_map_root_type(function, result, subject, "New result");
+                if instruction_touches_map_any_owner(function, instruction) {
+                    self.validate_map_any_owner_instruction(function, instruction, subject);
+                } else {
+                    self.validate_map_root_type(function, result, subject, "New result");
+                }
             }
             MirInstructionKind::MapRootSet {
                 result,
@@ -916,37 +2011,77 @@ impl<'a> CapabilityGate<'a> {
                 key,
                 value,
             } => {
-                self.validate_map_root_type(function, result, subject, "Set result");
-                self.validate_map_root_type(function, source, subject, "Set source");
-                if key.contains('\0') {
-                    self.error(format!("{subject} MapRoot key contains NUL"));
+                if instruction_touches_map_any_owner(function, instruction) {
+                    self.validate_map_any_owner_instruction(function, instruction, subject);
+                } else {
+                    self.validate_map_root_type(function, result, subject, "Set result");
+                    self.validate_map_root_type(function, source, subject, "Set source");
+                    if key.contains('\0') {
+                        self.error(format!("{subject} MapRoot key contains NUL"));
+                    }
+                    self.validate_map_root_set_payload(function, value, subject);
                 }
-                self.validate_map_root_set_payload(function, value, subject);
             }
             MirInstructionKind::MapRootRemove {
                 result,
                 source,
                 key,
             } => {
-                self.validate_map_root_type(function, result, subject, "Remove result");
-                self.validate_map_root_type(function, source, subject, "Remove source");
-                if key.contains('\0') {
-                    self.error(format!("{subject} MapRoot key contains NUL"));
+                if instruction_touches_map_any_owner(function, instruction) {
+                    self.validate_map_any_owner_instruction(function, instruction, subject);
+                } else {
+                    self.validate_map_root_type(function, result, subject, "Remove result");
+                    self.validate_map_root_type(function, source, subject, "Remove source");
+                    if key.contains('\0') {
+                        self.error(format!("{subject} MapRoot key contains NUL"));
+                    }
                 }
             }
             MirInstructionKind::MapRootSize { result, root } => {
-                self.validate_map_root_type(function, root, subject, "Size root");
-                self.validate_i32_value(function, result, subject, "MapRoot Size result");
+                if instruction_touches_map_any_owner(function, instruction) {
+                    self.validate_map_any_owner_instruction(function, instruction, subject);
+                } else {
+                    self.validate_map_root_type(function, root, subject, "Size root");
+                    self.validate_i32_value(function, result, subject, "MapRoot Size result");
+                }
             }
             MirInstructionKind::MapRootContains { result, root, key } => {
-                self.validate_map_root_type(function, root, subject, "Contains root");
-                self.validate_bool_value(function, result, subject, "MapRoot Contains result");
-                if key.contains('\0') {
-                    self.error(format!("{subject} MapRoot key contains NUL"));
+                if instruction_touches_map_any_owner(function, instruction) {
+                    self.validate_map_any_owner_instruction(function, instruction, subject);
+                } else {
+                    self.validate_map_root_type(function, root, subject, "Contains root");
+                    self.validate_bool_value(function, result, subject, "MapRoot Contains result");
+                    if key.contains('\0') {
+                        self.error(format!("{subject} MapRoot key contains NUL"));
+                    }
                 }
             }
             MirInstructionKind::MapRootDrop { root } => {
-                self.validate_map_root_type(function, root, subject, "Drop operand");
+                if instruction_touches_map_any_owner(function, instruction) {
+                    self.validate_map_any_owner_instruction(function, instruction, subject);
+                } else {
+                    self.validate_map_root_type(function, root, subject, "Drop operand");
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. } => {
+                self.validate_ordinary_map_owner_instruction(function, instruction, subject);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. } => {
+                self.validate_ordinary_map_owned_get_instruction(function, instruction, subject);
             }
             MirInstructionKind::Const { result, literal } => {
                 let Some(ty) = value_type(function, result) else {
@@ -1498,6 +2633,16 @@ impl<'a> CapabilityGate<'a> {
                         }
                     })
                     .or_else(|_| {
+                        if self
+                            .ordinary_map_owned_get_result_string_types
+                            .contains(&result_ty)
+                        {
+                            catalog.validate_result_string_i32_variant(&result_ty)
+                        } else {
+                            Err("owned Map getter Result construction is outside this profile".into())
+                        }
+                    })
+                    .or_else(|_| {
                         if self.allow_result_move_variant {
                             catalog
                                 .validate_result_move_projection_variant(&result_ty)
@@ -1554,6 +2699,20 @@ impl<'a> CapabilityGate<'a> {
                 if field_types.len() != fields.len() {
                     self.error(format!("{subject} record update field is absent"));
                 } else {
+                    // The shape-only validator is insufficient for an owned
+                    // aggregate: without a move receipt, consumers cannot
+                    // know whether the base is transferred or cloned. Keep
+                    // this proof boundary closed even when the ordinary MIR
+                    // builder intentionally preserves the operation.
+                    if record_update_move_contract.is_none()
+                        && catalog
+                            .get(&result_ty)
+                            .is_some_and(|descriptor| descriptor.ownership != MirOwnership::Copy)
+                    {
+                        self.error(format!(
+                            "{subject} non-Copy record update requires a validated move receipt"
+                        ));
+                    }
                     let validation = if let Some(receipt) = record_update_move_contract {
                         catalog.validate_record_update_move_receipt(
                             &result_ty,
@@ -1774,6 +2933,65 @@ impl<'a> CapabilityGate<'a> {
                     subject,
                 );
             }
+            MirInstructionKind::ClosureBind {
+                closure_local,
+                function_value,
+                abi,
+                ..
+            } => {
+                // The bind defines only a Copy function-TypeDesc identity;
+                // no runtime closure pointer is created.
+                if let Err(message) = super::mir::validate_closure_callable_value(
+                    self.program,
+                    function,
+                    closure_local,
+                    function_value,
+                    &abi.source_function_type,
+                    abi.source_abi,
+                    abi.source_parameter_types.len(),
+                ) {
+                    self.error(format!("{subject} closure bind callable value rejected: {message}"));
+                }
+            }
+            MirInstructionKind::ClosureInvoke {
+                closure_local,
+                function_value,
+                abi,
+                result,
+                callee,
+                type_arguments,
+                arguments,
+            } => {
+                if let Err(message) = super::mir::validate_closure_callable_value(
+                    self.program,
+                    function,
+                    closure_local,
+                    function_value,
+                    &abi.source_function_type,
+                    abi.source_abi,
+                    abi.source_parameter_types.len(),
+                ) {
+                    self.error(format!("{subject} closure invoke callable value rejected: {message}"));
+                }
+                let direct = ResolvedCallee::Function(callee.clone());
+                for argument in arguments {
+                    if value_type(function, argument).is_some_and(|ty| {
+                        self.program.type_catalog().validate_session_channel(&ty).is_ok()
+                    }) {
+                        self.error(format!("{subject} ClosureInvoke has no TransferSession effect receipt"));
+                    }
+                }
+                self.validate_call(
+                    function,
+                    instruction_id,
+                    result.as_ref(),
+                    &direct,
+                    type_arguments,
+                    arguments,
+                    None,
+                    subject,
+                );
+            }
             MirInstructionKind::FlowTransition {
                 result,
                 transition,
@@ -1950,6 +3168,26 @@ impl<'a> CapabilityGate<'a> {
             .values()
             .find(|instance| instance.function == owner);
         if let Some(instance) = instance {
+            let managed_any_crossing = crate::verifier::mir::direct_call_uses_managed_any(
+                target,
+                self.program.type_catalog(),
+            ) || type_arguments.iter().any(|ty| {
+                self.program
+                    .type_catalog()
+                    .contains_dynamic_or_managed_any(ty)
+            });
+            if managed_any_crossing
+                && !matches!(
+                    &instance.contract,
+                    MirGenericInstanceContract::ManagedAnyIdentity
+                        | MirGenericInstanceContract::ManagedAnyTrapCleanup { .. }
+                )
+            {
+                self.error(format!(
+                    "{subject} ManagedAny cannot cross an unreceipted generic instance ABI"
+                ));
+                return;
+            }
             if instance.arguments != type_arguments {
                 self.error(format!(
                     "{subject} generic arguments disagree with instance '{}'",
@@ -1973,6 +3211,30 @@ impl<'a> CapabilityGate<'a> {
                 | MirGenericInstanceContract::ScalarVariantPredicate { .. }
                 | MirGenericInstanceContract::ScalarVariantProjection { .. }
                 | MirGenericInstanceContract::ScalarVariantProjectionFallback { .. } => {}
+                MirGenericInstanceContract::ManagedAnyIdentity => {
+                    if let Err(message) = self
+                        .program
+                        .type_catalog()
+                        .validate_managed_any_identity_instance(instance, target)
+                    {
+                        self.error(format!(
+                            "{subject} ManagedAny identity instance receipt rejected: {message}"
+                        ));
+                        return;
+                    }
+                }
+                MirGenericInstanceContract::ManagedAnyTrapCleanup { .. } => {
+                    if let Err(message) = self
+                        .program
+                        .type_catalog()
+                        .validate_managed_any_trap_cleanup_instance(instance, target)
+                    {
+                        self.error(format!(
+                            "{subject} ManagedAny trap-cleanup instance receipt rejected: {message}"
+                        ));
+                        return;
+                    }
+                }
             }
         } else if !type_arguments.is_empty() {
             self.error(format!(
@@ -2003,6 +3265,14 @@ impl<'a> CapabilityGate<'a> {
             // the registered floor.
             && !self.call_routes_to_direct_scalar_evaluation(function, target, result)
             && !self.call_routes_to_direct_owned_string_evaluation(function, target, result)
+            && !self.call_routes_to_direct_managed_any_evaluation(function, target, result)
+            && !self.call_routes_to_managed_any_trap_cleanup_evaluation(
+                function,
+                target,
+                instance,
+                type_arguments,
+                result,
+            )
         {
             self.error(format!(
                 "{subject} ordinary call in a contract-bearing function is outside the verifier capability"
@@ -2034,6 +3304,72 @@ impl<'a> CapabilityGate<'a> {
         }
     }
 
+    fn call_routes_to_direct_managed_any_evaluation(
+        &self,
+        function: &MirFunction,
+        target: &MirFunction,
+        result: Option<&MirValueId>,
+    ) -> bool {
+        let catalog = self.program.type_catalog();
+        crate::verifier::mir::direct_call_uses_managed_any(target, catalog)
+            && target.validate().is_ok()
+            && catalog.validate_managed_any_function(target).is_ok()
+            && target.blocks.len() == 1
+            && crate::verifier::mir::is_direct_managed_any_call_type(catalog, &target.result)
+            && target.parameters.iter().all(|parameter| {
+                value_type(target, parameter).is_some_and(|ty| {
+                    crate::verifier::mir::is_direct_managed_any_call_type(catalog, &ty)
+                })
+            })
+            && !crate::verifier::mir::direct_call_graph_reaches(
+                self.program,
+                &target.owner,
+                &function.owner,
+                &mut BTreeSet::new(),
+            )
+            && (result.is_some()
+                || catalog
+                    .get(&target.result)
+                    .is_some_and(|desc| desc.is_canonical_ffi_unit()))
+    }
+
+    /// A generic ManagedAny cleanup call is admitted here only for its exact
+    /// sealed trap profile. Its evaluator records the sealed E0801 or E0802 trap
+    /// and terminates the normal path, so the structural i32 return cannot be
+    /// mistaken for a usable value in a contract-bearing caller.
+    fn call_routes_to_managed_any_trap_cleanup_evaluation(
+        &self,
+        function: &MirFunction,
+        target: &MirFunction,
+        instance: Option<&MirInstance>,
+        type_arguments: &[crate::core::ResolvedTypeId],
+        result: Option<&MirValueId>,
+    ) -> bool {
+        let Some(instance) = instance else {
+            return false;
+        };
+        if !matches!(
+            &instance.contract,
+            MirGenericInstanceContract::ManagedAnyTrapCleanup { .. }
+        ) {
+            return false;
+        }
+        instance.function == target.owner
+            && instance.arguments == type_arguments
+            && self
+                .program
+                .type_catalog()
+                .validate_managed_any_trap_cleanup_instance(instance, target)
+                .is_ok()
+            && !crate::verifier::mir::direct_call_graph_reaches(
+                self.program,
+                &target.owner,
+                &function.owner,
+                &mut BTreeSet::new(),
+            )
+            && result.is_some()
+    }
+
     /// R6-1073: mirror of the verifier's direct-scalar call routing.  The
     /// evaluator routes a non-instance call with no type arguments to
     /// `eval_direct_scalar_call` exactly when the callee result is inside
@@ -2049,7 +3385,8 @@ impl<'a> CapabilityGate<'a> {
         result: Option<&MirValueId>,
     ) -> bool {
         let catalog = self.program.type_catalog();
-        crate::verifier::mir::is_direct_scalar_call_type(catalog, &target.result)
+        !crate::verifier::mir::direct_call_uses_managed_any(target, catalog)
+            && crate::verifier::mir::is_direct_scalar_call_type(catalog, &target.result)
             && !crate::verifier::mir::direct_call_graph_reaches(
                 self.program,
                 &target.owner,
@@ -2082,7 +3419,8 @@ impl<'a> CapabilityGate<'a> {
         result: Option<&MirValueId>,
     ) -> bool {
         let catalog = self.program.type_catalog();
-        catalog.validate_owned_string(&target.result).is_ok()
+        !crate::verifier::mir::direct_call_uses_managed_any(target, catalog)
+            && catalog.validate_owned_string(&target.result).is_ok()
             && crate::core::mir::validate_owned_string_return_shape(
                 target,
                 self.program.functions(),
@@ -2130,10 +3468,52 @@ impl<'a> CapabilityGate<'a> {
         ) else {
             return;
         };
+        let catalog = self.program.type_catalog();
+        // The ordinary Map/Any snapshot equality face deliberately keeps the
+        // generation-bearing Any owner as one operand and the borrowed String
+        // peer as the other.  Their TypeDesc identities are therefore
+        // different by construction; the lowerer brands this exact
+        // instruction as `binary.managed_any_string_read`, and the ManagedAny
+        // owner ledger/Checker seal validates the owner side and its cleanup.
+        // Do this narrow check before the scalar same-TypeDesc rule instead
+        // of erasing the owner into a guessed String descriptor.
+        let managed_any_string_read = subject.contains("binary.managed_any_string_read")
+            && matches!(op, ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual)
+            && catalog_is_managed_any_string_pair(catalog, &left_ty, &right_ty)
+            && catalog.get(&result_ty).is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+                    && descriptor.is_canonical_copy_scalar(false)
+            });
+        if managed_any_string_read {
+            return;
+        }
         if left_ty != right_ty {
             self.error(format!(
                 "{subject} binary operands have different TypeDesc identities"
             ));
+            return;
+        }
+        let snapshot_string_operation = (function
+            .ownership
+            .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+            || crate::verifier::mir::direct_call_uses_managed_any(function, catalog))
+            && catalog.validate_owned_string(&left_ty).is_ok();
+        if snapshot_string_operation {
+            let valid = match op {
+                ResolvedBinaryOp::Add => catalog.validate_owned_string(&result_ty).is_ok(),
+                ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual => {
+                    catalog.get(&result_ty).is_some_and(|desc| {
+                        desc.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+                            && catalog.validate_copy_scalar(&result_ty).is_ok()
+                    })
+                }
+                _ => false,
+            };
+            if !valid {
+                self.error(format!(
+                    "{subject} String operator is outside the exact snapshot proof domain"
+                ));
+            }
             return;
         }
         let scalar = self.program.type_catalog().get(&left_ty);
@@ -2176,6 +3556,10 @@ impl<'a> CapabilityGate<'a> {
                     | ResolvedBinaryOp::Multiply
                     | ResolvedBinaryOp::Divide
                     | ResolvedBinaryOp::Remainder
+                    // Power belongs only to the signed i32/i64 Copy arm. The
+                    // typed proof term uses the explicit VM/native checked-i64
+                    // profile, wrapping only successful i32 results.
+                    | ResolvedBinaryOp::Power
                     | ResolvedBinaryOp::Equal
                     | ResolvedBinaryOp::NotEqual
                     | ResolvedBinaryOp::Less
@@ -2192,6 +3576,11 @@ impl<'a> CapabilityGate<'a> {
             ),
             _ => false,
         };
+        let power_profile_supported = op != ResolvedBinaryOp::Power
+            || matches!(
+                POWER_PROFILE_0_1_11_COMPAT,
+                CheckedPowerProfile::VmNativeI64ThenI32Wrap
+            );
         let result_is_bool =
             self.program
                 .type_catalog()
@@ -2209,7 +3598,11 @@ impl<'a> CapabilityGate<'a> {
                 | ResolvedBinaryOp::LessEqual
                 | ResolvedBinaryOp::GreaterEqual
         );
-        if !valid || (comparison && !result_is_bool) || (!comparison && result_ty != left_ty) {
+        if !valid
+            || !power_profile_supported
+            || (comparison && !result_is_bool)
+            || (!comparison && result_ty != left_ty)
+        {
             self.error(format!(
                 "{subject} binary operator is outside the verifier capability"
             ));
@@ -2368,6 +3761,19 @@ impl<'a> CapabilityGate<'a> {
                                 "nested Option tuple switch is outside this verifier profile"
                                     .into(),
                             )
+                        }
+                    })
+                    .or_else(|_| {
+                        if self
+                            .ordinary_map_owned_get_result_string_types
+                            .contains(&scrutinee_ty)
+                        {
+                            self.program
+                                .type_catalog()
+                                .validate_result_string_i32_variant(&scrutinee_ty)
+                                .map(|_| scrutinee_ty.clone())
+                        } else {
+                            Err("owned Map getter Result switch is outside this profile".into())
                         }
                     })
                     .or_else(|_| {
@@ -2545,9 +3951,77 @@ impl<'a> CapabilityGate<'a> {
     fn validate_acyclic_cfg(&mut self, function: &MirFunction) {
         let mut visiting = BTreeSet::new();
         let mut visited = BTreeSet::new();
+        let mut certified_back_edges = BTreeSet::new();
+        if let Some(worklist) = &function.proof_worklist {
+            fn collect(
+                block: &crate::core::mir::MirProofBlock,
+                edges: &mut BTreeSet<(crate::core::mir::MirBlockId, crate::core::mir::MirBlockId)>,
+            ) {
+                for operation in &block.operations {
+                    match operation {
+                        crate::core::mir::MirProofOperation::Loop {
+                            header,
+                            body_entry,
+                            body,
+                            stationary: true,
+                            ..
+                        } => {
+                            edges.insert((body_entry.clone(), header.clone()));
+                            collect(body, edges);
+                        }
+                        crate::core::mir::MirProofOperation::Loop {
+                            header,
+                            body,
+                            stationary: false,
+                            receipt: Some(receipt),
+                            ..
+                        } => {
+                            for edge in &receipt.edges {
+                                if matches!(
+                                    edge.kind,
+                                    MirProofLoopEdgeKind::BodyFallthrough
+                                        | MirProofLoopEdgeKind::Continue
+                                ) && edge.to_block.as_ref() == Some(header)
+                                    && edge.mir_edge.is_some()
+                                {
+                                    edges.insert((edge.from_block.clone(), header.clone()));
+                                }
+                            }
+                            collect(body, edges);
+                        }
+                        crate::core::mir::MirProofOperation::Branch {
+                            then_block,
+                            else_block,
+                            ..
+                        } => {
+                            collect(then_block, edges);
+                            collect(else_block, edges);
+                        }
+                        crate::core::mir::MirProofOperation::Scope(inner) => collect(inner, edges),
+                        crate::core::mir::MirProofOperation::Bind { .. }
+                        | crate::core::mir::MirProofOperation::Call(_)
+                        | crate::core::mir::MirProofOperation::Eval { .. }
+                        | crate::core::mir::MirProofOperation::Assign { .. }
+                        | crate::core::mir::MirProofOperation::Math(_)
+                        | crate::core::mir::MirProofOperation::Break { .. }
+                        | crate::core::mir::MirProofOperation::Continue { .. }
+                        | crate::core::mir::MirProofOperation::Return { .. }
+                        | crate::core::mir::MirProofOperation::Loop { .. }
+                        | crate::core::mir::MirProofOperation::Exit => {}
+                    }
+                }
+            }
+            collect(&worklist.root, &mut certified_back_edges);
+        }
         for block in function.blocks.keys() {
             if !visited.contains(block)
-                && self.visit_cfg(function, block, &mut visiting, &mut visited)
+                && self.visit_cfg(
+                    function,
+                    block,
+                    &mut visiting,
+                    &mut visited,
+                    &certified_back_edges,
+                )
             {
                 self.error(format!(
                     "function '{}' contains a cyclic CFG outside the verifier capability",
@@ -2564,10 +4038,15 @@ impl<'a> CapabilityGate<'a> {
         block: &crate::core::mir::MirBlockId,
         visiting: &mut BTreeSet<crate::core::mir::MirBlockId>,
         visited: &mut BTreeSet<crate::core::mir::MirBlockId>,
+        certified_back_edges: &BTreeSet<(
+            crate::core::mir::MirBlockId,
+            crate::core::mir::MirBlockId,
+        )>,
     ) -> bool {
-        if !visiting.insert(block.clone()) {
-            return true;
+        if visited.contains(block) {
+            return false;
         }
+        visiting.insert(block.clone());
         let Some(block_data) = function.blocks.get(block) else {
             visiting.remove(block);
             return false;
@@ -2590,10 +4069,13 @@ impl<'a> CapabilityGate<'a> {
             | MirTerminator::Unreachable => Vec::new(),
         };
         for target in targets {
-            if !visited.contains(target) && self.visit_cfg(function, target, visiting, visited) {
-                return true;
-            }
             if visiting.contains(target) {
+                if !certified_back_edges.contains(&(block.clone(), target.clone())) {
+                    return true;
+                }
+            } else if !visited.contains(target)
+                && self.visit_cfg(function, target, visiting, visited, certified_back_edges)
+            {
                 return true;
             }
         }
@@ -2607,8 +4089,253 @@ impl<'a> CapabilityGate<'a> {
     }
 }
 
+fn catalog_is_managed_any_string_pair(
+    catalog: &MirTypeCatalog,
+    left: &ResolvedTypeId,
+    right: &ResolvedTypeId,
+) -> bool {
+    (catalog.is_managed_any_i32_string_v1(left) && catalog.validate_owned_string(right).is_ok())
+        || (catalog.is_managed_any_i32_string_v1(right)
+            && catalog.validate_owned_string(left).is_ok())
+}
+
 fn value_type(function: &MirFunction, value: &MirValueId) -> Option<crate::core::ResolvedTypeId> {
     function.values.get(value).map(|value| value.ty.clone())
+}
+
+fn is_map_root_operation(instruction: &MirInstructionKind) -> bool {
+    matches!(
+        instruction,
+        MirInstructionKind::MapRootNew { .. }
+            | MirInstructionKind::MapRootSet { .. }
+            | MirInstructionKind::MapRootRemove { .. }
+            | MirInstructionKind::MapRootSize { .. }
+            | MirInstructionKind::MapRootContains { .. }
+            | MirInstructionKind::MapRootDrop { .. }
+    )
+}
+
+/// Validate the exact list payload that the owned-get `values()` instruction
+/// publishes.  A generic List TypeDesc is insufficient: every element is an
+/// independently owned ManagedAny snapshot and the List itself must carry the
+/// complete move/clone/drop contract consumed by the four MIR backends.
+fn is_canonical_managed_any_list_type(catalog: &MirTypeCatalog, ty: &ResolvedTypeId) -> bool {
+    let Some(descriptor) = catalog.get(ty) else {
+        return false;
+    };
+    let MirLayout::List { element } = &descriptor.layout else {
+        return false;
+    };
+    descriptor.kind == MirTypeKind::List
+        && descriptor.abi == MirAbiClass::OpaqueHandle
+        && descriptor.ownership == MirOwnership::Move
+        && descriptor.needs_drop_glue
+        && descriptor.needs_clone_glue
+        && descriptor.session_protocol.is_none()
+        && descriptor.drop_plan.is_none()
+        && descriptor.variant_drop_plan.is_none()
+        && descriptor.glue
+            == (crate::core::mir::types::MirGlueContract {
+                move_out: MirGlueKind::List,
+                clone: MirGlueKind::List,
+                drop: MirGlueKind::List,
+            })
+        && catalog.is_managed_any_i32_string_v1(element)
+}
+
+fn instruction_touches_ordinary_map_owner(instruction: &MirInstructionKind) -> bool {
+    matches!(
+        instruction,
+        MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+    )
+}
+
+fn instruction_touches_ordinary_map_owned_get(instruction: &MirInstructionKind) -> bool {
+    matches!(
+        instruction,
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+    )
+}
+
+fn instruction_touches_ordinary_map_owned_get_type(
+    function: &MirFunction,
+    instruction: &MirInstructionKind,
+) -> bool {
+    let owner_ty = crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+    let is_owner = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == owner_ty)
+    };
+    match instruction {
+        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. } => true,
+        MirInstructionKind::MapRootNew { result } => is_owner(result),
+        MirInstructionKind::MapRootSet {
+            result,
+            source,
+            value,
+            ..
+        } => is_owner(result) || is_owner(source) || is_owner(value),
+        MirInstructionKind::MapRootRemove { result, source, .. } => {
+            is_owner(result) || is_owner(source)
+        }
+        MirInstructionKind::MapRootSize { result, root }
+        | MirInstructionKind::MapRootContains { result, root, .. } => {
+            is_owner(result) || is_owner(root)
+        }
+        MirInstructionKind::MapRootDrop { root } => is_owner(root),
+        MirInstructionKind::Copy { result, source }
+        | MirInstructionKind::Move { result, source }
+        | MirInstructionKind::Clone { result, source } => is_owner(result) || is_owner(source),
+        MirInstructionKind::Drop { value } | MirInstructionKind::EndBorrow { borrow: value } => {
+            is_owner(value)
+        }
+        MirInstructionKind::Call {
+            result, arguments, ..
+        } => result.as_ref().is_some_and(is_owner) || arguments.iter().any(is_owner),
+        MirInstructionKind::ClosureInvoke {
+            result,
+            function_value,
+            arguments,
+            ..
+        } => {
+            is_owner(function_value)
+                || result.as_ref().is_some_and(is_owner)
+                || arguments.iter().any(is_owner)
+        }
+        MirInstructionKind::BuiltinCall {
+            result, arguments, ..
+        } => is_owner(result) || arguments.iter().any(is_owner),
+        _ => false,
+    }
+}
+
+fn instruction_touches_ordinary_type(
+    function: &MirFunction,
+    instruction: &MirInstructionKind,
+) -> bool {
+    let owner_ty = crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+    let is_owner = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == owner_ty)
+    };
+    match instruction {
+        MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+        | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. } => true,
+        MirInstructionKind::MapRootNew { result } => is_owner(result),
+        MirInstructionKind::MapRootSet {
+            result,
+            source,
+            value,
+            ..
+        } => is_owner(result) || is_owner(source) || is_owner(value),
+        MirInstructionKind::MapRootRemove { result, source, .. } => {
+            is_owner(result) || is_owner(source)
+        }
+        MirInstructionKind::MapRootSize { result, root }
+        | MirInstructionKind::MapRootContains { result, root, .. } => {
+            is_owner(result) || is_owner(root)
+        }
+        MirInstructionKind::MapRootDrop { root } => is_owner(root),
+        MirInstructionKind::Copy { result, source }
+        | MirInstructionKind::Move { result, source }
+        | MirInstructionKind::Clone { result, source } => is_owner(result) || is_owner(source),
+        MirInstructionKind::Drop { value } | MirInstructionKind::EndBorrow { borrow: value } => {
+            is_owner(value)
+        }
+        MirInstructionKind::Call {
+            result, arguments, ..
+        } => result.as_ref().is_some_and(is_owner) || arguments.iter().any(is_owner),
+        MirInstructionKind::ClosureInvoke {
+            result,
+            function_value,
+            arguments,
+            ..
+        } => {
+            is_owner(function_value)
+                || result.as_ref().is_some_and(is_owner)
+                || arguments.iter().any(is_owner)
+        }
+        MirInstructionKind::BuiltinCall {
+            result, arguments, ..
+        } => is_owner(result) || arguments.iter().any(is_owner),
+        _ => false,
+    }
+}
+
+/// MapAnyOwner v1 deliberately reuses the closed MapRoot instruction shapes,
+/// while its distinct synthetic TypeDesc and private Checker receipt supply
+/// the owner-token semantics. Select that route only from typed MIR identity;
+/// a raw MapRoot receipt cannot classify an operation as v1.
+fn instruction_touches_map_any_owner(
+    function: &MirFunction,
+    instruction: &MirInstructionKind,
+) -> bool {
+    let owner_ty = crate::core::mir::types::map_any_owner_v1_type_id();
+    let is_owner = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .is_some_and(|value| value.ty == owner_ty)
+    };
+    match instruction {
+        MirInstructionKind::MapRootNew { result } => is_owner(result),
+        MirInstructionKind::MapRootSet {
+            result,
+            source,
+            value,
+            ..
+        } => is_owner(result) || is_owner(source) || is_owner(value),
+        MirInstructionKind::MapRootRemove { result, source, .. } => {
+            is_owner(result) || is_owner(source)
+        }
+        MirInstructionKind::MapRootSize { result, root }
+        | MirInstructionKind::MapRootContains { result, root, .. } => {
+            is_owner(result) || is_owner(root)
+        }
+        MirInstructionKind::MapRootDrop { root } => is_owner(root),
+        MirInstructionKind::ClosureInvoke {
+            result,
+            function_value,
+            arguments,
+            ..
+        } => {
+            is_owner(function_value)
+                || result.as_ref().is_some_and(is_owner)
+                || arguments.iter().any(is_owner)
+        }
+        _ => false,
+    }
 }
 
 fn value_operation_is_supported(
@@ -2645,6 +4372,338 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
+    }
+
+    #[test]
+    fn admits_only_typed_signed_i32_i64_power_across_the_full_mir_graph() {
+        let program = canonical(
+            r#"
+                // These helpers are intentionally uncalled and contract-free:
+                // capability is a whole-program property, not a reachable-call
+                // or obligation-only property.
+                func pow_i32(base: i32, exponent: i32) -> i32 { base ** exponent }
+                func pow_i64(base: i64, exponent: i64) -> i64 { base ** exponent }
+                func main() -> i32 { 0 }
+            "#,
+        );
+
+        let mut saw_i32 = false;
+        let mut saw_i64 = false;
+        let mut power_count = 0;
+        for function in program.functions().values() {
+            for instruction in function
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+            {
+                let MirInstructionKind::Binary {
+                    result,
+                    op: ResolvedBinaryOp::Power,
+                    ..
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                power_count += 1;
+                let value = function
+                    .values
+                    .get(result)
+                    .expect("Power result is in the value table");
+                let descriptor = program
+                    .type_catalog()
+                    .get(&value.ty)
+                    .expect("Power result TypeDesc");
+                match descriptor.abi {
+                    MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    } => saw_i32 = true,
+                    MirAbiClass::Integer {
+                        bits: 64,
+                        signed: true,
+                    } => saw_i64 = true,
+                    other => panic!("Power result has unsupported ABI {other:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            power_count, 2,
+            "the uncalled helpers remain in the MIR graph"
+        );
+        assert!(
+            saw_i32 && saw_i64,
+            "both supported source widths are present"
+        );
+        assert!(matches!(
+            POWER_PROFILE_0_1_11_COMPAT,
+            CheckedPowerProfile::VmNativeI64ThenI32Wrap
+        ));
+        validate_mir_capabilities(&program)
+            .expect("signed i32/i64 Power must be admitted across every function");
+    }
+
+    #[test]
+    fn rejects_float_unsigned_and_narrow_integer_power_profiles() {
+        let float_program = canonical(
+            "func pow_float(base: f64, exponent: f64) -> f64 { base ** exponent } func main() -> i32 { 0 }",
+        );
+        let float_errors = validate_mir_capabilities(&float_program)
+            .expect_err("float Power remains outside the verifier capability");
+        assert!(
+            float_errors
+                .iter()
+                .any(|error| error.contains("float binary rejected")),
+            "{float_errors:?}"
+        );
+
+        let signed_i32 = canonical(
+            "func pow_i32(base: i32, exponent: i32) -> i32 { base ** exponent } func main() -> i32 { 0 }",
+        );
+        validate_mir_capabilities(&signed_i32)
+            .expect("the real signed i32 source remains admitted");
+
+        let mut power_type = None;
+        for function in signed_i32.functions().values() {
+            for instruction in function
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+            {
+                let MirInstructionKind::Binary {
+                    result,
+                    op: ResolvedBinaryOp::Power,
+                    left,
+                    right,
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                let result_ty = function
+                    .values
+                    .get(result)
+                    .expect("Power result value")
+                    .ty
+                    .clone();
+                for operand in [left, right] {
+                    assert_eq!(
+                        function
+                            .values
+                            .get(operand)
+                            .expect("Power operand value")
+                            .ty,
+                        result_ty,
+                        "the source Power operands and result share one canonical TypeDesc ID"
+                    );
+                }
+                assert!(
+                    power_type.replace(result_ty).is_none(),
+                    "single-function signed i32 source has exactly one Power result type"
+                );
+            }
+        }
+        let power_type = power_type.expect("signed i32 Power instruction exists");
+        let canonical_descriptor = signed_i32
+            .type_catalog()
+            .get(&power_type)
+            .expect("canonical signed i32 descriptor")
+            .clone();
+        assert_eq!(canonical_descriptor.id, power_type);
+        assert_eq!(
+            canonical_descriptor.abi,
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: true
+            }
+        );
+
+        for forged_abi in [
+            MirAbiClass::Integer {
+                bits: 32,
+                signed: false,
+            },
+            MirAbiClass::Integer {
+                bits: 8,
+                signed: true,
+            },
+            MirAbiClass::Integer {
+                bits: 16,
+                signed: true,
+            },
+        ] {
+            let mut catalog = signed_i32.type_catalog().clone();
+            let mut forged_descriptor = canonical_descriptor.clone();
+            forged_descriptor.abi = forged_abi;
+            catalog.replace_for_test_only(power_type.clone(), forged_descriptor);
+            let forged_program =
+                MirProgram::with_type_catalog(signed_i32.functions().clone(), catalog).expect(
+                    "ABI-only mutation keeps the same canonical TypeDesc identity and MIR graph",
+                );
+            assert_eq!(
+                forged_program.functions(),
+                signed_i32.functions(),
+                "the negative control must forge only the TypeDesc ABI metadata"
+            );
+            assert_eq!(
+                forged_program
+                    .type_catalog()
+                    .get(&power_type)
+                    .expect("forged descriptor keeps canonical ID")
+                    .id,
+                power_type
+            );
+            let errors = validate_mir_capabilities(&forged_program)
+                .expect_err("unsigned and narrow integer profiles must fail the capability gate");
+            assert!(
+                errors.iter().any(|error| error
+                    .contains("scalar TypeDesc is outside the verifier scalar contract")),
+                "forged ABI {forged_abi:?} must be rejected by the MIR verifier capability gate, got {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_copy_record_update_without_transfer_contract() {
+        let program = canonical(
+            r#"
+                type Box { text: string, count: i32 }
+
+                func rewrite(value: Box, next_count: i32) -> Box {
+                    ensures: result.count == next_count
+                    let updated = Box { count: next_count, ..value };
+                    updated
+                }
+
+                func main() -> i32 { 0 }
+            "#,
+        );
+        let errors = validate_mir_capabilities(&program)
+            .expect_err("unreceipted non-Copy update must stay outside the proof island");
+        assert!(errors.iter().any(|error| {
+            error.contains("non-Copy record update requires a validated move receipt")
+        }));
+    }
+
+    #[test]
+    fn actor_fast_path_rejects_forged_any_body_before_neutral_return() {
+        let mut program = canonical(
+            r#"
+                actor Counter {
+                    count: i32 = 0;
+                    func get() -> i32 { self.count }
+                }
+
+                func main() -> i32 {
+                    let root = map_new()
+                    let snapshot = map_get(root, "missing")
+                    drop(root)
+                    let found = snapshot.0
+                    let payload = snapshot.1
+                    drop(snapshot)
+                    drop(payload)
+                    if found { 1 } else { 0 }
+                }
+            "#,
+        );
+        assert!(program.actor_execution_plan().is_some());
+
+        let any_function = program
+            .functions()
+            .values()
+            .find(|function| {
+                function.values.values().any(|value| {
+                    program
+                        .type_catalog()
+                        .contains_dynamic_or_managed_any(&value.ty)
+                })
+            })
+            .expect("Actor fixture includes an Any-bearing callable");
+        let mut forged = any_function.clone();
+        let instruction = forged
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .next()
+            .expect("Any-bearing callable has a lowered instruction");
+        instruction.id = crate::core::mir::MirInstructionId::new("forged:any-instruction")
+            .expect("valid forged instruction identity");
+        program.replace_function_for_test_only(forged);
+
+        let errors = validate_mir_capabilities(&program)
+            .expect_err("Actor's neutral fast path must still preflight Any ownership receipts");
+        assert!(errors
+            .iter()
+            .any(|error| { error.contains("ManagedAny") || error.contains("managed-any") }));
+    }
+
+    #[test]
+    fn admits_only_the_separately_receipted_map_any_owner_v1_type() {
+        let program = canonical(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let inserted = map_set(root, "answer", 42)
+                    let size = map_size(inserted)
+                    drop(inserted)
+                    size
+                }
+            "#,
+        );
+        assert!(program
+            .functions()
+            .values()
+            .any(|function| { function.ownership.has_checker_map_any_owner_actions() }));
+        let owner_ty = crate::core::mir::types::map_any_owner_v1_type_id();
+        assert_eq!(
+            program
+                .type_catalog()
+                .get(&owner_ty)
+                .expect("MapAnyOwner v1 TypeDesc")
+                .kind,
+            MirTypeKind::MapAnyOwnerV1
+        );
+        assert!(program
+            .type_catalog()
+            .get(&crate::core::mir::types::map_root_type_id())
+            .is_none());
+        validate_mir_capabilities(&program)
+            .expect("the independent MapAnyOwner v1 receipt and TypeDesc admit the profile");
+    }
+
+    #[test]
+    fn rejects_orphan_or_forged_map_any_owner_v1_descriptors() {
+        let owner_program = canonical(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let inserted = map_set(root, "answer", 42)
+                    drop(inserted)
+                    0
+                }
+            "#,
+        );
+        let owner_ty = crate::core::mir::types::map_any_owner_v1_type_id();
+        let mut descriptor = owner_program
+            .type_catalog()
+            .get(&owner_ty)
+            .expect("MapAnyOwner v1 TypeDesc")
+            .clone();
+        descriptor.glue.clone = MirGlueKind::MapAnyOwnerV1;
+
+        let plain_program = canonical("func main() -> i32 { 0 }");
+        let mut catalog = plain_program.type_catalog().clone();
+        catalog.replace_for_test_only(owner_ty, descriptor);
+        let orphan = MirProgram::with_type_catalog(plain_program.functions().clone(), catalog)
+            .expect("unused synthetic TypeDesc remains structurally representable");
+        let errors = validate_mir_capabilities(&orphan)
+            .expect_err("an orphan owner descriptor cannot authorize the profile");
+        assert!(errors.iter().any(|error| {
+            error.contains(
+                "MapAnyOwner v1 TypeDesc presence must match independent Checker owner receipts",
+            )
+        }));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("MapAnyOwner v1 TypeDesc rejected")));
     }
 
     #[test]
@@ -2702,12 +4761,9 @@ mod tests {
 
         let errors = validate_mir_capabilities(&forged_program)
             .expect_err("forged scalar TypeDesc must fail capability admission");
-        assert!(
-            errors
-                .iter()
-                .any(|error| error
-                    .contains("scalar TypeDesc is outside the verifier scalar contract"))
-        );
+        assert!(errors.iter().any(|error| {
+            error.contains("scalar TypeDesc is outside the verifier scalar contract")
+        }));
     }
 
     #[test]

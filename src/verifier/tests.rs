@@ -2,6 +2,208 @@ use super::helpers::*;
 use super::*;
 use crate::ast::*;
 
+fn assert_finite_ieee_binary64_mir_artifact(result: &VerificationResult) {
+    let artifact = result.artifact.as_ref().expect("finite f64 proof artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(
+        artifact.float_model, "ieee754_binary64_finite_rne",
+        "the proof artifact must identify the actual finite IEEE binary64 model"
+    );
+    assert_eq!(
+        artifact.float_model,
+        crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL
+    );
+    let receipt = artifact
+        .mir_route_receipt
+        .as_ref()
+        .expect("canonical MIR route receipt");
+    assert_eq!(artifact.mir_hash, receipt.mir_digest);
+}
+
+fn verify_exact_typed_mir_request_for_test(
+    checked: &crate::core::CheckedProgram,
+    source_hash: &str,
+) -> (
+    Vec<VerificationResult>,
+    crate::core::mir::CanonicalMirRouteReceipt,
+) {
+    let request = match crate::core::mir::verification::prepare_verification_request(checked) {
+        crate::core::mir::verification::MirVerificationPreparation::Materialized(request) => {
+            request
+        }
+        crate::core::mir::verification::MirVerificationPreparation::Deferred(boundaries) => {
+            panic!("typed MIR request deferred unexpectedly: {boundaries:?}")
+        }
+        crate::core::mir::verification::MirVerificationPreparation::NotRequested => {
+            panic!("typed MIR verifier request was not requested")
+        }
+    };
+    let canonical = request.program();
+    crate::verifier::validate_mir_capabilities(canonical)
+        .expect("typed request must pass the same verifier capability gate as dual routing");
+    let receipt = canonical.route_receipt("canonical-contract-request-v1");
+    receipt
+        .validate_against_program(canonical)
+        .expect("exact typed MIR request receipt validates against its graph");
+    let results =
+        crate::verifier::verify_mir_with_route_receipt(canonical, &receipt, source_hash.to_owned())
+            .expect("independent MIR secondary consumes exact typed request");
+    for result in &results {
+        let Some(artifact) = result.artifact.as_ref() else {
+            continue;
+        };
+        assert_eq!(
+            artifact.engine,
+            ProofArtifact::ENGINE_MIR,
+            "{}",
+            result.func_name
+        );
+        assert_eq!(artifact.source_hash, source_hash, "{}", result.func_name);
+        assert_eq!(
+            artifact.mir_hash, receipt.mir_digest,
+            "{}",
+            result.func_name
+        );
+        assert_eq!(
+            artifact.mir_route_receipt.as_ref(),
+            Some(&receipt),
+            "{}",
+            result.func_name
+        );
+    }
+    (results, receipt)
+}
+
+fn assert_single_exact_mir_artifact(
+    result: &VerificationResult,
+    source_hash: &str,
+    expected_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) {
+    let artifact = result.artifact.as_ref().expect("single MIR proof artifact");
+    assert_eq!(
+        artifact.engine,
+        ProofArtifact::ENGINE_MIR,
+        "{}",
+        result.func_name
+    );
+    assert_eq!(artifact.source_hash, source_hash, "{}", result.func_name);
+    assert_eq!(expected_receipt.profile, "canonical-contract-request-v1");
+    assert_eq!(
+        artifact.mir_route_receipt.as_ref(),
+        Some(expected_receipt),
+        "{}",
+        result.func_name
+    );
+    assert_eq!(artifact.mir_hash, expected_receipt.mir_digest);
+}
+
+fn assert_dual_result_keeps_the_agreed_engine_artifact(
+    dual: &VerificationResult,
+    exact_mir: &VerificationResult,
+    source_hash: &str,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) {
+    assert_eq!(dual.status, exact_mir.status, "{}", dual.func_name);
+    let artifact = dual
+        .artifact
+        .as_ref()
+        .expect("agreeing dual result must retain a proof artifact");
+    assert_eq!(artifact.source_hash, source_hash, "{}", dual.func_name);
+    match artifact.engine.as_str() {
+        ProofArtifact::ENGINE_RESOLVED => {
+            assert!(
+                !artifact.resolved_ir_hash.is_empty(),
+                "resolved primary artifact must carry its own IR identity"
+            );
+            assert!(artifact.mir_hash.is_empty());
+            assert!(artifact.mir_route_receipt.is_none());
+        }
+        ProofArtifact::ENGINE_MIR => {
+            assert_eq!(artifact.source_hash, source_hash, "{}", dual.func_name);
+            assert_eq!(artifact.mir_hash, receipt.mir_digest, "{}", dual.func_name);
+            assert_eq!(
+                artifact.mir_route_receipt.as_ref(),
+                Some(receipt),
+                "{}",
+                dual.func_name
+            );
+        }
+        engine => panic!(
+            "dual result {} has unexpected engine {engine:?}",
+            dual.func_name
+        ),
+    }
+}
+
+fn assert_mir_contract_diagnostic_origin<'a>(
+    checked: &crate::core::CheckedProgram,
+    result: &'a VerificationResult,
+) -> &'a crate::diagnostic::Diagnostic {
+    assert_eq!(result.status, VerifStatus::Disproven, "{}", result.message);
+    let diagnostic = result
+        .diagnostic
+        .as_ref()
+        .expect("independent MIR contract diagnostic");
+    assert_eq!(
+        diagnostic.code, None,
+        "MIR contract diagnostics have no registered error code"
+    );
+    let origin = diagnostic
+        .origin
+        .as_ref()
+        .expect("typed MIR contract origin");
+    assert_eq!(origin.rule.as_deref(), Some("canonical_mir.contract"));
+    let parent = origin
+        .parent_node_id
+        .as_ref()
+        .expect("contract diagnostic parent identity");
+    assert!(
+        checked
+            .node_meta()
+            .contains_key(&crate::core::NodeId(parent.clone())),
+        "diagnostic parent {parent:?} must resolve in the checked source directory"
+    );
+    diagnostic
+}
+
+fn assert_exact_mir_contract_diagnostic(
+    checked: &crate::core::CheckedProgram,
+    result: &VerificationResult,
+    expected_message: &str,
+) {
+    let diagnostic = assert_mir_contract_diagnostic_origin(checked, result);
+    assert_eq!(result.message, expected_message);
+    assert_eq!(diagnostic.message, expected_message);
+}
+
+fn exact_mir_result_for_test<'a>(
+    results: &'a [VerificationResult],
+    function: &str,
+) -> &'a VerificationResult {
+    let canonical_name = format!("function:{function}");
+    results
+        .iter()
+        .find(|result| result.func_name == canonical_name || result.func_name == function)
+        .unwrap_or_else(|| panic!("exact MIR request omitted {function}: {results:?}"))
+}
+
+fn assert_exact_mir_secondary_status(
+    results: &[VerificationResult],
+    function: &str,
+    status: VerifStatus,
+) {
+    let result = exact_mir_result_for_test(results, function);
+    assert_eq!(
+        result.status, status,
+        "MIR secondary {function}: {}",
+        result.message
+    );
+    assert!(
+        result.artifact.is_some(),
+        "the exact MIR result for {function} must retain its own proof provenance"
+    );
+}
+
 #[test]
 fn mir_route_error_conversion_preserves_registered_code_and_display() {
     let error = format!(
@@ -79,7 +281,7 @@ macro_rules! require_z3 {
 }
 
 #[test]
-fn exported_body_keeps_direct_dual_verifier_on_compatibility_path_with_maproot_candidate() {
+fn exported_body_dual_verifier_fails_closed_without_legacy_access_for_map_any_owner_v1_candidate() {
     require_z3!();
     let source = r#"
         extern "C" func internal_export(value: i32) -> i32 { value + 1 }
@@ -100,21 +302,41 @@ fn exported_body_keeps_direct_dual_verifier_on_compatibility_path_with_maproot_c
             .parse_file()
             .expect("parse");
     let checked = crate::core::check_program(&file).expect("check");
-    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).map_root_complete());
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    let profile = crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1;
+    assert_eq!(
+        admission.map_any_owner,
+        crate::core::mir::MapAnyOwnerAdmission::CompleteCoverage
+    );
+    assert_eq!(
+        admission.map_root,
+        crate::core::mir::MapRootAdmission::OutsideProfile
+    );
+    assert!(profile.is_admitted(admission));
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let results = crate::verifier::verify_checked_dual(
-        &checked,
-        blake3::hash(source.as_bytes()).to_hex().to_string(),
-    )
-    .expect("export body must preserve the explicit dual-verifier compatibility route");
-    assert!(results.iter().any(|result| {
-        result.func_name == "map_contract" && result.status == VerifStatus::Proven
-    }));
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let results = crate::verifier::verify_checked_dual(&checked, source_hash.clone())
+        .expect("export body must fail closed before any AST dual-verifier fallback");
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "map_contract")
+        .expect("deferred Map contract result");
+    assert_eq!(result.status, VerifStatus::NotInTrustedSubset);
+    assert!(result
+        .message
+        .contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+    assert!(result
+        .message
+        .contains(&format!("source_hash={source_hash}")));
     assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::DualVerifierCompatibility]
+        result
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_deref()),
+        Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
     );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -234,7 +456,17 @@ func forged(x: i32) -> i32 {
     let results = verify_source(src).expect("verification should parse");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, VerifStatus::Failed);
-    assert!(results[0].message.contains("math obligation"));
+    assert!(results[0]
+        .message
+        .contains("scoped Math proof point is false on a reachable path"));
+    assert_eq!(
+        results[0]
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some(ProofArtifact::ENGINE_MIR),
+        "the scoped Math counterexample must come from canonical MIR"
+    );
 }
 
 #[test]
@@ -662,15 +894,13 @@ func positive(x: f64) -> f64 {
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs:343 unwrap failed");
     assert_eq!(results.len(), 1);
-    // P0-10: F64Compare encoding is semantically unsound (NaN bit-pattern
-    // breaks IEEE 754 ordering). All f64 comparisons are now fail-closed
-    // → NotInTrustedSubset until a proper uninterpreted predicate is implemented.
     assert_eq!(
         results[0].status,
-        VerifStatus::NotInTrustedSubset,
-        "f64 comparison should be NotInTrustedSubset (P0-10): {}",
+        VerifStatus::Proven,
+        "finite positive identity must preserve the positive comparison: {}",
         results[0].message
     );
+    assert_finite_ieee_binary64_mir_artifact(&results[0]);
 }
 
 #[test]
@@ -685,14 +915,14 @@ func negate(x: f64) -> f64 {
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs:359 unwrap failed");
     assert_eq!(results.len(), 1);
-    // 0.31.28: f64 negation is NOT in the trusted subset (IEEE 754 rounding
-    // is not modeled). The VIR path rejects f64 arithmetic → NotInTrustedSubset.
     assert_eq!(
         results[0].status,
-        VerifStatus::NotInTrustedSubset,
-        "f64 negation should be NotInTrustedSubset: {}",
+        VerifStatus::Disproven,
+        "negating a positive finite value must disprove positivity: {}",
         results[0].message
     );
+    assert!(results[0].message.contains("counterexample: result = (fp"));
+    assert_finite_ieee_binary64_mir_artifact(&results[0]);
 }
 
 // --- FFI call-site verification ---
@@ -722,64 +952,11 @@ extern "C" {
 }
 
 #[test]
-fn verify_ffi_literal_contract_on_non_scalar_abi_is_ast_free() {
-    // The declaration ABI is intentionally outside ScalarFfi (`string`), but
-    // the call-site obligation is a checker-owned boolean literal.  This
-    // admission slice must produce the same declaration-level result shape as
-    // the compatibility verifier without opening FfiVerifierCompatibility.
-    let src = r#"
-extern "C" {
-    func host_text(value: string) -> i32
-        requires: true;
-}
-func main() -> i32 { host_text("ok") }
-"#;
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let results = verify_ffi_source(src).expect("literal non-scalar FFI contract");
-    assert_eq!(results.len(), 1, "declaration-level result: {results:?}");
-    assert_eq!(results[0].func_name, "extern host_text");
-    assert_eq!(results[0].status, VerifStatus::Proven);
-    let artifact = results[0]
-        .artifact
-        .as_ref()
-        .expect("literal proof artifact");
-    assert_eq!(artifact.engine, ProofArtifact::ENGINE_RESOLVED);
-    assert_eq!(artifact.integer_model, "literal-boolean");
-    assert_eq!(artifact.float_model, "none");
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        Vec::<crate::core::LegacyBodyConsumer>::new(),
-        "literal declaration root must not read retained source body"
-    );
-}
-
-#[test]
-fn verify_ffi_false_literal_contract_is_failed_without_legacy() {
-    let src = r#"
-extern "C" {
-    func host_text(value: string) -> i32
-        requires: false;
-}
-func main() -> i32 { host_text("ok") }
-"#;
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let results = verify_ffi_source(src).expect("false literal non-scalar FFI contract");
-    assert_eq!(results.len(), 1, "declaration-level result: {results:?}");
-    assert_eq!(results[0].func_name, "extern host_text");
-    assert_eq!(results[0].status, VerifStatus::Failed);
-    assert!(results[0]
-        .message
-        .contains("unsatisfiable literal requires"));
-    assert!(results[0].diagnostic.is_some());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-}
-
-#[test]
 fn dual_literal_non_scalar_ffi_declaration_root_is_ast_free() {
     // The string ABI intentionally misses ScalarFfi.  A called declaration
     // whose only proof roots are boolean literals is nevertheless complete at
-    // the checker-owned declaration boundary.  Both public verifier entry
-    // points must keep the dual compatibility owner untouched.
+    // the checker-owned declaration boundary. Both public verifier entry
+    // points must keep the canonical route free of retained body access.
     let source = r#"
 extern "C" {
     func host_text(value: string) -> i32
@@ -808,8 +985,6 @@ func main() -> i32 { host_text("ok") }
     );
 }
 
-
-
 #[test]
 fn dual_scalar_ffi_literal_stays_on_canonical_mir_route() {
     require_z3!();
@@ -828,6 +1003,48 @@ func main() -> i32 { host_i32(1) }
     assert_eq!(results.len(), 1, "canonical scalar result: {results:?}");
     let artifact = results[0].artifact.as_ref().expect("MIR artifact");
     assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn single_literal_non_scalar_ffi_declaration_root_is_ast_free() {
+    let source = r#"
+extern "C" {
+    func host_text(value: string) -> i32
+        requires: true;
+}
+func main() -> i32 { host_text("ok") }
+"#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_source(source).expect("literal non-scalar FFI verification");
+    assert_eq!(results.len(), 1, "declaration-level result: {results:?}");
+    assert_eq!(results[0].func_name, "extern host_text");
+    assert_eq!(results[0].status, VerifStatus::Proven);
+    let artifact = results[0].artifact.as_ref().expect("literal artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_RESOLVED);
+    assert_eq!(artifact.integer_model, "literal-boolean");
+    assert_eq!(artifact.float_model, "none");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn false_literal_non_scalar_ffi_is_failed_without_legacy() {
+    let source = r#"
+extern "C" {
+    func host_text(value: string) -> i32
+        requires: false;
+}
+func main() -> i32 { host_text("ok") }
+"#;
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_source(source).expect("false literal FFI verification");
+    assert_eq!(results.len(), 1, "declaration-level result: {results:?}");
+    assert_eq!(results[0].func_name, "extern host_text");
+    assert_eq!(results[0].status, VerifStatus::Failed);
+    assert!(results[0]
+        .message
+        .contains("unsatisfiable literal requires"));
+    assert!(results[0].diagnostic.is_some());
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
@@ -920,7 +1137,7 @@ fn public_checked_verifiers_reject_recognized_mir_candidates_before_legacy() {
             "Copy Option<f64>",
         ),
         (
-            "incomplete MapRoot",
+            "incomplete MapAnyOwner v1",
             r#"
                 func main() -> i32 {
                     let root = map_new()
@@ -932,7 +1149,7 @@ fn public_checked_verifiers_reject_recognized_mir_candidates_before_legacy() {
                     size + temporary_size
                 }
             "#,
-            "Checker recognized a MapRoot candidate",
+            "Checker recognized a MapAnyOwner v1 candidate",
         ),
         (
             "incomplete S8 Flow",
@@ -972,6 +1189,21 @@ fn public_checked_verifiers_reject_recognized_mir_candidates_before_legacy() {
         let checked =
             crate::core::check_program(&file).unwrap_or_else(|error| panic!("{label}: {error:?}"));
         let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+        if label == "incomplete MapAnyOwner v1" {
+            let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+            assert_eq!(
+                admission.map_any_owner,
+                crate::core::mir::MapAnyOwnerAdmission::IncompleteCoverage
+            );
+            assert_eq!(
+                admission.map_root,
+                crate::core::mir::MapRootAdmission::OutsideProfile
+            );
+            assert!(
+                !crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1.is_admitted(admission)
+            );
+        }
 
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let single_error = match verify_checked(&checked, source_hash.clone()) {
@@ -1325,6 +1557,46 @@ func bad_caller(fd: i64) -> bool {
     );
 }
 
+fn verify_entry_invariant_without_legacy_access(source: &str) -> Vec<VerificationResult> {
+    let file = parse_memory_source(source, "entry-invariant-owner-retirement").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let single = verify_checked(&checked, source_hash.clone()).expect("typed entry invariant");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let super::mir_request::Preparation::Complete(request) = super::mir_request::prepare(&checked)
+    else {
+        panic!("entry invariant request must be complete");
+    };
+    for result in &single {
+        let artifact = result
+            .artifact
+            .as_ref()
+            .expect("real invariant proof/counterexample");
+        assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.source_hash, source_hash);
+        assert_eq!(artifact.mir_hash, request.program().canonical_digest());
+    }
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let dual =
+        verify_checked_dual(&checked, source_hash).expect("independent typed invariant dual");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    for result in &single {
+        let merged = dual
+            .iter()
+            .find(|merged| merged.func_name == result.func_name)
+            .expect("same canonical owner present in dual");
+        if result.status == VerifStatus::Disproven {
+            assert_eq!(
+                merged.status,
+                VerifStatus::Disproven,
+                "counterexample must stay visible"
+            );
+        }
+    }
+    single
+}
+
 #[test]
 fn verify_invariant_basic() {
     require_z3!();
@@ -1336,7 +1608,7 @@ func identity(x: i32) -> i32 {
     x
 }
 "#;
-    let results = verify_source(src).expect("src/verifier/tests.rs: verify_invariant_basic");
+    let results = verify_entry_invariant_without_legacy_access(src);
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0].status,
@@ -1357,7 +1629,7 @@ func add_one(x: i32) -> i32 {
     x + 1
 }
 "#;
-    let results = verify_source(src).expect("src/verifier/tests.rs: verify_invariant_with_ensures");
+    let results = verify_entry_invariant_without_legacy_access(src);
     assert_eq!(results.len(), 1);
     assert_eq!(
         results[0].status,
@@ -1379,14 +1651,16 @@ func scale_add(x: f64) -> f64 {
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs: verify_f64_add_and_compare");
     assert_eq!(results.len(), 1);
-    // 0.31.28: f64 arithmetic is NOT in the trusted subset (IEEE 754 rounding
-    // is not modeled). The VIR path rejects f64 arithmetic → NotInTrustedSubset.
+    // Finite IEEE rounding makes this postcondition false for sufficiently
+    // large x, where x + 1.0 rounds back to x.
     assert_eq!(
         results[0].status,
-        VerifStatus::NotInTrustedSubset,
-        "f64 arithmetic should be NotInTrustedSubset: {:?}",
+        VerifStatus::Disproven,
+        "finite IEEE rounding must expose the counterexample: {:?}",
         results[0]
     );
+    assert!(results[0].message.contains("counterexample: result = (fp"));
+    assert_finite_ieee_binary64_mir_artifact(&results[0]);
 }
 
 #[test]
@@ -1439,6 +1713,16 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
     let file = parse_memory_source(source, "mir-record-public-api").expect("parse");
     let program = crate::core::check_program(&file).expect("typecheck");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&program, &source_hash);
+    let exact_mir = exact_mir_result_for_test(&exact_mir_results, "advance");
+    assert_eq!(
+        exact_mir.status,
+        VerifStatus::Proven,
+        "{}",
+        exact_mir.message
+    );
+    assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
@@ -1451,6 +1735,7 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
         .find(|result| result.func_name.ends_with("advance"))
         .expect("record contract result");
     assert_eq!(result.status, VerifStatus::Proven);
+    assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
     assert_eq!(
         result
             .artifact
@@ -1460,7 +1745,7 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
     );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
+    let dual_result = verify_checked_dual(&program, source_hash.clone()).expect("MIR dual verify");
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "closed Copy record dual verifier route must not access retained legacy bodies"
@@ -1470,11 +1755,11 @@ fn public_checked_verifier_routes_closed_copy_record_to_mir() {
         .find(|result| result.func_name.ends_with("advance"))
         .expect("dual record contract result");
     assert_eq!(dual.status, VerifStatus::Proven);
-    assert_eq!(
-        dual.artifact
-            .as_ref()
-            .map(|artifact| artifact.engine.as_str()),
-        Some(ProofArtifact::ENGINE_MIR)
+    assert_dual_result_keeps_the_agreed_engine_artifact(
+        dual,
+        exact_mir,
+        &source_hash,
+        &typed_receipt,
     );
 }
 
@@ -1679,7 +1964,6 @@ fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
         let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
         for dual in [false, true] {
-            crate::core::mir::reset_test_route_materialization_count();
             crate::core::CheckedProgram::reset_test_legacy_body_access();
             let results = if dual {
                 crate::verifier::verify_checked_dual(&checked, source_hash.clone())
@@ -1693,12 +1977,6 @@ fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
                     if dual { "dual" } else { "single" }
                 )
             });
-            assert_eq!(
-                crate::core::mir::test_route_materialization_count(),
-                1,
-                "{} must materialize exactly once through the public verifier",
-                profile.as_str()
-            );
             assert!(
                 crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
                 "{} {} verifier touched retained legacy body",
@@ -1711,6 +1989,9 @@ fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
                         result.status == VerifStatus::Proven
                             && result.artifact.as_ref().is_some_and(|artifact| {
                                 artifact.engine == ProofArtifact::ENGINE_MIR
+                                    && artifact.mir_route_receipt.as_ref().is_some_and(|receipt| {
+                                        receipt.mir_digest == artifact.mir_hash
+                                    })
                             })
                     }),
                     "{} {} verifier must produce a MIR proof: {results:?}",
@@ -1792,7 +2073,7 @@ fn recoverable_cross_state_flow_verifier_reports_a_real_counterexample() {
 }
 
 #[test]
-fn flow_vir_bool_result_postconditions_agree_with_resolved() {
+fn flow_vir_bool_result_postconditions_keep_reference_and_dual_fails_closed() {
     require_z3!();
     // Keep this fixture on the explicit export-wrapper compatibility face:
     // the regression must exercise VIR, even after scalar contracts gain a
@@ -1822,10 +2103,7 @@ fn flow_vir_bool_result_postconditions_agree_with_resolved() {
         .expect("Flow/VIR verifier");
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual = verify_checked_dual(&checked, source_hash).expect("dual verifier");
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::DualVerifierCompatibility]
-    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     for (name, expected) in [
         ("true_value", VerifStatus::Proven),
         ("false_claim", VerifStatus::Disproven),
@@ -1834,7 +2112,7 @@ fn flow_vir_bool_result_postconditions_agree_with_resolved() {
         ("flip", VerifStatus::Proven),
         ("integer_claim", VerifStatus::Disproven),
     ] {
-        for results in [&resolved, &flow, &dual] {
+        for results in [&resolved, &flow] {
             let result = results
                 .iter()
                 .find(|result| result.func_name == name)
@@ -1842,6 +2120,21 @@ fn flow_vir_bool_result_postconditions_agree_with_resolved() {
             assert_eq!(result.status, expected, "{name}: {}", result.message);
             assert!(!result.message.contains("E0439"), "{}", result.message);
         }
+        let result = dual
+            .iter()
+            .find(|result| result.func_name == name)
+            .expect("dual coverage result");
+        assert_eq!(result.status, VerifStatus::NotInTrustedSubset);
+        assert!(result
+            .message
+            .contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+        assert_eq!(
+            result
+                .diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.code.as_deref()),
+            Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+        );
     }
 }
 
@@ -1865,6 +2158,7 @@ fn ordinary_scalar_contracts_share_mir_and_retire_legacy_body_access() {
             value + 1
         }
         func main() -> i32 { if positive(1) { 42 } else { 0 } }
+        func no_contract(value: i32) -> i32 { value }
     "#;
     let file = parse_memory_source(source, "ordinary-scalar-contracts").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
@@ -1898,11 +2192,14 @@ fn ordinary_scalar_contracts_share_mir_and_retire_legacy_body_access() {
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
     let results = verify_mir_with_route_receipt(&canonical, &receipt, source_hash.clone())
         .expect("same-MIR verifier");
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
     for (name, status) in [
         ("positive", VerifStatus::Proven),
         ("identity", VerifStatus::Proven),
         ("false_claim", VerifStatus::Disproven),
         ("checked_increment", VerifStatus::Disproven),
+        ("main", VerifStatus::Proven),
     ] {
         let result = results
             .iter()
@@ -1912,64 +2209,52 @@ fn ordinary_scalar_contracts_share_mir_and_retire_legacy_body_access() {
         let artifact = result.artifact.as_ref().expect("canonical proof identity");
         assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
         assert_eq!(artifact.mir_hash, receipt.mir_digest);
+
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+        assert_eq!(
+            exact_mir.status, status,
+            "typed MIR {name}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
     }
-    assert!(
-        results
-            .iter()
-            .all(|result| result.func_name != "function:main"),
-        "a no-contract caller must not acquire a proof verdict"
-    );
-    let expected_public = [
-        ("positive", VerifStatus::Proven),
-        ("identity", VerifStatus::Proven),
-        ("false_claim", VerifStatus::Disproven),
-        ("checked_increment", VerifStatus::Disproven),
-    ];
-    let mut public_projections = Vec::new();
+    assert!(results.iter().all(|result| {
+        result.func_name != "function:no_contract" && result.func_name != "no_contract"
+    }));
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
-        let results = if dual {
+        let public_results = if dual {
             verify_checked_dual(&checked, source_hash.clone())
         } else {
             verify_checked(&checked, source_hash.clone())
         }
         .expect("public checked verifier");
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-        assert_eq!(results.len(), expected_public.len());
-        for (name, expected_status) in expected_public.iter() {
-            let result = results
-                .iter()
-                .find(|result| result.func_name == *name)
-                .unwrap_or_else(|| panic!("public verifier omitted {name}: {results:?}"));
-            assert_eq!(
-                &result.status,
-                expected_status,
-                "public {} verifier changed {name}: {}",
-                if dual { "dual" } else { "single" },
-                result.message
-            );
-            let artifact = result
-                .artifact
-                .as_ref()
-                .unwrap_or_else(|| panic!("public verifier omitted MIR artifact for {name}"));
-            assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
-            assert_eq!(artifact.mir_hash, receipt.mir_digest);
+        for (name, status) in [
+            ("positive", VerifStatus::Proven),
+            ("identity", VerifStatus::Proven),
+            ("false_claim", VerifStatus::Disproven),
+            ("checked_increment", VerifStatus::Disproven),
+            ("main", VerifStatus::Proven),
+        ] {
+            let public = exact_mir_result_for_test(&public_results, name);
+            let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+            assert_eq!(public.status, status, "{name}: {}", public.message);
+            if dual {
+                assert_dual_result_keeps_the_agreed_engine_artifact(
+                    public,
+                    exact_mir,
+                    &source_hash,
+                    &typed_receipt,
+                );
+            } else {
+                assert_single_exact_mir_artifact(public, &source_hash, &typed_receipt);
+            }
         }
-        public_projections.push(
-            results
-                .iter()
-                .map(|result| {
-                    (
-                        result.func_name.clone(),
-                        result.status.clone(),
-                        result.message.clone(),
-                        result.constraint_count,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        assert!(public_results.iter().all(|result| {
+            result.func_name != "function:no_contract" && result.func_name != "no_contract"
+        }));
     }
-    assert_eq!(public_projections[0], public_projections[1]);
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let mut direct_native =
         crate::codegen::CodeGenerator::new(&context, "checked_scalar_contracts");
@@ -2016,6 +2301,56 @@ func false_claim() -> bool {
         .iter()
         .any(|error| error.contains("function:main")));
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    for (name, status) in [
+        ("positive", VerifStatus::Proven),
+        ("rejected", VerifStatus::Disproven),
+        ("admitted", VerifStatus::Proven),
+        ("impossible", VerifStatus::Disproven),
+        ("false_claim", VerifStatus::Disproven),
+    ] {
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+        assert_eq!(
+            exact_mir.status, status,
+            "exact MIR {name}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+        if name == "rejected" {
+            assert!(
+                exact_mir
+                    .message
+                    .contains("call to 'function:positive' may violate precondition"),
+                "exact rejected call-site VC: {}",
+                exact_mir.message
+            );
+            assert_mir_contract_diagnostic_origin(&checked, exact_mir);
+            let diagnostic = exact_mir.diagnostic.as_ref().unwrap();
+            assert_eq!(diagnostic.span.start_line, 6);
+            let call_site = checked
+                .call_sites_sorted()
+                .into_iter()
+                .find(|site| site.owner == "function:rejected" && site.callee == "positive")
+                .expect("exact rejected-to-positive call-site identity");
+            assert_eq!(call_site.origin.user_span().start_line, 6);
+        }
+        if name == "impossible" {
+            assert_exact_mir_contract_diagnostic(
+                &checked,
+                exact_mir,
+                "canonical MIR requires are unsatisfiable",
+            );
+        }
+        if name == "false_claim" {
+            assert_exact_mir_contract_diagnostic(
+                &checked,
+                exact_mir,
+                "canonical MIR ensures contract is disproven; counterexample: result = false",
+            );
+        }
+    }
+    assert_exact_mir_secondary_status(&exact_mir_results, "rejected", VerifStatus::Disproven);
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
@@ -2028,41 +2363,24 @@ func false_claim() -> bool {
         for (name, status) in [
             ("positive", VerifStatus::Proven),
             ("rejected", VerifStatus::Disproven),
+            ("admitted", VerifStatus::Proven),
             ("impossible", VerifStatus::Disproven),
             ("false_claim", VerifStatus::Disproven),
         ] {
-            let result = results
-                .iter()
-                .find(|result| result.func_name == name)
-                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+            let result = exact_mir_result_for_test(&results, name);
+            let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
             assert_eq!(result.status, status, "{name}: {}", result.message);
-            let artifact = result.artifact.as_ref().expect("canonical proof artifact");
-            assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
-            assert_eq!(artifact.mir_hash, canonical.canonical_digest());
-            if name == "rejected" {
-                assert!(result.message.contains("may violate precondition"));
-                let diagnostic = result.diagnostic.as_ref().expect("call diagnostic");
-                assert_eq!(diagnostic.span.start_line, 6);
-                assert!(diagnostic.origin.as_ref().unwrap().parent_node_id.is_some());
-            }
-            if name == "impossible" {
-                assert!(result
-                    .diagnostic
-                    .as_ref()
-                    .unwrap()
-                    .message
-                    .contains("unsatisfiable"));
-            }
-            if name == "false_claim" {
-                assert!(result
-                    .diagnostic
-                    .as_ref()
-                    .unwrap()
-                    .message
-                    .contains("result = false"));
+            if dual {
+                assert_dual_result_keeps_the_agreed_engine_artifact(
+                    result,
+                    exact_mir,
+                    &source_hash,
+                    &typed_receipt,
+                );
+            } else {
+                assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
             }
         }
-        assert!(results.iter().all(|result| result.func_name != "admitted"));
     }
 }
 
@@ -2088,6 +2406,40 @@ func guarded(value: i32) -> i32 {
         .expect("parse helper graph");
     let checked = crate::core::check_program(&file).expect("check helper graph");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    for (name, status) in [
+        ("positive", VerifStatus::Proven),
+        ("forward", VerifStatus::Disproven),
+        ("bad_lower", VerifStatus::Disproven),
+        ("bad_upper", VerifStatus::Disproven),
+        ("good", VerifStatus::Proven),
+        ("guarded", VerifStatus::Proven),
+    ] {
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+        assert_eq!(
+            exact_mir.status, status,
+            "exact MIR {name}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+        if status == VerifStatus::Disproven {
+            assert_mir_contract_diagnostic_origin(&checked, exact_mir);
+            assert!(
+                exact_mir.message.contains("may violate precondition"),
+                "exact MIR helper obligation for {name}: {}",
+                exact_mir.message
+            );
+            let owner = format!("function:{name}");
+            assert!(
+                checked
+                    .call_sites_sorted()
+                    .iter()
+                    .any(|site| site.owner == owner),
+                "{name} retains its checked helper call-site identity"
+            );
+        }
+    }
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
@@ -2102,22 +2454,23 @@ func guarded(value: i32) -> i32 {
             ("forward", VerifStatus::Disproven),
             ("bad_lower", VerifStatus::Disproven),
             ("bad_upper", VerifStatus::Disproven),
+            ("good", VerifStatus::Proven),
             ("guarded", VerifStatus::Proven),
         ] {
-            let result = results
-                .iter()
-                .find(|result| result.func_name == name)
-                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+            let result = exact_mir_result_for_test(&results, name);
+            let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
             assert_eq!(result.status, status, "{name}: {}", result.message);
-            assert_eq!(
-                result.artifact.as_ref().expect("MIR artifact").engine,
-                ProofArtifact::ENGINE_MIR,
-            );
-            if status == VerifStatus::Disproven {
-                assert!(result.message.contains("may violate precondition"));
+            if dual {
+                assert_dual_result_keeps_the_agreed_engine_artifact(
+                    result,
+                    exact_mir,
+                    &source_hash,
+                    &typed_receipt,
+                );
+            } else {
+                assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
             }
         }
-        assert!(results.iter().all(|result| result.func_name != "good"));
     }
 }
 
@@ -2137,6 +2490,19 @@ func guarded(flag: bool) {
         parse_memory_source(source, "scalar-contract-unit-return").expect("parse unit contracts");
     let checked = crate::core::check_program(&file).expect("check unit contracts");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    assert_eq!(exact_mir_results.len(), 2);
+    for name in ["finished", "guarded"] {
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+        assert_eq!(
+            exact_mir.status,
+            VerifStatus::Proven,
+            "{}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+    }
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
@@ -2147,12 +2513,20 @@ func guarded(flag: bool) {
         .expect("verify canonical unit returns");
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
         assert_eq!(results.len(), 2);
-        for result in results {
+        for name in ["finished", "guarded"] {
+            let result = exact_mir_result_for_test(&results, name);
+            let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
             assert_eq!(result.status, VerifStatus::Proven, "{}", result.message);
-            assert_eq!(
-                result.artifact.as_ref().expect("MIR artifact").engine,
-                ProofArtifact::ENGINE_MIR,
-            );
+            if dual {
+                assert_dual_result_keeps_the_agreed_engine_artifact(
+                    result,
+                    exact_mir,
+                    &source_hash,
+                    &typed_receipt,
+                );
+            } else {
+                assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
+            }
         }
     }
 }
@@ -2209,10 +2583,37 @@ func safe_contract_add(x: i32) -> bool {
 "#;
     let file = parse_memory_source(source, "typed-contract-arithmetic").expect("parse");
     let checked = crate::core::check_program(&file).expect("check contract library");
-    let canonical = crate::core::mir::materialize_canonical_mir_route(&checked, None)
-        .expect("typed arithmetic canonical MIR")
-        .program;
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    let expected = [
+        ("safe32", VerifStatus::Proven),
+        ("safe64", VerifStatus::Proven),
+        ("unsafe_division", VerifStatus::Disproven),
+        ("unsafe_remainder", VerifStatus::Disproven),
+        ("unsafe64", VerifStatus::Disproven),
+        ("mixed_width", VerifStatus::Proven),
+        ("wide_literal", VerifStatus::Proven),
+        ("truncation", VerifStatus::Proven),
+        ("unsafe_contract_add", VerifStatus::Disproven),
+        ("safe_contract_add", VerifStatus::Proven),
+    ];
+    for (name, status) in expected.iter().cloned() {
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+        assert_eq!(
+            exact_mir.status, status,
+            "exact MIR {name}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+        if status == VerifStatus::Disproven {
+            assert_exact_mir_contract_diagnostic(
+                &checked,
+                exact_mir,
+                "canonical MIR ensures contract expression is undefined",
+            );
+        }
+    }
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
@@ -2222,43 +2623,19 @@ func safe_contract_add(x: i32) -> bool {
         }
         .expect("verify actual expression types");
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-        for (name, status) in [
-            ("safe32", VerifStatus::Proven),
-            ("safe64", VerifStatus::Proven),
-            ("unsafe_division", VerifStatus::Disproven),
-            ("unsafe_remainder", VerifStatus::Disproven),
-            ("unsafe64", VerifStatus::Disproven),
-            ("mixed_width", VerifStatus::Proven),
-            ("wide_literal", VerifStatus::Proven),
-            ("truncation", VerifStatus::Proven),
-            ("unsafe_contract_add", VerifStatus::Disproven),
-            ("safe_contract_add", VerifStatus::Proven),
-        ] {
-            let result = results
-                .iter()
-                .find(|result| result.func_name == name)
-                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+        for (name, status) in expected.iter().cloned() {
+            let result = exact_mir_result_for_test(&results, name);
+            let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
             assert_eq!(result.status, status, "{name}: {}", result.message);
-            let artifact = result.artifact.as_ref().expect("MIR artifact");
-            assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
-            assert_eq!(artifact.mir_hash, canonical.canonical_digest());
-            if status == VerifStatus::Disproven {
-                assert!(
-                    result
-                        .message
-                        .contains("ensures contract expression is undefined"),
-                    "{name}: {}",
-                    result.message
+            if dual {
+                assert_dual_result_keeps_the_agreed_engine_artifact(
+                    result,
+                    exact_mir,
+                    &source_hash,
+                    &typed_receipt,
                 );
-                assert!(result
-                    .diagnostic
-                    .as_ref()
-                    .expect("contract diagnostic")
-                    .origin
-                    .as_ref()
-                    .expect("contract origin")
-                    .parent_node_id
-                    .is_some());
+            } else {
+                assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
             }
         }
     }
@@ -2322,6 +2699,42 @@ func return_path_guard(x: i32, y: i32) -> i32 {
     let file = parse_memory_source(source, "contract-evaluation-order").expect("parse");
     let checked = crate::core::check_program(&file).expect("check contract library");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    let expected = [
+        ("guarded_requires", VerifStatus::Proven),
+        ("reversed_requires", VerifStatus::Disproven),
+        ("unsafe_or", VerifStatus::Disproven),
+        ("guarded_or", VerifStatus::Proven),
+        ("earlier_guards", VerifStatus::Proven),
+        ("later_guards", VerifStatus::Disproven),
+        ("skipped_postcondition", VerifStatus::Proven),
+        ("false_short_circuit", VerifStatus::Disproven),
+        ("return_path_guard", VerifStatus::Proven),
+    ];
+    for (name, status) in expected.iter().cloned() {
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+        assert_eq!(
+            exact_mir.status, status,
+            "exact MIR {name}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+        if matches!(name, "reversed_requires" | "unsafe_or" | "later_guards") {
+            assert_exact_mir_contract_diagnostic(
+                &checked,
+                exact_mir,
+                "canonical MIR requires contract expression is undefined",
+            );
+        }
+        if name == "false_short_circuit" {
+            assert_exact_mir_contract_diagnostic(
+                &checked,
+                exact_mir,
+                "canonical MIR ensures contract is disproven; counterexample: result = 0",
+            );
+        }
+    }
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
@@ -2331,42 +2744,19 @@ func return_path_guard(x: i32, y: i32) -> i32 {
         }
         .expect("verify short-circuit guard obligations");
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-        for (name, status) in [
-            ("guarded_requires", VerifStatus::Proven),
-            ("reversed_requires", VerifStatus::Disproven),
-            ("unsafe_or", VerifStatus::Disproven),
-            ("guarded_or", VerifStatus::Proven),
-            ("earlier_guards", VerifStatus::Proven),
-            ("later_guards", VerifStatus::Disproven),
-            ("skipped_postcondition", VerifStatus::Proven),
-            ("false_short_circuit", VerifStatus::Disproven),
-            ("return_path_guard", VerifStatus::Proven),
-        ] {
-            let result = results
-                .iter()
-                .find(|result| result.func_name == name)
-                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+        for (name, status) in expected.iter().cloned() {
+            let result = exact_mir_result_for_test(&results, name);
+            let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
             assert_eq!(result.status, status, "{name}: {}", result.message);
-            assert_eq!(
-                result.artifact.as_ref().expect("MIR artifact").engine,
-                ProofArtifact::ENGINE_MIR
-            );
-            if matches!(name, "reversed_requires" | "unsafe_or" | "later_guards") {
-                assert!(
-                    result
-                        .message
-                        .contains("requires contract expression is undefined"),
-                    "{}",
-                    result.message
+            if dual {
+                assert_dual_result_keeps_the_agreed_engine_artifact(
+                    result,
+                    exact_mir,
+                    &source_hash,
+                    &typed_receipt,
                 );
-            }
-            if name == "false_short_circuit" {
-                assert!(
-                    result.message.contains("counterexample"),
-                    "{}",
-                    result.message
-                );
-                assert!(!result.message.contains("undefined"));
+            } else {
+                assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
             }
         }
     }
@@ -2390,6 +2780,25 @@ func proven_call() -> i32 {
     let file = parse_memory_source(source, "callee-contract-definedness").expect("parse");
     let checked = crate::core::check_program(&file).expect("check contract call graph");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    let expected = [
+        ("unsafe_gate", VerifStatus::Disproven),
+        ("rejected_call", VerifStatus::Disproven),
+        ("proven_call", VerifStatus::Proven),
+    ];
+    for (name, status) in expected.iter().cloned() {
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
+        assert_eq!(
+            exact_mir.status, status,
+            "exact MIR {name}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+    }
+    assert!(exact_mir_results
+        .iter()
+        .all(|result| result.func_name != "admitted_call"));
     for dual in [false, true] {
         crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
@@ -2399,20 +2808,20 @@ func proven_call() -> i32 {
         }
         .expect("verify argument-specific contract safety");
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-        for (name, status) in [
-            ("unsafe_gate", VerifStatus::Disproven),
-            ("rejected_call", VerifStatus::Disproven),
-            ("proven_call", VerifStatus::Proven),
-        ] {
-            let result = results
-                .iter()
-                .find(|result| result.func_name == name)
-                .unwrap_or_else(|| panic!("missing {name}: {results:?}"));
+        for (name, status) in expected.iter().cloned() {
+            let result = exact_mir_result_for_test(&results, name);
+            let exact_mir = exact_mir_result_for_test(&exact_mir_results, name);
             assert_eq!(result.status, status, "{name}: {}", result.message);
-            assert_eq!(
-                result.artifact.as_ref().expect("MIR artifact").engine,
-                ProofArtifact::ENGINE_MIR
-            );
+            if dual {
+                assert_dual_result_keeps_the_agreed_engine_artifact(
+                    result,
+                    exact_mir,
+                    &source_hash,
+                    &typed_receipt,
+                );
+            } else {
+                assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
+            }
             if status == VerifStatus::Disproven {
                 assert!(result.message.contains("undefined"), "{}", result.message);
             }
@@ -2424,35 +2833,46 @@ func proven_call() -> i32 {
 }
 
 #[test]
-fn compatibility_verifier_access_is_explicitly_tagged() {
+fn unsupported_contract_returns_structured_coverage_without_legacy_access() {
     require_z3!();
     let source = r#"
-        extern "C" func compatibility_marker(value: i32) -> i32 { value }
-        func positive(value: i32) -> i32 {
-            requires: value > 0
-            ensures: result > 0
-            value
+        func guarded(value: i32) -> i32 {
+            ensures: value > 0
+            value + {
+                requires: value > 0
+                0
+            }
         }
 
-        func main() -> i32 { positive(1) }
+        func main() -> i32 { guarded(1) }
     "#;
     let file = parse_memory_source(source, "legacy-body-owner-audit").expect("parse");
     let program = crate::core::check_program(&file).expect("typecheck");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    verify_checked(&program, source_hash.clone()).expect("compatibility verifier");
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::FlowVerifierCompatibility]
-    );
+    let single = verify_checked(&program, source_hash.clone()).expect("typed coverage result");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let guarded = single
+        .iter()
+        .find(|result| result.func_name == "guarded")
+        .expect("deferred guarded owner");
+    assert_eq!(guarded.status, VerifStatus::NotInTrustedSubset);
+    assert!(guarded
+        .message
+        .contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    verify_checked_dual(&program, source_hash).expect("dual compatibility verifier");
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::DualVerifierCompatibility]
-    );
+    let dual = verify_checked_dual(&program, source_hash).expect("typed dual coverage result");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let guarded = dual
+        .iter()
+        .find(|result| result.func_name == "guarded")
+        .expect("deferred dual guarded owner");
+    assert_eq!(guarded.status, VerifStatus::NotInTrustedSubset);
+    assert!(guarded
+        .message
+        .contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
 }
 
 #[test]
@@ -2466,6 +2886,16 @@ fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
         crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
     );
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&program, &source_hash);
+    let exact_mir = exact_mir_result_for_test(&exact_mir_results, "list_len_contract");
+    assert_eq!(
+        exact_mir.status,
+        VerifStatus::Proven,
+        "{}",
+        exact_mir.message
+    );
+    assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verify_result = verify_checked(&program, source_hash.clone()).expect("MIR verify");
@@ -2478,6 +2908,7 @@ fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
         .find(|result| result.func_name == "list_len_contract")
         .expect("scalar collection contract result");
     assert_eq!(result.status, VerifStatus::Proven);
+    assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
     assert_eq!(
         result
             .artifact
@@ -2487,7 +2918,7 @@ fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
     );
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let dual_result = verify_checked_dual(&program, source_hash).expect("MIR dual verify");
+    let dual_result = verify_checked_dual(&program, source_hash.clone()).expect("MIR dual verify");
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "closed dual verifier route must not access a retained legacy body"
@@ -2497,11 +2928,11 @@ fn public_checked_verifier_routes_closed_scalar_collection_to_mir() {
         .find(|result| result.func_name == "list_len_contract")
         .expect("dual scalar collection contract result");
     assert_eq!(dual.status, VerifStatus::Proven);
-    assert_eq!(
-        dual.artifact
-            .as_ref()
-            .map(|artifact| artifact.engine.as_str()),
-        Some(ProofArtifact::ENGINE_MIR)
+    assert_dual_result_keeps_the_agreed_engine_artifact(
+        dual,
+        exact_mir,
+        &source_hash,
+        &typed_receipt,
     );
 }
 
@@ -2518,14 +2949,12 @@ fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
     let results =
         verify_checked(&program, source_hash.clone()).expect("nested Option tuple MIR verify");
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "nested Option tuple verifier must not access retained legacy bodies"
     );
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     let result = results
         .iter()
         .find(|result| result.func_name == "main")
@@ -2541,25 +2970,29 @@ fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
     assert_eq!(artifact.mir_hash, canonical.canonical_digest());
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
     let dual = verify_checked_dual(&program, source_hash).expect("nested Option tuple dual verify");
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "nested Option tuple dual verifier must not access retained legacy bodies"
     );
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     let dual_result = dual
         .iter()
         .find(|result| result.func_name == "main")
         .expect("nested Option tuple dual contract result");
     assert_eq!(dual_result.status, VerifStatus::Proven);
     assert_eq!(dual_result.constraint_count, 4);
+    let dual_artifact = dual_result
+        .artifact
+        .as_ref()
+        .expect("dual MIR proof artifact");
+    assert_eq!(dual_artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(dual_artifact.mir_hash, canonical.canonical_digest());
     assert_eq!(
-        dual_result
-            .artifact
+        dual_artifact
+            .mir_route_receipt
             .as_ref()
-            .map(|artifact| artifact.engine.as_str()),
-        Some(ProofArtifact::ENGINE_MIR)
+            .map(|receipt| receipt.mir_digest.as_str()),
+        Some(dual_artifact.mir_hash.as_str())
     );
 }
 
@@ -2576,47 +3009,42 @@ fn public_checked_verifier_routes_recoverable_cross_state_flow_to_mir() {
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
     assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).flow_failure_retry);
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&program, &source_hash);
+    let exact_mir = exact_mir_result_for_test(&exact_mir_results, "main");
+    assert_eq!(
+        exact_mir.status,
+        VerifStatus::Proven,
+        "{}",
+        exact_mir.message
+    );
+    assert!(exact_mir.constraint_count > 0);
+    assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
     let results = verify_checked(&program, source_hash.clone()).expect("public MIR verify");
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "closed recoverable Flow verifier must not access the compatibility body"
     );
-    let result = results
-        .iter()
-        .find(|result| result.func_name == "main")
-        .expect("recoverable cross-state public proof");
+    let result = exact_mir_result_for_test(&results, "main");
     assert_eq!(result.status, VerifStatus::Proven);
     assert!(result.constraint_count > 0);
-    let artifact = result.artifact.as_ref().expect("MIR proof artifact");
-    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
-    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
-        .expect("canonical recoverable cross-state MIR");
-    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+    assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
-    let dual = verify_checked_dual(&program, source_hash).expect("public dual MIR verify");
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    let dual = verify_checked_dual(&program, source_hash.clone()).expect("public dual MIR verify");
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
         "closed recoverable Flow dual verifier must not access the compatibility body"
     );
-    let dual_result = dual
-        .iter()
-        .find(|result| result.func_name == "main")
-        .expect("recoverable cross-state public dual proof");
-    assert_eq!(dual_result.status, VerifStatus::Proven);
+    let dual_result = exact_mir_result_for_test(&dual, "main");
     assert!(dual_result.constraint_count > 0);
-    assert_eq!(
-        dual_result
-            .artifact
-            .as_ref()
-            .map(|artifact| artifact.engine.as_str()),
-        Some(ProofArtifact::ENGINE_MIR)
+    assert_dual_result_keeps_the_agreed_engine_artifact(
+        dual_result,
+        exact_mir,
+        &source_hash,
+        &typed_receipt,
     );
 }
 
@@ -2665,22 +3093,26 @@ fn public_checked_verifier_reports_recoverable_cross_state_counterexample_from_m
         .expect("parse recoverable cross-state counterexample");
     let program = crate::core::check_program(&file).expect("typecheck counterexample");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&program, &source_hash);
+    let exact_mir = exact_mir_result_for_test(&exact_mir_results, "main");
+    assert_eq!(
+        exact_mir.status,
+        VerifStatus::Disproven,
+        "{}",
+        exact_mir.message
+    );
+    assert!(exact_mir.constraint_count > 0);
+    assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
-    let results = verify_checked(&program, source_hash).expect("public MIR counterexample");
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    let results = verify_checked(&program, source_hash.clone()).expect("public MIR counterexample");
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    let result = results
-        .iter()
-        .find(|result| result.func_name == "main")
-        .expect("recoverable cross-state public counterexample");
+    let result = exact_mir_result_for_test(&results, "main");
     assert_eq!(result.status, VerifStatus::Disproven);
     assert!(result.constraint_count > 0);
     assert!(result.message.contains("ensures contract is disproven"));
-    let artifact = result.artifact.as_ref().expect("counterexample artifact");
-    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
-    assert!(!artifact.mir_hash.is_empty());
+    assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
 }
 
 #[test]
@@ -2693,42 +3125,39 @@ fn public_checked_verifier_proves_multifield_flow_source_receipt_from_mir() {
     let program =
         crate::core::check_program(&file).expect("typecheck multifield Flow source receipt");
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&program, &source_hash);
+    let exact_mir = exact_mir_result_for_test(&exact_mir_results, "main");
+    assert_eq!(
+        exact_mir.status,
+        VerifStatus::Proven,
+        "{}",
+        exact_mir.message
+    );
+    assert!(exact_mir.constraint_count > 0);
+    assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
     let results =
         verify_checked(&program, source_hash.clone()).expect("public multifield MIR verify");
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    let result = results
-        .iter()
-        .find(|result| result.func_name == "main")
-        .expect("multifield Flow source receipt proof");
+    let result = exact_mir_result_for_test(&results, "main");
     assert_eq!(result.status, VerifStatus::Proven);
     assert!(result.constraint_count > 0);
-    let artifact = result.artifact.as_ref().expect("MIR proof artifact");
-    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
-    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&program)
-        .expect("canonical multifield Flow source receipt MIR");
-    assert_eq!(artifact.mir_hash, canonical.canonical_digest());
+    assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
-    let dual_results = crate::verifier::verify_checked_dual(&program, source_hash)
+    let dual_results = crate::verifier::verify_checked_dual(&program, source_hash.clone())
         .expect("public dual multifield MIR verify");
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    let dual_result = dual_results
-        .iter()
-        .find(|result| result.func_name == "main")
-        .expect("multifield Flow dual verifier result");
-    assert_eq!(dual_result.status, VerifStatus::Proven);
-    let dual_artifact = dual_result
-        .artifact
-        .as_ref()
-        .expect("dual MIR proof artifact");
-    assert_eq!(dual_artifact.engine, ProofArtifact::ENGINE_MIR);
-    assert_eq!(dual_artifact.mir_hash, canonical.canonical_digest());
+    let dual_result = exact_mir_result_for_test(&dual_results, "main");
+    assert!(dual_result.constraint_count > 0);
+    assert_dual_result_keeps_the_agreed_engine_artifact(
+        dual_result,
+        exact_mir,
+        &source_hash,
+        &typed_receipt,
+    );
 }
 
 #[test]
@@ -2742,9 +3171,7 @@ fn public_checked_verifier_proves_f64_flow_arithmetic_from_mir() {
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
     let results = verify_checked(&program, source_hash).expect("public f64 Flow MIR verify");
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let result = results
         .iter()
@@ -2755,8 +3182,7 @@ fn public_checked_verifier_proves_f64_flow_arithmetic_from_mir() {
     // on the canonical engine instead of reporting the float boundary.
     assert_eq!(result.status, VerifStatus::Proven);
     assert!(result.constraint_count > 0);
-    let artifact = result.artifact.as_ref().expect("MIR proof artifact");
-    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_finite_ieee_binary64_mir_artifact(result);
 }
 
 #[test]
@@ -5899,7 +6325,7 @@ fn exact_s8_route_receipt_covers_all_consumers_without_legacy_escape() {
 }
 
 #[test]
-fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
+fn public_checked_verifier_routes_map_any_owner_v1_receipt_contracts_through_mir() {
     require_z3!();
     let source = r#"
         func checked_map_size(value: i32) -> i32 {
@@ -5967,24 +6393,40 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
         }
         func main() -> i32 { 0 }
     "#;
-    let file = parse_memory_source(source, "map-root-public-verify").expect("parse");
+    let file = parse_memory_source(source, "map-any-owner-v1-public-verify").expect("parse");
     let checked = crate::core::check_program(&file).expect("typecheck");
+    let profile = crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1;
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
     assert_eq!(
-        crate::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
-        crate::core::mir::MapRootAdmission::CompleteCoverage
+        admission.map_any_owner,
+        crate::core::mir::MapAnyOwnerAdmission::CompleteCoverage
     );
+    assert_eq!(
+        admission.map_root,
+        crate::core::mir::MapRootAdmission::OutsideProfile
+    );
+    assert!(profile.is_admitted(admission));
+
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("complete MapAnyOwner v1 Checker receipt must materialize");
+    assert!(profile.is_materialized(&route));
+    assert!(!route.materialized_map_root_candidate);
+    let receipt = route.program.route_receipt(profile.as_str());
+    assert_eq!(receipt.profile, "map-any-owner-v1");
+    receipt
+        .validate()
+        .expect("valid MapAnyOwner v1 route receipt");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
-    let results = crate::verifier::verify_checked(
-        &checked,
-        blake3::hash(source.as_bytes()).to_hex().to_string(),
-    )
-    .expect("public checked verifier must use the MapRoot MIR profile");
+    let results = crate::verifier::verify_checked(&checked, source_hash.clone())
+        .expect("public checked verifier must use the MapAnyOwner v1 MIR profile");
     let proven = results
         .iter()
         .find(|result| result.func_name == "checked_map_size")
-        .expect("positive MapRoot proof");
+        .expect("positive MapAnyOwner v1 proof");
     assert_eq!(proven.status, VerifStatus::Proven, "{}", proven.message);
     assert_eq!(
         proven
@@ -5996,7 +6438,7 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
     let disproven = results
         .iter()
         .find(|result| result.func_name == "false_map_size")
-        .expect("negative MapRoot proof");
+        .expect("negative MapAnyOwner v1 proof");
     assert_eq!(
         disproven.status,
         VerifStatus::Disproven,
@@ -6013,7 +6455,7 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
     let string_proven = results
         .iter()
         .find(|result| result.func_name == "checked_string_map_size")
-        .expect("positive String MapRoot proof");
+        .expect("positive String MapAnyOwner v1 proof");
     assert_eq!(
         string_proven.status,
         VerifStatus::Proven,
@@ -6030,7 +6472,7 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
     let string_disproven = results
         .iter()
         .find(|result| result.func_name == "false_string_map_size")
-        .expect("negative String MapRoot proof");
+        .expect("negative String MapAnyOwner v1 proof");
     assert_eq!(
         string_disproven.status,
         VerifStatus::Disproven,
@@ -6052,7 +6494,7 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
         let result = results
             .iter()
             .find(|result| result.func_name == function)
-            .unwrap_or_else(|| panic!("missing MapRoot Remove result for {function}"));
+            .unwrap_or_else(|| panic!("missing MapAnyOwner v1 Remove result for {function}"));
         assert_eq!(result.status, status, "{}", result.message);
         assert_eq!(
             result
@@ -6062,19 +6504,38 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
             Some(ProofArtifact::ENGINE_MIR)
         );
     }
+    for (function, status) in [
+        ("checked_map_size", VerifStatus::Proven),
+        ("false_map_size", VerifStatus::Disproven),
+        ("checked_string_map_size", VerifStatus::Proven),
+        ("false_string_map_size", VerifStatus::Disproven),
+        ("checked_map_remove_size", VerifStatus::Proven),
+        ("false_map_remove_size", VerifStatus::Disproven),
+        ("checked_missing_map_remove_size", VerifStatus::Proven),
+    ] {
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, function);
+        assert_eq!(
+            exact_mir.status, status,
+            "MIR secondary {function}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+        let public = exact_mir_result_for_test(&results, function);
+        assert_eq!(
+            public.status, status,
+            "public {function}: {}",
+            public.message
+        );
+        assert_single_exact_mir_artifact(public, &source_hash, &typed_receipt);
+    }
     assert!(
         crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "public MapRoot verification must not access the retained legacy body"
+        "public MapAnyOwner v1 verification must not access the retained legacy body"
     );
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
-    let dual_results = crate::verifier::verify_checked_dual(
-        &checked,
-        blake3::hash(source.as_bytes()).to_hex().to_string(),
-    )
-    .expect("public dual checked verifier");
+    let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash.clone())
+        .expect("public dual checked verifier");
     for (function, status) in [
         ("checked_map_size", VerifStatus::Proven),
         ("false_map_size", VerifStatus::Disproven),
@@ -6088,19 +6549,182 @@ fn public_checked_verifier_routes_map_root_receipt_contracts_through_mir() {
             .iter()
             .find(|result| result.func_name == function)
             .unwrap_or_else(|| {
-                panic!("missing dual MapRoot result for {function}: {dual_results:?}")
+                panic!("missing dual MapAnyOwner v1 result for {function}: {dual_results:?}")
             });
         assert_eq!(result.status, status, "{}", result.message);
-        assert_eq!(
-            result
-                .artifact
-                .as_ref()
-                .map(|artifact| artifact.engine.as_str()),
-            Some(ProofArtifact::ENGINE_MIR)
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, function);
+        assert_dual_result_keeps_the_agreed_engine_artifact(
+            result,
+            exact_mir,
+            &source_hash,
+            &typed_receipt,
         );
     }
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn public_checked_verifier_routes_map_any_owner_v1_receipts_through_mir() {
+    require_z3!();
+    let source = r#"
+        func checked_owner_size(value: i32) -> i32 {
+            requires: value >= 0
+            ensures: result == 1
+            let root = map_new()
+            let inserted = map_set(root, "answer", value)
+            let size = map_size(inserted)
+            drop(inserted)
+            size
+        }
+        func false_owner_size(value: i32) -> i32 {
+            ensures: result == 99
+            let root = map_new()
+            let inserted = map_set(root, "answer", value)
+            let size = map_size(inserted)
+            drop(inserted)
+            size
+        }
+        func main() -> i32 { 0 }
+    "#;
+    let file = parse_memory_source(source, "map-any-owner-v1-public-verify").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert_eq!(
+        admission.map_any_owner,
+        crate::core::mir::MapAnyOwnerAdmission::CompleteCoverage
+    );
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let profile = crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1;
+    let map_route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("MapAnyOwner v1 route must remain materializable");
+    assert!(profile.is_materialized(&map_route));
+    let map_receipt = map_route.program.route_receipt(profile.as_str());
+    map_receipt
+        .validate_against_program(&map_route.program)
+        .expect("MapAnyOwner receipt matches its exact route graph");
+    crate::verifier::validate_mir_capabilities(&map_route.program)
+        .expect("MapAnyOwner route passes verifier capability gate");
+    let map_results = crate::verifier::verify_mir_with_route_receipt(
+        &map_route.program,
+        &map_receipt,
+        source_hash.clone(),
+    )
+    .expect("independent MapAnyOwner v1 verifier");
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    assert_eq!(
+        map_receipt.mir_digest, typed_receipt.mir_digest,
+        "the profile route and typed public request must name the same canonical graph"
+    );
+    for (function, status) in [
+        ("checked_owner_size", VerifStatus::Proven),
+        ("false_owner_size", VerifStatus::Disproven),
+    ] {
+        let map_result = exact_mir_result_for_test(&map_results, function);
+        assert_eq!(
+            map_result.status, status,
+            "MapAnyOwner {function}: {}",
+            map_result.message
+        );
+        let map_artifact = map_result
+            .artifact
+            .as_ref()
+            .expect("MapAnyOwner proof artifact");
+        assert_eq!(map_artifact.engine, ProofArtifact::ENGINE_MIR);
+        assert_eq!(map_artifact.source_hash, source_hash);
+        assert_eq!(map_artifact.mir_hash, map_receipt.mir_digest);
+        assert_eq!(map_artifact.mir_route_receipt.as_ref(), Some(&map_receipt));
+
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, function);
+        assert_eq!(
+            exact_mir.status, status,
+            "typed request {function}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+    }
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = crate::verifier::verify_checked(&checked, source_hash.clone())
+        .expect("public checked verifier must use the MapAnyOwner v1 MIR profile");
+    for (function, status) in [
+        ("checked_owner_size", VerifStatus::Proven),
+        ("false_owner_size", VerifStatus::Disproven),
+    ] {
+        let result = exact_mir_result_for_test(&results, function);
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, function);
+        assert_eq!(result.status, status, "{}", result.message);
+        assert_eq!(
+            exact_mir.status, status,
+            "typed MIR {}: {}",
+            function, exact_mir.message
+        );
+        assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn map_any_owner_v1_nul_key_is_fail_closed_in_symbolic_verifier() {
+    require_z3!();
+    let source = r#"
+func checked_size() -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let inserted = map_set(root, "answer", 1)
+    let size = map_size(inserted)
+    drop(inserted)
+    size
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse_memory_source(source, "map-any-owner-v1-nul-key").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let mut program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MapAnyOwner v1 MIR");
+    let mut function = program
+        .functions()
+        .values()
+        .find(|function| function.owner.0 == "function:checked_size")
+        .expect("MapAnyOwner function")
+        .clone();
+    let set = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::MapRootSet { .. }
+            )
+        })
+        .expect("MapAnyOwner Set instruction");
+    let crate::core::mir::MirInstructionKind::MapRootSet { key, .. } = &mut set.kind else {
+        unreachable!("selected MapAnyOwner Set instruction")
+    };
+    key.push('\0');
+    program.replace_function_for_test_only(function);
+
+    let results = crate::verifier::mir::verify_program(
+        &program,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("the direct verifier should report the malformed key as unsupported");
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "function:checked_size")
+        .expect("MapAnyOwner proof result");
+    assert_eq!(
+        result.status,
+        VerifStatus::NotInTrustedSubset,
+        "{}",
+        result.message
+    );
+    assert!(
+        result.message.contains("MapRoot key contains NUL"),
+        "NUL keys must remain rejected at the MapAnyOwner key boundary: {}",
+        result.message
+    );
 }
 
 #[test]
@@ -6159,6 +6783,10 @@ fn non_copy_option_string_switch_move_closes_all_four_consumers() {
     codegen.module.verify().expect("native module verification");
 
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+    let canonical_digest = canonical.canonical_digest();
+    assert_eq!(typed_receipt.mir_digest, canonical_digest);
     let results =
         crate::verifier::verify_mir(&canonical, source_hash.clone()).expect("MIR verifier");
     for function in ["function:consume", "function:discard"] {
@@ -6174,34 +6802,69 @@ fn non_copy_option_string_switch_move_closes_all_four_consumers() {
         );
     }
 
-    // Public checked-verifier entry points must select the same closed island
-    // before their historical AST/Flow compatibility engine.  The counters
-    // make an accidental raw-AST fallback observable even though the verdicts
-    // would otherwise look identical.
+    // Public checked-verifier results must carry the same canonical proof
+    // identity while avoiding retained legacy bodies.
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
     let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
         .expect("public checked verifier must use the Option<string> MIR island");
-    assert!(checked_results
-        .iter()
-        .any(|result| result.func_name == "consume"));
-    assert!(checked_results
-        .iter()
-        .any(|result| result.func_name == "discard"));
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    for function in ["consume", "discard"] {
+        let result = checked_results
+            .iter()
+            .find(|result| result.func_name == function)
+            .unwrap_or_else(|| panic!("public verifier omitted {function}: {checked_results:?}"));
+        assert_eq!(
+            result.status,
+            VerifStatus::Proven,
+            "{function}: {}",
+            result.message
+        );
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, function);
+        assert_eq!(
+            exact_mir.status,
+            VerifStatus::Proven,
+            "{function}: {}",
+            exact_mir.message
+        );
+        assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+        assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
+        let artifact = result
+            .artifact
+            .as_ref()
+            .unwrap_or_else(|| panic!("{function} has no proof artifact"));
+        assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+        assert_eq!(artifact.mir_hash, canonical_digest);
+        assert_eq!(
+            artifact
+                .mir_route_receipt
+                .as_ref()
+                .map(|receipt| receipt.mir_digest.as_str()),
+            Some(artifact.mir_hash.as_str())
+        );
+    }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::mir::reset_test_route_materialization_count();
-    let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash)
+    let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash.clone())
         .expect("dual public checked verifier must use the Option<string> MIR island");
-    assert!(dual_results
-        .iter()
-        .any(|result| result.func_name == "consume"));
-    assert!(dual_results
-        .iter()
-        .any(|result| result.func_name == "discard"));
-    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    for function in ["consume", "discard"] {
+        let result = dual_results
+            .iter()
+            .find(|result| result.func_name == function)
+            .unwrap_or_else(|| panic!("dual verifier omitted {function}: {dual_results:?}"));
+        assert_eq!(
+            result.status,
+            VerifStatus::Proven,
+            "{function}: {}",
+            result.message
+        );
+        let exact_mir = exact_mir_result_for_test(&exact_mir_results, function);
+        assert_dual_result_keeps_the_agreed_engine_artifact(
+            result,
+            exact_mir,
+            &source_hash,
+            &typed_receipt,
+        );
+    }
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
@@ -6876,15 +7539,10 @@ func main() -> i64 { 0 }
 
 #[test]
 fn verify_callee_unencodable_ensures_is_fail_closed() {
-    // M4 (audit-triage-0.35.25): a callee postcondition that could not be
-    // encoded after call-argument substitution was silently dropped — the
-    // caller's proof ran against a weaker context and a flip to Disproven was
-    // untraceable (red line #2). `pos` verifies on its own (`result == x` is
-    // encodable with x as an i32 param), but the caller passes `arr[0]` — the
-    // substituted ensures `result == arr[0]` contains an Index expression that
-    // expr_to_z3_bool cannot encode. The caller must come back "not verified"
-    // naming the postcondition, never Proven. (The callee has NO requires, so
-    // the H1 requires walker cannot mask this.)
+    // Preserve the original trap negative independently from the unencodable
+    // postcondition case below. `arr[0]` may trap before the call when `arr`
+    // is empty, so this source must report its real E0803 body-trap obligation
+    // instead of pretending it reached the later callee-ensures encoder.
     require_z3!();
     let src = r#"
 func pos(x: i32) -> i32 {
@@ -6905,12 +7563,68 @@ func main() -> i32 { 0 }
     assert_ne!(
         caller.status,
         VerifStatus::Proven,
-        "unencodable callee ensures must not verify the caller: {}",
+        "an actual argument trap must not verify the caller: {}",
         caller.message
     );
     assert!(
-        caller.message.contains("postcondition") && caller.message.contains("cannot be encoded"),
-        "failure must name the unencodable postcondition: {}",
+        caller.message.contains("E0803") && caller.message.contains("trap"),
+        "the original empty-list index remains an exact E0803 trap negative: {}",
+        caller.message
+    );
+    let artifact = caller
+        .artifact
+        .as_ref()
+        .expect("E0803 body trap retains canonical proof provenance");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(
+        artifact.source_hash,
+        blake3::hash(src.as_bytes()).to_hex().to_string()
+    );
+    assert_eq!(
+        artifact
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some("canonical-contract-request-v1")
+    );
+}
+
+#[test]
+fn verify_callee_unencodable_ensures_with_total_index_argument_fails_closed() {
+    require_z3!();
+    let src = r#"
+func pos(x: i32) -> i32 {
+    ensures: result == x
+    x
+}
+func caller(arr: List<i32>) -> i32 {
+    requires: len(arr) > 0
+    ensures: true
+    pos(arr[0])
+}
+func main() -> i32 { 0 }
+"#;
+    let results = verify_source(src).expect("verify total argument with unencodable ensures");
+    let caller = results
+        .iter()
+        .find(|result| result.func_name == "caller")
+        .expect("caller result");
+    assert_ne!(
+        caller.status,
+        VerifStatus::Proven,
+        "an unencodable callee postcondition must not verify the caller: {}",
+        caller.message
+    );
+    assert!(
+        caller
+            .message
+            .contains("call to 'pos' has a postcondition that cannot be encoded for verification"),
+        "failure must name the exact unencodable callee postcondition: {}",
+        caller.message
+    );
+    assert!(
+        !caller.message.contains("E0803"),
+        "the `len(arr) > 0` entry precondition makes this argument total: {}",
         caller.message
     );
 }
@@ -7024,12 +7738,10 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn verify_f64_large_value_no_overflow() {
+fn verify_f64_large_unbounded_input_reports_e0813() {
     require_z3!();
-    // 3.1: Large f64 values should not overflow the verifier's encoding.
-    // The old i64 scaling approach would overflow for values > ~9e3.
-    // Test that both encoding and comparison work for positive large values.
-    // 0.31.28: f64 arithmetic is NOT in the trusted subset → NotInTrustedSubset.
+    // The lower bound exercises a large finite value, while the missing upper
+    // bound leaves a finite x whose doubling reaches the runtime E0813 trap.
     let src = r#"
 func scale(x: f64) -> f64 {
     requires: x >= 1e10
@@ -7041,20 +7753,18 @@ func main() -> f64 { 0.0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: f64_large");
     let s = results.iter().find(|r| r.func_name == "scale");
     assert!(s.is_some(), "scale function should be verified");
-    assert_eq!(
-        s.unwrap().status,
-        VerifStatus::NotInTrustedSubset,
-        "f64 arithmetic should be NotInTrustedSubset: {:?}",
-        s.unwrap()
-    );
+    let result = s.unwrap();
+    assert_eq!(result.status, VerifStatus::Disproven, "{}", result.message);
+    assert!(result.message.contains("E0813"), "{}", result.message);
+    assert_finite_ieee_binary64_mir_artifact(result);
 }
 
 #[test]
-fn verify_f64_tiny_value_no_underflow() {
+fn verify_f64_tiny_lower_bound_still_exposes_unbounded_overflow() {
     require_z3!();
-    // Tiny f64 values (< 1e-15) should not underflow (old encoding
-    // used 1e15 precision denominator and overflowed for very small values).
-    // 0.31.28: f64 arithmetic is NOT in the trusted subset → NotInTrustedSubset.
+    // The positive lower bound excludes underflow for the intended tiny
+    // region, but the missing upper bound leaves finite values whose doubling
+    // reaches the runtime E0813 trap.
     let src = r#"
 func check(x: f64) -> f64 {
     requires: x > 1e-20
@@ -7066,12 +7776,10 @@ func main() -> f64 { 0.0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: f64_tiny");
     let c = results.iter().find(|r| r.func_name == "check");
     assert!(c.is_some(), "check function should be verified");
-    assert_eq!(
-        c.unwrap().status,
-        VerifStatus::NotInTrustedSubset,
-        "f64 arithmetic should be NotInTrustedSubset: {:?}",
-        c.unwrap()
-    );
+    let result = c.unwrap();
+    assert_eq!(result.status, VerifStatus::Disproven, "{}", result.message);
+    assert!(result.message.contains("E0813"), "{}", result.message);
+    assert_finite_ieee_binary64_mir_artifact(result);
 }
 
 #[test]
@@ -7587,9 +8295,8 @@ func main() -> i32 { 0 }
     );
 }
 
-/// E3: Loop invariant as assumption — invariant is asserted as a constraint
-/// but NOT verified for preservation across iterations. This test documents
-/// the current behavior (invariant helps verification, not itself verified).
+/// Entry invariants need establishment under requires before becoming assumptions.
+/// Loop preservation remains a separate retained-owner obligation below.
 #[test]
 fn verify_invariant_not_established_fails() {
     require_z3!();
@@ -7603,7 +8310,7 @@ func broken(x: i32) -> i32 {
 }
 func main() -> i32 { 0 }
 "#;
-    let results = verify_source(src).expect("src/verifier/tests.rs: invariant_establish");
+    let results = verify_entry_invariant_without_legacy_access(src);
     let f = results.iter().find(|r| r.func_name == "broken");
     assert!(f.is_some(), "broken should be present");
     assert_eq!(
@@ -8491,7 +9198,7 @@ fn mir_result_provenance_gate_rejects_mixed_multi_call_batch() {
         constraint_count: 1,
         artifact: Some(ProofArtifact {
             semantics_version: ProofArtifact::SEMANTICS_VERSION,
-            integer_model: "checked_i32_i64".into(),
+            integer_model: "checked_i32_i64_power_i64_then_i32_wrap_0_1_11".into(),
             float_model: crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL.into(),
             solver_version: "z3 test".into(),
             source_hash: source_hash.into(),
@@ -8913,4 +9620,1931 @@ func double(x: i32) -> i32 {
         "both engines agree on unbounded i32 overflow (no divergence): {}",
         double.message
     );
+}
+
+#[test]
+fn ordinary_map_owner_v1_uses_independent_persistent_symbolic_roots() {
+    require_z3!();
+    let source = r#"
+func checked_source_preserving() -> i32 {
+    ensures: result == 1
+    let source = map_new()
+    let inserted = map_set(source, "same", 1)
+    let source_size = map_size(source)
+    let inserted_size = map_size(inserted)
+    drop(source)
+    drop(inserted)
+    source_size + inserted_size
+}
+
+func checked_remove_preserving() -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let inserted = map_set(root, "remove", 1)
+    let removed = map_remove(inserted, "remove")
+    let old_size = map_size(inserted)
+    let new_size = map_size(removed)
+    drop(root)
+    drop(inserted)
+    drop(removed)
+    old_size + new_size
+}
+
+func checked_dynamic_contains(key: string) -> bool {
+    ensures: result == true
+    let root = map_new()
+    let inserted = map_set(root, key, 1)
+    let present = has_key(inserted, key)
+    drop(root)
+    drop(inserted)
+    present
+}
+
+func false_distinct_dynamic_keys(first: string, second: string) -> i32 {
+    ensures: result == 2
+    let root = map_new()
+    let first_insert = map_set(root, first, 1)
+    let second_insert = map_set(first_insert, second, 2)
+    let size = map_size(second_insert)
+    drop(root)
+    drop(first_insert)
+    drop(second_insert)
+    size
+}
+
+func checked_equal_string_keys() -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let first = map_set(root, "same", 1)
+    let second = map_set(first, "same", 2)
+    let size = map_size(second)
+    drop(root)
+    drop(first)
+    drop(second)
+    size
+}
+
+func checked_string_payload() -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let inserted = map_set(root, "payload", "text")
+    let size = map_size(inserted)
+    drop(root)
+    drop(inserted)
+    size
+}
+
+func checked_nul_string_key() -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let inserted = map_set(root, "bad\0key", 1)
+    let size = map_size(inserted)
+    drop(root)
+    drop(inserted)
+    size
+}
+
+func false_nul_string_key() -> i32 {
+    ensures: result == 0
+    let root = map_new()
+    let inserted = map_set(root, "bad\0key", 1)
+    let size = map_size(inserted)
+    drop(root)
+    drop(inserted)
+    size
+}
+
+func main() -> i32 { 0 }
+"#;
+    let file = parse_memory_source(source, "ordinary-map-owner-v1-verifier").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical ordinary Map owner lifecycle MIR");
+    let owner_ty = crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+    assert!(program
+        .type_catalog()
+        .get(&owner_ty)
+        .is_some_and(|descriptor| {
+            descriptor.kind
+                == crate::core::mir::types::MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+        }));
+    assert!(program
+        .type_catalog()
+        .get(&crate::core::mir::types::map_root_type_id())
+        .is_none());
+    assert!(program
+        .type_catalog()
+        .get(&crate::core::mir::types::map_any_owner_v1_type_id())
+        .is_none());
+    crate::verifier::validate_mir_capabilities(&program)
+        .expect("the ordinary Map lifecycle has an independent receipt and capability");
+
+    let results = crate::verifier::mir::verify_program(
+        &program,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("symbolic ordinary Map verification");
+    for (function, status) in [
+        ("function:checked_source_preserving", VerifStatus::Proven),
+        ("function:checked_remove_preserving", VerifStatus::Proven),
+        ("function:checked_dynamic_contains", VerifStatus::Proven),
+        // Distinct MIR parameter IDs are not distinct String keys. Z3 may
+        // choose equal byte strings, in which case the second Set overwrites
+        // the first and the claimed size of two is disproven.
+        (
+            "function:false_distinct_dynamic_keys",
+            VerifStatus::Disproven,
+        ),
+        ("function:checked_equal_string_keys", VerifStatus::Proven),
+        ("function:checked_string_payload", VerifStatus::Proven),
+        // Exact symbolic literals preserve the NUL byte, so the truthful
+        // size claim is proven and the false claim receives a counterexample.
+        ("function:checked_nul_string_key", VerifStatus::Proven),
+        ("function:false_nul_string_key", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name == function)
+            .unwrap_or_else(|| panic!("missing ordinary Map verifier result for {function}"));
+        assert_eq!(result.status, status, "{}", result.message);
+        if status == VerifStatus::Proven {
+            assert_eq!(
+                result
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| artifact.engine.as_str()),
+                Some(ProofArtifact::ENGINE_MIR)
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_map_owner_v1_missing_receipt_or_forged_action_never_proves() {
+    require_z3!();
+    let source = r#"
+func checked_dynamic_contains(key: string) -> bool {
+    ensures: result == true
+    let root = map_new()
+    let inserted = map_set(root, key, 1)
+    let present = has_key(inserted, key)
+    drop(root)
+    drop(inserted)
+    present
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse_memory_source(source, "ordinary-map-owner-v1-forgery").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical ordinary Map owner lifecycle MIR");
+
+    let mut missing_receipt = program.clone();
+    let mut function = missing_receipt
+        .functions()
+        .values()
+        .find(|function| function.owner.0 == "function:checked_dynamic_contains")
+        .expect("ordinary Map function")
+        .clone();
+    function
+        .ownership
+        .clear_checker_ordinary_map_owner_lifecycle_v1_for_test_only();
+    missing_receipt.replace_function_for_test_only(function);
+    let errors = crate::verifier::validate_mir_capabilities(&missing_receipt)
+        .expect_err("missing ordinary Map receipt must fail capability validation");
+    assert!(errors.iter().any(|error| {
+        error.contains("ordinary Map owner lifecycle v1 without its independent Checker receipt")
+            || error.contains("ordinary Map owner lifecycle TypeDesc/operation has no independent Checker receipt")
+    }));
+    let results = crate::verifier::mir::verify_program(
+        &missing_receipt,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("direct verifier reports missing receipt as an unsupported shape");
+    assert!(results
+        .iter()
+        .all(|result| !matches!(result.status, VerifStatus::Proven)));
+
+    let mut forged_action = program.clone();
+    let mut function = forged_action
+        .functions()
+        .values()
+        .find(|function| function.owner.0 == "function:checked_dynamic_contains")
+        .expect("ordinary Map function")
+        .clone();
+    let bool_value = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .find_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleContains {
+                result,
+                ..
+            } => Some(result.clone()),
+            _ => None,
+        })
+        .expect("HasKey boolean result");
+    let set = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+            )
+        })
+        .expect("ordinary Map Set instruction");
+    let crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleSet { value, .. } =
+        &mut set.kind
+    else {
+        unreachable!("selected Set instruction")
+    };
+    value.clone_from(&bool_value);
+    forged_action.replace_function_for_test_only(function);
+    let errors = crate::verifier::validate_mir_capabilities(&forged_action)
+        .expect_err("forged Set payload identity must fail the Checker receipt");
+    assert!(errors.iter().any(|error| {
+        error.contains("ordinary Map lifecycle operation disagrees with its private Checker")
+            || error.contains("ordinary Map owner lifecycle v1 Set payload")
+    }));
+    let results = crate::verifier::mir::verify_program(
+        &forged_action,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("direct verifier reports the forged action as unsupported");
+    assert!(results
+        .iter()
+        .all(|result| !matches!(result.status, VerifStatus::Proven)));
+}
+
+#[test]
+fn typed_ffi_string_contract_context_retires_actual_body_reads() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func nonempty(s: string) -> i64 requires: len(s) > 0;
+        }
+        func protected(s: string) -> i64 {
+            requires: s != ""
+            nonempty(s)
+        }
+        func violated() -> i64 { nonempty("") }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-string-context").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check");
+    let roots = checked.declaration_expression_bodies();
+    let requires = roots
+        .values()
+        .find(|root| {
+            root.kind == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternRequires
+        })
+        .expect("typed Requires root");
+    let body = requires
+        .body
+        .as_ref()
+        .expect("Requires materialized by Checker");
+    assert_eq!(requires.node_id, body.root.result.as_ref().unwrap().node_id);
+    assert_eq!(requires.owner, body.owner);
+    let signature = checked.extern_func_signature("nonempty").unwrap();
+    assert_eq!(signature.node_id, requires.owner);
+    assert_eq!(body.parameters.len(), signature.parameter_ids.len());
+    for (local, parameter) in body.parameters.iter().zip(&signature.parameter_ids) {
+        assert_eq!(local.0 .0, format!("{}/local", parameter.0));
+    }
+
+    let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results =
+        verify_ffi_checked_with_source_hash(&checked, hash.clone()).expect("typed FFI proofs");
+    assert_eq!(
+        results.len(),
+        2,
+        "each actual call has one obligation: {results:?}"
+    );
+    for (caller, status) in [
+        ("protected calls nonempty", VerifStatus::Proven),
+        ("violated calls nonempty", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name == caller)
+            .expect("call result");
+        assert_eq!(result.status, status, "{caller}: {result:?}");
+        let artifact = result.artifact.as_ref().expect("typed proof identity");
+        assert_eq!(artifact.engine, "resolved_ffi");
+        assert_eq!(artifact.source_hash, hash);
+        assert_eq!(artifact.resolved_ir_hash.len(), 64);
+        assert!(artifact.mir_route_receipt.is_none());
+    }
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "string FFI proofs must consume checked arguments and Requires roots"
+    );
+    let negative = results
+        .iter()
+        .find(|result| result.status == VerifStatus::Disproven)
+        .unwrap();
+    let expected_span = checked
+        .call_sites_sorted()
+        .into_iter()
+        .find(|site| site.owner == "function:violated" && site.callee == "nonempty")
+        .unwrap()
+        .origin
+        .user_span();
+    assert_eq!(negative.diagnostic.as_ref().unwrap().span, expected_span);
+}
+
+#[test]
+fn typed_ffi_discovery_covers_declaration_and_callable_roots() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func nonempty(s: string) -> i32 requires: s != "";
+        }
+        const seed: i32 = nonempty("");
+        actor Holder {
+            initial: i32 = nonempty("");
+            func value() -> i32 { nonempty("") }
+        }
+        type Counter { n: i32 }
+        trait Read { func read() -> i32 }
+        impl Read for Counter {
+            func read() -> i32 { nonempty("") }
+        }
+        flow ItemFlow {
+            state Open { n: i32 }
+            transition step(Open) -> Open {
+                let checked = nonempty("")
+                return Open { n: self.n }
+            }
+        }
+        func defaulted(n: i32 = nonempty("")) -> i32 { n }
+        func ordinary() -> i32 {
+            if nonempty("") > 0 { 1 } else { 0 }
+        }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-root-coverage")
+        .expect("parse all declaration forms");
+    let checked = crate::core::check_program(&file).expect("check all declaration forms");
+    let expected = checked
+        .call_sites_sorted()
+        .into_iter()
+        .filter(|site| {
+            site.kind == crate::core::ResolvedCallKind::Extern && site.callee == "nonempty"
+        })
+        .count();
+    assert_eq!(
+        expected, 7,
+        "constant, field, Actor, Impl, Flow, default, condition"
+    );
+    for kind in [
+        crate::core::ir::lower::ResolvedDeclarationExpressionKind::ConstantInitializer,
+        crate::core::ir::lower::ResolvedDeclarationExpressionKind::ActorFieldInitializer,
+    ] {
+        assert!(checked
+            .declaration_expression_bodies()
+            .values()
+            .filter(|root| root.kind == kind)
+            .all(|root| root.body.is_ok()));
+    }
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed complete call directory");
+    assert_eq!(
+        results.len(),
+        expected,
+        "no declaration or callable call may vanish: {results:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.status == VerifStatus::Disproven),
+        "{results:?}"
+    );
+    assert!(results.iter().all(|result| result
+        .artifact
+        .as_ref()
+        .is_some_and(|artifact| artifact.engine == "resolved_ffi")));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_default_math_root_keeps_its_exact_deferred_identity() {
+    require_z3!();
+    let source = r#"
+        extern "C" { func positive(value: i32) -> i32 requires: value > 0; }
+        func caller(value: i32 = {
+            math: { 1 + 1 == 2; };
+            1
+        }) -> i32 {
+            requires: value == 1
+            positive(value)
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-default-math-census").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check declaration default Math");
+    let caller = checked
+        .callable(&crate::core::NodeId("function:caller".into()))
+        .expect("caller callable");
+    let (math_root, math_origin) = caller
+        .body
+        .math_proof_roots()
+        .into_iter()
+        .next()
+        .expect("Math inside the typed default must remain in the complete root census");
+    assert!(
+        caller
+            .proof_point_worklist()
+            .points
+            .iter()
+            .all(|point| point.id.statement != math_root),
+        "the fixture exercises a real root that has no callable-body proof point"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed call plus deferred Math root");
+    let call = results
+        .iter()
+        .find(|result| result.func_name == "caller calls positive")
+        .expect("the FFI call obligation remains visible");
+    assert_eq!(call.status, VerifStatus::Proven, "{results:?}");
+    assert!(
+        call.artifact.is_none(),
+        "the real Math root keeps this request on compatibility"
+    );
+
+    let deferred = results
+        .iter()
+        .find(|result| result.func_name.contains(&math_root.0))
+        .expect("the unmodeled default Math root has its own result");
+    assert_eq!(
+        deferred.status,
+        VerifStatus::NotInTrustedSubset,
+        "{results:?}"
+    );
+    assert_eq!(
+        deferred.diagnostic.as_ref().unwrap().span,
+        math_origin.user_span(),
+        "the deferred root uses the Math statement's checker-owned origin"
+    );
+    assert!(deferred.artifact.is_none());
+    assert!(
+        !crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "a true unsupported default Math root must preserve the compatibility boundary"
+    );
+}
+
+#[test]
+fn typed_ffi_default_math_with_a_checked_omitted_use_gets_separate_proofs() {
+    require_z3!();
+    let source = r#"
+        extern "C" { func positive(value: i32) -> i32 requires: value > 0; }
+        func good(value: i32 = {
+            let seed: i32 = 1
+            math: { seed == 1; };
+            seed
+        }) -> i32 {
+            requires: value == 1
+            positive(value)
+        }
+        func bad(value: i32 = {
+            let seed: i32 = 1
+            math: { seed < 0; };
+            seed
+        }) -> i32 {
+            requires: value == 1
+            positive(value)
+        }
+        func main() -> i64 {
+            let _good_result = good()
+            let _bad_result = bad()
+            0
+        }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-default-math-roots").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check declaration default Math");
+    let good = checked
+        .callable(&crate::core::NodeId("function:good".into()))
+        .expect("good callable");
+    let bad = checked
+        .callable(&crate::core::NodeId("function:bad".into()))
+        .expect("bad callable");
+    let good_root = good
+        .body
+        .math_proof_roots()
+        .into_iter()
+        .next()
+        .expect("the good default Math root remains in the complete census")
+        .0;
+    let bad_root = bad
+        .body
+        .math_proof_roots()
+        .into_iter()
+        .next()
+        .expect("the bad default Math root remains in the complete census")
+        .0;
+
+    let main = checked
+        .callable(&crate::core::NodeId("function:main".into()))
+        .expect("main callable");
+    let mut forged_use = main
+        .proof_point_worklist()
+        .default_uses
+        .into_iter()
+        .next()
+        .expect("omitted default arguments have exact use receipts");
+    forged_use.parameter_index += 1;
+    assert!(
+        !forged_use.validate_in_checked_program(&checked),
+        "a public-field mutation cannot retain the checker-sealed default-use authorization"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed calls plus scoped default Math");
+    for (name, root, expected) in [
+        ("good", &good_root, VerifStatus::Proven),
+        ("bad", &bad_root, VerifStatus::Disproven),
+    ] {
+        let call = results
+            .iter()
+            .find(|result| result.func_name == format!("{name} calls positive"))
+            .expect("the body FFI call obligation remains independently visible");
+        assert_eq!(call.status, VerifStatus::Proven, "{results:?}");
+        let default = results
+            .iter()
+            .find(|result| result.func_name.contains(&root.0))
+            .expect("the exact default Math root has its own result");
+        assert_eq!(default.status, expected, "{results:?}");
+        assert!(
+            default
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.engine == "resolved_ffi"),
+            "an executable default Math root must carry its own proof artifact: {results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_default_and_foreign_ensures_stay_separate_at_the_call_boundary() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func positive(value: i32) -> i32
+                requires: value > 0
+                ensures: result == result && value == 1;
+            func untrusted(value: i32) -> i32
+                requires: value > 0
+                ensures: result == value + 1;
+        }
+        func good(value: i32 = {
+            let seed: i32 = 1
+            math: { seed == 1; };
+            seed
+        }) -> i32 {
+            requires: value == 1
+            positive(value)
+        }
+        func bad(value: i32 = {
+            let seed: i32 = 1
+            math: { seed < 0; };
+            seed
+        }) -> i32 {
+            requires: value == 1
+            let observed = untrusted(value)
+            ensures: result == value + 1
+            observed
+        }
+        func main() -> i32 {
+            let _good = good()
+            let _bad = bad()
+            0
+        }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-default-ensures-composition")
+        .expect("parse default and post-call FFI contracts");
+    let checked = crate::core::check_program(&file).expect("check composition fixture");
+    let good = checked
+        .callable(&crate::core::NodeId("function:good".into()))
+        .expect("good callable");
+    let bad = checked
+        .callable(&crate::core::NodeId("function:bad".into()))
+        .expect("bad callable");
+    let good_default_math = good
+        .body
+        .math_proof_roots()
+        .into_iter()
+        .next()
+        .expect("good default has a Math obligation")
+        .0;
+    let bad_default_math = bad
+        .body
+        .math_proof_roots()
+        .into_iter()
+        .next()
+        .expect("bad default has a Math obligation")
+        .0;
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let ffi_names =
+        std::collections::BTreeSet::from(["positive".to_string(), "untrusted".to_string()]);
+    let results = super::ffi_checked::verify(&checked, &ffi_names, "")
+        .expect("scoped FFI composition proof")
+        .expect("complete typed verifier consumer context");
+    let result = |name: &str| {
+        results
+            .iter()
+            .find(|result| result.func_name == name)
+            .unwrap_or_else(|| panic!("missing {name}: {results:?}"))
+    };
+    assert_eq!(
+        result("good calls positive").status,
+        VerifStatus::Proven,
+        "the caller Requires is available while proving the pre-call Requires"
+    );
+    assert_eq!(
+        result("good -> extern positive Ensures").status,
+        VerifStatus::Proven,
+        "the tautological foreign Ensures is checked against the fresh result"
+    );
+    assert_eq!(
+        result("bad calls untrusted").status,
+        VerifStatus::Proven,
+        "the caller Requires establishes the input-side call condition"
+    );
+    assert_eq!(
+        result("bad -> extern untrusted Ensures").status,
+        VerifStatus::Disproven,
+        "the foreign Ensures cannot constrain its fresh result"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|result| result.func_name != "bad Ensures"),
+        "the unproved foreign Ensures must not appear as a caller postcondition proof"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .find(|result| result.func_name.contains(&good_default_math.0))
+            .expect("good default Math result")
+            .status,
+        VerifStatus::Proven
+    );
+    assert_eq!(
+        results
+            .iter()
+            .find(|result| result.func_name.contains(&bad_default_math.0))
+            .expect("bad default Math result")
+            .status,
+        VerifStatus::Disproven,
+        "default Math is replayed in its own scope, without borrowing the foreign Ensures"
+    );
+    assert!(result("bad -> extern untrusted Ensures").artifact.is_some());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_ensures_only_call_keeps_default_math_as_an_independent_root() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func foreign(value: i32) -> i32 ensures: result == result;
+        }
+        func good(value: i32 = {
+            let seed: i32 = 1
+            math: { seed == 1; };
+            seed
+        }) -> i32 {
+            foreign(value)
+        }
+        func bad(value: i32 = {
+            let seed: i32 = 1
+            math: { seed < 0; };
+            seed
+        }) -> i32 {
+            foreign(value)
+        }
+        func main() -> i32 {
+            let _good = good()
+            let _bad = bad()
+            0
+        }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-ensures-only-default-roots")
+        .expect("parse Ensures-only extern/default fixture");
+    let checked = crate::core::check_program(&file).expect("check Ensures-only fixture");
+    let good = checked
+        .callable(&crate::core::NodeId("function:good".into()))
+        .expect("good callable");
+    let bad = checked
+        .callable(&crate::core::NodeId("function:bad".into()))
+        .expect("bad callable");
+    let good_root = good
+        .body
+        .math_proof_roots()
+        .into_iter()
+        .next()
+        .expect("good default Math source root")
+        .0;
+    let bad_root = bad
+        .body
+        .math_proof_roots()
+        .into_iter()
+        .next()
+        .expect("bad default Math source root")
+        .0;
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("canonical Ensures and default roots");
+    let result = |name: &str| {
+        results
+            .iter()
+            .find(|result| result.func_name == name)
+            .unwrap_or_else(|| panic!("missing {name}: {results:?}"))
+    };
+    for owner in ["good", "bad"] {
+        assert_eq!(
+            result(&format!("{owner} -> extern foreign Ensures")).status,
+            VerifStatus::Proven,
+            "the tautological foreign Ensures is checked independently"
+        );
+    }
+    for (root, expected) in [
+        (&good_root, VerifStatus::Proven),
+        (&bad_root, VerifStatus::Disproven),
+    ] {
+        let default = results
+            .iter()
+            .find(|result| result.func_name.contains(&root.0))
+            .unwrap_or_else(|| panic!("missing independent Math root {}: {results:?}", root.0));
+        assert_eq!(default.status, expected, "{results:?}");
+        assert!(
+            default
+                .artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.engine == "resolved_ffi"),
+            "each supported Math root has a separate proof artifact: {results:?}"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn ffi_omitted_fixed_default_is_a_source_producer_counterexample() {
+    let source = r#"
+        extern "C" {
+            func foreign(value: i32 = 7) -> i32
+                requires: value == 7
+                ensures: result == 8;
+        }
+        func caller() -> i32 { foreign() }
+    "#;
+    assert!(
+        parse_memory_source(source, "ffi-omitted-fixed-default-counterexample").is_err(),
+        "the current extern parameter/source lowering has no optional fixed-parameter syntax"
+    );
+}
+
+#[test]
+fn typed_ffi_deferred_ensures_emits_no_proof_artifact() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func foreign(value: string) -> i32
+                requires: value != ""
+                ensures: unsupported_contract(result);
+        }
+        func caller(value: string) -> i32 {
+            requires: value != ""
+            foreign(value)
+        }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-deferred-ensures").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check deferred Ensures root");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let names = std::collections::BTreeSet::from(["foreign".to_string()]);
+    let results = super::ffi_checked::verify(&checked, &names, "")
+        .expect("explicit Deferred Ensures result")
+        .expect("complete typed verifier consumer context");
+    let ensures = results
+        .iter()
+        .find(|result| result.func_name == "caller -> extern foreign Ensures")
+        .expect("called Deferred Ensures retains its named obligation");
+    assert_eq!(ensures.status, VerifStatus::NotInTrustedSubset);
+    assert!(ensures.artifact.is_none());
+    assert_eq!(
+        ensures.trusted_subset_domain,
+        Some(TrustedSubsetDomain::Contract)
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_deferred_predicate_preserves_explicit_compatibility_obligation() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func foreign(s: string) -> i64 requires: unsupported_contract(s);
+        }
+        func caller(s: string) -> i64 { foreign(s) }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-deferred-contract").expect("parse");
+    let checked =
+        crate::core::check_program(&file).expect("historically accepted contract stays legal");
+    let root = checked
+        .declaration_expression_bodies()
+        .values()
+        .find(|root| {
+            root.kind == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternRequires
+        })
+        .unwrap();
+    let errors = root
+        .body
+        .as_ref()
+        .expect_err("untyped predicate must stay Deferred");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("checker-finalized canonical type")),
+        "{errors:?}"
+    );
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("explicit checker-owned coverage result");
+    assert_eq!(
+        results.len(),
+        1,
+        "a Deferred root cannot erase the called Requires obligation"
+    );
+    assert_eq!(results[0].status, VerifStatus::NotInTrustedSubset);
+    assert_eq!(
+        results[0]
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_deref()),
+        Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    );
+    assert!(results[0].message.contains("checker-owned FFI declaration"));
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        Vec::<crate::core::LegacyBodyConsumer>::new()
+    );
+}
+
+#[test]
+fn typed_ffi_deferred_actual_argument_preserves_old_conditional_proof() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func foreign(s: string, n: i32) -> i32 requires: n > 0;
+        }
+        func caller(choice: bool) -> i32 {
+            foreign("ok", if choice { 1 } else { 2 })
+        }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-deferred-argument").expect("parse");
+    let checked = crate::core::check_program(&file).expect("old legal conditional argument");
+    assert!(checked
+        .declaration_expression_bodies()
+        .values()
+        .filter(|root| root.kind
+            == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternRequires)
+        .all(|root| root.body.is_ok()));
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("explicit compatibility context");
+    assert_eq!(results.len(), 1, "conditional actual argument: {results:?}");
+    assert_eq!(results[0].status, VerifStatus::Proven, "{results:?}");
+    assert_eq!(
+        results[0]
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some("resolved_ffi"),
+        "expression-only conditional actuals use the checker-owned typed receipt"
+    );
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        Vec::<crate::core::LegacyBodyConsumer>::new()
+    );
+}
+
+#[test]
+fn typed_ffi_conditional_actual_counterexample_stays_checker_owned() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func foreign(value: i32, marker: string) -> i32
+                requires: value > 0 && marker != "";
+        }
+        func caller(choice: bool) -> i32 {
+            foreign(if choice { 1 } else { -1 }, "ok")
+        }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-conditional-counterexample")
+        .expect("parse conditional counterexample");
+    let checked = crate::core::check_program(&file).expect("check conditional counterexample");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed conditional FFI proof");
+    assert_eq!(
+        results.len(),
+        1,
+        "one conditional call-site result: {results:?}"
+    );
+    assert_eq!(results[0].status, VerifStatus::Disproven, "{results:?}");
+    assert_eq!(
+        results[0]
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.engine.as_str()),
+        Some("resolved_ffi"),
+        "the conditional counterexample must retain checker-owned provenance"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "a typed conditional counterexample must not reopen the retained FFI body"
+    );
+}
+
+#[test]
+fn typed_ffi_short_circuit_and_actual_integer_width_control_definedness() {
+    require_z3!();
+    for (predicate, argument, status) in [
+        ("false && 1 / n > 0", "0", VerifStatus::Disproven),
+        ("true || 1 / n > 0", "0", VerifStatus::Proven),
+        ("n + 1 > n", "2147483647", VerifStatus::Disproven),
+        ("n + 1 > n", "2147483646", VerifStatus::Proven),
+    ] {
+        // A string parameter keeps this outside the closed scalar executable
+        // island, exercising the real typed FFI compatibility migration.
+        let source = format!("extern \"C\" {{ func foreign(s: string, n: i32) -> i32 requires: {predicate}; }}\nfunc caller() -> i32 {{ foreign(\"ok\", {argument}) }}");
+        let file = parse_memory_source(&source, "typed-ffi-definedness").expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = verify_ffi_checked(&checked).expect("typed predicate definedness");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].status, status,
+            "{predicate} with {argument}: {results:?}"
+        );
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn typed_ffi_div_rem_requires_use_canonical_operand_width_and_short_circuit() {
+    require_z3!();
+    for (declaration, ty, minimum, nearby) in [
+        ("", "i32", "-2147483648", "-2147483647"),
+        (
+            "",
+            "i64",
+            "((-9223372036854775807 as i64) - (1 as i64))",
+            "(-9223372036854775807 as i64)",
+        ),
+        ("type Count = i32", "Count", "-2147483648", "-2147483647"),
+    ] {
+        for (predicate, input, status) in [
+            ("n % -1 == 0", minimum, VerifStatus::Disproven),
+            ("n % -1 == 0", nearby, VerifStatus::Proven),
+            ("n / -1 > 0", minimum, VerifStatus::Disproven),
+            ("n / -1 > 0", nearby, VerifStatus::Proven),
+            ("true || n % -1 == 0", minimum, VerifStatus::Proven),
+            ("false && n % -1 == 0", minimum, VerifStatus::Disproven),
+        ] {
+            let source = format!(
+                "{declaration}\nextern \"C\" {{ func foreign(s: string, n: {ty}) -> i32 requires: {predicate}; }}\nfunc caller(n: {ty}) -> i32 {{ requires: n == {input}\nforeign(\"ok\", n) }}"
+            );
+            let file = parse_memory_source(&source, "typed-ffi-remainder-width").expect("parse");
+            let checked = crate::core::check_program(&file).expect("check");
+            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let results = verify_ffi_checked(&checked).expect("typed div/rem Requires");
+            assert_eq!(results.len(), 1, "{source}: {results:?}");
+            assert_eq!(results[0].status, status, "{source}: {results:?}");
+            assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+            assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        }
+    }
+}
+
+#[test]
+fn typed_ffi_actual_arguments_keep_div_rem_definedness_when_contract_ignores_them() {
+    require_z3!();
+    for (declaration, ty, minimum, nearby) in [
+        ("", "i32", "-2147483648", "-2147483647"),
+        (
+            "",
+            "i64",
+            "((-9223372036854775807 as i64) - (1 as i64))",
+            "(-9223372036854775807 as i64)",
+        ),
+        ("type Count = i32", "Count", "-2147483648", "-2147483647"),
+    ] {
+        for (argument_type, argument, predicate, input, status) in [
+            (ty, "n % -1", "n == 0", minimum, VerifStatus::Disproven),
+            (ty, "n % -1", "n == 0", nearby, VerifStatus::Proven),
+            (ty, "n % -1", "true", minimum, VerifStatus::Disproven),
+            (ty, "n % -1", "true", nearby, VerifStatus::Proven),
+            (ty, "n / -1", "true", minimum, VerifStatus::Disproven),
+            (ty, "n / -1", "true", nearby, VerifStatus::Proven),
+            (
+                "bool",
+                "true || n % -1 == 0",
+                "true",
+                minimum,
+                VerifStatus::Proven,
+            ),
+        ] {
+            let source = format!(
+                "{declaration}\nextern \"C\" {{ func foreign(s: string, n: {argument_type}) -> i32 requires: {predicate}; }}\nfunc caller(n: {ty}) -> i32 {{ requires: n == {input}\nforeign(\"ok\", {argument}) }}"
+            );
+            let file = parse_memory_source(&source, "typed-ffi-remainder-argument").expect("parse");
+            let checked = crate::core::check_program(&file).expect("check");
+            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let results = verify_ffi_checked(&checked).expect("typed actual argument definedness");
+            assert_eq!(results.len(), 1, "{source}: {results:?}");
+            assert_eq!(results[0].status, status, "{source}: {results:?}");
+            assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+            assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        }
+    }
+}
+
+#[test]
+fn typed_ffi_string_literals_preserve_nul_unicode_and_escape_text() {
+    require_z3!();
+    for (expected, argument, length, status) in [
+        (r#""a\0🧪值""#, r#""a\0🧪值""#, 4, VerifStatus::Proven),
+        (r#""a\0🧪值""#, r#""a🧪值""#, 4, VerifStatus::Disproven),
+        (r#""a\0🧪值""#, r#""a\0🧫值""#, 4, VerifStatus::Disproven),
+        (r#""🧪值""#, r#""🧪值""#, 2, VerifStatus::Proven),
+        (r#""🧪值""#, r#""🧪值""#, 7, VerifStatus::Disproven),
+        (r#""\\u{41}""#, r#""\\u{41}""#, 6, VerifStatus::Proven),
+        (r#""\\u{41}""#, r#""A""#, 6, VerifStatus::Disproven),
+        (r#""a\0\\u{41}""#, r#""a\0\\u{41}""#, 8, VerifStatus::Proven),
+        (r#""a\0\\u{41}""#, r#""a\0A""#, 8, VerifStatus::Disproven),
+    ] {
+        let source = format!(
+            "extern \"C\" {{ func foreign(s: string) -> i32 requires: s == {expected} && len(s) == {length}; }}\nfunc caller() -> i32 {{ foreign({argument}) }}"
+        );
+        let file = parse_memory_source(&source, "typed-ffi-exact-string-literal").expect("parse");
+        let checked = crate::core::check_program(&file).expect("check exact String fixture");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = verify_ffi_checked(&checked).expect("exact typed String proof");
+        assert_eq!(results.len(), 1, "{source}: {results:?}");
+        assert_eq!(results[0].status, status, "{source}: {results:?}");
+        assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn typed_ffi_integer_parameter_domains_preserve_safe_inputs_and_unsafe_requires() {
+    require_z3!();
+    for (declaration, ty, maximum) in [
+        ("", "i32", "2147483647"),
+        ("type Count = i32", "Count", "2147483647"),
+        ("", "i64", "(9223372036854775807 as i64)"),
+    ] {
+        for (condition, argument, status) in [
+            (format!("x < {maximum}"), "x + 1", VerifStatus::Proven),
+            (format!("x == {maximum}"), "x + 1", VerifStatus::Disproven),
+            ("x + 1 > x".into(), "x", VerifStatus::Disproven),
+        ] {
+            let source = format!(
+                "{declaration}\nextern \"C\" {{ func foreign(s: string, n: {ty}) -> i32 requires: true; }}\nfunc caller(x: {ty}) -> i32 {{ requires: {condition}\nforeign(\"ok\", {argument}) }}"
+            );
+            let file =
+                parse_memory_source(&source, "typed-ffi-entry-integer-domain").expect("parse");
+            let checked = crate::core::check_program(&file).expect("check bounded entry");
+            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let results = verify_ffi_checked(&checked).expect("exact machine parameter domain");
+            assert_eq!(results.len(), 1, "{source}: {results:?}");
+            assert_eq!(results[0].status, status, "{source}: {results:?}");
+            assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+            assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        }
+    }
+}
+
+#[test]
+fn typed_ffi_higher_unicode_keeps_the_actual_call_obligation_deferred() {
+    require_z3!();
+    for literal in [r#""\u{30000}""#, r#""\u{10ffff}""#] {
+        let source = format!(
+            "extern \"C\" {{ func foreign(s: string) -> i32 requires: s == {literal} && len(s) == 1; }}\nfunc caller() -> i32 {{ foreign({literal}) }}"
+        );
+        let file =
+            parse_memory_source(&source, "typed-ffi-higher-unicode-alphabet").expect("parse");
+        let checked =
+            crate::core::check_program(&file).expect("higher Unicode remains a legal String");
+        let root = checked
+            .declaration_expression_bodies()
+            .values()
+            .find(|root| {
+                root.kind
+                    == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternRequires
+            })
+            .expect("the legal Requires has a declaration root");
+        assert!(
+            root.body.is_ok(),
+            "the proof alphabet does not reject typed construction"
+        );
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = verify_ffi_checked(&checked).expect("explicit host SMT alphabet boundary");
+        assert_eq!(results.len(), 1, "{source}: {results:?}");
+        assert_eq!(
+            results[0].status,
+            VerifStatus::NotInTrustedSubset,
+            "{source}: {results:?}"
+        );
+        assert!(results[0].message.contains("checker-owned FFI declaration"));
+        assert!(results[0].message.contains("owner 'function:caller'"));
+        let site = checked
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| site.callee == "foreign")
+            .expect("checker call-site directory has the deferred call");
+        assert_eq!(
+            results[0].diagnostic.as_ref().unwrap().span,
+            site.origin.user_span()
+        );
+        assert!(results[0].artifact.is_none());
+        assert_eq!(
+            crate::core::CheckedProgram::test_legacy_body_access(),
+            Vec::<crate::core::LegacyBodyConsumer>::new()
+        );
+    }
+}
+
+#[test]
+fn typed_ffi_deferred_context_is_checker_owned_without_legacy_access() {
+    require_z3!();
+    for (literal, first, length) in [
+        (r#""🧪值""#, r#""🧪""#, 2),
+        (r#""\\u{41}""#, r#""\\""#, 6),
+        (r#""a\0🧪值""#, r#""a""#, 4),
+    ] {
+        for claimed_length in [length, length + 1] {
+            // char_at is deliberately outside the typed FFI encoding. The
+            // checker therefore reports a precise coverage boundary instead
+            // of reopening a retained surface body or inventing a status.
+            let source = format!(
+                "extern \"C\" {{ func foreign(s: string) -> i32 requires: len(s) == {claimed_length}; }}\nfunc caller(s: string) -> i32 {{ requires: s == {literal} && char_at(s, 0) == {first}\nforeign(s) }}"
+            );
+            let file =
+                parse_memory_source(&source, "typed-ffi-exact-deferred-string").expect("parse");
+            let checked = crate::core::check_program(&file).expect("old legal rich String context");
+            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let results = verify_ffi_checked(&checked).expect("checker-owned String boundary");
+            assert_eq!(results.len(), 1, "{source}: {results:?}");
+            assert_eq!(
+                results[0].status,
+                VerifStatus::NotInTrustedSubset,
+                "{source}: {results:?}"
+            );
+            assert!(results[0].artifact.is_none());
+            assert_eq!(
+                results[0]
+                    .diagnostic
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.code.as_deref()),
+                Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            );
+            assert_eq!(
+                crate::core::CheckedProgram::test_legacy_body_access(),
+                Vec::<crate::core::LegacyBodyConsumer>::new()
+            );
+        }
+    }
+}
+
+#[test]
+fn typed_ffi_aggregate_requires_keeps_unused_callers_and_exact_source_identity() {
+    require_z3!();
+    // Neither callable is reachable from main. Their syntactic extern calls
+    // remain obligations; execution-graph reachability cannot erase them.
+    let source = r#"
+        #[repr(C)]
+        type Pair { value: i64 }
+        extern "C" { func foreign(value: Pair) -> Pair requires: value.value >= 0; }
+        func caller_positive(value: Pair) -> Pair {
+            requires: value.value >= 0
+            foreign(value)
+        }
+        func caller_negative(value: Pair) -> Pair {
+            requires: value.value < 0
+            foreign(value)
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-aggregate-unused-callers").expect("parse");
+    let checked = crate::core::check_program(&file).expect("original aggregate Requires fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked_with_source_hash(&checked, source_hash.clone())
+        .expect("typed aggregate input predicate proof");
+    assert_eq!(
+        results.len(),
+        2,
+        "all dormant call-site obligations: {results:?}"
+    );
+    for (caller, status) in [
+        ("caller_positive", VerifStatus::Proven),
+        ("caller_negative", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name.contains(caller))
+            .unwrap();
+        assert_eq!(result.status, status, "{caller}: {results:?}");
+        let artifact = result
+            .artifact
+            .as_ref()
+            .expect("complete typed proof provenance");
+        assert_eq!(artifact.engine, "resolved_ffi");
+        assert_eq!(artifact.source_hash, source_hash);
+        assert!(!artifact.resolved_ir_hash.is_empty());
+        if status == VerifStatus::Disproven {
+            let site = checked
+                .call_sites_sorted()
+                .into_iter()
+                .find(|site| site.owner == format!("function:{caller}") && site.callee == "foreign")
+                .expect("exact negative call-site identity");
+            assert_eq!(
+                result.diagnostic.as_ref().unwrap().span,
+                site.origin.user_span()
+            );
+        }
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_aggregate_nested_fields_keep_scalar_domains_and_exact_strings() {
+    require_z3!();
+    for (claimed_length, status) in [(4, VerifStatus::Proven), (5, VerifStatus::Disproven)] {
+        let source = format!(
+            r#"
+            #[repr(C)]
+            type Inner {{ value: i32, label: string }}
+            #[repr(C)]
+            type Envelope {{ inner: Inner, enabled: bool }}
+            extern "C" {{
+                func foreign(value: Envelope) -> Envelope
+                    requires: value.enabled && value.inner.value > 0 && len(value.inner.label) == {claimed_length};
+            }}
+            func caller(value: Envelope) -> Envelope {{
+                requires: value.enabled && value.inner.value == 3 && value.inner.label == "a\0🧪值"
+                foreign(value)
+            }}
+        "#
+        );
+        let file = parse_memory_source(&source, "typed-ffi-nested-record-fields").expect("parse");
+        let checked = crate::core::check_program(&file).expect("check nested canonical fields");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = verify_ffi_checked(&checked).expect("typed nested field contract");
+        assert_eq!(results.len(), 1, "{source}: {results:?}");
+        assert_eq!(results[0].status, status, "{source}: {results:?}");
+        assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+    for (condition, status) in [
+        ("value.value < 2147483647", VerifStatus::Proven),
+        ("value.value == 2147483647", VerifStatus::Disproven),
+    ] {
+        let source = format!(
+            r#"
+            #[repr(C)] type Pair {{ value: i32 }}
+            extern "C" {{ func foreign(value: Pair) -> Pair requires: true; }}
+            func caller(value: Pair) -> Pair {{
+                requires: {condition}
+                foreign(Pair {{ value: value.value + 1 }})
+            }}
+        "#
+        );
+        let file = parse_memory_source(&source, "typed-ffi-record-entry-domain").expect("parse");
+        let checked = crate::core::check_program(&file).expect("check record leaf domain");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = verify_ffi_checked(&checked).expect("bounded record field inputs");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, status, "{source}: {results:?}");
+        assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn typed_ffi_aggregate_actual_fields_keep_unobserved_definedness() {
+    require_z3!();
+    for (condition, noise, status) in [
+        ("n == -2147483648", "n % -1", VerifStatus::Disproven),
+        ("n == -2147483647", "n % -1", VerifStatus::Proven),
+        ("n == 2147483647", "n + 1", VerifStatus::Disproven),
+        ("n < 2147483647", "n + 1", VerifStatus::Proven),
+    ] {
+        let source = format!(
+            r#"
+            #[repr(C)] type Pair {{ value: i32, noise: i32 }}
+            extern "C" {{ func foreign(value: Pair) -> Pair requires: value.value >= 0; }}
+            func caller(n: i32) -> Pair {{
+                requires: {condition}
+                foreign(Pair {{ value: 1, noise: {noise} }})
+            }}
+        "#
+        );
+        let file = parse_memory_source(&source, "typed-ffi-record-unused-field").expect("parse");
+        let checked = crate::core::check_program(&file).expect("check actual record construction");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results =
+            verify_ffi_checked(&checked).expect("all record field evaluation obligations");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, status, "{source}: {results:?}");
+        assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn typed_ffi_aggregate_rvalue_projection_keeps_whole_record_evaluation() {
+    require_z3!();
+    for (input, status) in [
+        ("-2147483648", VerifStatus::Disproven),
+        ("-2147483647", VerifStatus::Proven),
+    ] {
+        let source = format!(
+            r#"
+            type Pair {{ value: i32, noise: i32 }}
+            extern "C" {{ func foreign(s: string, value: i32) -> i32 requires: value >= 0; }}
+            func caller(n: i32) -> i32 {{
+                requires: n == {input}
+                foreign("ok", (Pair {{ value: 1, noise: n % -1 }}).value)
+            }}
+        "#
+        );
+        let file =
+            parse_memory_source(&source, "typed-ffi-record-rvalue-projection").expect("parse");
+        let checked =
+            crate::core::check_program(&file).expect("check typed value field projection");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results =
+            verify_ffi_checked(&checked).expect("rvalue field must keep constructor traps");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, status, "{source}: {results:?}");
+        assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn typed_ffi_caller_if_and_short_circuit_paths_constrain_the_call() {
+    require_z3!();
+    let source = r#"
+        extern "C" { func foreign(value: i32, marker: string) -> i32 requires: value >= 0 && marker != ""; }
+        func if_positive(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            if value >= 0 { foreign(value, marker) } else { 0 }
+        }
+        func if_negative(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            if value < 0 { foreign(value, marker) } else { 0 }
+        }
+        func short_circuit_positive(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            if value == 0 || (value > 0 && foreign(value, marker) >= 0) { 1 } else { 0 }
+        }
+        func while_positive(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            while value >= 0 { foreign(value, marker); break; }
+            0
+        }
+        func while_negative(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            while value < 0 { foreign(value, marker); break; }
+            0
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-caller-paths").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check path-sensitive calls");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed path-conditioned FFI proofs");
+    assert_eq!(
+        results.len(),
+        5,
+        "one proof per reachable FFI call: {results:?}"
+    );
+    for (caller, status) in [
+        ("if_positive", VerifStatus::Proven),
+        ("if_negative", VerifStatus::Disproven),
+        ("short_circuit_positive", VerifStatus::Proven),
+        ("while_positive", VerifStatus::Proven),
+        ("while_negative", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name.contains(caller))
+            .expect("typed call result");
+        assert_eq!(result.status, status, "{caller}: {result:?}");
+        assert_eq!(
+            result.artifact.as_ref().unwrap().engine,
+            "resolved_ffi",
+            "supported caller branch facts must be consumed by the typed verifier"
+        );
+    }
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "supported branch proofs must use checked path expressions without rebuilding AST"
+    );
+}
+
+#[test]
+fn typed_ffi_caller_literal_match_patterns_constrain_the_call() {
+    require_z3!();
+    let source = r#"
+        extern "C" { func positive(value: i32, marker: string) -> i32 requires: value > 0 && marker != ""; }
+        func match_positive(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            match value {
+                1 => positive(value, marker),
+                _ => 0
+            }
+        }
+        func match_zero(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            match value {
+                0 => positive(value, marker),
+                _ => 0
+            }
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-match-literal-paths").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check literal match paths");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed literal-pattern FFI proofs");
+    assert_eq!(
+        results.len(),
+        2,
+        "one proof per reachable FFI call: {results:?}"
+    );
+    for (caller, status) in [
+        ("match_positive", VerifStatus::Proven),
+        ("match_zero", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name.contains(caller))
+            .expect("typed match call result");
+        assert_eq!(result.status, status, "{caller}: {result:?}");
+        assert_eq!(result.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_caller_singleton_iteration_binds_the_checked_element() {
+    require_z3!();
+    let source = r#"
+        extern "C" { func positive(value: i32, marker: string) -> i32 requires: value > 0 && marker != ""; }
+        func one_positive(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            requires: value == 0
+            for item in [value + 1] { positive(item, marker); }
+            0
+        }
+        func one_zero(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            requires: value == 0
+            for item in [value] { positive(item, marker); }
+            0
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-singleton-iteration").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check singleton iteration");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed singleton-iteration FFI proofs");
+    assert_eq!(
+        results.len(),
+        2,
+        "one proof per loop-body call: {results:?}"
+    );
+    for (caller, status) in [
+        ("one_positive", VerifStatus::Proven),
+        ("one_zero", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name.contains(caller))
+            .expect("typed iteration call result");
+        assert_eq!(result.status, status, "{caller}: {result:?}");
+        assert_eq!(result.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_while_exit_paths_are_exact() {
+    require_z3!();
+    let source = r#"
+        extern "C" {
+            func positive(value: i32, marker: string) -> i32 requires: value > 0 && marker != "";
+            func greater_than_one(value: i32, marker: string) -> i32 requires: value > 1 && marker != "";
+        }
+        func while_continue_positive(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            while value >= 0 {
+                if value == 0 { continue; }
+                positive(value, marker);
+                break;
+            }
+            0
+        }
+        func while_break_positive(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            while value >= 0 {
+                if value == 0 { break; }
+                positive(value, marker);
+                break;
+            }
+            0
+        }
+        func while_break_negative(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            while value >= 0 {
+                if value <= 0 { break; }
+                greater_than_one(value, marker);
+                break;
+            }
+            0
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-loop-exit-paths").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check loop exit paths");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed loop FFI proofs");
+    assert_eq!(
+        results.len(),
+        3,
+        "one proof per loop-body call: {results:?}"
+    );
+    for (caller, status) in [
+        ("while_continue_positive", VerifStatus::Proven),
+        ("while_break_positive", VerifStatus::Proven),
+        ("while_break_negative", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name.contains(caller))
+            .expect("loop call result");
+        assert_eq!(result.status, status, "{caller}: {result:?}");
+        assert_eq!(result.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_while_backedge_mutation_defers_entry_value_assumptions() {
+    require_z3!();
+    let source = r#"
+        extern "C" { func positive(value: i32, marker: string) -> i32 requires: value > 0 && marker != ""; }
+        func while_backedge_mutates_local(value: i32, marker: string) -> i32 {
+            requires: marker != ""
+            let mut current = value
+            while current > 0 {
+                current = current - 1
+                positive(current, marker);
+                break;
+            }
+            0
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-loop-backedge-mutation").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check loop-local mutation");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("mutable loop-local call defers safely");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].status,
+        VerifStatus::NotInTrustedSubset,
+        "{results:?}"
+    );
+    assert_eq!(
+        results[0]
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_deref()),
+        Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+        "mutable loop-local state has a checker-owned coverage boundary"
+    );
+    assert!(results[0]
+        .message
+        .contains("owner 'function:while_backedge_mutates_local'"));
+    let site = checked
+        .call_sites_sorted()
+        .into_iter()
+        .find(|site| site.callee == "positive")
+        .expect("checker call-site directory has the mutated-loop call");
+    assert_eq!(
+        results[0].diagnostic.as_ref().unwrap().span,
+        site.origin.user_span()
+    );
+    assert!(results[0].artifact.is_none());
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "the mutation/backedge counterexample must not reopen a compatibility body"
+    );
+}
+
+#[test]
+fn typed_ffi_aggregate_f64_leaf_keeps_ieee_contract_results() {
+    require_z3!();
+    let source = r#"
+        #[repr(C)] type FloatPair { value: f64 }
+        extern "C" { func foreign(value: FloatPair) -> FloatPair requires: value.value >= 0.0; }
+        func caller_positive(value: FloatPair) -> FloatPair {
+            requires: value.value >= 0.0
+            foreign(value)
+        }
+        func caller_negative(value: FloatPair) -> FloatPair {
+            requires: value.value < 0.0
+            foreign(value)
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-record-ieee-f64").expect("parse");
+    let checked =
+        crate::core::check_program(&file).expect("check typed binary64 aggregate predicates");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results =
+        verify_ffi_checked(&checked).expect("typed IEEE binary64 comparisons are supported");
+    assert_eq!(results.len(), 2);
+    for (caller, status) in [
+        ("caller_positive", VerifStatus::Proven),
+        ("caller_negative", VerifStatus::Disproven),
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.func_name.contains(caller))
+            .unwrap();
+        assert_eq!(result.status, status, "{caller}: {results:?}");
+        assert_eq!(
+            result.artifact.as_ref().unwrap().engine,
+            "resolved_ffi",
+            "{caller}: binary64 leaf must be verified from its typed descriptor"
+        );
+    }
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        Vec::<crate::core::LegacyBodyConsumer>::new(),
+        "typed IEEE proofs must not rebuild the legacy extern AST"
+    );
+}
+
+#[test]
+fn typed_ffi_aggregate_f64_contracts_preserve_nan_comparison_semantics() {
+    require_z3!();
+    let source = r#"
+        #[repr(C)] type FloatPair { value: f64 }
+        extern "C" { func foreign(value: FloatPair) -> FloatPair requires: value.value >= 0.0; }
+        func caller_nan(value: FloatPair) -> FloatPair {
+            requires: value.value != value.value
+            foreign(value)
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let file = parse_memory_source(source, "typed-ffi-record-f64-nan").expect("parse");
+    let checked = crate::core::check_program(&file).expect("check IEEE NaN contract");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_ffi_checked(&checked).expect("typed IEEE NaN comparison");
+    assert_eq!(results.len(), 1, "single FFI call site: {results:?}");
+    assert_eq!(
+        results[0].status,
+        VerifStatus::Disproven,
+        "the caller Requires admits NaN, for which ordered >= is false: {results:?}"
+    );
+    assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn typed_ffi_aggregate_nested_contract_context_is_a_named_deferred_obligation() {
+    require_z3!();
+    for (parameters, statement, actual) in [
+        ("value: Pair", "let n = { ensures: false\n0 }", "\"ok\""),
+        ("value: Pair, n: i32 = { ensures: false\n0 }", "", "\"ok\""),
+        ("value: Pair", "", "{ ensures: false\n\"ok\" }"),
+    ] {
+        let source = format!(
+            r#"
+            #[repr(C)] type Pair {{ value: i64 }}
+            extern "C" {{ func foreign(s: string, value: Pair) -> Pair requires: value.value >= 0; }}
+            func caller({parameters}) -> Pair {{
+                requires: value.value >= 0
+                {statement}
+                foreign({actual}, value)
+            }}
+            func main() -> i32 {{ 0 }}
+        "#
+        );
+        let file =
+            parse_memory_source(&source, "typed-ffi-nested-context-obligation").expect("parse");
+        let checked = crate::core::check_program(&file).expect("legal nested contract context");
+        let caller = checked
+            .callable(&crate::core::NodeId("function:caller".into()))
+            .unwrap();
+        assert!(caller.has_unmodeled_proof_roots());
+        let nested = caller
+            .contracts
+            .iter()
+            .find(|contract| {
+                !caller
+                    .body
+                    .root
+                    .statements
+                    .iter()
+                    .any(|statement| statement.node_id == contract.node_id)
+            })
+            .expect("complete typed census retains the exact nested contract");
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results =
+            verify_ffi_checked(&checked).expect("compatibility plus retained context obligation");
+        let call = results
+            .iter()
+            .find(|result| result.func_name.contains("calls foreign"))
+            .unwrap();
+        assert_eq!(
+            call.status,
+            VerifStatus::NotInTrustedSubset,
+            "unsupported aggregate/context composition is a checker-owned boundary: {results:?}"
+        );
+        assert_eq!(
+            call.diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.code.as_deref()),
+            Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+            "unsupported aggregate/context composition keeps the checker-owned coverage code"
+        );
+        assert!(call.artifact.is_none());
+        let deferred = results
+            .iter()
+            .find(|result| result.func_name.contains(&nested.node_id.0))
+            .unwrap();
+        assert_eq!(deferred.status, VerifStatus::NotInTrustedSubset);
+        assert_eq!(
+            deferred.trusted_subset_domain,
+            Some(TrustedSubsetDomain::Contract)
+        );
+        assert_eq!(
+            deferred.diagnostic.as_ref().unwrap().span,
+            nested.origin.user_span()
+        );
+        assert!(deferred.artifact.is_none());
+        assert_eq!(
+            crate::core::CheckedProgram::test_legacy_body_access(),
+            Vec::<crate::core::LegacyBodyConsumer>::new()
+        );
+    }
+}
+
+#[test]
+fn actor_map_ffi_callsite_deferred_results_are_exact_and_untrusted() {
+    const FFI: &str = r#"
+extern "C" {
+    func scalar_probe(value: i32) -> i32
+        requires: value >= 0
+        ensures: result == value + 1;
+    func scalar_probe_unused(value: i32) -> i32
+        ensures: result == value + 1;
+}
+"#;
+    const USED_ACTOR_MAIN: &str = r#"
+func main() -> i32 {
+    let counter = Counter.spawn()
+    let actor_value = counter.bump(5)
+    let root = map_new()
+    let updated = map_set(root, "answer", scalar_probe(actor_value))
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#;
+    const UNUSED_ACTOR_MAIN: &str = r#"
+func main() -> i32 {
+    let root = map_new()
+    let updated = map_set(root, "answer", scalar_probe(41 as i32))
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#;
+    let actor_prefix = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/real_world/actor_nested_func_capture.mimi"
+    ))
+    .split("\nfunc main() -> i32 {")
+    .next()
+    .expect("original Actor fixture has its main entry");
+
+    for (label, main) in [
+        ("used-actor", USED_ACTOR_MAIN),
+        ("unused-actor", UNUSED_ACTOR_MAIN),
+    ] {
+        let source = format!("{actor_prefix}\n{FFI}\n{main}");
+        let file = parse_memory_source(&source, "actor-map-ffi-deferred-callsite")
+            .unwrap_or_else(|error| panic!("{label}: parse: {error}"));
+        let checked = crate::core::check_program(&file)
+            .unwrap_or_else(|error| panic!("{label}: check: {error:?}"));
+        let site = checked
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| site.owner == "function:main" && site.callee == "scalar_probe")
+            .unwrap_or_else(|| panic!("{label}: expected actual scalar_probe call site"));
+        let declaration_owner = checked
+            .ffi_declarations()
+            .values()
+            .find(|declaration| declaration.symbol == "scalar_probe")
+            .map(|declaration| declaration.declaration.0.clone())
+            .unwrap_or_else(|| panic!("{label}: scalar_probe declaration owner missing"));
+        let results = verify_ffi_checked(&checked)
+            .unwrap_or_else(|error| panic!("{label}: verify checked FFI obligations: {error}"));
+
+        assert_eq!(
+            results.len(),
+            2,
+            "{label}: only the called declaration's Requires and Ensures are obligations: {results:?}"
+        );
+        let requires = results
+            .iter()
+            .find(|result| result.func_name == "main calls scalar_probe")
+            .unwrap_or_else(|| panic!("{label}: named Requires result missing: {results:?}"));
+        let ensures = results
+            .iter()
+            .find(|result| result.func_name == "main -> extern scalar_probe Ensures")
+            .unwrap_or_else(|| panic!("{label}: named Ensures result missing: {results:?}"));
+        let expected_span = site.origin.user_span();
+        for result in [requires, ensures] {
+            assert_eq!(
+                result.status,
+                VerifStatus::NotInTrustedSubset,
+                "{label}: Map/FFI composition cannot claim a proof: {result:?}"
+            );
+            assert_eq!(
+                result.trusted_subset_domain,
+                Some(TrustedSubsetDomain::Contract),
+                "{label}: the unsupported boundary is a Contract obligation"
+            );
+            assert_eq!(
+                result.constraint_count, 0,
+                "{label}: no solver constraint may be attributed to this deferred result"
+            );
+            assert!(
+                result.artifact.is_none(),
+                "{label}: no proof artifact may be attached to a deferred result"
+            );
+            let diagnostic = result.diagnostic.as_ref().unwrap_or_else(|| {
+                panic!("{label}: deferred result needs a diagnostic: {result:?}")
+            });
+            assert_eq!(
+                diagnostic.code.as_deref(),
+                Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+                "{label}: retain the registered coverage boundary code"
+            );
+            assert_eq!(
+                diagnostic.span, expected_span,
+                "{label}: exact checker-owned source call-site span"
+            );
+            assert_eq!(diagnostic.message, result.message);
+            assert!(
+                result.message.contains(&site.node_id.0),
+                "{label}: result must carry the exact call-site identity {}: {result:?}",
+                site.node_id.0
+            );
+        }
+        assert_eq!(
+            requires.message,
+            format!(
+                "{}: called extern 'scalar_probe' Requires at call site '{}' is Deferred because the Actor compatibility request also contains an independently-owned Map profile without a combined verifier receipt",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                site.node_id.0
+            ),
+            "{label}: exact Requires disposition"
+        );
+        assert_eq!(
+            ensures.message,
+            format!(
+                "{}: checker-owned FFI declaration 'scalar_probe' (owner '{}') Ensures at call site '{}' (owner 'function:main', span {}) is outside canonical proof coverage; any Requires result is independent and does not prove the foreign postcondition",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                declaration_owner,
+                site.node_id.0,
+                site.origin.user_span()
+            ),
+            "{label}: exact foreign Ensures disposition"
+        );
+    }
 }

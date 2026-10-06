@@ -1167,6 +1167,51 @@ impl<'a> Checker<'a> {
                         Type::Name("Any".into(), vec![]),
                     ]);
                 }
+                "map_get_i32" | "map_get_string" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("{name} expects 2 arguments (map, key)"),
+                        );
+                    } else {
+                        let map_ty = self.infer_expr(&args[0], scopes);
+                        let map_ty = self.resolve_type(&map_ty);
+                        if !matches!(map_ty.unlocated(), Type::TyErr)
+                            && !matches!(
+                                map_ty.unlocated(),
+                                Type::Name(map_name, arguments)
+                                    if map_name == "Record" && arguments.is_empty()
+                            )
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "{name} expects a Map/Record as its first argument, found {}",
+                                    crate::core::fmt_type(&map_ty)
+                                ),
+                            );
+                        }
+                        let key_ty = self.infer_expr(&args[1], scopes);
+                        let key_ty = self.resolve_type(&key_ty);
+                        if !matches!(key_ty.unlocated(), Type::TyErr)
+                            && !crate::core::helpers::is_string(&key_ty)
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "{name} expects a String key as its second argument, found {}",
+                                    crate::core::fmt_type(&key_ty)
+                                ),
+                            );
+                        }
+                    }
+                    let ok = if name == "map_get_i32" {
+                        Type::Name("i32".into(), vec![])
+                    } else {
+                        Type::Name("string".into(), vec![])
+                    };
+                    return Type::Result(Box::new(ok), Box::new(Type::Name("i32".into(), vec![])));
+                }
                 "map_set" => {
                     if args.len() != 3 {
                         self.emit_code(
@@ -3075,6 +3120,21 @@ impl<'a> Checker<'a> {
         let has_named_args = args
             .iter()
             .any(|a| matches!(a.unlocated(), Expr::NamedArg(_, _)));
+        let variadic_extern = self.variadic_extern_funcs.contains(name);
+        if variadic_extern && has_named_args {
+            for argument in args {
+                self.infer_expr(argument, scopes);
+            }
+            self.emit_code(
+                crate::diagnostic::codes::E0257,
+                format!(
+                    "variadic extern function '{}' only accepts positional arguments",
+                    name
+                ),
+            );
+            return Type::TyErr;
+        }
+
         if has_named_args || args.len() != params.len() {
             // Check if the function definition has param names (for named args) or defaults
             let func_def_params: Option<Vec<Param>> = self
@@ -3190,7 +3250,12 @@ impl<'a> Checker<'a> {
             }
         }
 
-        if args.len() != params.len() {
+        let arity_valid = if variadic_extern {
+            args.len() >= params.len()
+        } else {
+            args.len() == params.len()
+        };
+        if !arity_valid {
             self.emit_code(
                 crate::diagnostic::codes::E0257,
                 format!(
@@ -3491,6 +3556,14 @@ impl<'a> Checker<'a> {
                                 fmt_type(param)
                             )),
                         );
+                    }
+                }
+                // C variadic tail operands have no declared parameter type.
+                // Infer each in source order so lowering can bind its exact
+                // node/type identity; ABI promotions remain a separate receipt.
+                if variadic_extern {
+                    for argument in args.iter().skip(params.len()) {
+                        self.infer_expr(argument, scopes);
                     }
                 }
                 // Check where constraints for non-generic functions. CK-H6: all entries.
@@ -4151,6 +4224,35 @@ fn is_impure_builtin(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::is_impure_builtin;
+
+    #[test]
+    fn typed_owned_map_getters_require_a_record_and_string_key() {
+        for (source, expected) in [
+            (
+                "func invalid_map(map: i32) -> Result<i32, i32> { map_get_i32(map, \"key\") }\nfunc main() -> i32 { 0 }",
+                "expects a Map/Record as its first argument",
+            ),
+            (
+                "func invalid_key(map: Record) -> Result<string, i32> { map_get_string(map, 1) }\nfunc main() -> i32 { 0 }",
+                "expects a String key as its second argument",
+            ),
+        ] {
+            let tokens = crate::lexer::Lexer::new(source)
+                .tokenize()
+                .expect("tokenize typed owned-Map getter negative fixture");
+            let file = crate::parser::Parser::new(tokens)
+                .parse_file()
+                .expect("parse typed owned-Map getter negative fixture");
+            let diagnostics = crate::core::check_program(&file)
+                .expect_err("invalid typed owned-Map getter argument must fail type checking");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(expected)),
+                "expected diagnostic containing '{expected}', got {diagnostics:?}"
+            );
+        }
+    }
 
     /// P1-37: Cross-check that all known impure codegen builtins are
     /// covered by is_impure_builtin. When adding a new I/O/net/fs/env/

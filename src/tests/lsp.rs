@@ -2458,7 +2458,7 @@ fn lsp_verification_cache_writeback_is_byte_deterministic() {
 }
 
 #[test]
-fn lsp_verification_refresh_without_result_drops_stale_verdict() {
+fn lsp_verification_refresh_replaces_stale_verdict_with_fresh_not_in_subset() {
     if !crate::verifier::is_z3_available() {
         return;
     }
@@ -2497,8 +2497,8 @@ fn lsp_verification_refresh_without_result_drops_stale_verdict() {
     let body_hash = crate::lsp::util::hash_func_body(text, func);
     let key = crate::lsp::verification_cache_key(uri, "invariant_only");
     // A malformed/stale Disproven entry has no safely replayable diagnostic.
-    // The Resolved verifier currently emits no result for invariant-only
-    // callables, so a refresh must remove this entry instead of preserving it.
+    // The invariant-only callable is outside the Resolved contract model, so
+    // refresh must replace the stale verdict with the fresh NITS result.
     server.insert_verification_cache(
         key.clone(),
         body_hash,
@@ -2509,9 +2509,18 @@ fn lsp_verification_refresh_without_result_drops_stale_verdict() {
 
     let diagnostics = server.compute_verification_diagnostics(text, 0, uri);
     assert!(diagnostics.is_empty());
-    assert!(
-        !server.verification_cache.contains_key(&key),
-        "a refresh with no verifier result must remove the stale in-memory verdict"
+    let refreshed = server
+        .verification_cache
+        .get(&key)
+        .expect("fresh verification result replaces stale verdict");
+    assert_eq!(refreshed.body_hash, body_hash);
+    assert_eq!(
+        refreshed.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset
+    );
+    assert_eq!(
+        refreshed.message,
+        "checked typed proof obligations are outside the resolved contract model"
     );
     server.save_cache();
     let persisted: serde_json::Value = serde_json::from_str(
@@ -2519,10 +2528,14 @@ fn lsp_verification_refresh_without_result_drops_stale_verdict() {
             .expect("read refreshed cache"),
     )
     .expect("parse refreshed cache");
+    let persisted_entry = persisted["entries"]
+        .get(key.as_str())
+        .expect("persist fresh verification result");
+    assert_eq!(persisted_entry["body_hash"], serde_json::json!(body_hash));
+    assert_eq!(persisted_entry["status"], "NotInTrustedSubset");
     assert_eq!(
-        persisted["entries"].get(key.as_str()),
-        None,
-        "a refresh with no verifier result must not persist the stale verdict"
+        persisted_entry["message"],
+        "checked typed proof obligations are outside the resolved contract model"
     );
     let _ = std::fs::remove_dir_all(root);
 }

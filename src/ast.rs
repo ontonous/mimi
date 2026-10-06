@@ -144,6 +144,11 @@ pub struct ExternBlock {
     pub meta: AstNodeMeta,
     pub abi: String,
     pub funcs: Vec<ExternFunc>,
+    /// Names of declarations carrying their own `#[errno]` attribute.
+    /// `ExternFunc::returns_errno` remains the effective flag (block default
+    /// OR declaration attribute) for compatibility; this list preserves the
+    /// source-level origin for typed metadata consumers.
+    pub explicit_errno_funcs: Vec<String>,
     /// If true, the compiler wraps all FFI calls in this block with
     /// catch_unwind (Rust panics) and signal handlers (SIGSEGV/SIGABRT).
     pub no_panic: bool,

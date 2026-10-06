@@ -920,10 +920,28 @@ fn canonical_actor_complete_proof_census_does_not_promote_scoped_requires_to_fun
         2,
         "scope-aware census still retains both source obligations"
     );
-    let error = MirProgram::from_checked_program(&checked)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("cannot become unconditional MIR function assumptions"));
+    let program = MirProgram::from_checked_program(&checked)
+        .expect("scoped proof roots are retained as explicit MIR boundaries");
+    let guarded = program
+        .functions()
+        .get(&NodeId("function:guarded".into()))
+        .expect("guarded MIR owner");
+    assert!(
+        guarded.contracts.iter().all(|contract| {
+            contract.id.0.contains("stmt.ensures") && !contract.id.0.contains("stmt.requires")
+        }),
+        "only the direct entry Ensures may become a MIR function contract"
+    );
+    let boundary = guarded
+        .proof_worklist
+        .as_ref()
+        .expect("scoped proof boundary worklist")
+        .boundaries
+        .iter()
+        .flat_map(|boundary| boundary.scoped_boundaries.iter())
+        .find(|boundary| boundary.point.0.contains("expr.binary"))
+        .expect("nested Requires must remain a scoped, reason-bearing boundary");
+    assert!(boundary.reason.contains("proof root") || boundary.reason.contains("evaluation-order"));
     let mut verifier = crate::verifier::Verifier::new().unwrap();
     let results = verifier.verify_checked(&checked);
     let result = results

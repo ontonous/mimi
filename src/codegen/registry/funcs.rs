@@ -12,6 +12,27 @@ use inkwell::values::{
 use inkwell::ThreadLocalMode;
 use std::collections::HashMap;
 
+fn native_generic_to_ast(
+    generic: &crate::core::ir::NativeGenericBinder,
+) -> crate::ast::GenericParam {
+    crate::ast::GenericParam {
+        meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::RuntimeSystem(
+            "codegen.checked_impl_generic",
+        )),
+        name: generic.name.clone(),
+        bounds: generic
+            .bounds
+            .iter()
+            .map(|bound| bound.name.clone())
+            .collect(),
+        kind: match generic.kind {
+            crate::core::ir::NativeGenericKind::Free => crate::ast::GenericKind::Free,
+            crate::core::ir::NativeGenericKind::Linear => crate::ast::GenericKind::Linear,
+            crate::core::ir::NativeGenericKind::LinearDrop => crate::ast::GenericKind::LinearDrop,
+        },
+    }
+}
+
 /// LLVM types computed for an extern wrapper and its underlying C declaration.
 #[allow(dead_code)]
 struct ExternFnSignature<'ctx> {
@@ -61,138 +82,651 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
-    pub(in crate::codegen) fn compile_impl_methods(&mut self) -> MimiResult<()> {
-        for (type_name, trait_impls) in self.type_impls.clone() {
-            for (trait_name, methods) in &trait_impls {
-                for method in methods {
-                    // Mangle name: {type_name}__{trait_name}__{method_name}
-                    let mangled = format!("{}__{}__{}", type_name, trait_name, method.name);
-                    // Build function: prepend self: &type_name as first param
-                    let mut impl_method = method.clone();
-                    impl_method.name = mangled;
-                    // Include generic type args from the impl block so monomorphization
-                    // can resolve e.g. List<T> → List<Item> when T=Item inside for loops.
-                    let type_args_for_self = self
-                        .impl_type_args
-                        .get(&type_name)
-                        .cloned()
-                        .unwrap_or_default();
-                    let self_type_name = if type_args_for_self.is_empty() {
-                        Type::Name(type_name.clone(), vec![])
-                    } else {
-                        Type::Name(type_name.clone(), type_args_for_self.clone())
-                    };
-                    // Prepend self param: self: &type_name (or self: type_name for value types)
-                    let self_ty = match type_name.as_str() {
-                        // Scalar/value types: pass self by value.
-                        "i32" | "i64" | "f64" | "bool" | "Record" | "Map" | "Any" => self_type_name,
-                        _ => {
-                            // Compound types: pass self by reference
-                            crate::ast::Type::Ref(None, Box::new(self_type_name))
+    /// Production method bodies are joined to their checked native signature
+    /// and vtable slot by callable owner. The AST value here is only the legacy
+    /// executable body payload; it never decides which method gets emitted.
+    pub(in crate::codegen) fn compile_checked_impl_methods(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+    ) -> MimiResult<()> {
+        self.compile_checked_impl_methods_with_eligibility(program, None)
+    }
+
+    /// Install checked impl-method declarations before vtable materialization.
+    ///
+    /// A production resolved pass supplies the exact callable set it will
+    /// lower. Those method bodies are only declared here; the Typed IR
+    /// emitter fills the body after all declarations are installed. A method
+    /// outside that set is an explicit canonical coverage boundary. It must
+    /// not quietly re-enter the retained AST emitter merely because a vtable
+    /// needs a function symbol.
+    pub(in crate::codegen) fn compile_checked_impl_methods_with_eligibility(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+        resolved_eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
+    ) -> MimiResult<()> {
+        let catalog = program.native_declarations();
+        for impl_owner in &catalog.impl_order {
+            let implementation = catalog.impls.get(impl_owner).ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "checked impl '{}' is absent from native declaration catalog",
+                    impl_owner.0
+                ))
+            })?;
+            for binding in &implementation.methods {
+                let (body, receiver_ty) = self
+                    .checked_impl_method_bodies
+                    .get(&binding.callable)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "checked impl method '{}' has no body payload",
+                            binding.callable.0
+                        ))
+                    })?;
+                if body.name != binding.symbol {
+                    return Err(CompileError::LlvmError(format!(
+                        "checked impl body '{}' differs from native method '{}'",
+                        body.name, binding.symbol
+                    )));
+                }
+                let type_args_for_self: Vec<Type> = implementation
+                    .generics
+                    .iter()
+                    .map(|generic| Type::Name(generic.name.clone(), Vec::new()))
+                    .collect();
+                let impl_method = if resolved_eligible
+                    .is_some_and(|eligible| eligible.contains(&binding.callable))
+                {
+                    // Resolved `self` follows the canonical signature's
+                    // value ABI. The compatibility header above retains the
+                    // historical reference spelling for the test adapter,
+                    // but using that spelling for the declaration here would
+                    // make the vtable slot's LLVM type disagree with Typed
+                    // MIR for record receivers.
+                    let canonical_receiver =
+                        binding.signature.parameters.first().ok_or_else(|| {
+                            CompileError::LlvmError(format!(
+                                "checked impl method '{}' has no canonical receiver",
+                                binding.callable.0
+                            ))
+                        })?;
+                    let canonical_receiver_ty = self
+                        .checked_legacy_type_for_resolved(
+                            &canonical_receiver.ty,
+                            program.resolved_types(),
+                        )
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!(
+                                "checked impl method '{}' canonical receiver is not materializable: {error}",
+                                binding.callable.0
+                            ))
+                        })?;
+                    self.impl_method_with_self_type(&body, &binding.symbol, canonical_receiver_ty)
+                } else {
+                    self.impl_method_with_self_type(&body, &binding.symbol, receiver_ty)
+                };
+                match resolved_eligible {
+                    Some(eligible) if eligible.contains(&binding.callable) => {
+                        // The canonical emitter owns the body. Declare the
+                        // checker-issued symbol now so vtable construction can
+                        // bind its slot before resolved bodies are emitted.
+                        self.declare_func(&impl_method)?;
+                    }
+                    Some(_) => {
+                        return Err(CompileError::CanonicalMirCoverage(format!(
+                            "MIR-COVERAGE-001/NITS: checked impl method '{}' has no canonical resolved-native body; refusing legacy impl emission",
+                            binding.callable.0
+                        )));
+                    }
+                    None => {
+                        // Unit tests that exercise the compatibility registry
+                        // directly retain the old body adapter. Production
+                        // always passes an explicit resolved-eligibility set.
+                        #[cfg(test)]
+                        {
+                            self.compile_impl_method_body_for_test(
+                                &body,
+                                &binding.symbol,
+                                type_args_for_self,
+                                impl_method.params[0].ty.clone(),
+                            )?;
                         }
-                    };
-                    impl_method.params.insert(0, {
-                        let meta = crate::ast::AstNodeMeta::inherited(
-                            impl_method.meta.span,
-                            crate::ast::AstOrigin::RuntimeSystem("codegen.impl_self"),
-                        );
-                        crate::ast::Param {
-                            meta,
-                            name: "self".into(),
-                            ty: self_ty.deep_reorigin(meta),
-                            mut_: false,
-                            default_value: None,
-                            borrow: None,
-                        }
-                    });
-                    // Set type_map to identity so compile_func_legacy can resolve type params
-                    // in self (e.g., &List<T> → T resolves to T in type_map).
-                    // This is later overridden by compile_generic_func for monomorphization.
-                    let saved_type_map = self.type_map.clone();
-                    if !type_args_for_self.is_empty() {
-                        let mut identity_map: HashMap<String, Type> = HashMap::new();
-                        for ta in &type_args_for_self {
-                            if let Type::Name(tn, _) = ta.unlocated() {
-                                identity_map.insert(tn.clone(), ta.clone());
-                            }
-                        }
-                        // Only set when identity_map has entries and current type_map is empty
-                        if !identity_map.is_empty() && self.type_map.is_empty() {
-                            self.type_map.extend(identity_map);
+                        #[cfg(not(test))]
+                        {
+                            let _ = type_args_for_self;
+                            return Err(CompileError::CanonicalMirCoverage(format!(
+                                "MIR-COVERAGE-001/NITS: checked impl method '{}' requires an explicit resolved-native eligibility receipt",
+                                binding.callable.0
+                            )));
                         }
                     }
-                    self.compile_func_legacy(&impl_method)?;
-                    self.type_map = saved_type_map;
                 }
             }
         }
         Ok(())
     }
 
+    pub(in crate::codegen) fn checked_impl_method_header(
+        &self,
+        body: &crate::ast::FuncDef,
+        implementation: &crate::core::ir::NativeImplDeclaration,
+        binding: &crate::core::ir::NativeImplMethodDeclaration,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<(crate::ast::FuncDef, Type), CompileError> {
+        let signature = &binding.signature;
+        let Some(receiver) = signature.parameters.first() else {
+            return Err(CompileError::LlvmError(format!(
+                "checked impl method '{}' has no canonical receiver parameter",
+                binding.callable.0
+            )));
+        };
+        if receiver.name != "self" {
+            return Err(CompileError::LlvmError(format!(
+                "checked impl method '{}' first parameter is not self",
+                binding.callable.0
+            )));
+        }
+        let source_parameters = body
+            .params
+            .iter()
+            .filter(|parameter| parameter.name != "self")
+            .collect::<Vec<_>>();
+        if source_parameters.len() + 1 != signature.parameters.len() {
+            return Err(CompileError::LlvmError(format!(
+                "checked impl method '{}' source body and canonical parameter counts differ",
+                binding.callable.0
+            )));
+        }
+
+        let mut checked = body.clone();
+        checked.name = binding.symbol.clone();
+        checked.params.clear();
+        for (source, canonical) in source_parameters
+            .into_iter()
+            .zip(signature.parameters.iter().skip(1))
+        {
+            if source.name != canonical.name {
+                return Err(CompileError::LlvmError(format!(
+                    "checked impl method '{}' parameter order differs at '{}' / '{}'",
+                    binding.callable.0, source.name, canonical.name
+                )));
+            }
+            let ty = self
+                .checked_legacy_type_for_resolved(&canonical.ty, program.resolved_types())
+                .map_err(|error| {
+                    CompileError::LlvmError(format!(
+                        "checked impl method '{}' parameter '{}' type is not materializable: {error}",
+                        binding.callable.0, canonical.name
+                    ))
+                })?
+                .deep_reorigin(source.meta);
+            checked.params.push(crate::ast::Param {
+                meta: source.meta,
+                name: canonical.name.clone(),
+                ty,
+                mut_: canonical.mutable,
+                default_value: source.default_value.clone(),
+                borrow: match canonical.permission {
+                    Some(crate::core::Permission::View) => Some(crate::ast::ParamBorrow::View),
+                    Some(crate::core::Permission::Mutate) => Some(crate::ast::ParamBorrow::Mutate),
+                    Some(crate::core::Permission::Consume) | None => None,
+                },
+            });
+        }
+        let return_type = self
+            .checked_legacy_type_for_resolved(&signature.result, program.resolved_types())
+            .map_err(|error| {
+                CompileError::LlvmError(format!(
+                    "checked impl method '{}' result type is not materializable: {error}",
+                    binding.callable.0
+                ))
+            })?;
+        checked.ret = Some(return_type);
+        checked.generics = implementation
+            .generics
+            .iter()
+            .chain(&binding.generics)
+            .map(native_generic_to_ast)
+            .collect();
+
+        let receiver_ty = self
+            .checked_legacy_type_for_resolved(&receiver.ty, program.resolved_types())
+            .map_err(|error| {
+                CompileError::LlvmError(format!(
+                    "checked impl method '{}' receiver type is not materializable: {error}",
+                    binding.callable.0
+                ))
+            })?;
+        let receiver_is_direct = matches!(
+            program.resolved_types().get(&receiver.ty),
+            Some(
+                crate::core::ResolvedType::Primitive(
+                    crate::core::PrimitiveType::I32
+                        | crate::core::PrimitiveType::I64
+                        | crate::core::PrimitiveType::F64
+                        | crate::core::PrimitiveType::Bool
+                ) | crate::core::ResolvedType::DynamicAny { .. }
+            )
+        ) || matches!(
+            program.resolved_types().get(&receiver.ty),
+            Some(crate::core::ResolvedType::Nominal { item, .. })
+                if matches!(
+                    item.as_str()
+                        .strip_prefix("builtin:type:")
+                        .unwrap_or(item.as_str()),
+                    "Record" | "Map" | "Any"
+                )
+        );
+        let receiver_ty = if receiver_is_direct
+            || matches!(
+                receiver_ty.unlocated(),
+                Type::Ref(_, _) | Type::RefMut(_, _)
+            ) {
+            receiver_ty
+        } else {
+            Type::Ref(None, Box::new(receiver_ty))
+        };
+        Ok((checked, receiver_ty))
+    }
+
+    pub(in crate::codegen) fn checked_legacy_type_for_resolved(
+        &self,
+        id: &crate::core::ResolvedTypeId,
+        table: &crate::core::ResolvedTypeTable,
+    ) -> Result<Type, String> {
+        use crate::core::{FunctionTypeAbi, OwnershipTypeKind, PrimitiveType, ResolvedType};
+        let resolved = table
+            .get(id)
+            .ok_or_else(|| format!("type id '{}' is absent", id.as_str()))?;
+        let convert = |child: &crate::core::ResolvedTypeId| {
+            self.checked_legacy_type_for_resolved(child, table)
+        };
+        let nominal_name = |identity: &str| {
+            identity
+                .strip_prefix("builtin:type:")
+                .or_else(|| identity.strip_prefix("type:"))
+                .or_else(|| identity.strip_prefix("actor:"))
+                .or_else(|| identity.strip_prefix("state:"))
+                .unwrap_or(identity)
+                .to_owned()
+        };
+        Ok(match resolved {
+            ResolvedType::Primitive(primitive) => Type::Name(
+                if *primitive == PrimitiveType::Unit {
+                    "unit"
+                } else {
+                    primitive.language_name()
+                }
+                .to_owned(),
+                Vec::new(),
+            ),
+            ResolvedType::GenericParameter(binder) => Type::Name(
+                self.checked_generic_binder_names
+                    .get(binder)
+                    .cloned()
+                    .ok_or_else(|| format!("generic binder '{}' has no checked name", binder.0))?,
+                Vec::new(),
+            ),
+            ResolvedType::Nominal {
+                item, arguments, ..
+            } => Type::Name(
+                nominal_name(item.as_str()),
+                arguments
+                    .iter()
+                    .map(convert)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            ResolvedType::Reference {
+                lifetime,
+                mutable,
+                target,
+            } => {
+                let target = Box::new(convert(target)?);
+                if *mutable {
+                    Type::RefMut(lifetime.clone(), target)
+                } else {
+                    Type::Ref(lifetime.clone(), target)
+                }
+            }
+            ResolvedType::Option(payload) => Type::Option(Box::new(convert(payload)?)),
+            ResolvedType::Result { ok, error } => {
+                Type::Result(Box::new(convert(ok)?), Box::new(convert(error)?))
+            }
+            ResolvedType::Tuple(elements) => Type::Tuple(
+                elements
+                    .iter()
+                    .map(convert)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            ResolvedType::Function {
+                abi,
+                parameters,
+                result,
+            } => {
+                let parameters = parameters
+                    .iter()
+                    .map(convert)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result = Box::new(convert(result)?);
+                match abi {
+                    FunctionTypeAbi::Mimi => Type::Func(parameters, result),
+                    FunctionTypeAbi::C => Type::ExternFunc(parameters, result),
+                }
+            }
+            ResolvedType::CBuffer(inner) => Type::CBuffer(Box::new(convert(inner)?)),
+            ResolvedType::Capability(capability) => Type::Cap(nominal_name(capability.as_str())),
+            ResolvedType::Ownership { kind, target } => match kind {
+                OwnershipTypeKind::Shared => Type::Shared(Box::new(convert(target)?)),
+                OwnershipTypeKind::Weak => Type::Weak(Box::new(convert(target)?)),
+            },
+            ResolvedType::Newtype { item, inner } => {
+                Type::Newtype(nominal_name(item.as_str()), Box::new(convert(inner)?))
+            }
+            ResolvedType::Array { element, length } => {
+                Type::Array(Box::new(convert(element)?), *length)
+            }
+            ResolvedType::Slice(inner) => Type::Slice(Box::new(convert(inner)?)),
+            ResolvedType::Trait { kind, traits } => {
+                let traits = traits
+                    .iter()
+                    .map(|trait_| {
+                        trait_
+                            .as_str()
+                            .strip_prefix("trait:")
+                            .unwrap_or(trait_.as_str())
+                            .to_owned()
+                    })
+                    .collect();
+                match kind {
+                    crate::core::TraitTypeKind::Opaque => Type::ImplTrait(traits),
+                    crate::core::TraitTypeKind::Dynamic => Type::DynTrait(traits),
+                }
+            }
+            ResolvedType::RawPointer { mutable, target } => {
+                let target = Box::new(convert(target)?);
+                if *mutable {
+                    Type::RawPtrMut(target)
+                } else {
+                    Type::RawPtr(target)
+                }
+            }
+            ResolvedType::DynamicAny { .. } => Type::Name("Any".into(), Vec::new()),
+            ResolvedType::FlowStateSet { .. } => {
+                return Err("FlowStateSet has no legacy source ABI spelling".into())
+            }
+        })
+    }
+
+    pub(in crate::codegen) fn compile_checked_impl_method_instance(
+        &mut self,
+        callable: &crate::core::NodeId,
+        type_map: &HashMap<String, Type>,
+    ) -> MimiResult<()> {
+        let (method, receiver_ty) = self
+            .checked_impl_method_bodies
+            .get(callable)
+            .cloned()
+            .ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "checked impl method '{}' has no canonical body template",
+                    callable.0
+                ))
+            })?;
+        let instance = self.impl_method_with_self_type(&method, &method.name, receiver_ty);
+        if self.checked_native_declarations.is_some() {
+            return Err(CompileError::CanonicalMirCoverage(format!(
+                "MIR-COVERAGE-001/NITS: checked generic impl method '{}' has no canonical specialized MIR instance; refusing legacy monomorphization",
+                callable.0
+            )));
+        }
+        #[cfg(test)]
+        {
+            self.compile_checked_impl_method_instance_legacy_for_test(&instance, type_map)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (instance, type_map);
+            Err(CompileError::CanonicalMirCoverage(format!(
+                "MIR-COVERAGE-001/NITS: checked generic impl method '{}' requires a canonical specialized MIR instance",
+                callable.0
+            )))
+        }
+    }
+
+    pub(in crate::codegen) fn impl_method_with_self_type(
+        &self,
+        method: &crate::ast::FuncDef,
+        symbol: &str,
+        self_ty: Type,
+    ) -> crate::ast::FuncDef {
+        let mut impl_method = method.clone();
+        impl_method.name = symbol.to_owned();
+        impl_method.params.insert(0, {
+            let meta = crate::ast::AstNodeMeta::inherited(
+                impl_method.meta.span,
+                crate::ast::AstOrigin::RuntimeSystem("codegen.impl_self"),
+            );
+            crate::ast::Param {
+                meta,
+                name: "self".into(),
+                ty: self_ty.deep_reorigin(meta),
+                mut_: false,
+                default_value: None,
+                borrow: None,
+            }
+        });
+        impl_method
+    }
+
     /// Build vtable struct types and global vtable instances for all trait impls.
     /// Called after compile_impl_methods so mangled functions exist.
     pub(in crate::codegen) fn compile_vtables(&mut self) -> MimiResult<()> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-        // Phase 1: define vtable struct type per trait
         let mut trait_method_list: HashMap<String, Vec<String>> = HashMap::new();
-        for (trait_name, trait_def) in &self.trait_defs {
-            let method_names: Vec<String> =
-                trait_def.methods.iter().map(|m| m.name.clone()).collect();
+        let trait_declarations = if let Some(catalog) = &self.checked_native_declarations {
+            catalog
+                .trait_order
+                .iter()
+                .filter_map(|owner| catalog.traits.get(owner))
+                .map(|declaration| {
+                    (
+                        declaration.qualified_name.clone(),
+                        declaration
+                            .slots
+                            .iter()
+                            .map(|slot| slot.name.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.trait_method_names
+                .iter()
+                .map(|(name, methods)| (name.clone(), methods.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        // Phase 1: define vtable struct types from checker-owned slot order in
+        // production. The surface-name map remains only for the test harness.
+        for (trait_name, method_names) in &trait_declarations {
             if method_names.is_empty() {
                 continue;
             }
-            // Vtable struct: one i8* (function pointer) per method
             let field_tys: Vec<BasicTypeEnum> = (0..method_names.len())
                 .map(|_| BasicTypeEnum::PointerType(i8_ptr))
                 .collect();
             let vtable_ty = self.context.struct_type(&field_tys, false);
             self.vtable_types.insert(trait_name.clone(), vtable_ty);
-            trait_method_list.insert(trait_name.clone(), method_names);
+            trait_method_list.insert(trait_name.clone(), method_names.clone());
         }
 
-        // Phase 2: emit a global vtable constant for each (type, trait) impl pair
-        for (type_name, trait_impls) in &self.type_impls {
-            for (trait_name, methods) in trait_impls {
-                let Some(vtable_ty) = self.vtable_types.get(trait_name) else {
-                    continue;
-                };
-                let Some(expected_methods) = trait_method_list.get(trait_name) else {
-                    continue;
-                };
-
-                // Build initializer: one bitcast(function) per method slot
-                let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-                let mut fn_ptrs: Vec<BasicValueEnum> = Vec::new();
-                for method_name in expected_methods {
-                    if methods.iter().any(|m| &m.name == method_name) {
-                        let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
-                        if let Some(f) = self.module.get_function(&mangled) {
-                            let ptr = self
-                                .builder
-                                .build_bit_cast(
-                                    f.as_global_value().as_pointer_value(),
-                                    i8_ptr,
-                                    &format!("{}_{}_cast", trait_name, method_name),
-                                )
-                                .map_err(|e| {
-                                    CompileError::LlvmError(format!("bitcast error: {}", e))
-                                })?;
-                            fn_ptrs.push(ptr);
-                            continue;
-                        }
+        if let Some(catalog) = &self.checked_native_declarations {
+            // Phase 2 (production): install each checked impl's exact slot
+            // bindings. Do not infer a vtable from the legacy FuncDef cache or
+            // iterate the type_impls HashMaps to determine ABI order. Several
+            // checked impls may share the same legacy display type and trait
+            // names while specializing different trait/receiver arguments.
+            // Preserve each checked owner as a distinct LLVM global; only keep
+            // the legacy display-name alias when it identifies one impl.
+            let implementations = catalog
+                .impl_order
+                .iter()
+                .filter_map(|owner| catalog.impls.get(owner))
+                .collect::<Vec<_>>();
+            let mut legacy_key_counts = HashMap::new();
+            for implementation in &implementations {
+                *legacy_key_counts
+                    .entry(format!(
+                        "{}__{}",
+                        implementation.type_name, implementation.trait_name
+                    ))
+                    .or_insert(0usize) += 1;
+            }
+            for implementation in implementations {
+                let trait_declaration = catalog
+                    .traits
+                    .get(&implementation.trait_owner)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "checked impl '{}' references absent trait owner '{}'",
+                            implementation.owner.0, implementation.trait_owner.0
+                        ))
+                    })?;
+                let canonical_trait_name = &trait_declaration.qualified_name;
+                let vtable_ty = self
+                    .vtable_types
+                    .get(canonical_trait_name)
+                    .copied()
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "checked trait '{}' has no materialized vtable type",
+                            canonical_trait_name
+                        ))
+                    })?;
+                let expected_methods =
+                    trait_method_list.get(canonical_trait_name).ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "checked trait '{}' has no canonical slot order",
+                            canonical_trait_name
+                        ))
+                    })?;
+                let expected_slots = (0..expected_methods.len())
+                    .map(|ordinal| {
+                        u32::try_from(ordinal).map_err(|_| {
+                            CompileError::LlvmError(
+                                "trait method slot exceeds native ABI range".into(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if implementation.vtable_slots != expected_slots {
+                    return Err(CompileError::LlvmError(format!(
+                        "checked impl '{}' vtable slot family differs from its canonical fields",
+                        implementation.owner.0
+                    )));
+                }
+                let mut fn_ptrs: Vec<BasicValueEnum> = Vec::with_capacity(expected_methods.len());
+                for (ordinal, method_name) in expected_methods.iter().enumerate() {
+                    let ordinal = u32::try_from(ordinal).map_err(|_| {
+                        CompileError::LlvmError("trait method slot exceeds native ABI range".into())
+                    })?;
+                    let mut bindings = implementation
+                        .methods
+                        .iter()
+                        .filter(|method| method.trait_slots.contains(&ordinal));
+                    let binding = bindings.next();
+                    if bindings.next().is_some() {
+                        return Err(CompileError::LlvmError(format!(
+                            "checked impl '{}' has multiple bodies for slot {} ('{}')",
+                            implementation.owner.0, ordinal, method_name
+                        )));
                     }
-                    fn_ptrs.push(i8_ptr.const_null().into());
+                    if let Some(binding) = binding {
+                        let function =
+                            self.module.get_function(&binding.symbol).ok_or_else(|| {
+                                CompileError::LlvmError(format!(
+                                    "checked impl method '{}' has no emitted symbol '{}'",
+                                    binding.callable.0, binding.symbol
+                                ))
+                            })?;
+                        let pointer = self
+                            .builder
+                            .build_bit_cast(
+                                function.as_global_value().as_pointer_value(),
+                                i8_ptr,
+                                &format!("{}_{}_cast", implementation.trait_name, method_name),
+                            )
+                            .map_err(|error| {
+                                CompileError::LlvmError(format!("bitcast error: {error}"))
+                            })?;
+                        fn_ptrs.push(pointer);
+                    } else {
+                        fn_ptrs.push(i8_ptr.const_null().into());
+                    }
                 }
                 if fn_ptrs.is_empty() {
                     continue;
                 }
                 let init_val = vtable_ty.const_named_struct(&fn_ptrs);
-                let gv_name = format!("{}_{}_vtable", type_name, trait_name);
-                let gv = self.module.add_global(*vtable_ty, None, &gv_name);
+                let gv = self
+                    .module
+                    .add_global(vtable_ty, None, &implementation.vtable_symbol);
                 gv.set_initializer(&init_val);
                 gv.set_constant(true);
                 self.vtable_globals
-                    .insert(format!("{}__{}", type_name, trait_name), gv);
+                    .insert(implementation.vtable_symbol.clone(), gv);
+                let legacy_key = format!(
+                    "{}__{}",
+                    implementation.type_name, implementation.trait_name
+                );
+                if legacy_key_counts.get(&legacy_key) == Some(&1) {
+                    self.vtable_globals.insert(legacy_key, gv);
+                }
+            }
+        } else {
+            // Test-only compatibility harness, where no CheckedProgram
+            // declaration catalog was installed.
+            for (type_name, trait_impls) in &self.type_impls {
+                for (trait_name, methods) in trait_impls {
+                    let Some(vtable_ty) = self.vtable_types.get(trait_name).copied() else {
+                        continue;
+                    };
+                    let Some(expected_methods) = trait_method_list.get(trait_name) else {
+                        continue;
+                    };
+                    let mut fn_ptrs: Vec<BasicValueEnum> = Vec::new();
+                    for method_name in expected_methods {
+                        if methods.iter().any(|method| &method.name == method_name) {
+                            let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
+                            if let Some(function) = self.module.get_function(&mangled) {
+                                let pointer = self
+                                    .builder
+                                    .build_bit_cast(
+                                        function.as_global_value().as_pointer_value(),
+                                        i8_ptr,
+                                        &format!("{}_{}_cast", trait_name, method_name),
+                                    )
+                                    .map_err(|error| {
+                                        CompileError::LlvmError(format!("bitcast error: {error}"))
+                                    })?;
+                                fn_ptrs.push(pointer);
+                                continue;
+                            }
+                        }
+                        fn_ptrs.push(i8_ptr.const_null().into());
+                    }
+                    if fn_ptrs.is_empty() {
+                        continue;
+                    }
+                    let init_val = vtable_ty.const_named_struct(&fn_ptrs);
+                    let gv_name = format!("{}_{}_vtable", type_name, trait_name);
+                    let gv = self.module.add_global(vtable_ty, None, &gv_name);
+                    gv.set_initializer(&init_val);
+                    gv.set_constant(true);
+                    self.vtable_globals
+                        .insert(format!("{}__{}", type_name, trait_name), gv);
+                }
             }
         }
         Ok(())

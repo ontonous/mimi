@@ -1,0 +1,9 @@
+// Provisional 0.1.11 compatibility profile: checked i64 PowInt, then i32 wrap.
+func main() -> i32 {
+    let base: i32 = 2
+    let exp31: i32 = 31
+    let exp32: i32 = 32
+    println(base ** exp31)
+    println(base ** exp32)
+    0
+}

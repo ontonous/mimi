@@ -584,11 +584,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let field_index =
                 self.u32_abi(receipt.field_index, "tuple projection field index", subject)?;
             let aggregate = self.value(base, subject)?.into_struct_value();
-            return self
+            let projected = self
                 .generator
                 .builder
                 .build_extract_value(aggregate, field_index, "mir_tuple_project")
-                .map_err(|error| NativeMirError::new(subject, error.to_string()));
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            // Project borrows the source product. A new MIR owner must clone
+            // its typed leaf obligations rather than copying token bits.
+            if self.program.type_catalog().contains_managed_any(&result_ty) {
+                return self.emit_clone_value(projected, &result_ty, subject);
+            }
+            return Ok(projected);
         }
         let MirProjection::Field(field_id) = projection else {
             return Err(NativeMirError::new(

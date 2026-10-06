@@ -1,0 +1,13 @@
+extern "C" {
+    func mimi_ffi_vararg_probe(tag: i32 ...) -> i32;
+}
+
+func main() -> i32 {
+    let bool_tail = mimi_ffi_vararg_probe(1, true)
+    let f32_tail = mimi_ffi_vararg_probe(2, 1.5 as f32)
+    let mixed_tail = mimi_ffi_vararg_probe(3, false, 1.25 as f32)
+    let integer_tail = mimi_ffi_vararg_probe(4, -7 as i32, 9000000000 as i64)
+    let f64_tail = mimi_ffi_vararg_probe(5, 2.5 as f64)
+    let empty_tail = mimi_ffi_vararg_probe(0)
+    bool_tail + f32_tail + mixed_tail + integer_tail + f64_tail + empty_tail - 81
+}

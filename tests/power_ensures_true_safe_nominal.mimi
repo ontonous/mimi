@@ -1,0 +1,16 @@
+// The ensures clause does not mention result. The body still owes proof that
+// every evaluated integer Power terminates normally on all requires paths.
+newtype Receipt = i32
+
+func make_receipt(exponent: i32) -> Receipt {
+    requires: exponent == 31
+    ensures: true
+    let base: i32 = 2
+    let ignored = base ** exponent
+    Receipt(7)
+}
+
+func main() -> i32 {
+    let receipt = make_receipt(31)
+    0
+}

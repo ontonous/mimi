@@ -624,7 +624,7 @@ pub(crate) fn build(
             crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?
         } else {
             match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
-                crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => canonical,
+                crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => *canonical,
                 crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
                     return Err(format!("default Canonical MIR route rejected: {reason}"));
                 }

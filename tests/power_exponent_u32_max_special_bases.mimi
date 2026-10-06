@@ -1,0 +1,12 @@
+// The exponent domain includes u32::MAX. Runtime must stay logarithmic and
+// preserve the checked_pow results for the three safe bases.
+func main() -> i32 {
+    let exponent: i64 = 4294967295
+    let zero: i64 = 0
+    let one: i64 = 1
+    let minus_one: i64 = -1
+    println(zero ** exponent)
+    println(one ** exponent)
+    println(minus_one ** exponent)
+    0
+}

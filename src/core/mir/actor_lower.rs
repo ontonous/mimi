@@ -51,6 +51,34 @@ pub(crate) fn has_actor_candidate(
     !selected_actor_ids(program, excluded).is_empty()
 }
 
+/// Return whether a selected Actor method contains a direct nested callable
+/// declaration.  These declarations are the historically reachable Actor
+/// fallback shape (capture/shadow); if the finite lexical-environment receipt
+/// cannot be materialized, production dispatch must reject the graph rather
+/// than hand the method to the legacy AST emitter.
+pub(crate) fn has_nested_callable_candidate(
+    program: &CheckedProgram,
+    excluded: Option<&HashSet<SourceId>>,
+) -> bool {
+    selected_actor_ids(program, excluded).iter().any(|actor| {
+        program
+            .actor_descriptors()
+            .get(actor)
+            .is_some_and(|descriptor| {
+                descriptor.methods.iter().any(|method| {
+                    program.callable(&method.owner).is_some_and(|callable| {
+                        callable.body.root.statements.iter().any(|statement| {
+                            matches!(
+                                statement.kind,
+                                crate::core::ir::ResolvedStmtKind::NestedCallable(_)
+                            )
+                        })
+                    })
+                })
+            })
+    })
+}
+
 /// A NoContracts Actor graph cannot discard an obligation in any checked
 /// user callable or contract declaration, even when that owner is unreachable.
 pub(crate) fn contract_boundary_reason(

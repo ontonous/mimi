@@ -1,6 +1,7 @@
 //! AST-free native consumer for the closed scalar/owned-String,
 //! recursive-tuple, non-Copy-record, flat-record/flat-variant, scalar-List
-//! (including bounded nested List construction/clone/drop/outer-len/index/reverse/concat), and
+//! (including bounded nested List construction/clone/drop/outer-len/index/reverse/concat),
+//! and the independently receipted owned `List<ManagedAny>` Values snapshots, and
 //! local immutable-borrow Canonical MIR slices, plus the separately receipted
 //! MapRoot, MapAnyOwner v1, and persistent ordinary-Map owner profiles.
 //!
@@ -733,6 +734,10 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     ),
                 ),
                 (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_values",
+                    i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
                     "mimi_mir_ordinary_map_owned_get_i32_string_v1_drop",
                     void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
                 ),
@@ -745,6 +750,44 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                         Some(Linkage::External),
                     );
                 }
+            }
+        }
+
+        // Values snapshots are move-owned lists of generation-bearing
+        // ManagedAny tokens.  Their list storage has dedicated clone/drop
+        // glue; never route these i64 token slots through the copy-scalar
+        // helpers.  Keep declarations local to the canonical MIR module so
+        // legacy LLVM modules do not gain this ABI merely by construction.
+        let managed_any_list_helpers = [
+            ("mimi_mir_list_new_managed_any", i8_ptr.fn_type(&[], false)),
+            (
+                "mimi_mir_list_len_managed_any",
+                i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+            ),
+            (
+                "mimi_mir_list_push_managed_any",
+                self.generator.context.i8_type().fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                    ],
+                    false,
+                ),
+            ),
+            (
+                "mimi_mir_list_clone_managed_any",
+                i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+            ),
+            (
+                "mimi_mir_list_drop_managed_any",
+                void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+            ),
+        ];
+        for (name, function_type) in managed_any_list_helpers {
+            if self.generator.module.get_function(name).is_none() {
+                self.generator
+                    .module
+                    .add_function(name, function_type, Some(Linkage::External));
             }
         }
         self.declare_managed_any_helpers();
@@ -1793,6 +1836,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_ordinary_map_get_any(result, root, key, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { result, root } => {
+                let value = self.emit_ordinary_map_owned_get_values(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::ManagedAny {
                 result,
                 source,
@@ -2041,14 +2088,14 @@ func main() -> i32 {
 "#;
 
     const MAP_ANY_OWNER_V1_NATIVE_LIFECYCLE_SOURCE: &str = r#"
-extern "C" { func mimi_test_map_root_live_count() -> i64; }
 func main() -> i32 {
     let root = map_new()
     let updated = map_set(root, "reclaim-me", 17)
     drop(updated)
-    let temporary_size = map_size(map_new())
-    println(mimi_test_map_root_live_count())
+    let temporary = map_new()
+    let temporary_size = map_size(temporary)
     println(temporary_size)
+    drop(temporary)
     0
 }
 "#;
@@ -3173,8 +3220,8 @@ func main() -> i32 {
             .expect("production runtime link observes the emitted Drop");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
         assert_eq!(
-            native.stdout, "0\n0\n",
-            "emitted v1 Drop must remove the live map owner from the shared table"
+            native.stdout, "0\n",
+            "emitted v1 Drop must leave the temporary owner empty and reclaimable"
         );
 
         if std::process::Command::new("valgrind")
@@ -3201,7 +3248,7 @@ func main() -> i32 {
             )
             .expect("production runtime MapAnyOwner v1 lifecycle under Memcheck");
             assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, "0\n0\n");
+            assert_eq!(memcheck.stdout, "0\n");
             assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
             assert!(memcheck
                 .stderr

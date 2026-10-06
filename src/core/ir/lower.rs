@@ -193,6 +193,7 @@ fn lower_function_body_with_captures(
         parameters: Vec::new(),
         place_inputs: BTreeMap::new(),
         default_values: BTreeMap::new(),
+        resolved_calls: BTreeMap::new(),
         capture_candidates: capture_ids,
         callable_captures: BTreeSet::new(),
         lambda_contexts: Vec::new(),
@@ -217,6 +218,7 @@ fn lower_function_body_with_captures(
         captures: lowerer.callable_captures.iter().cloned().collect(),
         place_inputs: lowerer.place_inputs,
         default_values: lowerer.default_values,
+        resolved_calls: lowerer.resolved_calls,
         root,
     };
     body.validate(input.types, input.type_targets)?;
@@ -430,6 +432,419 @@ pub fn lower_checked_callable_bodies(
     } else {
         Err(errors)
     }
+}
+
+/// A source-owned expression evaluated outside an executable callable body.
+/// Materialized roots have the same stable identity, canonical types and local
+/// catalog as callable bodies. Deferred roots retain the exact failing nodes;
+/// a consumer must account for them before claiming complete call coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedDeclarationExpressionKind {
+    ConstantInitializer,
+    ActorFieldInitializer,
+    TraitParameterDefault,
+    ExternRequires,
+    ExternEnsures,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedDeclarationExpressionBody {
+    pub node_id: NodeId,
+    pub owner: NodeId,
+    pub role: String,
+    pub display_name: String,
+    pub kind: ResolvedDeclarationExpressionKind,
+    pub body: Result<ResolvedBody, Vec<ResolvedBodyError>>,
+}
+
+/// Lower declaration-owned expressions while source syntax is still in the
+/// checker. Backend consumers receive this directory, never a new AST wrapper.
+pub(crate) fn lower_checked_declaration_expression_bodies(
+    file: &File,
+    program: &CheckedProgram,
+) -> BTreeMap<NodeId, ResolvedDeclarationExpressionBody> {
+    use ResolvedDeclarationExpressionKind as K;
+    let ids = NodeIdBuilder::new(&file.sources);
+    let mut roots = BTreeMap::new();
+    let mut add = |owner: NodeId,
+                   expression: &Expr,
+                   role: String,
+                   display_name: String,
+                   kind: K,
+                   parameters: Vec<(String, NodeId, crate::ast::Type)>,
+                   result: Option<crate::ast::Type>| {
+        let meta = expression.meta();
+        let mut errors = Vec::new();
+        let node = ids.anonymous(
+            &owner,
+            expr_kind(expression),
+            &role,
+            meta.and_then(|meta| usable_span(meta.span)),
+            meta.map(|meta| meta.origin).unwrap_or(AstOrigin::User),
+            &mut errors,
+        );
+        let body = if errors.is_empty() {
+            lower_declaration_expression(
+                file,
+                program,
+                &owner,
+                expression,
+                &role,
+                &parameters,
+                result.as_ref(),
+                kind == K::ExternEnsures,
+            )
+        } else {
+            Err(errors
+                .into_iter()
+                .map(|error| ResolvedBodyError::new(node.clone(), error.message))
+                .collect())
+        };
+        roots.insert(
+            node.clone(),
+            ResolvedDeclarationExpressionBody {
+                node_id: node,
+                owner,
+                role,
+                display_name,
+                kind,
+                body,
+            },
+        );
+    };
+    for item in &file.items {
+        match item {
+            Item::Const { name, value, .. } => add(
+                NodeId(format!("constant:{name}")),
+                value,
+                "value".into(),
+                format!("constant {name}"),
+                K::ConstantInitializer,
+                Vec::new(),
+                None,
+            ),
+            Item::Actor(actor) => {
+                for field in &actor.fields {
+                    if let Some(value) = &field.init {
+                        add(
+                            NodeId(format!("actor:{}", actor.name)),
+                            value,
+                            format!("field.{}.initializer", stable_id_fragment(&field.name)),
+                            format!("{}::field {} initializer", actor.name, field.name),
+                            K::ActorFieldInitializer,
+                            Vec::new(),
+                            None,
+                        );
+                    }
+                }
+            }
+            Item::ExternBlock(block) => {
+                let block_owner = NodeId(format!(
+                    "extern:{}",
+                    crate::core::resolved::extern_block_key(block)
+                ));
+                for function in &block.funcs {
+                    let owner =
+                        crate::core::resolved::extern_function_owner(&block_owner, function);
+                    let parameters = program
+                        .extern_func_for_signature(&owner)
+                        .ok()
+                        .flatten()
+                        .map(|signature| {
+                            signature
+                                .typed_params
+                                .iter()
+                                .zip(&signature.parameter_ids)
+                                .map(|((name, ty, _), identity)| {
+                                    (name.clone(), identity.clone(), ty.clone())
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if let Some(value) = &function.requires {
+                        add(
+                            owner.clone(),
+                            value,
+                            "requires".into(),
+                            format!("extern {} requires", function.name),
+                            K::ExternRequires,
+                            parameters.clone(),
+                            function.ret.clone(),
+                        );
+                    }
+                    if let Some(value) = &function.ensures {
+                        add(
+                            owner,
+                            value,
+                            "ensures".into(),
+                            format!("extern {} ensures", function.name),
+                            K::ExternEnsures,
+                            parameters,
+                            function.ret.clone(),
+                        );
+                    }
+                }
+            }
+            Item::Trait(definition) => {
+                for method in &definition.methods {
+                    let key = crate::core::resolved::method_signature_key(
+                        &method.name,
+                        &method.params,
+                        method.ret.as_ref(),
+                    );
+                    let owner = NodeId(format!(
+                        "trait:{}/method:{}:{:016x}",
+                        definition.name,
+                        stable_id_fragment(&method.name),
+                        crate::core::resolved::stable_text_hash(&key)
+                    ));
+                    for parameter in &method.params {
+                        if let Some(value) = &parameter.default_value {
+                            add(
+                                owner.clone(),
+                                value,
+                                format!(
+                                    "parameter.{}.default",
+                                    stable_id_fragment(&parameter.name)
+                                ),
+                                format!(
+                                    "{}::{} default for {}",
+                                    definition.name, method.name, parameter.name
+                                ),
+                                K::TraitParameterDefault,
+                                Vec::new(),
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
+            Item::Func(_)
+            | Item::Impl(_)
+            | Item::Flow(_)
+            | Item::Type(_)
+            | Item::Cap(_)
+            | Item::Session(_) => {}
+        }
+    }
+    roots
+}
+
+pub(super) fn declaration_canonical_type(
+    program: &CheckedProgram,
+    ty: &crate::ast::Type,
+    owner: &NodeId,
+) -> Result<ResolvedTypeId, Vec<ResolvedBodyError>> {
+    let mut types = program.resolved_types().clone();
+    let zonked = crate::core::phase::ZonkedTy::from_resolved(ty.clone())
+        .map_err(|error| vec![ResolvedBodyError::new(owner.clone(), error.to_string())])?;
+    let resolve = |name: &str| {
+        if let Some(primitive) = crate::core::resolved::transparent_alias_primitive(name, program) {
+            return Some(super::ResolvedTypeName::Primitive(primitive));
+        }
+        let candidates = program
+            .type_defs()
+            .values()
+            .filter(|definition| {
+                definition.qualified_name == name
+                    || definition
+                        .qualified_name
+                        .rsplit_once("::")
+                        .is_some_and(|(_, short)| short == name)
+            })
+            .map(|definition| definition.node_id.clone())
+            .chain(
+                program
+                    .actors()
+                    .values()
+                    .filter(|actor| actor.qualified_name == name)
+                    .map(|actor| actor.node_id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        if candidates.len() == 1 {
+            return super::NominalTypeId::new(candidates.iter().next()?.0.clone())
+                .ok()
+                .map(super::ResolvedTypeName::Nominal);
+        }
+        program
+            .resolved_types()
+            .iter()
+            .find_map(|(_, shape)| match shape {
+                ResolvedType::Nominal { item, .. }
+                    if item.as_str() == format!("builtin:type:{name}") =>
+                {
+                    Some(super::ResolvedTypeName::Nominal(item.clone()))
+                }
+                _ => None,
+            })
+    };
+    let canonical = types
+        .intern_zonked(
+            &zonked,
+            &super::ResolvedTypeCapabilities::with_dynamic_any("type.dynamic_value")
+                .map_err(|error| vec![ResolvedBodyError::new(owner.clone(), error.to_string())])?,
+            resolve,
+        )
+        .map_err(|error| vec![ResolvedBodyError::new(owner.clone(), error.to_string())])?;
+    if program.resolved_types().get(&canonical).is_none() {
+        return Err(vec![ResolvedBodyError::new(
+            owner.clone(),
+            "declaration type is absent from the checker-owned canonical table",
+        )]);
+    }
+    Ok(canonical)
+}
+
+fn lower_declaration_expression(
+    file: &File,
+    program: &CheckedProgram,
+    owner: &NodeId,
+    expression: &Expr,
+    role: &str,
+    parameter_declarations: &[(String, NodeId, crate::ast::Type)],
+    result_declaration: Option<&crate::ast::Type>,
+    ensures: bool,
+) -> Result<ResolvedBody, Vec<ResolvedBodyError>> {
+    let origin = program
+        .node_meta()
+        .get(owner)
+        .map(|meta| meta.origin.clone())
+        .ok_or_else(|| {
+            vec![ResolvedBodyError::new(
+                owner.clone(),
+                "declaration expression owner has no checked origin",
+            )]
+        })?;
+    let fallback = origin.user_span();
+    let unit = program.resolved_types().unit_type_id().ok_or_else(|| {
+        vec![ResolvedBodyError::new(
+            owner.clone(),
+            "canonical unit type is absent",
+        )]
+    })?;
+    let parameters = parameter_declarations
+        .iter()
+        .map(|(name, identity, ty)| {
+            declaration_canonical_type(program, ty, identity).map(|ty| super::ResolvedParameter {
+                id: super::ResolvedParameterId(identity.clone()),
+                name: name.clone(),
+                ty,
+                mutable: false,
+                permission: None,
+                has_default: false,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = result_declaration
+        .map(|ty| declaration_canonical_type(program, ty, owner))
+        .transpose()?
+        .unwrap_or_else(|| unit.clone());
+    let signature = ResolvedSignature {
+        owner: owner.clone(),
+        generic_parameters: Vec::new(),
+        parameters,
+        result: result.clone(),
+        effects: Vec::new(),
+    };
+    let function = FuncDef {
+        meta: crate::ast::AstNodeMeta::inherited(
+            fallback,
+            AstOrigin::Desugared("resolved_body.declaration_expression"),
+        ),
+        name: owner.0.clone(),
+        pub_: false,
+        params: Vec::new(),
+        ret: None,
+        body: Vec::new(),
+        where_clause: Vec::new(),
+        generics: Vec::new(),
+        effects: Vec::new(),
+        is_comptime: false,
+        is_async: false,
+        extern_abi: None,
+        has_requires: false,
+        has_ensures: false,
+        has_mutate_params: false,
+    };
+    let mut lowerer = BodyLowerer {
+        owner: owner.clone(),
+        fallback,
+        function: &function,
+        signature: &signature,
+        signatures: program.resolved_signatures(),
+        functions: program.functions(),
+        type_defs: program.type_defs(),
+        variants: program.resolved_variants(),
+        actors: program.actors(),
+        flows: program.flows(),
+        traits: program.traits(),
+        impls: program.impls(),
+        field_types: program.resolved_field_types(),
+        type_targets: program.resolved_type_targets(),
+        call_sites: program.call_sites(),
+        extern_blocks: program.extern_blocks(),
+        constants: program.constants(),
+        node_types: program.resolved_node_types(),
+        type_operands: program.resolved_type_operands(),
+        type_arguments: program.resolved_type_arguments(),
+        session_actions: program.resolved_session_actions(),
+        types: program.resolved_types(),
+        node_meta: program.node_meta(),
+        ids: NodeIdBuilder::new(&file.sources),
+        unit,
+        locals: BTreeMap::new(),
+        parameters: Vec::new(),
+        place_inputs: BTreeMap::new(),
+        default_values: BTreeMap::new(),
+        resolved_calls: BTreeMap::new(),
+        capture_candidates: BTreeSet::new(),
+        callable_captures: BTreeSet::new(),
+        lambda_contexts: Vec::new(),
+        lambda_owners: Vec::new(),
+        scopes: vec![BTreeMap::new()],
+        nested_environments: BTreeMap::new(),
+        transition_fails: false,
+        body_result: result.clone(),
+    };
+    lowerer.install_parameters()?;
+    if ensures {
+        let local = ResolvedLocalId(NodeId(format!("{}/contract-result", owner.0)));
+        lowerer.insert_local(
+            "result".into(),
+            ResolvedLocal {
+                id: local,
+                display_name: "result".into(),
+                ty: result,
+                mutable: false,
+                origin: origin.clone(),
+            },
+            owner,
+        )?;
+    }
+    let value = lowerer.lower_expr(expression, role)?;
+    let root = ResolvedBlock {
+        node_id: NodeId(format!("{}/declaration-expression-block", value.node_id.0)),
+        origin: Origin::Desugared {
+            parent: value.node_id.clone(),
+            rule: "resolved_body.declaration_expression".into(),
+            span: value.origin.user_span(),
+        },
+        ty: value.ty.clone(),
+        statements: Vec::new(),
+        result: Some(Box::new(value)),
+    };
+    let body = ResolvedBody {
+        owner: owner.clone(),
+        locals: lowerer.locals,
+        parameters: lowerer.parameters,
+        captures: lowerer.callable_captures.into_iter().collect(),
+        place_inputs: lowerer.place_inputs,
+        default_values: lowerer.default_values,
+        resolved_calls: lowerer.resolved_calls,
+        root,
+    };
+    body.validate(program.resolved_types(), program.resolved_type_targets())?;
+    Ok(body)
 }
 
 fn collect_function_syntax<'a>(items: &'a [Item], out: &mut BTreeMap<NodeId, &'a FuncDef>) {
@@ -745,6 +1160,7 @@ struct BodyLowerer<'a> {
     parameters: Vec<ResolvedLocalId>,
     place_inputs: BTreeMap<NodeId, ResolvedExpr>,
     default_values: BTreeMap<super::ResolvedParameterId, ResolvedExpr>,
+    resolved_calls: BTreeMap<NodeId, super::ResolvedCallee>,
     capture_candidates: BTreeSet<ResolvedLocalId>,
     callable_captures: BTreeSet<ResolvedLocalId>,
     lambda_contexts: Vec<LambdaCaptureContext>,
@@ -2090,6 +2506,16 @@ impl BodyLowerer<'_> {
             ty = self.place_type(&node_id, place)?.clone();
         }
         if let ResolvedExprKind::Call(call) = &kind {
+            if self
+                .resolved_calls
+                .insert(node_id.clone(), call.callee.clone())
+                .is_some()
+            {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    "call expression identity occurs more than once",
+                )]);
+            }
             if call.result != ty && !self.alias_equivalent(&call.result, &ty) {
                 if self.is_system_fault_refinement(&call.result, &ty)
                     || self.is_flow_state_set_refinement(&call.result, &ty)
@@ -4628,15 +5054,27 @@ impl BodyLowerer<'_> {
             .generic_parameters
             .iter()
             .map(|parameter| {
-                substitutions.get(parameter).cloned().ok_or_else(|| {
-                    vec![ResolvedBodyError::new(
-                        node_id.clone(),
-                        format!(
-                            "generic method parameter '{}' has no checker-closed instantiation",
-                            parameter.0
-                        ),
-                    )]
-                })
+                substitutions
+                    .get(parameter)
+                    .cloned()
+                    .or_else(|| {
+                        self.types.iter().find_map(|(type_id, ty)| {
+                            matches!(
+                                ty,
+                                ResolvedType::GenericParameter(binder) if binder == parameter
+                            )
+                            .then(|| type_id.clone())
+                        })
+                    })
+                    .ok_or_else(|| {
+                        vec![ResolvedBodyError::new(
+                            node_id.clone(),
+                            format!(
+                                "generic method parameter '{}' has no checker instantiation or exact binder identity",
+                                parameter.0
+                            ),
+                        )]
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let result = self.substitute_member_type(node_id, &signature.result, &substitutions)?;
@@ -5526,6 +5964,53 @@ impl BodyLowerer<'_> {
                 }
                 for ((_, binder), argument) in definition.generic_parameters.iter().zip(arguments) {
                     substitutions.insert(binder.clone(), argument.clone());
+                }
+            } else if let Some(state) = self
+                .flows
+                .values()
+                .flat_map(|flow| flow.states.values())
+                .find(|state| state.node_id == owner)
+            {
+                // Flow-state payloads inherit the Flow's generic binders. Unlike
+                // user record declarations, states do not carry a separate
+                // `ResolvedTypeDef`; their fields are stored on ResolvedFlow,
+                // while the owning transition signature carries the same
+                // binder identities. Preserve those identities when a
+                // transition body constructs or projects a generic state.
+                let flow = self.flows.get(&state.id.flow).ok_or_else(|| {
+                    vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "Flow state '{}' has no owning canonical Flow declaration",
+                            owner.0
+                        ),
+                    )]
+                })?;
+                if !arguments.is_empty() && arguments.len() != flow.generic_parameters.len() {
+                    return Err(vec![ResolvedBodyError::new(
+                        node_id.clone(),
+                        format!(
+                            "Flow state '{}' has {} canonical arguments for {} Flow generic binders",
+                            owner.0,
+                            arguments.len(),
+                            flow.generic_parameters.len()
+                        ),
+                    )]);
+                }
+                for (index, (_, binder)) in flow.generic_parameters.iter().enumerate() {
+                    let argument = if let Some(argument) = arguments.get(index) {
+                        Some(argument.clone())
+                    } else if self.signature.generic_parameters.contains(binder) {
+                        self.types.iter().find_map(|(id, ty)| {
+                            matches!(ty, ResolvedType::GenericParameter(parameter) if parameter == binder)
+                                .then(|| id.clone())
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(argument) = argument {
+                        substitutions.insert(binder.clone(), argument);
+                    }
                 }
             }
         }
@@ -8743,6 +9228,14 @@ mod tests {
                 if protocol == &NodeId("trait:Desc".into())
                     && method.as_str().starts_with("function:Desc:for:Dog::describe:")
         ));
+        assert_eq!(main.resolved_calls.get(&result.node_id), Some(&call.callee));
+        assert_eq!(
+            program
+                .call_sites()
+                .get(&result.node_id)
+                .and_then(|site| site.resolved_callee.as_ref()),
+            Some(&call.callee)
+        );
         assert_eq!(call.arguments.len(), 1);
         assert!(call.arguments[0].parameter.0 .0.contains("parameter.self"));
         assert!(matches!(

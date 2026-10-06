@@ -12,7 +12,7 @@ use std::sync::Arc;
 use libffi::middle::{arg as ffi_arg, Cif, CodePtr, Type as FfiType};
 use libloading::Library;
 
-use super::instr::{CanonicalFfiDescriptor, CanonicalFfiScalarType};
+use super::instr::{CanonicalFfiDescriptor, CanonicalFfiScalarType, CanonicalFfiVariadicArgument};
 use crate::interp::ffi_system_libraries::{
     discover_no_env_candidates, resolve_explicit_binding, select_library_index, SelectorDialect,
     SelectorLibraryCache, SelectorRejection,
@@ -203,16 +203,14 @@ impl CanonicalMirFfiRuntime {
         let mut symbols = Vec::new();
         for descriptor in descriptors {
             let args = descriptor
-                .arguments
+                .parameter_conversions
                 .iter()
-                .map(|scalar| match scalar {
-                    CanonicalFfiScalarType::I32 | CanonicalFfiScalarType::I64 => Value::Int(0),
-                    CanonicalFfiScalarType::Bool => Value::Bool(false),
-                    CanonicalFfiScalarType::F32 | CanonicalFfiScalarType::F64 => Value::Float(0.0),
-                    CanonicalFfiScalarType::Unit => Value::Unit,
-                })
-                .collect::<Vec<_>>();
+                .map(|conversion| zero_value_for_abi(conversion.from))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(crate::interp::InterpError::new)?;
             self.validate_descriptor(descriptor, &args, None, None)
+                .map_err(crate::interp::InterpError::new)?;
+            self.convert_arguments(descriptor, &args)
                 .map_err(crate::interp::InterpError::new)?;
             if seen_symbols.insert(descriptor.symbol.clone()) {
                 symbols.push(descriptor.symbol.clone());
@@ -417,7 +415,15 @@ impl CanonicalMirFfiRuntime {
             .zip(&descriptor.parameter_conversions)
             .enumerate()
             .map(|(index, (value, conversion))| {
-                apply_argument_conversion(value, conversion).map_err(|error| {
+                let converted = descriptor
+                    .variadic_arguments
+                    .iter()
+                    .find(|tail| tail.argument_index == index)
+                    .map_or_else(
+                        || apply_argument_conversion(value, conversion),
+                        |tail| apply_variadic_default_promotion(value, tail),
+                    );
+                converted.map_err(|error| {
                     format!(
                         "canonical MIR FFI argument {index} for '{}' conversion failed: {error}",
                         descriptor.symbol
@@ -517,6 +523,29 @@ impl CanonicalMirFfiRuntime {
                 args.len()
             ));
         }
+        if descriptor.fixed_argument_count > descriptor.arguments.len() {
+            return Err(format!(
+                "canonical MIR FFI fixed argument count {} exceeds actual argument count {}",
+                descriptor.fixed_argument_count,
+                descriptor.arguments.len()
+            ));
+        }
+        if descriptor.variadic {
+            if descriptor.fixed_argument_count == 0 {
+                return Err("canonical variadic FFI signature has no fixed parameter".into());
+            }
+            let tail_count = descriptor.arguments.len() - descriptor.fixed_argument_count;
+            if descriptor.variadic_arguments.len() != tail_count {
+                return Err(format!(
+                    "canonical variadic FFI receipt has {} tail promotion(s) for {tail_count} actual variadic argument(s)",
+                    descriptor.variadic_arguments.len()
+                ));
+            }
+        } else if descriptor.fixed_argument_count != descriptor.arguments.len()
+            || !descriptor.variadic_arguments.is_empty()
+        {
+            return Err("canonical non-variadic FFI descriptor has variadic tail metadata".into());
+        }
         let result_is_unit = matches!(descriptor.result, CanonicalFfiScalarType::Unit);
         if !result_is_unit && descriptor.result_id.is_none() {
             return Err("canonical FFI non-Unit result has no result identity".into());
@@ -533,13 +562,60 @@ impl CanonicalMirFfiRuntime {
         if descriptor.arguments.contains(&CanonicalFfiScalarType::Unit) {
             return Err("unit is not a canonical scalar FFI argument".into());
         }
+        if descriptor.variadic {
+            for (tail_offset, tail) in descriptor.variadic_arguments.iter().enumerate() {
+                let expected_index = descriptor.fixed_argument_count + tail_offset;
+                if tail.argument_index != expected_index {
+                    return Err(format!(
+                        "canonical FFI variadic argument ordinal {} appears at index {}, expected {expected_index}",
+                        tail.argument_index, tail_offset
+                    ));
+                }
+                let decoded_source_node = descriptor
+                    .argument_ids
+                    .get(expected_index)
+                    .and_then(|argument| argument.as_str().strip_prefix("expr:"));
+                if decoded_source_node != Some(tail.source_node.0.as_str()) {
+                    return Err(format!(
+                        "canonical FFI variadic argument {expected_index} source identity disagrees with its call operand"
+                    ));
+                }
+                let Some(conversion) = descriptor.parameter_conversions.get(expected_index) else {
+                    return Err(format!(
+                        "canonical FFI variadic argument {expected_index} has no parameter conversion"
+                    ));
+                };
+                if conversion.from != tail.source_type
+                    || conversion.to != tail.promoted_type.abi_class()
+                {
+                    return Err(format!(
+                        "canonical FFI variadic argument {expected_index} promotion endpoint disagrees with its source or physical type"
+                    ));
+                }
+                if descriptor.arguments.get(expected_index) != Some(&tail.promoted_type) {
+                    return Err(format!(
+                        "canonical FFI variadic argument {expected_index} promoted type disagrees with the physical parameter type"
+                    ));
+                }
+                if !valid_default_promotion(tail) {
+                    return Err(format!(
+                        "canonical FFI variadic argument {expected_index} has an invalid default promotion receipt"
+                    ));
+                }
+            }
+        }
         for (index, (scalar, conversion)) in descriptor
             .arguments
             .iter()
             .zip(&descriptor.parameter_conversions)
             .enumerate()
         {
-            if !conversion.is_supported_argument() {
+            let default_promotion = descriptor
+                .variadic_arguments
+                .iter()
+                .find(|tail| tail.argument_index == index)
+                .is_some_and(|tail| valid_default_promotion(tail));
+            if !conversion.is_supported_argument() && !default_promotion {
                 return Err(format!(
                     "canonical FFI argument {index} ABI conversion from {:?} to {:?} is unsupported",
                     conversion.from, conversion.to
@@ -609,7 +685,11 @@ impl CanonicalMirFfiRuntime {
             .map(ffi_type)
             .collect::<Result<Vec<_>, _>>()?;
         let return_type = ffi_type(&descriptor.result)?;
-        let cif = Cif::new(argument_types, return_type);
+        let cif = if descriptor.variadic {
+            Cif::new_variadic(argument_types, descriptor.fixed_argument_count, return_type)
+        } else {
+            Cif::new(argument_types, return_type)
+        };
 
         // libffi::Arg stores an address into the typed value.  Keep every
         // boxed scalar alive and immovable until the synchronous call ends.
@@ -733,6 +813,101 @@ impl CanonicalMirFfiRuntime {
         // the symbol's ABI; that external contract is the program's obligation.
         let result = unsafe { call_typed(&cif, code_ptr, &ffi_args, &descriptor.result) }?;
         apply_result_conversion(result, descriptor.result_conversion.as_ref())
+    }
+}
+
+fn zero_value_for_abi(abi: crate::core::mir::types::MirAbiClass) -> Result<Value, String> {
+    use crate::core::mir::types::MirAbiClass;
+
+    Ok(match abi {
+        MirAbiClass::Integer { .. } => Value::Int(0),
+        MirAbiClass::Bool => Value::Bool(false),
+        MirAbiClass::Float { .. } => Value::Float(0.0),
+        MirAbiClass::Unit => Value::Unit,
+        other => {
+            return Err(format!(
+                "canonical FFI preflight cannot synthesize an argument for ABI {other:?}"
+            ))
+        }
+    })
+}
+
+fn valid_default_promotion(tail: &CanonicalFfiVariadicArgument) -> bool {
+    use crate::core::mir::types::MirAbiClass;
+    use crate::core::mir::MirFfiDefaultPromotion;
+
+    match &tail.promotion {
+        MirFfiDefaultPromotion::Identity => {
+            tail.source_type == tail.promoted_type.abi_class()
+                && matches!(
+                    tail.source_type,
+                    MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true
+                    } | MirAbiClass::Float { bits: 64 }
+                )
+        }
+        MirFfiDefaultPromotion::IntegerToI32 => {
+            matches!(
+                tail.source_type,
+                MirAbiClass::Bool | MirAbiClass::Integer { bits: 8 | 16, .. }
+            ) && tail.promoted_type == CanonicalFfiScalarType::I32
+        }
+        MirFfiDefaultPromotion::FloatToF64 => {
+            tail.source_type == MirAbiClass::Float { bits: 32 }
+                && tail.promoted_type == CanonicalFfiScalarType::F64
+        }
+    }
+}
+
+fn apply_variadic_default_promotion(
+    value: &Value,
+    tail: &CanonicalFfiVariadicArgument,
+) -> Result<Value, String> {
+    use crate::core::mir::types::MirAbiClass;
+    use crate::core::mir::MirFfiDefaultPromotion;
+
+    match (&tail.promotion, value) {
+        (MirFfiDefaultPromotion::Identity, value) if valid_default_promotion(tail) => {
+            Ok(value.clone())
+        }
+        (MirFfiDefaultPromotion::IntegerToI32, Value::Bool(value))
+            if valid_default_promotion(tail) && tail.source_type == MirAbiClass::Bool =>
+        {
+            Ok(Value::Int(i64::from(u8::from(*value))))
+        }
+        (MirFfiDefaultPromotion::IntegerToI32, Value::Int(value))
+            if valid_default_promotion(tail) =>
+        {
+            let MirAbiClass::Integer { bits, signed } = tail.source_type else {
+                return Err(format!(
+                    "integer default promotion has non-integer source ABI {:?}",
+                    tail.source_type
+                ));
+            };
+            let (minimum, maximum) = if signed {
+                let upper = (1_i64 << (bits - 1)) - 1;
+                (-upper - 1, upper)
+            } else {
+                (0, (1_i64 << bits) - 1)
+            };
+            if *value < minimum || *value > maximum {
+                return Err(format!(
+                    "variadic integer value {value} is outside its source i{bits}{} range",
+                    if signed { "" } else { " (unsigned)" }
+                ));
+            }
+            Ok(Value::Int(*value))
+        }
+        (MirFfiDefaultPromotion::FloatToF64, Value::Float(value))
+            if valid_default_promotion(tail) =>
+        {
+            Ok(Value::Float(f64::from(*value as f32)))
+        }
+        (_, value) => Err(format!(
+            "default promotion {:?} for source type {:?} cannot convert value {value:?}",
+            tail.promotion, tail.source_type
+        )),
     }
 }
 
@@ -1310,11 +1485,14 @@ mod tests {
             callee: format!("extern:C:test/function:{symbol}:0000000000000000"),
             symbol: symbol.into(),
             abi: "C".into(),
+            fixed_argument_count: 1,
+            variadic: false,
             arguments: vec![argument.clone()],
             parameter_conversions: vec![crate::core::mir::MirFfiAbiConversion {
                 from: abi,
                 to: abi,
             }],
+            variadic_arguments: Vec::new(),
             result: argument,
             result_conversion,
             argument_ids: vec![crate::core::mir::MirValueId::new("ffi-test-arg").unwrap()],
@@ -1322,6 +1500,295 @@ mod tests {
             result_id,
             ensures: None,
         }
+    }
+
+    fn variadic_descriptor(symbol: &str) -> CanonicalFfiDescriptor {
+        use crate::core::mir::types::MirAbiClass;
+        use crate::core::mir::MirFfiDefaultPromotion;
+
+        let mut call = descriptor(symbol, CanonicalFfiScalarType::I64);
+        call.arguments = vec![
+            CanonicalFfiScalarType::I64,
+            CanonicalFfiScalarType::I32,
+            CanonicalFfiScalarType::I32,
+            CanonicalFfiScalarType::I32,
+            CanonicalFfiScalarType::I32,
+            CanonicalFfiScalarType::I32,
+            CanonicalFfiScalarType::F64,
+        ];
+        call.fixed_argument_count = 1;
+        call.variadic = true;
+        call.argument_ids = vec![
+            crate::core::mir::MirValueId::new("ffi-test-fixed").unwrap(),
+            crate::core::mir::MirValueId::new("expr:ffi-test-i8-tail").unwrap(),
+            crate::core::mir::MirValueId::new("expr:ffi-test-u8-tail").unwrap(),
+            crate::core::mir::MirValueId::new("expr:ffi-test-i16-tail").unwrap(),
+            crate::core::mir::MirValueId::new("expr:ffi-test-u16-tail").unwrap(),
+            crate::core::mir::MirValueId::new("expr:ffi-test-bool-tail").unwrap(),
+            crate::core::mir::MirValueId::new("expr:ffi-test-float-tail").unwrap(),
+        ];
+        call.parameter_conversions = vec![
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 64,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 8,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 8,
+                    signed: false,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 16,
+                    signed: true,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Integer {
+                    bits: 16,
+                    signed: false,
+                },
+                to: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Bool,
+                to: MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                },
+            },
+            crate::core::mir::MirFfiAbiConversion {
+                from: MirAbiClass::Float { bits: 32 },
+                to: MirAbiClass::Float { bits: 64 },
+            },
+        ];
+        call.variadic_arguments = [
+            (
+                1,
+                "i8-tail",
+                MirAbiClass::Integer {
+                    bits: 8,
+                    signed: true,
+                },
+            ),
+            (
+                2,
+                "u8-tail",
+                MirAbiClass::Integer {
+                    bits: 8,
+                    signed: false,
+                },
+            ),
+            (
+                3,
+                "i16-tail",
+                MirAbiClass::Integer {
+                    bits: 16,
+                    signed: true,
+                },
+            ),
+            (
+                4,
+                "u16-tail",
+                MirAbiClass::Integer {
+                    bits: 16,
+                    signed: false,
+                },
+            ),
+            (5, "bool-tail", MirAbiClass::Bool),
+        ]
+        .into_iter()
+        .map(
+            |(argument_index, suffix, source_type)| CanonicalFfiVariadicArgument {
+                argument_index,
+                source_node: crate::core::NodeId(format!("ffi-test-{suffix}")),
+                source_type,
+                promoted_type: CanonicalFfiScalarType::I32,
+                promotion: MirFfiDefaultPromotion::IntegerToI32,
+            },
+        )
+        .chain([CanonicalFfiVariadicArgument {
+            argument_index: 6,
+            source_node: crate::core::NodeId("ffi-test-float-tail".into()),
+            source_type: MirAbiClass::Float { bits: 32 },
+            promoted_type: CanonicalFfiScalarType::F64,
+            promotion: MirFfiDefaultPromotion::FloatToF64,
+        }])
+        .collect();
+        call
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn canonical_variadic_ffi_uses_promoted_integer_and_float_tail_values() {
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before Unix epoch")
+                .as_nanos()
+        );
+        let c_path = std::env::temp_dir().join(format!("mimi-vararg-{suffix}.c"));
+        let so_path = std::env::temp_dir().join(format!("mimi-vararg-{suffix}.so"));
+        std::fs::write(
+            &c_path,
+            r#"
+                #include <stdarg.h>
+                #include <stdint.h>
+                static volatile int side_effect_count;
+                int64_t mimi_ffi_variadic_probe(int64_t seed, ...) {
+                    va_list args;
+                    va_start(args, seed);
+                    int signed_i8_tail = va_arg(args, int);
+                    int unsigned_u8_tail = va_arg(args, int);
+                    int signed_i16_tail = va_arg(args, int);
+                    int unsigned_u16_tail = va_arg(args, int);
+                    int bool_tail = va_arg(args, int);
+                    double float_tail = va_arg(args, double);
+                    va_end(args);
+                    side_effect_count += 1;
+                    return (int64_t)side_effect_count * 1000000
+                        + seed * 10000
+                        + signed_i8_tail * 100000
+                        + unsigned_u8_tail * 1000
+                        + signed_i16_tail * 100
+                        + unsigned_u16_tail
+                        + bool_tail * 10
+                        + (int64_t)(float_tail * 10.0);
+                }
+            "#,
+        )
+        .expect("write the variadic C shim");
+        let compiler = std::process::Command::new("cc")
+            .args(["-shared", "-fPIC", "-O2", "-o"])
+            .arg(&so_path)
+            .arg(&c_path)
+            .output()
+            .expect("the C shim test requires a C compiler");
+        assert!(
+            compiler.status.success(),
+            "compile variadic C shim failed: {}",
+            String::from_utf8_lossy(&compiler.stderr)
+        );
+
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        runtime.set_library_path(so_path.to_string_lossy().into_owned());
+        let result = runtime
+            .call(
+                &variadic_descriptor("mimi_ffi_variadic_probe"),
+                &[
+                    Value::Int(3),
+                    Value::Int(-12),
+                    Value::Int(250),
+                    Value::Int(-123),
+                    Value::Int(60_000),
+                    Value::Bool(true),
+                    Value::Float(1.25),
+                ],
+            )
+            .expect("C shim must observe sign/zero-extended integers and promoted f32 tail");
+        assert_eq!(result, Value::Int(127_722));
+        drop(runtime);
+        let _ = std::fs::remove_file(c_path);
+        let _ = std::fs::remove_file(so_path);
+    }
+
+    #[test]
+    fn canonical_variadic_ffi_rejects_forged_signature_receipts_before_symbol_lookup() {
+        let args = [
+            Value::Int(3),
+            Value::Int(-12),
+            Value::Int(250),
+            Value::Int(-123),
+            Value::Int(60_000),
+            Value::Bool(true),
+            Value::Float(1.25),
+        ];
+        let mut forged_cases = Vec::new();
+
+        let mut forged_fixed_count = variadic_descriptor("mimi_ffi_variadic_probe");
+        forged_fixed_count.fixed_argument_count = 8;
+        forged_cases.push((forged_fixed_count, "fixed argument count"));
+
+        let mut forged_promotion = variadic_descriptor("mimi_ffi_variadic_probe");
+        forged_promotion.variadic_arguments[0].promotion =
+            crate::core::mir::MirFfiDefaultPromotion::FloatToF64;
+        forged_cases.push((forged_promotion, "invalid default promotion"));
+
+        let mut forged_ordinal = variadic_descriptor("mimi_ffi_variadic_probe");
+        forged_ordinal.variadic_arguments[0].argument_index = 2;
+        forged_cases.push((forged_ordinal, "ordinal"));
+
+        let mut forged_variadic_flag = variadic_descriptor("mimi_ffi_variadic_probe");
+        forged_variadic_flag.variadic = false;
+        forged_cases.push((forged_variadic_flag, "variadic tail metadata"));
+
+        for (descriptor, expected) in forged_cases {
+            let mut runtime = CanonicalMirFfiRuntime::new();
+            runtime.set_library_path("/missing/should-not-be-loaded.so");
+            let error = runtime
+                .call(&descriptor, &args)
+                .expect_err("forged variadic signature receipt must fail before loading a symbol");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(
+                runtime.loaded_libs.is_empty(),
+                "malformed variadic receipt touched the library cache"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_variadic_ffi_range_checks_promoted_integer_sources_before_symbol_lookup() {
+        let mut runtime = CanonicalMirFfiRuntime::new();
+        runtime.set_library_path("/missing/should-not-be-loaded.so");
+        let error = runtime
+            .call(
+                &variadic_descriptor("mimi_ffi_variadic_probe"),
+                &[
+                    Value::Int(3),
+                    Value::Int(-12),
+                    Value::Int(250),
+                    Value::Int(32_768),
+                    Value::Int(60_000),
+                    Value::Bool(true),
+                    Value::Float(1.25),
+                ],
+            )
+            .expect_err("an out-of-range i16 must fail before loading the foreign library");
+        assert!(
+            error.to_string().contains("outside its source i16 range"),
+            "{error}"
+        );
+        assert!(runtime.loaded_libs.is_empty());
     }
 
     #[test]

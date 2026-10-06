@@ -134,6 +134,7 @@ pub(crate) fn direct_variant_projection_fixture() -> DirectVariantProjectionFixt
                 },
             )]),
             contracts,
+            proof_worklist: None,
             ownership: MirOwnershipSummary::default(),
         },
     );
@@ -270,6 +271,7 @@ pub(crate) fn direct_variant_move_projection_fixture() -> DirectVariantMoveProje
                 },
             )]),
             contracts,
+            proof_worklist: None,
             ownership: MirOwnershipSummary::default(),
         },
     );
@@ -388,6 +390,7 @@ pub(crate) fn direct_record_move_drop_fixture() -> DirectRecordMoveDropFixture {
                 },
             )]),
             contracts,
+            proof_worklist: None,
             ownership: MirOwnershipSummary::default(),
         },
     );
@@ -572,6 +575,7 @@ pub(crate) fn direct_enum_switch_move_fixture() -> DirectEnumSwitchMoveFixture {
                 ),
             ]),
             contracts,
+            proof_worklist: None,
             ownership: MirOwnershipSummary::default(),
         },
     );
@@ -754,6 +758,7 @@ pub(crate) fn direct_flat_copy_enum_switch_fixture() -> DirectFlatCopyEnumSwitch
                 ),
             ]),
             contracts,
+            proof_worklist: None,
             ownership: MirOwnershipSummary::default(),
         },
     );
@@ -865,6 +870,7 @@ pub(crate) fn direct_flat_copy_enum_construct_fixture() -> DirectFlatCopyEnumCon
                 },
             )]),
             contracts: Vec::new(),
+            proof_worklist: None,
             ownership: MirOwnershipSummary::default(),
         },
     );

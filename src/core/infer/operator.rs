@@ -179,8 +179,19 @@ impl<'a> Checker<'a> {
             BinOp::EqCmp | BinOp::NeCmp => {
                 // IF-H1: try unify first so TypeVars resolve; fall back to
                 // numeric common type for i32/i64 mixed comparisons.
-                let compatible = self.unification.unify(&lt, &rt).is_ok()
-                    || common_numeric_type(&lt, &rt).is_some();
+                // The managed Any v1 profile admits exactly borrowed
+                // equality against String. Keep the dynamic side in the
+                // operand's original position; MIR lowering canonicalizes
+                // the operand pair later without consuming the owner.
+                let managed_any_string = (is_dynamic_any(&lt) && is_string(&rt))
+                    || (is_string(&lt) && is_dynamic_any(&rt));
+                let has_dynamic_any = is_dynamic_any(&lt) || is_dynamic_any(&rt);
+                let compatible = if has_dynamic_any {
+                    managed_any_string
+                } else {
+                    self.unification.unify(&lt, &rt).is_ok()
+                        || common_numeric_type(&lt, &rt).is_some()
+                };
                 if !compatible {
                     self.emit_code(
                         crate::diagnostic::codes::E0202,
@@ -241,5 +252,103 @@ impl<'a> Checker<'a> {
                 Type::Name("unknown".into(), vec![])
             }
         }
+    }
+}
+
+fn is_dynamic_any(ty: &Type) -> bool {
+    matches!(ty.unlocated(), Type::Name(name, args) if name == "Any" && args.is_empty())
+}
+
+#[cfg(test)]
+mod managed_any_string_equality_tests {
+    use super::*;
+
+    fn expression(name: &str) -> Expr {
+        Expr::Ident(name.to_owned())
+    }
+
+    #[test]
+    fn equality_accepts_any_string_in_both_operand_orders_only() {
+        let file = crate::tests::parse("func main() -> i32 { 0 }");
+        let mut checker = Checker::new(&file);
+        let mut scopes = vec![HashMap::from([
+            ("dynamic".into(), Type::Name("Any".into(), vec![])),
+            ("text".into(), Type::Name("string".into(), vec![])),
+            ("number".into(), Type::Name("i32".into(), vec![])),
+        ])];
+
+        for op in [BinOp::EqCmp, BinOp::NeCmp] {
+            for (left, right) in [("dynamic", "text"), ("text", "dynamic")] {
+                let result =
+                    checker.infer_binary(op, &expression(left), &expression(right), &mut scopes);
+                assert!(matches!(result, Type::Name(name, _) if name == "bool"));
+                assert!(checker.errors.is_empty(), "{:?}", checker.errors);
+            }
+        }
+
+        for (left, right) in [("dynamic", "number"), ("number", "dynamic")] {
+            let _ = checker.infer_binary(
+                BinOp::EqCmp,
+                &expression(left),
+                &expression(right),
+                &mut scopes,
+            );
+        }
+        assert_eq!(checker.errors.len(), 2, "{:?}", checker.errors);
+        assert!(checker
+            .errors
+            .iter()
+            .all(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0202)));
+    }
+
+    #[test]
+    fn checker_source_accepts_both_any_string_orders_and_keeps_any_i32_closed() {
+        let legal = crate::tests::parse(
+            r#"
+            func main() -> i32 {
+                let empty = map_new()
+                let root = map_set(empty, "key", "value\0🧪")
+                let pair = map_get(root, "key")
+                let payload = pair.1
+                let eq_forward = payload == "value\0🧪"
+                let eq_reverse = "value\0🧪" == payload
+                let ne_forward = payload != "other"
+                let ne_reverse = "other" != payload
+                drop(pair)
+                drop(payload)
+                drop(empty)
+                drop(root)
+                if eq_forward && eq_reverse && ne_forward && ne_reverse { 0 } else { 1 }
+            }
+            "#,
+        );
+        crate::core::check_program(&legal).expect("legal Any/String comparison source");
+
+        let illegal = crate::tests::parse(
+            r#"
+            func main() -> i32 {
+                let empty = map_new()
+                let root = map_set(empty, "key", "value")
+                let pair = map_get(root, "key")
+                let payload = pair.1
+                let bad_forward = payload == 1
+                let bad_reverse = 1 == payload
+                drop(pair)
+                drop(payload)
+                drop(empty)
+                drop(root)
+                if bad_forward || bad_reverse { 1 } else { 0 }
+            }
+            "#,
+        );
+        let diagnostics = crate::core::check_program(&illegal)
+            .expect_err("Any/I32 comparison must remain rejected");
+        let equality_errors = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0202)
+            })
+            .count();
+        assert_eq!(equality_errors, 2, "{diagnostics:?}");
     }
 }

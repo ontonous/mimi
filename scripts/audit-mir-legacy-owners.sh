@@ -8,23 +8,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$ROOT_DIR/src"
 
-# These are the current, deliberately explicit compatibility boundaries.  A
-# migration that removes an owner must update these values in the same change;
-# an accidental new accessor or legacy call then fails this audit instead of
-# silently widening the raw-AST surface.
-readonly EXPECTED_OWNER_ACCESSOR_CALL_SITES=1
-readonly EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES=4
+# Production code must not enter any retained surface-body owner.  The
+# compatibility adapters remain available to the cfg(test) module only; the
+# production inventory below excludes that module explicitly and reports its
+# references separately.  A new production accessor or legacy call therefore
+# fails this audit instead of silently widening the raw-AST surface.
+readonly EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES=0
+readonly EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES=0
 readonly EXPECTED_PRODUCTION_RAW_AST_CALL_SITES=0
-readonly EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES=6
+readonly EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES=0
+readonly EXPECTED_PRODUCTION_COMPILE_GENERIC_FUNC_CALL_SITES=0
 readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
 # The deletion conditions are part of the compatibility contract. Keep a
 # digest beside each prose condition so scope changes are detected by the
 # gate and reviewed together with the migration that changes the condition.
-readonly EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST=2568b029a170043114b68ea0d35f9061617cc969ea2f9c8b7288d3d7f4f5e40c
-readonly EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST=bd5ea9e2bce323e05ac07aaa9ed3eee3c48b1fcfb2ceb3dae879bccef9904f93
-readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=f760de7d0a7f11cb703995b9069da4a510935d9ffcb34715418516aa5cc6b5fe
-readonly EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST=ff30fc215553993cb653cab0746ce34c3b275936e8d699ac25856f8201d210f4
-readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=af85b1c18cdc527b8b0433b1fff23b06aa3593d3452225bce38050d2064ed4da
+readonly EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST=fc5d620ce5d0ca2182f85bcc629ab0729cd0f162b511cfccd0b6bf9bb682a7b3
+readonly EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST=93de03d733aaa6989cb3af9cd425e27565babd99ad64cbc4cddca27fdae345ee
+readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=bf600c2bdf035af84479b7fe16ddc415ea3716bf273c39a089358e05841712d0
+readonly EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST=2f2b0eb8778541ec328a7af98c4cee4fdaf116863ab8769ae3f2d6d569495740
+readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=3092551fbf65e60eba825d96eb92740d504027d50f261fa72800591c79d5fb1d
 audit_failed=0
 closed_scalar_marker_sequence=()
 
@@ -37,12 +39,11 @@ emit_closed_scalar_marker() {
 printf 'schema=canonical-mir-legacy-owner-audit-v1\n'
 printf 'root=%s\n' "$ROOT_DIR"
 
-# Keep one executable evidence case for each retained owner.  The cases are
-# deliberately split between a closed scalar MIR route (which must bypass all
-# owners) and a representative compatibility shape (which must still reach
-# the named owner).  If a future migration removes or renames one of these
-# tests without replacing its evidence, this audit fails instead of silently
-# turning an owner into an undocumented deletion candidate.
+# Keep one executable evidence case for each retired production owner.  Every
+# case proves either a canonical route or an explicit MIR-COVERAGE-001/NITS
+# rejection and an empty legacy-access receipt. Removing that test without a
+# replacement must fail this audit rather than silently erasing migration
+# evidence.
 owner_evidence() {
     local owner="$1"
     local source_file="$2"
@@ -57,7 +58,7 @@ owner_evidence() {
         return
     fi
     if ! sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" "$test_path" \
-        | rg -q "${expected_marker}"; then
+        | rg -Fq "${expected_marker}"; then
         printf 'owner_audit_error=%s evidence_test_missing_marker=%s marker=%s\n' \
             "$owner" "$test_name" "$expected_marker" >&2
         audit_failed=1
@@ -70,47 +71,52 @@ owner_evidence() {
 owner_evidence \
     CodegenLegacyRemainder \
     src/codegen/tests.rs \
-    compile_checked_tags_unmigrated_generic_body_with_legacy_owner \
-    'closed scalar bypass + generic compatibility reaches codegen remainder' \
-    'LegacyBodyConsumer::CodegenLegacyRemainder'
+    compile_checked_rejects_unmigrated_generic_body_without_legacy_owner \
+    'unsupported generic body is rejected before any legacy owner' \
+    'MIR-COVERAGE-001'
 owner_evidence \
     FlowVerifierCompatibility \
     src/verifier/tests.rs \
-    compatibility_verifier_access_is_explicitly_tagged \
-    'closed scalar bypass + non-closed contract reaches Flow/Z3 compatibility' \
-    'LegacyBodyConsumer::FlowVerifierCompatibility'
+    unsupported_contract_returns_structured_coverage_without_legacy_access \
+    'unsupported contract reports typed coverage without any legacy owner' \
+    'test_legacy_body_access().is_empty()'
 owner_evidence \
     FfiVerifierCompatibility \
-    src/tests/canonical_scalar_ffi.rs \
-    ffi_checked_preserves_legacy_for_unmigrated_string_contract \
-    'closed scalar bypass + string FFI contract reaches FFI compatibility' \
-    'LegacyBodyConsumer::FfiVerifierCompatibility'
+    src/verifier/tests.rs \
+    typed_ffi_deferred_context_is_checker_owned_without_legacy_access \
+    'typed String FFI context reports checker-owned coverage without any legacy owner' \
+    'Vec::<crate::core::LegacyBodyConsumer>::new()'
 owner_evidence \
     DualVerifierCompatibility \
     src/verifier/tests.rs \
-    compatibility_verifier_access_is_explicitly_tagged \
-    'closed scalar bypass + secondary Flow/VIR compatibility remains reachable' \
-    'LegacyBodyConsumer::DualVerifierCompatibility'
+    unsupported_contract_returns_structured_coverage_without_legacy_access \
+    'deferred dual request reports typed coverage without opening the retired secondary owner' \
+    'test_legacy_body_access().is_empty()'
 
-# Keep the retained accessor tied to the function that owns its compatibility
-# boundary. A count-only check would miss an accidental move into a closed MIR
-# route or a new helper that widens the raw-AST surface while preserving the
-# same number of calls.
-owner_accessor_context() {
-    local owner="$1"
-    local source_file="$2"
-    local start_function="$3"
-    local end_function="$4"
+# The retained body accessor and AST adapters are deliberately test-only. Keep
+# their location explicit so moving one back into production cannot be hidden
+# by the production exclusion used by the call-site inventory.
+test_only_legacy_body_adapter_context() {
     local context
-    context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
-    if ! printf '%s\n' "$context" | rg "legacy_body_file\\([^)]*LegacyBodyConsumer::${owner}" >/dev/null; then
-        printf 'owner_audit_error=%s accessor_context_missing=%s::%s\n' \
-            "$owner" "$source_file" "$start_function" >&2
+    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn legacy_body_file\(' \
+        "$ROOT_DIR/src/core/resolved/mod.rs"; then
+        printf 'owner_audit_error=legacy_body_file_accessor_lost_cfg_test\n' >&2
         audit_failed=1
         return
     fi
-    printf 'owner=%s accessor_context=%s::%s\n' \
-        "$owner" "$source_file" "$start_function"
+    if ! rg -U -q '#\[cfg\(test\)\]\nmod tests;' "$ROOT_DIR/src/codegen/mod.rs"; then
+        printf 'owner_audit_error=test_only_codegen_adapter_module_not_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    context="$(sed -n '/pub(crate) fn legacy_body_file(/,/pub(crate) fn has_imports(/p' \
+        "$ROOT_DIR/src/core/resolved/mod.rs")"
+    if ! printf '%s\n' "$context" | rg -F 'Arc::clone(&self.legacy_file)' >/dev/null; then
+        printf 'owner_audit_error=test_only_legacy_body_accessor_context_missing\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'test_only_legacy_body_adapter_context=core::CheckedProgram::legacy_body_file+codegen::tests\n'
 }
 
 # The closed scalar guard may live in the public entry function while the
@@ -164,26 +170,73 @@ route_receipt_profile_binding() {
         "$profile_name" "$receipt_label" "$source_file" "$start_function"
 }
 
-owner_accessor_context \
-    CodegenLegacyRemainder \
-    src/codegen/compile.rs \
-    'fn compile_file_with_resolved(' \
-    'fn compile_file_inner('
-owner_accessor_context \
-    FlowVerifierCompatibility \
-    src/verifier/mod.rs \
-    'pub fn verify_checked(' \
-    'pub fn verify_ffi_source('
-owner_accessor_context \
-    FfiVerifierCompatibility \
-    src/verifier/mod.rs \
-    'fn verify_ffi_checked_with_source_hash(' \
-    'pub fn is_z3_available('
-owner_accessor_context \
-    DualVerifierCompatibility \
-    src/verifier/mod.rs \
-    'pub fn verify_checked_dual(' \
-    'fn verify_closed_mir_program('
+test_only_legacy_body_adapter_context
+
+# The former Flow/VIR/FFI verifier implementations consume the retained
+# surface AST. They remain compiled for the in-crate equivalence tests, where
+# the old engine is an oracle, but no production library build may expose the
+# modules or their AST entry points. Keep the cfg(test) boundary explicit so a
+# future re-export cannot silently reopen one of the three retired verifier
+# owners (Flow, FFI, or the secondary dual engine).
+test_only_ast_verifier_modules() {
+    local module
+    for module in expr ffi flow func helpers vir; do
+        if ! rg -U -q "#\[cfg\(test\)\]\n(?:pub[[:space:]]+)?mod ${module};" \
+            "$ROOT_DIR/src/verifier/mod.rs"; then
+            printf 'owner_audit_error=verifier_ast_module_not_cfg_test module=%s\n' "$module" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn verify_file\(' \
+        "$ROOT_DIR/src/verifier/ctx.rs"; then
+        printf 'owner_audit_error=verifier_ast_file_entry_not_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -U -q '#\[cfg\(test\)\]\n(?:[[:space:]]*)pub\(crate\) fn mock_verify_file\(' \
+        "$ROOT_DIR/src/verifier/helpers.rs"; then
+        printf 'owner_audit_error=verifier_ast_mock_entry_not_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'test_only_ast_verifier_modules=expr,ffi,flow,func,helpers,vir;ctx::verify_file;helpers::mock_verify_file\n'
+}
+
+test_only_ast_verifier_modules
+
+# Native Codegen's retained surface-file adapter is test-only. The Bytecode
+# source compiler is a separate, explicitly named compatibility consumer for
+# `run`/`test`/`disasm`: each production call must sit behind the dispatcher’s
+# `DefaultMirRoute::Legacy` arm, while the native build has no such ingress.
+# Keep this distinction visible so removing LLVM legacy edges is not confused
+# with silently deleting the interpreter's graph-outside compatibility route.
+codegen_legacy_consumer_boundary() {
+    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn compile_file\(' \
+        "$ROOT_DIR/src/codegen/compile.rs"; then
+        printf 'owner_audit_error=codegen_compile_file_not_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    if rg -n 'BytecodeCompiler|\.compile_file\(' "$ROOT_DIR/src/main/build.rs" >/dev/null; then
+        printf 'owner_audit_error=native_build_reaches_bytecode_legacy_compiler\n' >&2
+        audit_failed=1
+        return
+    fi
+    local path
+    for path in src/main/run.rs src/main/test.rs src/main/disasm_cmd.rs; do
+        if ! rg -q 'DefaultMirRoute::Legacy' "$ROOT_DIR/$path" \
+            || ! rg -q '\.compile_file\(' "$ROOT_DIR/$path" \
+            || ! rg -q 'report_legacy_route' "$ROOT_DIR/$path"; then
+            printf 'owner_audit_error=bytecode_legacy_route_not_explicit path=%s\n' "$path" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'codegen_legacy_consumer_boundary=llvm_compile_file_cfg_test;native_build_no_bytecode_legacy;run-test-disasm_explicit_legacy_route\n'
+}
+
+codegen_legacy_consumer_boundary
 
 owner_closed_route_guard \
     CodegenLegacyRemainder \
@@ -202,10 +255,10 @@ owner_closed_route_guard \
 owner_closed_route_guard \
     FfiVerifierCompatibility \
     src/verifier/mod.rs \
-    'fn verify_ffi_checked_with_source_hash(' \
-    'pub fn is_z3_available(' \
-    materialize_closed_mir_island \
-    'if let Some(canonical) = materialize_closed_mir_island('
+    'pub fn verify_ffi_checked_with_source_hash(' \
+    'fn ffi_infrastructure_error(' \
+    scalar_ffi_admission \
+    'if profile.is_admitted(admission)'
 owner_closed_route_guard \
     DualVerifierCompatibility \
     src/verifier/mod.rs \
@@ -247,6 +300,54 @@ direct_native_ffi_boundary_guard
 # R6-1111: the raw-AST bytecode compiler and VM must not retain the old host
 # loader ingress. The legacy instruction is kept only as a rejected bytecode
 # shape, with VM-wide validation before execution or host lookup.
+bytecode_vm_canonical_ffi_preflight_order() {
+    local vm="$1"
+    local structural_context
+    local execution_context
+    local tail_expression
+    local structure_line
+    local begin_line
+    local worker_symbol_line
+    local normal_symbol_line
+    local worker_execute_line
+    local normal_execute_line
+    structural_context="$(sed -n '/fn preflight_canonical_program_structure(/,/^    }/p' "$vm")"
+    tail_expression="$(printf '%s\n' "$structural_context" \
+        | awk 'NF { previous = last; last = $0 } END { print previous }' \
+        | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [ -z "$structural_context" ] \
+        || [ "$tail_expression" != 'self.validate_canonical_ffi_program()' ]; then
+        printf 'owner_audit_error=bytecode_vm_ffi_preflight_marker_missing marker=preflight_canonical_program_structure-tail-self.validate_canonical_ffi_program()\n' >&2
+        audit_failed=1
+        return
+    fi
+    execution_context="$(sed -n '/fn with_canonical_actor_execution/,/Counters are observational/p' "$vm")"
+    structure_line="$(printf '%s\n' "$execution_context" | awk 'index($0, "self.preflight_canonical_program_structure()?") { print NR; exit }')"
+    begin_line="$(printf '%s\n' "$execution_context" | awk 'index($0, ".begin_execution(&self.program, self.max_children)?") { print NR; exit }')"
+    worker_symbol_line="$(printf '%s\n' "$execution_context" | awk 'index($0, "self.preflight_canonical_ffi_symbols()?") { print NR; exit }')"
+    normal_symbol_line="$(printf '%s\n' "$execution_context" | awk 'index($0, "match self.preflight_canonical_ffi_symbols()") { print NR; exit }')"
+    worker_execute_line="$(printf '%s\n' "$execution_context" | awk -v symbol_line="$worker_symbol_line" 'NR > symbol_line && index($0, "return execute(self);") { print NR; exit }')"
+    normal_execute_line="$(printf '%s\n' "$execution_context" | awk -v symbol_line="$normal_symbol_line" 'NR > symbol_line && index($0, "Ok(()) => execute(self),") { print NR; exit }')"
+    if [ -z "$structure_line" ] || [ -z "$begin_line" ] \
+        || [ -z "$worker_symbol_line" ] || [ -z "$normal_symbol_line" ] \
+        || [ -z "$worker_execute_line" ] || [ -z "$normal_execute_line" ]; then
+        printf 'owner_audit_error=bytecode_vm_ffi_preflight_order_marker_missing function=with_canonical_actor_execution\n' >&2
+        audit_failed=1
+        return
+    fi
+    if [ "$structure_line" -ge "$begin_line" ] \
+        || [ "$structure_line" -ge "$worker_symbol_line" ] \
+        || [ "$structure_line" -ge "$normal_symbol_line" ] \
+        || [ "$begin_line" -ge "$normal_symbol_line" ] \
+        || [ "$worker_symbol_line" -ge "$worker_execute_line" ] \
+        || [ "$normal_symbol_line" -ge "$normal_execute_line" ]; then
+        printf 'owner_audit_error=bytecode_vm_ffi_preflight_order_drift expected=canonical-receipts-before-actor-root-and-host-symbols-and-symbols-before-execution\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'bytecode_vm_ffi_preflight_order=canonical-receipts-before-actor-root+host-symbols-before-execution\n'
+}
+
 retired_receiptless_bytecode_ffi_path() {
     local compiler="$ROOT_DIR/src/interp/bytecode/compiler.rs"
     local vm="$ROOT_DIR/src/interp/bytecode/vm.rs"
@@ -268,8 +369,7 @@ retired_receiptless_bytecode_ffi_path() {
     fi
     for marker in \
         'receiptless legacy CallExtern' \
-        'receiptless legacy CallExtern execution is disabled' \
-        'self.validate_canonical_ffi_program()?'; do
+        'receiptless legacy CallExtern execution is disabled'; do
         if ! rg -F "$marker" "$vm" >/dev/null; then
             printf 'owner_audit_error=bytecode_vm_ffi_preflight_marker_missing marker=%s\n' \
                 "$marker" >&2
@@ -277,6 +377,10 @@ retired_receiptless_bytecode_ffi_path() {
             return
         fi
     done
+    bytecode_vm_canonical_ffi_preflight_order "$vm"
+    if [ "$audit_failed" -ne 0 ]; then
+        return
+    fi
     for test_name in \
         raw_ast_compiler_rejects_receiptless_extern_calls \
         raw_ast_compiler_rejects_deterministic_receiptless_extern_matrix \
@@ -353,48 +457,33 @@ retired_checked_directory_viewer_from_production() {
 
 retired_checked_directory_viewer_from_production
 
-# The owner accessor is test-instrumented, but Rust privacy does not prevent a
-# future production consumer in the same crate from reading `legacy_file`
-# directly. Canonical lowering now uses CheckedProgram::source_registry() for
-# NodeId construction; only the explicitly tagged body-owner accessor may
-# refer to legacy_file in production.
+# The retained AST snapshot is a test-only adapter. Canonical lowering now
+# uses CheckedProgram::source_registry() for NodeId construction; no
+# production source may read `legacy_file` directly. Keep the test-only
+# accessor shape checked separately so an accidental cfg removal fails closed.
 direct_legacy_file_reads_are_owner_only() {
-    local reads unapproved obsolete_metadata_reads owner_accessor_reads accessor_context
+    local reads unapproved
     reads="$(rg -n '\.legacy_file\b' "$SRC_DIR" \
         --glob '*.rs' \
         --glob '!**/tests.rs' \
         --glob '!**/test.rs' \
         --glob '!src/tests/**' || true)"
-    if [ -z "$reads" ]; then
-        printf 'production_direct_legacy_file_reads=0 body_reads=0\n'
-        return
-    fi
-
-    obsolete_metadata_reads="$(printf '%s\n' "$reads" | rg \
-        'src/core/resolved/mod\.rs:[0-9]+: *let ids = NodeIdBuilder::new\(&program\.legacy_file\.sources\);' || true)"
-    owner_accessor_reads="$(printf '%s\n' "$reads" | rg \
-        'src/core/resolved/mod\.rs:[0-9]+: *Arc::clone\(&self\.legacy_file\)$' || true)"
-    accessor_context="$(sed -n \
-        '/pub(crate) fn legacy_body_file(/,/pub(crate) fn has_imports(/p' \
-        "$ROOT_DIR/src/core/resolved/mod.rs")"
-    if [ -n "$obsolete_metadata_reads" ] ||
-        [ "$(printf '%s\n' "$owner_accessor_reads" | rg -c . || true)" -ne 1 ] ||
-        [ "$(printf '%s\n' "$accessor_context" | rg -F -c 'Arc::clone(&self.legacy_file)' || true)" -ne 1 ]; then
-        printf 'owner_audit_error=legacy_file_whitelist_shape_changed\n' >&2
-        audit_failed=1
-        return
-    fi
-
     unapproved="$(printf '%s\n' "$reads" | rg -v \
         'src/core/resolved/mod\.rs:[0-9]+: *Arc::clone\(&self\.legacy_file\)$' || true)"
     if [ -n "$unapproved" ]; then
-        printf 'owner_audit_error=unowned_direct_legacy_file_access\n%s\n' \
+        printf 'owner_audit_error=production_direct_legacy_file_reads\n%s\n' \
             "$unapproved" >&2
         audit_failed=1
         return
     fi
-
-    printf 'production_direct_legacy_file_accessors=1 source-metadata-reads=0 body_bypasses=0\n'
+    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn legacy_body_file\(' \
+        "$ROOT_DIR/src/core/resolved/mod.rs"; then
+        printf 'owner_audit_error=legacy_body_file_accessor_lost_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'production_direct_legacy_file_accessors=0 source-metadata-reads=0 body_bypasses=0\n'
+    printf 'test_only_legacy_file_accessor=src/core/resolved/mod.rs::legacy_body_file\n'
 }
 
 direct_legacy_file_reads_are_owner_only
@@ -478,7 +567,7 @@ consumer_receipt_provenance_binding \
     'fn verify_ffi_checked_with_source_hash(' \
     'pub fn is_z3_available(' \
     verify-ffi-v1 \
-    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)' \
+    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash.clone())' \
     canonical-mir-graph+source-hash
 
 # The direct native entry performs bytecode and verifier preflight before LLVM
@@ -986,7 +1075,7 @@ source_hash_parameter_binding \
     'fn verify_ffi_checked_with_source_hash(' \
     'pub fn is_z3_available(' \
     'source_hash: String' \
-    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)'
+    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash.clone())'
 
 # Keep the FFI MIR adapter's proof artifacts sourced from the same hash passed
 # into the MIR verifier.  The route-level check above proves the caller passes
@@ -1383,89 +1472,94 @@ else
     printf 'scalar_evidence_marker_sequence_status=ok\n'
 fi
 
-require_codegen_legacy_body_class_tripwire() {
-    local body_class="$1"
+require_codegen_closed_route_tripwire() {
+    local route_class="$1"
     local test_name="$2"
     shift 2
-    local -a class_markers=("$@")
+    local -a route_markers=("$@")
     local marker_summary
     local body
-    if [ "${#class_markers[@]}" -eq 0 ]; then
-        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker_configuration class=%s test=%s\n' \
-            "$body_class" "$test_name" >&2
+    if [ "${#route_markers[@]}" -eq 0 ]; then
+        printf 'owner_audit_error=codegen_closed_route_tripwire_missing_marker_configuration class=%s test=%s\n' \
+            "$route_class" "$test_name" >&2
         audit_failed=1
         return
     fi
     body="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" \
         "$ROOT_DIR/src/codegen/tests.rs")"
     if [ -z "$body" ]; then
-        printf 'owner_audit_error=missing_codegen_legacy_body_class_tripwire class=%s test=%s\n' \
-            "$body_class" "$test_name" >&2
-        audit_failed=1
-        return
-    fi
-    if ! printf '%s\n' "$body" | rg -F 'LegacyBodyConsumer::CodegenLegacyRemainder' >/dev/null; then
-        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_owner class=%s test=%s\n' \
-            "$body_class" "$test_name" >&2
-        audit_failed=1
-        return
-    fi
-    if ! printf '%s\n' "$body" | rg 'test_legacy_body_access\(\)' >/dev/null; then
-        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_access_assertion class=%s test=%s\n' \
-            "$body_class" "$test_name" >&2
+        printf 'owner_audit_error=missing_codegen_closed_route_tripwire class=%s test=%s\n' \
+            "$route_class" "$test_name" >&2
         audit_failed=1
         return
     fi
     if ! printf '%s\n' "$body" | rg 'assert(_eq|_ne)?!' >/dev/null; then
-        printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_test_assertion class=%s test=%s\n' \
-            "$body_class" "$test_name" >&2
+        printf 'owner_audit_error=codegen_closed_route_tripwire_missing_test_assertion class=%s test=%s\n' \
+            "$route_class" "$test_name" >&2
         audit_failed=1
         return
     fi
-    for class_marker in "${class_markers[@]}"; do
-        if ! printf '%s\n' "$body" | rg -F "$class_marker" >/dev/null; then
-            printf 'owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker class=%s test=%s marker=%s\n' \
-                "$body_class" "$test_name" "$class_marker" >&2
+    for route_marker in "${route_markers[@]}"; do
+        if ! printf '%s\n' "$body" | rg -F "$route_marker" >/dev/null; then
+            printf 'owner_audit_error=codegen_closed_route_tripwire_missing_marker class=%s test=%s marker=%s\n' \
+                "$route_class" "$test_name" "$route_marker" >&2
             audit_failed=1
             return
         fi
     done
-    printf -v marker_summary '%s,' "${class_markers[@]}"
+    printf -v marker_summary '%s,' "${route_markers[@]}"
     marker_summary="${marker_summary%,}"
-    printf 'codegen_legacy_body_class_tripwire=%s test=%s markers=%s\n' \
-        "$body_class" "$test_name" "$marker_summary"
+    printf 'closed_codegen_route_tripwire=%s test=%s markers=%s\n' \
+        "$route_class" "$test_name" "$marker_summary"
 }
 
-require_codegen_legacy_body_class_tripwire \
+require_codegen_closed_route_tripwire \
     dynamic-trait \
-    compile_checked_keeps_dynamic_protocol_method_on_legacy_owner \
-    'mir_protocol_method_dyn.mimi'
-require_codegen_legacy_body_class_tripwire \
+    compile_checked_rejects_dynamic_protocol_method_without_legacy_owner \
+    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
+    'test_legacy_body_access().is_empty()'
+require_codegen_closed_route_tripwire \
     flow-transition \
-    compile_checked_keeps_flow_transition_on_legacy_owner \
-    'Counter__inc__from_Zero'
-require_codegen_legacy_body_class_tripwire \
+    compile_checked_routes_multi_transition_flow_through_canonical_mir \
+    'test_legacy_body_access().is_empty()' \
+    'canonical multi-transition Flow must emit main'
+require_codegen_closed_route_tripwire \
     trait-impl-specialization \
-    compile_checked_keeps_trait_impl_specialization_on_legacy_owner \
-    'Data__Computable__compute'
-require_codegen_legacy_body_class_tripwire \
+    compile_checked_rejects_trait_impl_specialization_without_legacy_owner \
+    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
+    'test_legacy_body_access().is_empty()'
+require_codegen_closed_route_tripwire \
     nested-function-body \
-    compile_checked_keeps_captured_nested_helper_on_legacy_owner \
+    compile_checked_rejects_captured_nested_helper_without_legacy_owner \
+    'MIR-COVERAGE-001' \
+    'test_legacy_body_access().is_empty()' \
     'nested_increment'
-require_codegen_legacy_body_class_tripwire \
+require_codegen_closed_route_tripwire \
     export-wrapper \
-    compile_checked_keeps_export_wrapper_body_on_legacy_owner \
-    'CodeGenerator::export_body_symbol("owner_tripwire_export")'
-require_codegen_legacy_body_class_tripwire \
+    compile_checked_routes_scalar_export_wrapper_without_legacy_access \
+    'test_legacy_body_access().is_empty()' \
+    'owner_tripwire_export'
+require_codegen_closed_route_tripwire \
     actor-method \
-    compile_checked_keeps_actor_method_on_legacy_owner \
+    compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access \
+    'CanonicalMirRouteProfile::ScalarActor' \
+    'Vec::<crate::core::LegacyBodyConsumer>::new()' \
     'OwnerTripwireWorker__read__method'
-require_codegen_legacy_body_class_tripwire \
-    map-any-borrowed \
-    compile_checked_keeps_map_any_borrowed_access_on_legacy_owner \
-    'map_get' \
-    'values'
-
+require_codegen_closed_route_tripwire \
+    actor-method-rejected \
+    compile_checked_rejects_contract_bearing_actor_without_legacy_owner \
+    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
+    'test_legacy_body_access().is_empty()'
+require_codegen_closed_route_tripwire \
+    map-any-owned \
+    compile_checked_routes_closed_map_any_owner_v1_without_legacy_access \
+    'test_legacy_body_access().is_empty()' \
+    'MapAnyOwnerAdmission::CompleteCoverage'
+require_codegen_closed_route_tripwire \
+    map-any-rejected \
+    compile_checked_rejects_map_any_borrowed_access_without_legacy_owner \
+    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
+    'test_legacy_body_access().is_empty()'
 require_direct_mir_no_legacy_tripwire() {
     local test_name="$1"
     local body
@@ -1517,39 +1611,39 @@ for owner in \
     if [ -n "$matches" ]; then
         printf '%s\n' "$matches"
     fi
-    if [ "$count" -ne "$EXPECTED_OWNER_ACCESSOR_CALL_SITES" ]; then
+    if [ "$count" -ne "$EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES" ]; then
         printf 'owner_audit_error=%s expected_accessor_call_sites=%s actual=%s\n' \
-            "$owner" "$EXPECTED_OWNER_ACCESSOR_CALL_SITES" "$count" >&2
+            "$owner" "$EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES" "$count" >&2
         audit_failed=1
     fi
     case "$owner" in
         CodegenLegacyRemainder)
             dependency_class='legacy-codegen-remainder'
-            deletion_blocker='all legacy body classes and compile_func_legacy production callers must be removed'
-            condition='delete after every legacy body class is lowered to MIR and compile_func_legacy has zero production callers'
+            deletion_blocker='cfg(test) compatibility adapters and the surface body compiler remain retained'
+            condition='delete after cfg(test) legacy codegen adapters and the surface body compiler are removed; the production owner is already closed'
             ;;
         FlowVerifierCompatibility)
             dependency_class='flow-body-compatibility'
-            deletion_blocker='non-closed function and Flow contract profiles still require the AST/Z3 compatibility encoder'
-            condition='delete after canonical MIR contracts cover every remaining function and Flow contract profile and the AST body walker is retired'
+            deletion_blocker='cfg(test) legacy verifier adapter and AST body walker remain retained'
+            condition='delete after cfg(test) legacy verifier adapters and the AST body walker are removed after canonical MIR covers all obligations'
             ;;
         FfiVerifierCompatibility)
             dependency_class='ffi-declaration-compatibility'
-            deletion_blocker='unmigrated FFI declaration semantics still require the compatibility encoder'
-            condition='delete after string/aggregate/variadic/errno/mode/ensures FFI declarations have complete MIR receipts and proofs'
+            deletion_blocker='cfg(test) FFI compatibility adapter and AST call-site encoder remain retained'
+            condition='delete after cfg(test) FFI compatibility adapters and the AST call-site encoder are removed after canonical MIR receipts and proofs cover all declarations'
             ;;
         DualVerifierCompatibility)
             dependency_class='secondary-flow-vir-compatibility'
-            deletion_blocker='the secondary Flow/VIR engine is not MIR-native for every compatibility profile'
-            condition='delete after the secondary Flow/VIR engine is retired or is MIR-native for every compatibility profile'
+            deletion_blocker='cfg(test) dual verifier adapter and secondary Flow/VIR engine remain retained'
+            condition='delete after cfg(test) dual verifier adapters and the secondary Flow/VIR engine are retired or MIR-native'
             ;;
     esac
     if [ "$count" -eq 0 ]; then
-        owner_status='unreachable'
-        accessor_blocker='owner accessor is unreachable'
+        owner_status='closed'
+        accessor_blocker='no production accessor; cfg(test) adapter only'
     else
-        owner_status='retained'
-        accessor_blocker='owner accessor remains reachable'
+        owner_status='open'
+        accessor_blocker='production accessor remains reachable'
     fi
     # Accessor reachability is only one deletion prerequisite. Keep the
     # readiness gate conservative until a migration explicitly proves the
@@ -1645,58 +1739,82 @@ if [ "$legacy_call_count" -ne "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SIT
         "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES" "$legacy_call_count" >&2
     audit_failed=1
 fi
+legacy_body_compiler_context="$(sed -n \
+    '/Test-only legacy surface-AST function body compiler/,/^[[:space:]]*fn compile_func_legacy_clean(/p' \
+    "$ROOT_DIR/src/codegen/func.rs")"
+if ! printf '%s\n' "$legacy_body_compiler_context" | rg -F '#[cfg(test)]' >/dev/null \
+    || ! printf '%s\n' "$legacy_body_compiler_context" | rg -F 'pub(super) fn compile_func_legacy(' >/dev/null \
+    || ! printf '%s\n' "$legacy_body_compiler_context" | rg -F 'fn compile_func_legacy_inner(' >/dev/null \
+    || ! printf '%s\n' "$legacy_body_compiler_context" | rg -F 'fn compile_func_legacy_clean(' >/dev/null; then
+    printf 'owner_audit_error=compile_func_legacy_cfg_test_adapter_shape_missing\n' >&2
+    audit_failed=1
+fi
+printf 'test_only_codegen_legacy_body_compiler=src/codegen/func.rs::compile_func_legacy+inner+clean\n'
 
-# R6-1114: pin the identity of the six retained legacy body call sites, not
-# just their aggregate count. Each expression is a distinct body class; a
-# migration may remove it only while updating this inventory and its evidence.
-legacy_callsite_expression() {
-    local owner="$1"
-    local source_file="$2"
-    local expression="$3"
-    local expected="$4"
-    local source="$ROOT_DIR/$source_file"
-    local matches actual
-    matches="$(rg -n -F "$expression" "$source" || true)"
-    actual=0
-    if [ -n "$matches" ]; then
-        actual="$(printf '%s\n' "$matches" | wc -l)"
+# Generic monomorphization is retained only as a cfg(test) adapter in
+# codegen/func.rs. Keep the production inventory separate from that block so
+# a new resolved/generic caller cannot hide behind the adapter exclusion.
+generic_func_adapter_context="$(sed -n \
+    '/The only caller is the cfg(test) compatibility adapter below/,/^[[:space:]]*fn compile_generic_func_inner(/p' \
+    "$ROOT_DIR/src/codegen/func.rs")"
+if ! printf '%s\n' "$generic_func_adapter_context" | rg -F '#[cfg(test)]' >/dev/null \
+    || ! printf '%s\n' "$generic_func_adapter_context" | rg -F 'self.compile_generic_func(function, type_map)' >/dev/null; then
+    printf 'owner_audit_error=compile_generic_func_cfg_test_adapter_shape_missing\n' >&2
+    audit_failed=1
+fi
+generic_func_adapter_start="$(rg -n 'pub\(super\) fn compile_generic_func\(' \
+    "$ROOT_DIR/src/codegen/func.rs" | head -n1 | cut -d: -f1)"
+generic_func_adapter_end="$(rg -n '^[[:space:]]*fn compile_generic_func_inner\(' \
+    "$ROOT_DIR/src/codegen/func.rs" | head -n1 | cut -d: -f1)"
+generic_func_outside_adapter=''
+while IFS=: read -r line_number line_text; do
+    [ -z "$line_number" ] && continue
+    if [ -z "$generic_func_adapter_start" ] || [ -z "$generic_func_adapter_end" ] \
+        || [ "$line_number" -lt "$generic_func_adapter_start" ] \
+        || [ "$line_number" -ge "$generic_func_adapter_end" ]; then
+        generic_func_outside_adapter+="src/codegen/func.rs:${line_number}:${line_text}"$'\n'
     fi
-    if [ "$actual" -ne "$expected" ]; then
-        printf 'owner_audit_error=legacy_callsite_identity owner=%s file=%s expression=%s expected=%s actual=%s\n' \
-            "$owner" "$source_file" "$expression" "$expected" "$actual" >&2
-        audit_failed=1
-        return
-    fi
-    printf 'legacy_callsite_identity owner=%s file=%s expression=%s count=%s\n' \
-        "$owner" "$source_file" "$expression" "$actual"
-    printf '%s\n' "$matches" | sed 's/^/  /'
-}
+done < <(rg -n 'compile_generic_func\(' "$ROOT_DIR/src/codegen/func.rs" || true)
+if [ -n "$generic_func_outside_adapter" ]; then
+    printf 'owner_audit_error=compile_generic_func_outside_cfg_test_adapter\n%s' \
+        "$generic_func_outside_adapter" >&2
+    audit_failed=1
+fi
+generic_refs="$(rg -n \
+    --glob '*.rs' \
+    --glob '!**/tests.rs' \
+    --glob '!src/tests/**' \
+    --glob '!src/codegen/func.rs' \
+    'compile_generic_func\(' \
+    "$SRC_DIR" || true)"
+generic_call_count=0
+if [ -n "$generic_refs" ]; then
+    generic_call_count="$(printf '%s\n' "$generic_refs" | rg -v 'fn compile_generic_func' | wc -l)"
+fi
+printf 'production_compile_generic_func_call_sites=%s\n' "$generic_call_count"
+if [ "$generic_call_count" -ne "$EXPECTED_PRODUCTION_COMPILE_GENERIC_FUNC_CALL_SITES" ]; then
+    printf 'owner_audit_error=production_compile_generic_func_call_sites expected=%s actual=%s\n' \
+        "$EXPECTED_PRODUCTION_COMPILE_GENERIC_FUNC_CALL_SITES" "$generic_call_count" >&2
+    audit_failed=1
+fi
+generic_adapter_ref_count=0
+if [ -n "$generic_func_adapter_context" ]; then
+    generic_adapter_ref_count="$(printf '%s\n' "$generic_func_adapter_context" \
+        | rg -c 'compile_generic_func\(' || true)"
+fi
+printf 'test_only_codegen_func_generic_adapter_refs=%s excluded_from_production=1\n' \
+    "$generic_adapter_ref_count"
 
-legacy_callsite_expression \
-    top_level_function_pass \
-    src/codegen/compile.rs \
-    'self.compile_func_legacy(f)' \
-    1
-legacy_callsite_expression \
-    flow_transition_multi_and_single_target \
-    src/codegen/compile.rs \
-    '.compile_func_legacy(&func)' \
-    2
-legacy_callsite_expression \
-    extern_export_body_wrapper \
-    src/codegen/func.rs \
-    'self.compile_func_legacy(&body_func)' \
-    1
-legacy_callsite_expression \
-    nested_function_body \
-    src/codegen/expr/lambda.rs \
-    'self.compile_func_legacy(&compile_target)' \
-    1
-legacy_callsite_expression \
-    trait_impl_specialization \
-    src/codegen/registry/funcs.rs \
-    'self.compile_func_legacy(&impl_method)' \
-    1
+# The cfg(test) adapters are intentionally excluded from the production
+# inventory above. Keep their count visible so a future edit cannot silently
+# broaden the exclusion to an untracked production file.
+test_legacy_refs="$(rg -n 'compile_func_legacy\(|compile_generic_func\(|legacy_body_file\(' \
+    "$ROOT_DIR/src/codegen/tests.rs" || true)"
+test_legacy_count=0
+if [ -n "$test_legacy_refs" ]; then
+    test_legacy_count="$(printf '%s\n' "$test_legacy_refs" | wc -l)"
+fi
+printf 'test_only_codegen_legacy_adapter_refs=%s excluded_from_production=1\n' "$test_legacy_count"
 
 # The resolved emitter deliberately leaves a failed/partial body for the
 # fifth pass to rebuild. Removing the top-level call without replacing this

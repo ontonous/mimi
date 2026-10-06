@@ -45,6 +45,367 @@ fn node_meta_ids(program: &CheckedProgram) -> std::collections::BTreeSet<String>
 }
 
 #[test]
+fn native_declaration_catalog_owns_typed_edges_and_abi_recipes() {
+    let source = r#"
+type InnerText = string
+type Text = InnerText
+newtype UserId = i64
+type Row { label: Text, count: i32 }
+trait Slots { func second() -> i32; func first() -> i32; }
+impl Slots for Row {
+    func first() -> i32 { self.count }
+    func second() -> i32 { self.count + 1 }
+}
+trait GenericSlots<T> {
+    func echo(value: T) -> T;
+    func echo_local<U>(value: U) -> U;
+}
+impl<T> GenericSlots<T> for Row {
+    func echo(value: T) -> T { value }
+    func echo_local<U>(value: U) -> U { value }
+}
+type Choice { Zed, Item(Text), Pair { left: i32, right: Text } }
+flow Worker<T> {
+    state Idle { count: i32 }
+    state Busy { value: T, count: i32 }
+    transition start(Idle, value: T, count: i32) -> Busy {
+        return Busy { value: value, count: count }
+    }
+    transition stop(Busy, value: T, count: i32) -> Idle {
+        return Idle { count: count }
+    }
+}
+actor Echo {
+    func echo(value: (Text, i32)) -> (Text, i32) { value }
+}
+func main() -> i32 { 0 }
+"#;
+    let program = crate::core::check_program(&parse(source)).expect("check declarations");
+    let declarations = program.native_declarations();
+    declarations
+        .validate_against(&program)
+        .expect("immutable native declaration catalog validates");
+
+    let aliases = declarations.closed_primitive_aliases(program.resolved_types());
+    assert_eq!(
+        aliases.get(&NodeId("type:Text".into())),
+        Some(&crate::core::PrimitiveType::String)
+    );
+    assert_eq!(
+        aliases.get(&NodeId("type:InnerText".into())),
+        Some(&crate::core::PrimitiveType::String)
+    );
+
+    let choice = declarations
+        .types
+        .get(&NodeId("type:Choice".into()))
+        .unwrap();
+    let crate::core::ir::NativeTypeDeclarationKind::Enum { variants } = &choice.kind else {
+        panic!("Choice must have an enum declaration");
+    };
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Zed", "Item", "Pair"],
+        "source declaration order is retained independently from native tags"
+    );
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.native_tag)
+            .collect::<Vec<_>>(),
+        vec![2, 0, 1],
+        "native enum tags retain the existing name-sorted ABI"
+    );
+    assert!(matches!(
+        choice.drop_recipe(),
+        crate::core::ir::NativeDropRecipe::Variants(ref recipes)
+            if matches!(&recipes[1].payload, crate::core::ir::NativeVariantPayloadRecipe::ClassifySingle(_))
+    ));
+
+    let slots = declarations
+        .traits
+        .get(&NodeId("trait:Slots".into()))
+        .expect("canonical trait vtable slots");
+    assert_eq!(
+        slots
+            .slots
+            .iter()
+            .map(|slot| (slot.ordinal, slot.name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "second"), (1, "first")],
+        "vtable ABI slots keep checker-owned trait declaration order",
+    );
+    let implementation = declarations
+        .impls
+        .values()
+        .find(|implementation| implementation.trait_name == "Slots")
+        .expect("canonical impl method bindings");
+    assert_eq!(implementation.trait_owner, slots.owner);
+    assert_eq!(implementation.methods.len(), 2);
+    assert_eq!(implementation.methods[0].name, "first");
+    assert_eq!(implementation.methods[0].trait_slots, vec![1]);
+    assert!(implementation.methods[0]
+        .symbol
+        .starts_with("__mimi_impl_method__impl_"));
+    assert_ne!(
+        implementation.methods[0].symbol, implementation.methods[1].symbol,
+        "different checked callables have distinct native bodies",
+    );
+    assert_eq!(
+        implementation.methods[0].signature.owner, implementation.methods[0].callable,
+        "impl body is linked by its exact canonical callable owner",
+    );
+    assert_eq!(implementation.methods[1].name, "second");
+    assert_eq!(implementation.methods[1].trait_slots, vec![0]);
+
+    let generic_impl = declarations
+        .impls
+        .values()
+        .find(|implementation| implementation.trait_name == "GenericSlots")
+        .expect("generic impl and method binders are canonical metadata");
+    assert_eq!(generic_impl.vtable_slots, vec![0, 1]);
+    assert!(generic_impl
+        .vtable_symbol
+        .starts_with("__mimi_vtable__impl_"));
+    assert_eq!(generic_impl.generics.len(), 1);
+    assert_eq!(generic_impl.generics[0].owner, generic_impl.owner);
+    assert_eq!(generic_impl.generics[0].name, "T");
+    assert_eq!(generic_impl.methods[0].ordinal, 0);
+    assert_eq!(generic_impl.methods[0].generics.len(), 0);
+    assert_eq!(generic_impl.methods[1].ordinal, 1);
+    assert_eq!(generic_impl.methods[1].generics.len(), 1);
+    let impl_binder = &generic_impl.generics[0].binder;
+    let method_binder = &generic_impl.methods[1].generics[0].binder;
+    assert_eq!(
+        generic_impl.methods[0].signature.generic_parameters,
+        vec![impl_binder.clone()]
+    );
+    assert_eq!(
+        generic_impl.methods[1].signature.generic_parameters,
+        vec![impl_binder.clone(), method_binder.clone()],
+        "the method ABI preserves ordered impl-then-method binder identity",
+    );
+    let mut forged_ordinal = declarations.clone();
+    forged_ordinal
+        .impls
+        .get_mut(&generic_impl.owner)
+        .unwrap()
+        .methods[1]
+        .ordinal = 0;
+    assert!(
+        forged_ordinal.validate_against(&program).is_err(),
+        "method ordinal drift must fail closed",
+    );
+    let mut forged_binder = declarations.clone();
+    forged_binder
+        .impls
+        .get_mut(&generic_impl.owner)
+        .unwrap()
+        .methods[1]
+        .generics[0]
+        .binder = impl_binder.clone();
+    assert!(
+        forged_binder.validate_against(&program).is_err(),
+        "generic binder identity drift must fail closed",
+    );
+    let mut forged_symbol = declarations.clone();
+    forged_symbol
+        .impls
+        .get_mut(&generic_impl.owner)
+        .unwrap()
+        .methods[0]
+        .symbol
+        .push_str("_forged");
+    assert!(
+        forged_symbol.validate_against(&program).is_err(),
+        "native method symbols must encode their checked owner and slot family",
+    );
+    let mut forged_vtable_symbol = declarations.clone();
+    forged_vtable_symbol
+        .impls
+        .get_mut(&generic_impl.owner)
+        .unwrap()
+        .vtable_symbol
+        .push_str("_forged");
+    assert!(
+        forged_vtable_symbol.validate_against(&program).is_err(),
+        "native vtable symbols must encode their checked owner and slot family",
+    );
+    let mut forged_vtable_slots = declarations.clone();
+    forged_vtable_slots
+        .impls
+        .get_mut(&generic_impl.owner)
+        .unwrap()
+        .vtable_slots
+        .reverse();
+    assert!(
+        forged_vtable_slots.validate_against(&program).is_err(),
+        "native vtable slot order must match its canonical trait family",
+    );
+
+    let mut forged = declarations.clone();
+    forged.impls.get_mut(&implementation.owner).unwrap().methods[0].trait_slots = vec![0];
+    assert!(
+        forged.validate_against(&program).is_err(),
+        "impl-to-trait slot drift must fail closed",
+    );
+
+    let flow = declarations
+        .flows
+        .get(&NodeId("flow:Worker".into()))
+        .expect("typed Flow declaration");
+    let busy = flow
+        .states
+        .iter()
+        .find(|state| state.name == "Busy")
+        .unwrap();
+    assert_eq!(busy.fields.len(), 2);
+    assert!(busy
+        .fields
+        .iter()
+        .all(|field| { program.resolved_field_type(&field.field) == Some(&field.ty) }));
+    assert_eq!(flow.generics.len(), 1);
+    let flow_binder = flow.generics[0].binder.clone();
+    assert!(program.node_meta().contains_key(&flow_binder));
+    assert!(matches!(
+        program.resolved_types().get(&busy.fields[0].ty),
+        Some(crate::core::ResolvedType::GenericParameter(binder)) if binder == &flow_binder
+    ));
+    let checked_start = program
+        .transition("Worker", "start", "Idle")
+        .expect("typed Flow transition");
+    let checked_signature = program
+        .resolved_signature(&checked_start.node_id)
+        .expect("canonical typed Flow transition signature");
+    assert_eq!(
+        checked_signature.generic_parameters,
+        vec![flow_binder.clone()]
+    );
+    assert!(matches!(
+        program.resolved_types().get(&checked_signature.parameters[1].ty),
+        Some(crate::core::ResolvedType::GenericParameter(binder)) if binder == &flow_binder
+    ));
+    let transition_body = program
+        .resolved_body(&checked_start.node_id)
+        .expect("canonical typed Flow transition body");
+    let [return_statement] = transition_body.root.statements.as_slice() else {
+        panic!("start transition should have one canonical return statement");
+    };
+    let crate::core::ResolvedStmtKind::Return {
+        value: Some(returned),
+        ..
+    } = &return_statement.kind
+    else {
+        panic!("start transition should return a typed state value");
+    };
+    let crate::core::ResolvedExprKind::Record { fields, .. } = &returned.kind else {
+        panic!("start transition result should be a canonical record construction");
+    };
+    let value_field = fields
+        .iter()
+        .find(|field| field.field == busy.fields[0].field)
+        .expect("canonical Busy.value field construction");
+    assert_eq!(
+        value_field.value.ty, checked_signature.parameters[1].ty,
+        "Flow state member type must instantiate to the owning transition's generic binder"
+    );
+    let native_start = flow
+        .transitions
+        .iter()
+        .find(|transition| transition.event == "start")
+        .expect("native Flow transition schema");
+    assert_eq!(native_start.owner, checked_start.node_id);
+    assert_eq!(native_start.source_name, "Idle");
+    assert_eq!(native_start.target_names, vec!["Busy".to_owned()]);
+    assert_eq!(&native_start.signature, checked_signature);
+    assert_eq!(
+        native_start
+            .signature
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["self", "value", "count"],
+        "the typed transition header preserves source parameter order"
+    );
+    assert!(
+        !native_start.is_fallback && !native_start.is_ffi_pinned && !native_start.silent_transition
+    );
+
+    let canonical_tables = declarations.build_transition_tables(program.resolved_types());
+    let checked_tables = program.build_transition_tables();
+    assert_eq!(canonical_tables.resolved, checked_tables.resolved);
+    assert_eq!(canonical_tables.fallbacks, checked_tables.fallbacks);
+    assert_eq!(canonical_tables.pinned, checked_tables.pinned);
+    assert_eq!(canonical_tables.param_arity, checked_tables.param_arity);
+    assert_eq!(canonical_tables.param_lists, checked_tables.param_lists);
+    assert_eq!(canonical_tables.by_flow, checked_tables.by_flow);
+    assert_eq!(canonical_tables.by_event, checked_tables.by_event);
+
+    let echo_owner = NodeId("actor:Echo".into());
+    assert_eq!(declarations.actor_order, vec![echo_owner.clone()]);
+    let echo = declarations
+        .actors
+        .get(&echo_owner)
+        .expect("checker-owned Actor schema");
+    assert_eq!(echo.owner, echo_owner);
+    assert_eq!(echo.qualified_name, "Echo");
+    assert_eq!(echo.descriptor.methods.len(), 1);
+    let echo_parameter = &echo.descriptor.methods[0].signature.parameters[1];
+    let Some(crate::core::ResolvedType::Tuple(echo_fields)) =
+        program.resolved_types().get(&echo_parameter.ty)
+    else {
+        panic!("Actor mailbox parameter should retain its typed product shape");
+    };
+    assert!(matches!(
+        program.resolved_types().get(&echo_fields[0]),
+        Some(crate::core::ResolvedType::Primitive(
+            crate::core::PrimitiveType::String
+        ))
+    ));
+    assert!(matches!(
+        program.resolved_types().get(&echo_fields[1]),
+        Some(crate::core::ResolvedType::Primitive(
+            crate::core::PrimitiveType::I32
+        ))
+    ));
+
+    let mut forged = declarations.clone();
+    let crate::core::ir::NativeTypeDeclarationKind::Enum { variants } = &mut forged
+        .types
+        .get_mut(&NodeId("type:Choice".into()))
+        .unwrap()
+        .kind
+    else {
+        unreachable!();
+    };
+    variants[0].native_tag = 0;
+    assert!(forged.validate_against(&program).is_err());
+
+    let mut forged_flow = declarations.clone();
+    forged_flow
+        .flows
+        .get_mut(&NodeId("flow:Worker".into()))
+        .unwrap()
+        .transitions[0]
+        .target_names[0] = "Idle".into();
+    assert!(forged_flow.validate_against(&program).is_err());
+
+    let mut forged_actor = declarations.clone();
+    forged_actor
+        .actors
+        .get_mut(&echo_owner)
+        .unwrap()
+        .descriptor
+        .methods[0]
+        .name = "forged".into();
+    assert!(forged_actor.validate_against(&program).is_err());
+}
+
+#[test]
 fn checked_program_persists_zonked_function_signatures() {
     let file = parse("func identity(value: i32) -> i32 { value }");
     let program = crate::core::check_program(&file).expect("check");
@@ -852,6 +1213,56 @@ func main() -> i32 { 0 }
 }
 
 #[test]
+fn trait_methods_have_canonical_typed_abi_and_stable_owners() {
+    let file = parse(
+        r#"
+trait Store<T> {
+    func put<U>(value: T, token: U) -> T
+}
+func main() -> i32 { 0 }
+"#,
+    );
+    let program = crate::core::check_program(&file).expect("check");
+    let trait_def = program.trait_def("Store").expect("Store trait");
+    assert_eq!(trait_def.methods, vec!["put"]);
+    assert_eq!(trait_def.method_owners.len(), 1);
+    let owner = &trait_def.method_owners[0];
+    let signature = program
+        .resolved_trait_signature(owner)
+        .expect("canonical trait method ABI");
+    assert_eq!(&signature.owner, owner);
+    assert_eq!(signature.generic_parameters.len(), 2);
+    assert_eq!(signature.parameters.len(), 2);
+    let types = program.resolved_types();
+    assert_eq!(
+        types.get(&signature.parameters[0].ty),
+        Some(&crate::core::ResolvedType::GenericParameter(
+            signature.generic_parameters[0].clone()
+        ))
+    );
+    assert_eq!(
+        types.get(&signature.parameters[1].ty),
+        Some(&crate::core::ResolvedType::GenericParameter(
+            signature.generic_parameters[1].clone()
+        ))
+    );
+    assert_eq!(
+        types.get(&signature.result),
+        Some(&crate::core::ResolvedType::GenericParameter(
+            signature.generic_parameters[0].clone()
+        ))
+    );
+    let native_trait = program
+        .native_declarations()
+        .traits
+        .get(&trait_def.node_id)
+        .expect("native trait declaration");
+    assert_eq!(native_trait.slots.len(), 1);
+    assert_eq!(native_trait.slots[0].method_owner, *owner);
+    assert_eq!(&native_trait.slots[0].signature, signature);
+}
+
+#[test]
 fn consumers_install_ownership_ledger_owners() {
     let file = parse(
         r#"
@@ -979,6 +1390,16 @@ fn ownership_summary_flags_maybe_consumed_branch_merge() {
         loans: Vec::new(),
         map_root_actions: Vec::new(),
         map_root_new_attempts: BTreeSet::new(),
+        map_any_owner_actions: Vec::new(),
+        map_any_owner_new_attempts: BTreeSet::new(),
+        ordinary_map_owner_lifecycle_v1_actions: Vec::new(),
+        ordinary_map_owner_lifecycle_v1_new_attempts: BTreeSet::new(),
+        ordinary_map_owner_lifecycle_v1_operation_attempts: BTreeSet::new(),
+        ordinary_map_owned_get_i32_string_v1_actions: Vec::new(),
+        ordinary_map_owned_get_i32_string_v1_new_attempts: BTreeSet::new(),
+        ordinary_map_owned_get_i32_string_v1_operation_attempts: BTreeSet::new(),
+        ordinary_map_owned_get_i32_string_v1_cfg_receipt: None,
+        managed_any_cfg_receipt: None,
         in_states: std::collections::BTreeMap::new(),
         out_states: std::collections::BTreeMap::new(),
     };
@@ -1847,10 +2268,17 @@ fn actor_method_signatures_are_materialised() {
 actor Worker {
     func run(x: i32) -> i32 { x }
 }
-func main() -> i32 { 0 }
+func main() -> i32 {
+    let worker = Worker.spawn()
+    worker.run(1)
+}
 "#,
     );
     let program = crate::core::check_program(&file).expect("check");
+    assert!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program).scalar_actor,
+        "the signature query must be exercised with an admitted canonical Actor graph"
+    );
     let sig = program
         .actor_method_signature("Worker", "run")
         .expect("run");
@@ -1869,7 +2297,10 @@ func main() -> i32 { 0 }
         Some(vec![("x".into(), "i32".into())])
     );
     let mut verifier = crate::verifier::Verifier::new().expect("z3");
-    let _ = verifier.verify_checked(&program);
+    assert!(
+        verifier.verify_checked(&program).is_empty(),
+        "a NoContracts Actor graph remains neutral after canonical verification"
+    );
     assert_eq!(
         verifier.checked_actor_method_signature("Worker", "run"),
         Some((1, "i32".into()))
@@ -3156,8 +3587,12 @@ flow Worker<T> {
     @mailbox(depth = 8)
     state Idle { value: T, count: i32 }
     state Busy { value: T, count: i32 }
-    transition start(Idle, left: i32, right: i32) -> Busy { return Busy {} }
-    transition stop(Busy, left: i32, right: i32) -> Idle { return Idle {} }
+    transition start(Idle, value: T, count: i32) -> Busy {
+        return Busy { value: value, count: count }
+    }
+    transition stop(Busy, value: T, count: i32) -> Idle {
+        return Idle { value: value, count: count }
+    }
 }
 func catalog<T: Clone, U: Eq>(first: Pair<T, U>, second: Pair<T, U>) -> i32 where T: Clone, U: Eq {
     let pair = Pair { left: first.left, right: second.right }

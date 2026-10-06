@@ -4049,14 +4049,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok((function, ret_type))
     }
 
-    /// Legacy surface-AST function body compiler (fifth pass).
+    /// Test-only legacy surface-AST function body compiler (fifth pass).
     ///
-    /// Called by `compile_file_inner` for functions NOT compiled by the resolved
-    /// native emitter. The skip guard (`count_basic_blocks != 0`) prevents
+    /// Called by the cfg(test) `compile_file_inner` adapter for functions NOT
+    /// compiled by the resolved native emitter. The skip guard
+    /// (`count_basic_blocks != 0`) prevents
     /// double-emission of functions already handled by the resolved emitter.
     ///
     /// Permanent ineligible body classes: capturing lambdas, generics,
     /// async, extern ABI wrappers, view/mutate borrow params (non-self).
+    #[cfg(test)]
     pub(super) fn compile_func_legacy(&mut self, func: &FuncDef) -> MimiResult<()> {
         #[cfg(test)]
         crate::core::CheckedProgram::record_test_legacy_codegen_function_call(&func.name);
@@ -4127,6 +4129,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.current_legacy_fn = saved_current_fn;
     }
 
+    #[cfg(test)]
     fn compile_func_legacy_inner(&mut self, func: &FuncDef) -> MimiResult<()> {
         // 0.35.24 (deep-eval): snapshot the caller's per-function variable type
         // tracking before the fresh-start clears below. When a caller body
@@ -4148,6 +4151,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         result
     }
 
+    #[cfg(test)]
     fn compile_func_legacy_clean(&mut self, func: &FuncDef) -> MimiResult<()> {
         // Per-function variable type tracking must start fresh so that parameters
         // with common names (e.g. `xs`) don't inherit types from other functions.

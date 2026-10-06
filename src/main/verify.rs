@@ -89,21 +89,20 @@ pub(crate) fn verify(
         }
     };
 
-    // `run` and `build` always merge the standard prelude before checking,
-    // while legacy `verify` historically omits it when no extern block is
-    // present. A complete MapRoot candidate has a canonical default route,
-    // so give that verifier route the same checked source graph (and MIR
-    // digest) as those execution consumers. Ordinary compatibility verifier
-    // inputs keep the historical prelude boundary above.
-    if !has_extern_block
-        && mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
-            .map_root
-            .is_candidate()
-    {
+    // `run`, `build`, and `mimi mir` include the standard prelude before
+    // constructing their checked graph. Legacy `verify` historically omits
+    // it when no extern block is present, but the Actor materializer's MIR
+    // TypeCatalog is derived from the complete CheckedProgram type table
+    // even while prelude callables themselves are excluded by source ID.
+    // Give default Actor and MapRoot verifier routes the same checked graph
+    // (and receipt digest) as those shared consumers; compatibility verifier
+    // inputs keep the historical prelude boundary.
+    let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked_program);
+    if !has_extern_block && admission.has_candidate() {
         loader::merge_prelude_into(&mut merged_file);
         checked_program = mimi::core::check_program(&merged_file).map_err(|diags| {
             format!(
-                "typecheck failed after loading the canonical MapRoot prelude ({} diagnostics): {diags:?}",
+                "typecheck failed after loading the canonical prelude ({} diagnostics): {diags:?}",
                 diags.len()
             )
         })?;
@@ -111,6 +110,7 @@ pub(crate) fn verify(
 
     // P1-24: compute source hash for ProofArtifact tamper detection.
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let source_hash_for_provenance = source_hash.clone();
 
     let mut default_legacy_reason = None;
     let canonical = if mir {
@@ -133,7 +133,7 @@ pub(crate) fn verify(
             &checked_program,
             &merged_file,
         ) {
-            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(canonical),
+            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(*canonical),
             crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
                 crate::canonical_dispatch::report_legacy_route(reason);
                 default_legacy_reason = Some(reason);
@@ -182,19 +182,35 @@ pub(crate) fn verify(
     };
 
     // The canonical scalar FFI verifier proves call-site preconditions from
-    // the shared MIR receipts. A program containing an exported C body stays
-    // on the explicit compatibility route because MIR has no export-wrapper
-    // ABI receipt; preserve the scalar FFI obligations through their retained
-    // verifier owner on that route rather than silently skipping them.
+    // shared MIR receipts. A program containing an exported C body stays on
+    // the explicit compatibility route because MIR has no export-wrapper ABI
+    // receipt. Keep the general verifier's results while reporting the FFI
+    // obligation's separate fail-closed boundary.
     if default_legacy_reason
         == Some(crate::canonical_dispatch::LegacyRouteReason::ExportedAbiBodyCompatibility)
         || (dump_z3
             && mimi::core::mir::exported_abi_body_boundary_reason(&checked_program).is_some())
     {
-        results.extend(mimi::verifier::verify_ffi_checked_with_source_hash(
+        match mimi::verifier::verify_ffi_checked_with_source_hash(
             &checked_program,
             blake3::hash(source.as_bytes()).to_hex().to_string(),
-        )?);
+        ) {
+            Ok(ffi_results) => results.extend(ffi_results),
+            Err(message) => results.push(mimi::verifier::VerificationResult {
+                func_name: "extern call-site obligations".into(),
+                status: if message.starts_with("TOOL-RESOLUTION-001:") {
+                    mimi::verifier::VerifStatus::InfrastructureError
+                } else {
+                    mimi::verifier::VerifStatus::NotInTrustedSubset
+                },
+                message: format!("FFI call-site verification failed closed: {message}"),
+                diagnostic: None,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: Some(mimi::verifier::TrustedSubsetDomain::Contract),
+            }),
+        }
     }
 
     // MIR proof results keep canonical subject identities. Source positions
@@ -237,12 +253,23 @@ pub(crate) fn verify(
     // print anything for the compatibility verifier path.
     if std::env::var_os("MIMI_VERBOSE").is_some() {
         if let Some(receipt) = canonical_receipt.as_ref() {
-            if let Some(artifact) = results.iter().find_map(|result| {
+            // A no-contract canonical program legitimately has no proof
+            // artifact, but it still crossed the same Checker/MIR route and
+            // must expose that receipt for CLI evidence and backend parity.
+            // When an artifact exists, retain its immutable source hash;
+            // otherwise the already computed source hash is the only valid
+            // provenance value (never synthesize a second route identity).
+            let artifact_source_hash = results.iter().find_map(|result| {
                 result
                     .artifact
                     .as_ref()
                     .filter(|artifact| artifact.engine == mimi::verifier::ProofArtifact::ENGINE_MIR)
-            }) {
+                    .map(|artifact| artifact.source_hash.clone())
+            });
+            let provenance_source_hash = artifact_source_hash
+                .as_deref()
+                .unwrap_or(&source_hash_for_provenance);
+            {
                 eprintln!(
                     "canonical MIR verifier provenance: profile={} mir_digest={} type_desc_digest={} abi_digest={} ffi_digest={} ownership_digest={} flow_transition_digest={} source_hash={}",
                     receipt.profile,
@@ -252,7 +279,7 @@ pub(crate) fn verify(
                     receipt.ffi_digest,
                     receipt.ownership_digest,
                     receipt.flow_transition_digest,
-                    artifact.source_hash,
+                    provenance_source_hash,
                 );
             }
         }

@@ -14,7 +14,12 @@
 use std::collections::HashSet;
 
 use crate::core::mir::reference::MirProgram;
-use crate::core::CheckedProgram;
+use crate::core::{
+    CheckedProgram, OrdinaryMapOwnedGetI32StringV1Action, OrdinaryMapOwnedGetI32StringV1ActionKind,
+    OrdinaryMapOwnedGetI32StringV1Attempt, OrdinaryMapOwnedGetI32StringV1AttemptKind,
+    OrdinaryMapOwnedGetI32StringV1ProfileVersion, OrdinaryMapOwnerLifecycleActionKind,
+    OrdinaryMapOwnerLifecycleAttemptKind, OrdinaryMapOwnerLifecycleProfileVersion,
+};
 
 use super::{
     classify_copy_option_i32_variant_admission, classify_copy_option_variant_admission,
@@ -37,14 +42,14 @@ use super::{
     contains_option_nested_tuple_variant_candidate, contains_option_string_variant_candidate,
     contains_s8_flow_transition_candidate, contains_scalar_collection_candidate,
     contains_scalar_collection_operation_candidate, contains_scalar_generic_identity_candidate,
-    contains_session_channel_candidate, is_exact_s8_flow_transition,
-    is_flow_failure_retry_candidate, is_s8_flow_transition_candidate, scalar_ffi_boundary_reason,
-    CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission, FlatCopyRecordAdmission,
-    GenericOptionProjectionAdmission, GenericOptionProjectionFallbackAdmission,
-    GenericResultProjectionAdmission, GenericResultProjectionFallbackAdmission,
-    GenericVariantPredicateAdmission, ManagedResultCallAdmission,
-    OptionNestedTupleVariantAdmission, OptionStringVariantAdmission, ScalarCollectionAdmission,
-    ScalarGenericIdentityAdmission, SessionChannelAdmission,
+    contains_session_channel_candidate, is_closed_silent_local_flow_candidate,
+    is_exact_s8_flow_transition, is_flow_failure_retry_candidate, is_s8_flow_transition_candidate,
+    scalar_ffi_boundary_reason, CopyOptionI32VariantAdmission, CopyResultI32VariantAdmission,
+    FlatCopyRecordAdmission, GenericOptionProjectionAdmission,
+    GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
+    GenericResultProjectionFallbackAdmission, GenericVariantPredicateAdmission,
+    ManagedResultCallAdmission, OptionNestedTupleVariantAdmission, OptionStringVariantAdmission,
+    ScalarCollectionAdmission, ScalarGenericIdentityAdmission, SessionChannelAdmission,
 };
 
 #[cfg(test)]
@@ -68,7 +73,13 @@ pub(crate) fn test_route_materialization_count() -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalMirRouteProfile {
     MapRoot,
+    MapAnyOwnerV1,
+    OrdinaryMapOwnerLifecycleI32StringV1,
+    OrdinaryMapOwnedGetI32StringV1,
+    ScalarExport,
     ScalarFfi,
+    ScalarNested,
+    ScalarActor,
     ScalarGenericIdentityI32,
     ScalarGenericIdentityI64,
     ScalarCollection,
@@ -95,7 +106,15 @@ impl CanonicalMirRouteProfile {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::MapRoot => MAP_ROOT_ISLAND,
+            Self::MapAnyOwnerV1 => MAP_ANY_OWNER_V1_ISLAND,
+            Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
+                ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
+            }
+            Self::OrdinaryMapOwnedGetI32StringV1 => ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND,
+            Self::ScalarExport => SCALAR_EXPORT_ISLAND,
             Self::ScalarFfi => "scalar-ffi-v1",
+            Self::ScalarNested => SCALAR_NESTED_ISLAND,
+            Self::ScalarActor => SCALAR_ACTOR_ISLAND,
             Self::ScalarGenericIdentityI32 => super::SCALAR_GENERIC_IDENTITY_I32_ISLAND,
             Self::ScalarGenericIdentityI64 => super::SCALAR_GENERIC_IDENTITY_I64_ISLAND,
             Self::ScalarCollection => super::SCALAR_COLLECTION_ISLAND,
@@ -133,7 +152,17 @@ impl CanonicalMirRouteProfile {
     pub const fn is_admitted(self, admission: CanonicalMirRouteAdmission) -> bool {
         match self {
             Self::MapRoot => admission.map_root_complete(),
+            Self::MapAnyOwnerV1 => admission.map_any_owner_complete(),
+            Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
+                admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+            }
+            Self::OrdinaryMapOwnedGetI32StringV1 => {
+                admission.ordinary_map_owned_get_i32_string_v1_complete()
+            }
+            Self::ScalarExport => admission.scalar_export,
             Self::ScalarFfi => admission.scalar_ffi,
+            Self::ScalarNested => admission.scalar_nested,
+            Self::ScalarActor => admission.scalar_actor,
             Self::ScalarGenericIdentityI32 => admission.scalar_generic_identity_i32_complete(),
             Self::ScalarGenericIdentityI64 => admission.scalar_generic_identity_i64_complete(),
             Self::ScalarCollection => admission.collection_complete(),
@@ -166,7 +195,17 @@ impl CanonicalMirRouteProfile {
     pub const fn is_materialized(self, route: &CanonicalMirRouteMaterialization) -> bool {
         match self {
             Self::MapRoot => route.materialized_map_root_candidate,
+            Self::MapAnyOwnerV1 => route.materialized_map_any_owner_candidate,
+            Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
+                route.materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate
+            }
+            Self::OrdinaryMapOwnedGetI32StringV1 => {
+                route.materialized_ordinary_map_owned_get_i32_string_v1_candidate
+            }
+            Self::ScalarExport => route.materialized_scalar_export_candidate,
             Self::ScalarFfi => route.materialized_scalar_ffi_candidate,
+            Self::ScalarNested => route.materialized_scalar_nested_candidate,
+            Self::ScalarActor => route.materialized_scalar_actor_candidate,
             Self::ScalarGenericIdentityI32 => {
                 route.materialized_scalar_generic_identity_i32_candidate
             }
@@ -216,10 +255,105 @@ pub enum MapRootAdmission {
     CompleteCoverage,
 }
 
+/// Finite scalar Actor graph with typed state, mailbox and lexical capture receipts.
+pub const SCALAR_ACTOR_ISLAND: &str = "scalar-actor-domain-v1";
+
+pub const SCALAR_EXPORT_ISLAND: &str = "scalar-export-v1";
+
+pub const SCALAR_NESTED_ISLAND: &str = "scalar-nested-callable-v1";
+
 pub const MAP_ROOT_ISLAND: &str = "map-root-v1";
 
 impl MapRootAdmission {
     pub const fn is_candidate(self) -> bool {
+        !matches!(self, Self::OutsideProfile)
+    }
+
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::CompleteCoverage)
+    }
+}
+
+/// Checker-owned admission for the separately versioned MapAnyOwner v1
+/// lifecycle. Its coverage is calculated from the independent MapAnyOwner
+/// ledger; legacy MapRoot receipts can only make a missing v1 ledger fail
+/// closed and can never admit this profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapAnyOwnerAdmission {
+    OutsideProfile,
+    IncompleteCoverage,
+    CompleteCoverage,
+}
+
+pub const MAP_ANY_OWNER_V1_ISLAND: &str = "map-any-owner-v1";
+
+impl MapAnyOwnerAdmission {
+    pub const fn is_candidate(self) -> bool {
+        !matches!(self, Self::OutsideProfile)
+    }
+
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::CompleteCoverage)
+    }
+}
+
+/// Checker-owned admission for the independently versioned ordinary Map
+/// owner lifecycle. An action receipt is required before this profile can be
+/// a candidate: constructor or unsupported-operation attempts alone do not
+/// authorize the ordinary Map TypeDesc or route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrdinaryMapOwnerLifecycleI32StringV1Admission {
+    OutsideProfile,
+    IncompleteCoverage,
+    CompleteCoverage,
+    /// The ordinary source ledger is complete, but every attempt is already
+    /// represented by the selected, older MapAnyOwner v1 identity.
+    CoveredByMapAnyOwnerV1,
+}
+
+pub const ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND: &str =
+    "ordinary-map-owner-lifecycle-i32-string-v1";
+
+impl OrdinaryMapOwnerLifecycleI32StringV1Admission {
+    /// Only a complete, independently selected action ledger authorizes this
+    /// profile. A complete ledger already covered by MapAnyOwner remains a
+    /// source signal but does not authorize a second TypeDesc identity.
+    pub const fn is_candidate(self) -> bool {
+        self.is_complete()
+    }
+
+    pub const fn has_profile_signal(self) -> bool {
+        !matches!(self, Self::OutsideProfile)
+    }
+
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::CompleteCoverage)
+    }
+}
+
+/// Checker-owned admission for the independent owned-result typed-Get Map
+/// profile. Its receipt includes the complete ordinary owner lifecycle plus
+/// typed getters, but the profile identity and coverage ledger are wholly
+/// separate from the older ordinary lifecycle, MapRoot and MapAnyOwner v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrdinaryMapOwnedGetI32StringV1Admission {
+    OutsideProfile,
+    IncompleteCoverage,
+    CompleteCoverage,
+}
+
+pub const ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND: &str =
+    "ordinary-map-owned-get-i32-string-v1";
+
+impl OrdinaryMapOwnedGetI32StringV1Admission {
+    /// A complete independent typed-Get ledger is the only authority for this
+    /// identity. Incomplete coverage remains visible for compatibility and
+    /// direct-route failure decisions but is never a candidate.
+    pub const fn is_candidate(self) -> bool {
+        self.is_complete()
+    }
+
+    pub const fn has_profile_signal(self) -> bool {
         !matches!(self, Self::OutsideProfile)
     }
 
@@ -322,7 +456,13 @@ impl CanonicalMirRouteMaterializationError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalMirRouteAdmission {
     pub map_root: MapRootAdmission,
+    pub map_any_owner: MapAnyOwnerAdmission,
+    pub ordinary_map_owner_lifecycle_i32_string_v1: OrdinaryMapOwnerLifecycleI32StringV1Admission,
+    pub ordinary_map_owned_get_i32_string_v1: OrdinaryMapOwnedGetI32StringV1Admission,
+    pub scalar_export: bool,
     pub scalar_ffi: bool,
+    pub scalar_nested: bool,
+    pub scalar_actor: bool,
     pub scalar_generic_identity_i32: ScalarGenericIdentityAdmission,
     pub scalar_generic_identity_i64: ScalarGenericIdentityAdmission,
     pub collection: ScalarCollectionAdmission,
@@ -348,7 +488,15 @@ pub struct CanonicalMirRouteAdmission {
 impl CanonicalMirRouteAdmission {
     pub const fn has_candidate(self) -> bool {
         self.map_root.is_candidate()
+            || self.map_any_owner.is_candidate()
+            || self
+                .ordinary_map_owner_lifecycle_i32_string_v1
+                .is_candidate()
+            || self.ordinary_map_owned_get_i32_string_v1.is_candidate()
+            || self.scalar_export
             || self.scalar_ffi
+            || self.scalar_nested
+            || self.scalar_actor
             || self.scalar_generic_identity_i32_complete()
             || self.scalar_generic_identity_i64_complete()
             || !matches!(self.collection, ScalarCollectionAdmission::OutsideProfile)
@@ -416,6 +564,19 @@ impl CanonicalMirRouteAdmission {
 
     pub const fn map_root_complete(self) -> bool {
         self.map_root.is_complete()
+    }
+
+    pub const fn map_any_owner_complete(self) -> bool {
+        self.map_any_owner.is_complete()
+    }
+
+    pub const fn ordinary_map_owner_lifecycle_i32_string_v1_complete(self) -> bool {
+        self.ordinary_map_owner_lifecycle_i32_string_v1
+            .is_complete()
+    }
+
+    pub const fn ordinary_map_owned_get_i32_string_v1_complete(self) -> bool {
+        self.ordinary_map_owned_get_i32_string_v1.is_complete()
     }
 
     pub const fn scalar_generic_identity_i32_complete(self) -> bool {
@@ -545,7 +706,13 @@ pub struct CanonicalMirRouteMaterialization {
     pub program: MirProgram,
     pub admission: CanonicalMirRouteAdmission,
     pub materialized_map_root_candidate: bool,
+    pub materialized_map_any_owner_candidate: bool,
+    pub materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate: bool,
+    pub materialized_ordinary_map_owned_get_i32_string_v1_candidate: bool,
+    pub materialized_scalar_export_candidate: bool,
     pub materialized_scalar_ffi_candidate: bool,
+    pub materialized_scalar_nested_candidate: bool,
+    pub materialized_scalar_actor_candidate: bool,
     pub materialized_scalar_generic_identity_i32_candidate: bool,
     pub materialized_scalar_generic_identity_i64_candidate: bool,
     pub materialized_collection_candidate: bool,
@@ -574,13 +741,148 @@ pub struct CanonicalMirRouteMaterialization {
     pub materialized_session_candidate: bool,
 }
 
+/// The map-specific profile slice needed while constructing synthetic type
+/// descriptors. This deliberately excludes whole-route admission: Actor
+/// admission itself materializes a type catalog, so calling the full selector
+/// from the catalog would recursively re-enter Actor materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MapOwnerProfileAdmission {
+    pub(super) map_root: MapRootAdmission,
+    pub(super) map_any_owner: MapAnyOwnerAdmission,
+    pub(super) ordinary_map_owner_lifecycle_i32_string_v1:
+        OrdinaryMapOwnerLifecycleI32StringV1Admission,
+    pub(super) ordinary_map_owned_get_i32_string_v1: OrdinaryMapOwnedGetI32StringV1Admission,
+}
+
+impl MapOwnerProfileAdmission {
+    pub(super) const fn map_any_owner_complete(self) -> bool {
+        self.map_any_owner.is_complete()
+    }
+
+    pub(super) const fn ordinary_map_owner_lifecycle_i32_string_v1_complete(self) -> bool {
+        self.ordinary_map_owner_lifecycle_i32_string_v1
+            .is_complete()
+    }
+}
+
+/// Classify only the checker-owned Map profile facts consumed by TypeDesc
+/// construction. Keep this independent from Actor and every backend route
+/// predicate so type materialization remains a terminal dependency.
+pub(super) fn classify_map_owner_profile_admission(
+    program: &CheckedProgram,
+) -> MapOwnerProfileAdmission {
+    let closure_source_plan =
+        super::closure_callable::CheckedClosureCallablePlanV1::derive_source(program, None).ok();
+    classify_map_owner_profile_admission_with_closure_source(program, closure_source_plan.as_ref())
+}
+
+/// TypeCatalog construction derives the source-only closure plan before
+/// materializing its descriptors. Accept that exact plan here so Map route
+/// admission and TypeDesc evidence consume the same callable-local receipts
+/// without making TypeCatalog a dependency of its own classifier.
+pub(super) fn classify_map_owner_profile_admission_with_closure_source(
+    program: &CheckedProgram,
+    closure_source_plan: Option<&super::closure_callable::CheckedClosureCallablePlanV1>,
+) -> MapOwnerProfileAdmission {
+    let ordinary_map_owned_get_i32_string_v1 =
+        classify_ordinary_map_owned_get_i32_string_v1_admission(program, closure_source_plan);
+    let ordinary_map_owner_lifecycle_i32_string_v1 =
+        classify_ordinary_map_owner_lifecycle_i32_string_v1_admission(program);
+    let legacy_map_root = classify_map_root_admission(program);
+    let mut map_any_owner = classify_map_any_owner_admission(program, legacy_map_root);
+    // A complete persistent ordinary-Map ledger with a borrowed dynamic
+    // String key is a separate applicable owner profile. Older MapRoot
+    // recognition can still make the compatibility-derived MapAny status
+    // look incomplete when no MapAny action exists; that legacy observation
+    // must not suppress the exact ordinary profile. Do not apply this rule
+    // when any MapAny action or checked closure candidate exists: those are
+    // independent source signals and remain hard boundaries unless receipted.
+    if map_any_owner == MapAnyOwnerAdmission::IncompleteCoverage
+        && ordinary_map_owner_lifecycle_i32_string_v1.is_complete()
+        && !program
+            .resource_analyses()
+            .values()
+            .any(|analysis| !analysis.map_any_owner_actions.is_empty())
+        && !super::closure_callable::CheckedClosureCallablePlanV1::has_source_candidate(program)
+        && ordinary_map_owner_has_direct_string_key_local(program)
+    {
+        map_any_owner = MapAnyOwnerAdmission::OutsideProfile;
+    }
+    // Each admitted owner profile owns its route decision. The ordinary Map
+    // owner has a separate persistent-root contract and identity, so its
+    // checker receipt must never fall through to the overlapping MapRoot or
+    // MapAnyOwner representations.
+    let ordinary_attempts_fully_covered_by_map_any_owner_v1 =
+        ordinary_map_attempts_fully_covered_by_map_any_owner_v1(program);
+    let (map_root, map_any_owner, ordinary_map_owner_lifecycle_i32_string_v1) =
+        if ordinary_map_owned_get_i32_string_v1.has_profile_signal() {
+            // Typed owned-get is a separate profile over the ordinary Map
+            // lifecycle. Any typed-get signal owns arbitration even when its
+            // receipt is incomplete; older lifecycle/Map identities cannot
+            // claim the source or authorize the typed getter by implication.
+            // However, an independently recognized incomplete MapAnyOwner
+            // ledger is itself a hard source signal. Do not erase that
+            // signal merely because typed-get arbitration also observed the
+            // source; public callers must reject the whole mixed candidate
+            // before considering a compatibility route.
+            (
+                MapRootAdmission::OutsideProfile,
+                if ordinary_map_owned_get_i32_string_v1
+                    == OrdinaryMapOwnedGetI32StringV1Admission::IncompleteCoverage
+                    && map_any_owner == MapAnyOwnerAdmission::IncompleteCoverage
+                {
+                    MapAnyOwnerAdmission::IncompleteCoverage
+                } else {
+                    MapAnyOwnerAdmission::OutsideProfile
+                },
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
+            )
+        } else {
+            let (map_root, map_any_owner) = select_map_owner_admissions(
+                legacy_map_root,
+                map_any_owner,
+                ordinary_map_owner_lifecycle_i32_string_v1,
+                ordinary_attempts_fully_covered_by_map_any_owner_v1,
+            );
+            // When the complete MapAnyOwner ledger covers every ordinary
+            // lifecycle attempt, it owns the one materialized identity for
+            // those same source roots and operations. Preserve the separate
+            // ordinary source signal as covered, while independent ordinary
+            // roots remain visible and block composition.
+            let selected_ordinary_map_owner = if map_any_owner
+                == MapAnyOwnerAdmission::CompleteCoverage
+                && ordinary_map_owner_lifecycle_i32_string_v1.is_complete()
+                && ordinary_attempts_fully_covered_by_map_any_owner_v1
+            {
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::CoveredByMapAnyOwnerV1
+            } else {
+                ordinary_map_owner_lifecycle_i32_string_v1
+            };
+            (map_root, map_any_owner, selected_ordinary_map_owner)
+        };
+    MapOwnerProfileAdmission {
+        map_root,
+        map_any_owner,
+        ordinary_map_owner_lifecycle_i32_string_v1: ordinary_map_owner_lifecycle_i32_string_v1,
+        ordinary_map_owned_get_i32_string_v1,
+    }
+}
+
 /// Classify route eligibility once from checker-owned typed facts.
 pub fn classify_canonical_mir_route_admission(
     program: &CheckedProgram,
 ) -> CanonicalMirRouteAdmission {
+    let map_owner = classify_map_owner_profile_admission(program);
     CanonicalMirRouteAdmission {
-        map_root: classify_map_root_admission(program),
+        map_root: map_owner.map_root,
+        map_any_owner: map_owner.map_any_owner,
+        ordinary_map_owner_lifecycle_i32_string_v1: map_owner
+            .ordinary_map_owner_lifecycle_i32_string_v1,
+        ordinary_map_owned_get_i32_string_v1: map_owner.ordinary_map_owned_get_i32_string_v1,
+        scalar_export: super::is_scalar_export_candidate(program),
         scalar_ffi: super::is_scalar_ffi_candidate(program),
+        scalar_nested: super::nested_callable::is_scalar_nested_candidate(program),
+        scalar_actor: classify_scalar_actor_admission(program),
         scalar_generic_identity_i32: classify_scalar_generic_identity_admission(program),
         scalar_generic_identity_i64: classify_scalar_generic_identity_i64_admission(program),
         collection: classify_scalar_collection_admission(program),
@@ -617,6 +919,396 @@ pub fn classify_canonical_mir_route_admission(
     }
 }
 
+fn classify_ordinary_map_owned_get_i32_string_v1_admission(
+    program: &CheckedProgram,
+    closure_source_plan: Option<&super::closure_callable::CheckedClosureCallablePlanV1>,
+) -> OrdinaryMapOwnedGetI32StringV1Admission {
+    use OrdinaryMapOwnedGetI32StringV1ActionKind as Action;
+    use OrdinaryMapOwnedGetI32StringV1AttemptKind as Attempt;
+
+    let mut actions = Vec::<(crate::core::NodeId, OrdinaryMapOwnedGetI32StringV1Action)>::new();
+    let mut new_attempts = std::collections::BTreeSet::new();
+    let mut operation_attempts = std::collections::BTreeSet::new();
+    let mut valid = true;
+    let closure_source_candidate =
+        super::closure_callable::CheckedClosureCallablePlanV1::has_source_candidate(program);
+
+    for analysis in program.resource_analyses().values() {
+        new_attempts.extend(
+            analysis
+                .ordinary_map_owned_get_i32_string_v1_new_attempts
+                .iter()
+                .cloned()
+                .map(|point| (analysis.owner.clone(), point)),
+        );
+        operation_attempts.extend(
+            analysis
+                .ordinary_map_owned_get_i32_string_v1_operation_attempts
+                .iter()
+                .cloned()
+                .map(|attempt| (analysis.owner.clone(), attempt)),
+        );
+        for action in &analysis.ordinary_map_owned_get_i32_string_v1_actions {
+            valid &= action.profile_version == OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1;
+            actions.push((analysis.owner.clone(), action.clone()));
+        }
+    }
+
+    if let Some(closure_plan) = closure_source_plan {
+        for (owner, child_actions, child_new_attempts, child_operation_attempts) in
+            closure_plan.ordinary_map_ledgers()
+        {
+            for action in child_actions {
+                valid &= action.profile_version == OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1;
+                actions.push((owner.clone(), action));
+            }
+            new_attempts.extend(
+                child_new_attempts
+                    .into_iter()
+                    .map(|point| (owner.clone(), point)),
+            );
+            operation_attempts.extend(
+                child_operation_attempts
+                    .into_iter()
+                    .map(|attempt| (owner.clone(), attempt)),
+            );
+        }
+    } else if closure_source_candidate {
+        // A checked Any-bearing closure with no complete independent child
+        // receipt is an incomplete Map/GetAny source candidate. Keep the
+        // ordinary Map route from falling through to a compatibility emitter.
+        valid = false;
+    }
+
+    let has_typed_get_attempt = operation_attempts.iter().any(|(_, attempt)| {
+        matches!(
+            attempt.kind,
+            Attempt::GetI32 | Attempt::GetString | Attempt::UntypedGet | Attempt::Values
+        )
+    });
+    let has_typed_get_action = actions.iter().any(|(_, action)| {
+        matches!(
+            action.kind,
+            Action::GetI32 | Action::GetString | Action::GetAny | Action::Values
+        )
+    });
+    if !has_typed_get_attempt && !has_typed_get_action && !closure_source_candidate {
+        // This checker also scans common Map operations to prove whole-program
+        // coverage once a typed getter opts the source into this profile. A
+        // program with no typed-get signal remains eligible for older Map
+        // profiles rather than being treated as an incomplete getter island.
+        return OrdinaryMapOwnedGetI32StringV1Admission::OutsideProfile;
+    }
+
+    let mut action_new_points = std::collections::BTreeSet::new();
+    let mut operation_new_points = std::collections::BTreeSet::new();
+    for (owner, attempt) in &operation_attempts {
+        if attempt.kind == Attempt::New {
+            operation_new_points.insert((owner.clone(), attempt.point.clone()));
+        }
+    }
+    for (owner, action) in &actions {
+        if action.kind == Action::New {
+            action_new_points.insert((owner.clone(), action.point.clone()));
+        }
+    }
+
+    // Match both ledgers one-to-one. The operation point and exact key/value
+    // expression identities bind source calls; Drop shares a statement point
+    // when several locals are settled, so its root-local argument participates
+    // in the identity too.
+    let mut unmatched_attempts = operation_attempts.clone();
+    for (owner, action) in &actions {
+        let matched = unmatched_attempts
+            .iter()
+            .find(|(attempt_owner, attempt)| {
+                attempt_owner == owner && owned_get_action_matches_attempt(action, attempt)
+            })
+            .cloned();
+        if let Some(matched) = matched {
+            unmatched_attempts.remove(&matched);
+        } else {
+            valid = false;
+        }
+    }
+    if !unmatched_attempts.is_empty() {
+        // This includes old tuple-valued map_get and any recognized operation
+        // not covered by the frozen typed-get receipt.
+        valid = false;
+    }
+
+    let getter_receipt_complete = (has_typed_get_attempt && has_typed_get_action) && valid;
+    let new_coverage_complete = !new_attempts.is_empty()
+        && new_attempts == action_new_points
+        && new_attempts == operation_new_points;
+    if valid && getter_receipt_complete && new_coverage_complete {
+        OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage
+    } else {
+        OrdinaryMapOwnedGetI32StringV1Admission::IncompleteCoverage
+    }
+}
+
+fn ordinary_map_owner_has_direct_string_key_local(program: &CheckedProgram) -> bool {
+    use crate::core::OrdinaryMapOwnerLifecycleActionKind as Kind;
+
+    program.resource_analyses().values().any(|analysis| {
+        analysis
+            .ordinary_map_owner_lifecycle_v1_actions
+            .iter()
+            .any(|action| {
+                matches!(action.kind, Kind::Set | Kind::Remove | Kind::HasKey)
+                    && action.key_local.is_some()
+            })
+    })
+}
+
+fn owned_get_action_matches_attempt(
+    action: &OrdinaryMapOwnedGetI32StringV1Action,
+    attempt: &OrdinaryMapOwnedGetI32StringV1Attempt,
+) -> bool {
+    use OrdinaryMapOwnedGetI32StringV1ActionKind as Action;
+    use OrdinaryMapOwnedGetI32StringV1AttemptKind as Attempt;
+
+    if action.point != attempt.point {
+        return false;
+    }
+    match (action.kind, attempt.kind) {
+        (Action::New, Attempt::New) => attempt.arguments.is_empty(),
+        (Action::Clone, Attempt::Clone) => {
+            attempt.arguments.len() == 2
+                && action
+                    .source_local
+                    .as_ref()
+                    .is_some_and(|source| source.0 == attempt.arguments[0])
+                && action.local.0 == attempt.arguments[1]
+        }
+        (Action::Set, Attempt::Set) => {
+            attempt.arguments.len() == 3
+                && action.key.as_ref() == attempt.arguments.get(1)
+                && action.value.as_ref() == attempt.arguments.get(2)
+        }
+        (Action::Remove, Attempt::Remove) => {
+            attempt.arguments.len() == 2 && action.key.as_ref() == attempt.arguments.get(1)
+        }
+        (Action::Size, Attempt::Size) => attempt.arguments.len() == 1,
+        (Action::HasKey, Attempt::HasKey)
+        | (Action::GetI32, Attempt::GetI32)
+        | (Action::GetString, Attempt::GetString)
+        | (Action::GetAny, Attempt::UntypedGet) => {
+            attempt.arguments.len() == 2 && action.key.as_ref() == attempt.arguments.get(1)
+        }
+        (Action::Values, Attempt::Values) => attempt.arguments.len() == 1,
+        (Action::Drop, Attempt::Drop | Attempt::ScopeDrop) => {
+            attempt.arguments.len() == 1 && action.local.0 == attempt.arguments[0]
+        }
+        _ => false,
+    }
+}
+
+fn classify_ordinary_map_owner_lifecycle_i32_string_v1_admission(
+    program: &CheckedProgram,
+) -> OrdinaryMapOwnerLifecycleI32StringV1Admission {
+    let mut valid = true;
+    let mut new_attempts = std::collections::BTreeSet::new();
+    let mut operation_attempts = std::collections::BTreeSet::new();
+    let mut actions = Vec::new();
+    for analysis in program.resource_analyses().values() {
+        new_attempts.extend(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_new_attempts
+                .iter()
+                .cloned()
+                .map(|point| (analysis.owner.clone(), point)),
+        );
+        operation_attempts.extend(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_operation_attempts
+                .iter()
+                .cloned()
+                .map(|attempt| (analysis.owner.clone(), attempt)),
+        );
+        for action in &analysis.ordinary_map_owner_lifecycle_v1_actions {
+            valid &= action.profile_version == OrdinaryMapOwnerLifecycleProfileVersion::V1;
+            actions.push((analysis.owner.clone(), action));
+        }
+    }
+    if actions.is_empty() {
+        return if new_attempts.is_empty() && operation_attempts.is_empty() {
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
+        } else {
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage
+        };
+    }
+    let action_new_points = actions
+        .iter()
+        .filter(|(_, action)| action.kind == OrdinaryMapOwnerLifecycleActionKind::New)
+        .map(|(owner, action)| (owner.clone(), action.point.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let operation_new_points = operation_attempts
+        .iter()
+        .filter(|(_, attempt)| attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::New)
+        .map(|(owner, attempt)| (owner.clone(), attempt.point.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    // Scope cleanup can share the callable's final CFG point with another
+    // operation. Bind every action to one exact attempt including its root
+    // local, rather than collapsing a point into one root operation.
+    let mut unmatched = operation_attempts.clone();
+    for (owner, action) in actions {
+        let matched = unmatched
+            .iter()
+            .find(|(attempt_owner, attempt)| {
+                attempt_owner == &owner
+                    && action.point == attempt.point
+                    && ordinary_action_matches_attempt(action, attempt)
+            })
+            .cloned();
+        if let Some(matched) = matched {
+            unmatched.remove(&matched);
+        } else {
+            valid = false;
+        }
+    }
+    valid &= unmatched.is_empty();
+    let new_coverage_complete = !new_attempts.is_empty()
+        && new_attempts == action_new_points
+        && new_attempts == operation_new_points;
+    if valid && new_coverage_complete {
+        OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage
+    } else {
+        OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage
+    }
+}
+
+fn ordinary_action_matches_attempt(
+    action: &crate::core::OrdinaryMapOwnerLifecycleAction,
+    attempt: &crate::core::OrdinaryMapOwnerLifecycleAttempt,
+) -> bool {
+    use OrdinaryMapOwnerLifecycleActionKind as Action;
+    use OrdinaryMapOwnerLifecycleAttemptKind as Attempt;
+
+    match (action.kind, attempt.kind) {
+        (Action::New, Attempt::New) => attempt.arguments.is_empty(),
+        (Action::Clone, Attempt::Clone) => {
+            attempt.arguments.len() == 2
+                && action
+                    .source_local
+                    .as_ref()
+                    .is_some_and(|source| source.0 == attempt.arguments[0])
+                && action.local.0 == attempt.arguments[1]
+        }
+        (Action::Set, Attempt::Set) => {
+            attempt.arguments.len() == 3
+                && action.key.as_ref() == attempt.arguments.get(1)
+                && action.value.as_ref() == attempt.arguments.get(2)
+        }
+        (Action::Remove, Attempt::Remove) => {
+            attempt.arguments.len() == 2 && action.key.as_ref() == attempt.arguments.get(1)
+        }
+        (Action::Size, Attempt::Size) => attempt.arguments.len() == 1,
+        (Action::HasKey, Attempt::HasKey) => {
+            attempt.arguments.len() == 2 && action.key.as_ref() == attempt.arguments.get(1)
+        }
+        (Action::Drop, Attempt::Drop | Attempt::ScopeDrop) => {
+            attempt.arguments.len() == 1 && action.local.0 == attempt.arguments[0]
+        }
+        // All other combinations include unsupported or mismatched coverage.
+        _ => false,
+    }
+}
+
+fn select_map_owner_admissions(
+    legacy_map_root: MapRootAdmission,
+    map_any_owner: MapAnyOwnerAdmission,
+    ordinary_map_owner: OrdinaryMapOwnerLifecycleI32StringV1Admission,
+    ordinary_attempts_fully_covered_by_map_any_owner_v1: bool,
+) -> (MapRootAdmission, MapAnyOwnerAdmission) {
+    // Keep the established MapAnyOwner route when its independent ledger
+    // covers every overlapping ordinary-Map attempt. The ordinary checker
+    // intentionally recognizes the same supported operations, so letting
+    // its complete ledger win first would erase MapAnyOwner's own identity.
+    if ordinary_attempts_fully_covered_by_map_any_owner_v1
+        && map_any_owner == MapAnyOwnerAdmission::CompleteCoverage
+    {
+        return (MapRootAdmission::OutsideProfile, map_any_owner);
+    }
+    // A recognized MapAnyOwner candidate with missing or extra receipts is a
+    // hard boundary. Do not hide that incomplete ledger behind a complete
+    // ordinary-Map profile or re-open the legacy MapRoot route.
+    if map_any_owner == MapAnyOwnerAdmission::IncompleteCoverage {
+        return (MapRootAdmission::OutsideProfile, map_any_owner);
+    }
+    if map_any_owner == MapAnyOwnerAdmission::CompleteCoverage && ordinary_map_owner.is_complete() {
+        // Preserve both complete identities until the caller proves that the
+        // MapAnyOwner receipt covers the ordinary attempts. A distinct
+        // ordinary owner must not disappear behind a complete MapAnyOwner
+        // profile merely because both recognize some of the same operations.
+        return (MapRootAdmission::OutsideProfile, map_any_owner);
+    }
+    if ordinary_map_owner.is_complete() {
+        return (
+            MapRootAdmission::OutsideProfile,
+            MapAnyOwnerAdmission::OutsideProfile,
+        );
+    }
+    if ordinary_map_owner.has_profile_signal() {
+        // Unsupported ordinary Map shapes stay on the compatibility route.
+        // They cannot borrow a MapRoot or MapAnyOwner receipt for a supported
+        // subset of the same source program.
+        return (
+            MapRootAdmission::OutsideProfile,
+            MapAnyOwnerAdmission::OutsideProfile,
+        );
+    }
+    (
+        select_map_root_admission(legacy_map_root, map_any_owner),
+        map_any_owner,
+    )
+}
+
+/// Whether the complete MapAnyOwner v1 receipt covers every ordinary
+/// lifecycle attempt with the same checker root and operation operands, with
+/// no extra MapAnyOwner action or independent ordinary owner. The predicate
+/// is non-vacuous and one-to-one across the whole checked program.
+#[doc(hidden)]
+pub fn ordinary_map_attempts_fully_covered_by_map_any_owner_v1(program: &CheckedProgram) -> bool {
+    let mut saw_ordinary_attempts = false;
+    for analysis in program.resource_analyses().values() {
+        let has_attempts = analysis.has_ordinary_map_owner_lifecycle_v1_attempts();
+        let has_map_any_actions = !analysis.map_any_owner_actions.is_empty();
+        if !has_attempts && has_map_any_actions {
+            return false;
+        }
+        if !has_attempts {
+            continue;
+        }
+        saw_ordinary_attempts = true;
+        if !analysis.ordinary_map_attempts_fully_covered_by_map_any_owner_v1()
+            || !analysis.map_any_owner_v1_actions_are_within_ordinary_map_profile()
+        {
+            return false;
+        }
+    }
+    saw_ordinary_attempts
+}
+
+/// Whether every MapAnyOwner v1 action is also represented by the exact
+/// ordinary lifecycle source operation. This is descriptive evidence only;
+/// it never authorizes an incomplete MapAnyOwner ledger.
+#[doc(hidden)]
+pub fn map_any_owner_v1_actions_are_within_ordinary_map_profile(program: &CheckedProgram) -> bool {
+    let mut saw_map_any_actions = false;
+    for analysis in program.resource_analyses().values() {
+        if analysis.map_any_owner_actions.is_empty() {
+            continue;
+        }
+        saw_map_any_actions = true;
+        if !analysis.map_any_owner_v1_actions_are_within_ordinary_map_profile() {
+            return false;
+        }
+    }
+    saw_map_any_actions
+}
+
 fn classify_map_root_admission(program: &CheckedProgram) -> MapRootAdmission {
     let mut has_receipted_lifecycle = false;
     let mut attempted_new_points = std::collections::BTreeSet::new();
@@ -646,14 +1338,216 @@ fn classify_map_root_admission(program: &CheckedProgram) -> MapRootAdmission {
     }
 }
 
+fn classify_map_any_owner_admission(
+    program: &CheckedProgram,
+    legacy_map_root: MapRootAdmission,
+) -> MapAnyOwnerAdmission {
+    let mut has_actions = false;
+    let mut has_non_v1_action = false;
+    let mut attempted_new_points = std::collections::BTreeSet::new();
+    let mut receipted_new_points = std::collections::BTreeSet::new();
+    let mut new_action_count = 0usize;
+    for analysis in program.resource_analyses().values() {
+        attempted_new_points.extend(
+            analysis
+                .map_any_owner_new_attempts
+                .iter()
+                .cloned()
+                .map(|point| (analysis.owner.clone(), point)),
+        );
+        has_actions |= !analysis.map_any_owner_actions.is_empty();
+        has_non_v1_action |= analysis
+            .ordinary_map_owner_lifecycle_v1_operation_attempts
+            .iter()
+            .any(|attempt| !ordinary_attempt_has_map_any_owner_v1_receipt(analysis, attempt));
+        for action in &analysis.map_any_owner_actions {
+            if action.profile_version != crate::core::MapAnyOwnerProfileVersion::V1 {
+                has_non_v1_action = true;
+            }
+            if action.kind == crate::core::MapAnyOwnerActionKind::New {
+                new_action_count += 1;
+                receipted_new_points.insert((analysis.owner.clone(), action.point.clone()));
+            }
+        }
+    }
+    let attempts_match_receipts = !attempted_new_points.is_empty()
+        && attempted_new_points == receipted_new_points
+        && new_action_count == receipted_new_points.len();
+    classify_map_any_owner_ledger(
+        has_actions,
+        !attempted_new_points.is_empty(),
+        attempts_match_receipts,
+        has_non_v1_action,
+        legacy_map_root,
+    )
+}
+
+fn ordinary_attempt_has_map_any_owner_v1_receipt(
+    analysis: &crate::core::ResourceAnalysis,
+    attempt: &crate::core::OrdinaryMapOwnerLifecycleAttempt,
+) -> bool {
+    use crate::core::MapAnyOwnerActionKind as MapAny;
+    use OrdinaryMapOwnerLifecycleAttemptKind as Attempt;
+
+    if attempt.kind == Attempt::ScopeDrop {
+        return analysis.ordinary_scope_drop_is_settled_by_map_any_owner_v1(attempt);
+    }
+    let expected_kind = match attempt.kind {
+        Attempt::New => MapAny::New,
+        Attempt::Set => MapAny::Set,
+        Attempt::Remove => MapAny::Remove,
+        Attempt::Size => MapAny::Size,
+        Attempt::HasKey => MapAny::Contains,
+        Attempt::Drop => MapAny::Drop,
+        Attempt::Clone
+        | Attempt::ScopeDrop
+        | Attempt::Get
+        | Attempt::Keys
+        | Attempt::Values
+        | Attempt::FromList
+        | Attempt::MapLiteral => return false,
+    };
+    analysis.map_any_owner_actions.iter().any(|action| {
+        action.profile_version == crate::core::MapAnyOwnerProfileVersion::V1
+            && action.point == attempt.point
+            && action.kind == expected_kind
+    })
+}
+
+fn classify_map_any_owner_ledger(
+    has_actions: bool,
+    has_attempts: bool,
+    attempts_match_receipts: bool,
+    has_non_v1_action: bool,
+    legacy_map_root: MapRootAdmission,
+) -> MapAnyOwnerAdmission {
+    if !has_actions {
+        // Construction attempts are not typed authority: ordinary dynamic
+        // Map/Any programs also call map_new(), often in shapes that the v1
+        // recognizer deliberately does not model. Keep those programs on the
+        // compatibility route unless either lifecycle ledger contains an
+        // actual receipt. A legacy receipt can still expose a missing v1
+        // ledger, but it may never re-admit the old MapRoot identity.
+        return if legacy_map_root.is_candidate() {
+            MapAnyOwnerAdmission::IncompleteCoverage
+        } else {
+            MapAnyOwnerAdmission::OutsideProfile
+        };
+    }
+    if has_actions && has_attempts && attempts_match_receipts && !has_non_v1_action {
+        MapAnyOwnerAdmission::CompleteCoverage
+    } else {
+        MapAnyOwnerAdmission::IncompleteCoverage
+    }
+}
+
+fn select_map_root_admission(
+    legacy_map_root: MapRootAdmission,
+    map_any_owner: MapAnyOwnerAdmission,
+) -> MapRootAdmission {
+    if map_any_owner.is_candidate() {
+        MapRootAdmission::OutsideProfile
+    } else {
+        legacy_map_root
+    }
+}
+
 fn classify_s8_flow_admission(program: &CheckedProgram) -> S8FlowAdmission {
     if is_exact_s8_flow_transition(program) {
+        S8FlowAdmission::CompleteCoverage
+    } else if is_closed_silent_local_flow_candidate(program) {
+        // The canonical MIR native adapter already validates direct
+        // SilentLocal and multi-transition records.  Keep the
+        // checker admission complete for this broader scalar shape so the
+        // route materializer owns it before compile_flow can be reached.
         S8FlowAdmission::CompleteCoverage
     } else if is_s8_flow_transition_candidate(program) {
         S8FlowAdmission::MixedCoverage
     } else {
         S8FlowAdmission::OutsideProfile
     }
+}
+
+/// Whole checked-source proof boundary for the bounded Actor NoContracts
+/// route. Default consumers retain their full contract-verification path;
+/// explicit Actor MIR construction rejects before any graph is trimmed.
+pub fn scalar_actor_contract_boundary_reason(program: &CheckedProgram) -> Option<String> {
+    let excluded = program
+        .source_registry()
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    if !super::actor_lower::has_actor_candidate(program, Some(&excluded)) {
+        return None;
+    }
+    super::actor_lower::contract_boundary_reason(program, Some(&excluded))
+}
+
+/// Detect the selected nested-callable Actor shape before route selection.
+/// This is intentionally narrower than `scalar_actor_contract_boundary_reason`:
+/// proof-bearing Actor programs retain their explicit compatibility verifier,
+/// while a no-contract capture/shadow candidate must be canonical or fail
+/// closed and may never silently enter the legacy emitter.
+pub fn has_scalar_actor_nested_callable_candidate(program: &CheckedProgram) -> bool {
+    let excluded = program
+        .source_registry()
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    super::actor_lower::has_nested_callable_candidate(program, Some(&excluded))
+}
+
+/// Admission uses checker-owned typed bodies and private operation/environment
+/// receipts. Unsupported Actor bodies stay outside this bounded profile;
+/// successful admission owns a hard materialization boundary for every caller.
+fn classify_scalar_actor_admission(program: &CheckedProgram) -> bool {
+    if super::exported_abi_body_boundary_reason(program).is_some()
+        || scalar_actor_contract_boundary_reason(program).is_some()
+    {
+        return false;
+    }
+    let excluded = program
+        .source_registry()
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    if !super::actor_lower::has_actor_candidate(program, Some(&excluded)) {
+        return false;
+    }
+    super::actor_lower::materialize(program, Some(&excluded))
+        .is_ok_and(|canonical| validate_scalar_actor_island(&canonical).is_ok())
+}
+
+/// Recheck the exact scalar Actor identity before an execution or verification
+/// consumer accepts the shared graph. No mailbox contract is statically proved.
+pub fn validate_scalar_actor_island(program: &MirProgram) -> Result<(), Vec<String>> {
+    program.validate_actor_contracts()?;
+    let Some(plan) = program.actor_execution_plan() else {
+        return Err(vec![
+            "scalar Actor island has no checked execution plan".into()
+        ]);
+    };
+    if program.actors().is_empty() || plan.root.0 != "function:main" {
+        return Err(vec![
+            "scalar Actor island has no checked Actor/root contract".into(),
+        ]);
+    }
+    if program
+        .functions()
+        .values()
+        .any(|function| !function.contracts.is_empty())
+    {
+        return Err(vec![
+            "Actor mailbox contracts have no trusted static proof model".into(),
+        ]);
+    }
+    Ok(())
 }
 
 /// Construct the one canonical graph shared by the current production route
@@ -665,11 +1559,100 @@ pub fn materialize_canonical_mir_route(
     #[cfg(test)]
     TEST_ROUTE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
     let admission = classify_canonical_mir_route_admission(program);
+    if admission.map_any_owner == MapAnyOwnerAdmission::IncompleteCoverage {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "Checker recognized a MapAnyOwner v1 candidate but withheld its complete independent lifecycle receipt".into(),
+        });
+    }
+    if admission.ordinary_map_owned_get_i32_string_v1
+        == OrdinaryMapOwnedGetI32StringV1Admission::IncompleteCoverage
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "Checker recognized a typed owned-get Map candidate but withheld its complete independent operation-attempt receipt".into(),
+        });
+    }
+    if admission.ordinary_map_owner_lifecycle_i32_string_v1
+        == OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage
+        && !(admission.map_any_owner_complete()
+            && ordinary_map_attempts_fully_covered_by_map_any_owner_v1(program))
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "Checker recognized an ordinary Map owner lifecycle candidate but withheld complete operation-attempt coverage".into(),
+        });
+    }
     if admission.map_root == MapRootAdmission::IncompleteCoverage {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::MapRoot,
             stage: CanonicalMirRouteFailureStage::Coverage,
             message: "Checker recognized a MapRoot candidate but withheld its complete local lifecycle receipt".into(),
+        });
+    }
+    // The Actor producer already owns a complete finite whole-graph receipt.
+    // Do not compose unrelated scalar/collection profile predicates with its
+    // private state and status ABI. Every route owner receives this same graph.
+    if admission.scalar_actor {
+        let mut excluded = excluded_sources.cloned().unwrap_or_default();
+        excluded.extend(
+            program
+                .source_registry()
+                .records()
+                .iter()
+                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                .map(|record| record.id),
+        );
+        let canonical =
+            super::actor_lower::materialize(program, Some(&excluded)).map_err(|error| {
+                CanonicalMirRouteMaterializationError::Complete {
+                    profile: CanonicalMirRouteProfile::ScalarActor,
+                    stage: CanonicalMirRouteFailureStage::Construction,
+                    message: error.to_string(),
+                }
+            })?;
+        validate_scalar_actor_island(&canonical).map_err(|errors| {
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::ScalarActor,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message: format!("scalar Actor receipt rejected: {errors:?}"),
+            }
+        })?;
+        return Ok(CanonicalMirRouteMaterialization {
+            program: canonical,
+            admission,
+            materialized_map_root_candidate: false,
+            materialized_map_any_owner_candidate: false,
+            materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate: false,
+            materialized_ordinary_map_owned_get_i32_string_v1_candidate: false,
+            materialized_scalar_export_candidate: false,
+            materialized_scalar_ffi_candidate: false,
+            materialized_scalar_nested_candidate: false,
+            materialized_scalar_actor_candidate: true,
+            materialized_scalar_generic_identity_i32_candidate: false,
+            materialized_scalar_generic_identity_i64_candidate: false,
+            materialized_collection_candidate: false,
+            materialized_collection_operation_candidate: false,
+            materialized_record_candidate: false,
+            materialized_flow_candidate: false,
+            materialized_flow_failure_retry_candidate: false,
+            materialized_option_string_candidate: false,
+            materialized_option_nested_tuple_candidate: false,
+            materialized_generic_variant_candidate: false,
+            materialized_generic_option_projection_candidate: false,
+            materialized_generic_option_projection_fallback_candidate: false,
+            materialized_generic_result_projection_candidate: false,
+            materialized_generic_result_projection_fallback_candidate: false,
+            materialized_managed_result_call_candidate: false,
+            materialized_copy_option_i32_candidate: false,
+            materialized_copy_option_bool_candidate: false,
+            materialized_copy_option_i64_candidate: false,
+            materialized_copy_option_f64_candidate: false,
+            materialized_copy_result_i32_candidate: false,
+            materialized_session_candidate: false,
         });
     }
     if !admission.scalar_ffi {
@@ -693,8 +1676,13 @@ pub fn materialize_canonical_mir_route(
     // the same reason, so a direct `materialize_canonical_mir_route` caller
     // observes the same prelude-free graph as the CLI dispatch wrapper.
     let mut selected_exclusions = excluded_sources.cloned().unwrap_or_default();
-    if admission.scalar_ffi
+    if admission.scalar_export
+        || admission.scalar_ffi
+        || admission.scalar_nested
         || admission.map_root_complete()
+        || admission.map_any_owner_complete()
+        || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+        || admission.ordinary_map_owned_get_i32_string_v1_complete()
         || admission.scalar_generic_identity_i32_complete()
         || admission.scalar_generic_identity_i64_complete()
         || admission.generic_variant_complete()
@@ -730,15 +1718,29 @@ pub fn materialize_canonical_mir_route(
                 admission,
                 CanonicalMirRouteFailureStage::Construction,
                 error.to_string(),
-            ))
+            ));
         }
     };
 
+    let materialized_scalar_export_candidate =
+        admission.scalar_export && !canonical.export_declarations().is_empty();
     let materialized_scalar_ffi_candidate = !canonical.ffi_calls().is_empty();
+    let materialized_scalar_nested_candidate =
+        admission.scalar_nested && !canonical.nested_callable_scopes().is_empty();
     let materialized_map_root_candidate = canonical
         .functions()
         .values()
         .any(|function| function.ownership.has_checker_map_root_actions());
+    let materialized_map_any_owner_candidate = canonical
+        .functions()
+        .values()
+        .any(|function| function.ownership.has_checker_map_any_owner_actions());
+    let materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate = admission
+        .ordinary_map_owner_lifecycle_i32_string_v1_complete()
+        && contains_ordinary_map_owner_lifecycle_i32_string_v1_candidate(&canonical);
+    let materialized_ordinary_map_owned_get_i32_string_v1_candidate = admission
+        .ordinary_map_owned_get_i32_string_v1_complete()
+        && contains_ordinary_map_owned_get_i32_string_v1_candidate(&canonical);
     if admission.map_root_complete() && !materialized_map_root_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::MapRoot,
@@ -748,11 +1750,59 @@ pub fn materialize_canonical_mir_route(
                     .into(),
         });
     }
+    if admission.map_any_owner_complete() && !materialized_map_any_owner_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete Checker MapAnyOwner v1 admission did not materialize an independent v1 action receipt".into(),
+        });
+    }
+    if admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+        && (!materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate
+            || materialized_map_root_candidate
+            || materialized_map_any_owner_candidate)
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete ordinary Map owner admission did not materialize its isolated operation identity".into(),
+        });
+    }
+    if admission.ordinary_map_owned_get_i32_string_v1_complete()
+        && (!materialized_ordinary_map_owned_get_i32_string_v1_candidate
+            || materialized_map_root_candidate
+            || materialized_map_any_owner_candidate
+            || contains_ordinary_map_owner_lifecycle_i32_string_v1_candidate(&canonical))
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete typed owned-get Map admission did not materialize its isolated Checker/MIR operation receipt".into(),
+        });
+    }
     if admission.scalar_ffi && !materialized_scalar_ffi_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarFfi,
             stage: CanonicalMirRouteFailureStage::Coverage,
             message: "scalar FFI admission did not materialize a canonical FFI receipt".into(),
+        });
+    }
+    if admission.scalar_nested && !materialized_scalar_nested_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarNested,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "scalar nested admission did not materialize a canonical nested-callable receipt"
+                    .into(),
+        });
+    }
+    if admission.scalar_export && !materialized_scalar_export_candidate {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarExport,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "scalar export admission did not materialize a canonical export wrapper receipt"
+                    .into(),
         });
     }
     let scalar_generic_identity_candidate = contains_scalar_generic_identity_candidate(&canonical);
@@ -772,7 +1822,9 @@ pub fn materialize_canonical_mir_route(
             CanonicalMirRouteMaterializationError::Complete {
                 profile: CanonicalMirRouteProfile::ScalarGenericIdentityI32,
                 stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!("generic scalar identity whole-program validator rejected the graph: {errors:?}"),
+                message: format!(
+                    "generic scalar identity whole-program validator rejected the graph: {errors:?}"
+                ),
             }
         })?;
     }
@@ -792,12 +1844,15 @@ pub fn materialize_canonical_mir_route(
             CanonicalMirRouteMaterializationError::Complete {
                 profile: CanonicalMirRouteProfile::ScalarGenericIdentityI64,
                 stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!("generic scalar identity whole-program validator rejected the graph: {errors:?}"),
+                message: format!(
+                    "generic scalar identity whole-program validator rejected the graph: {errors:?}"
+                ),
             }
         })?;
     }
     let materialized_collection_operation_candidate =
-        contains_scalar_collection_operation_candidate(&canonical);
+        contains_scalar_collection_operation_candidate(&canonical)
+            && !contains_only_managed_any_values_list_len(&canonical);
     let materialized_collection_candidate = materialized_collection_operation_candidate
         || (admission.collection_complete()
             && canonical.transitions().is_empty()
@@ -832,17 +1887,13 @@ pub fn materialize_canonical_mir_route(
     let materialized_copy_result_i32_candidate =
         contains_copy_result_i32_variant_candidate(&canonical);
     let materialized_session_candidate = contains_session_channel_candidate(&canonical);
-    if admission.map_root_complete()
-        && has_unsupported_map_root_composition(
-            admission,
-            materialized_collection_operation_candidate,
-        )
-    {
-        return Err(CanonicalMirRouteMaterializationError::Complete {
-            profile: CanonicalMirRouteProfile::MapRoot,
-            stage: CanonicalMirRouteFailureStage::Coverage,
-            message: "MapRoot profile cannot be combined with a second migrated MIR island or unsupported scalar-collection operation".into(),
-        });
+    let map_root_composition_blockers = unsupported_map_root_composition_reasons(
+        admission,
+        materialized_collection_operation_candidate,
+        &canonical,
+    );
+    if let Some(error) = map_owner_composition_failure(admission, &map_root_composition_blockers) {
+        return Err(error);
     }
     if admission.scalar_ffi {
         // A scalar FFI call does not opt the whole graph into every other
@@ -1094,7 +2145,13 @@ pub fn materialize_canonical_mir_route(
         program: canonical,
         admission,
         materialized_map_root_candidate,
+        materialized_map_any_owner_candidate,
+        materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate,
+        materialized_ordinary_map_owned_get_i32_string_v1_candidate,
+        materialized_scalar_export_candidate,
         materialized_scalar_ffi_candidate,
+        materialized_scalar_nested_candidate,
+        materialized_scalar_actor_candidate: false,
         materialized_scalar_generic_identity_i32_candidate,
         materialized_scalar_generic_identity_i64_candidate,
         materialized_collection_candidate,
@@ -1119,74 +2176,370 @@ pub fn materialize_canonical_mir_route(
     })
 }
 
-fn has_unsupported_map_root_composition(
+fn unsupported_map_root_composition_reasons(
     admission: CanonicalMirRouteAdmission,
     materialized_collection_operation_candidate: bool,
-) -> bool {
-    admission.scalar_ffi
-        || admission.scalar_generic_identity_i32_complete()
-        || admission.scalar_generic_identity_i64_complete()
-        || materialized_collection_operation_candidate
-        || !matches!(
+    canonical: &MirProgram,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if admission.scalar_ffi {
+        reasons.push("scalar FFI");
+    }
+    if admission.scalar_generic_identity_i32_complete() {
+        reasons.push("scalar generic identity i32");
+    }
+    if admission.scalar_generic_identity_i64_complete() {
+        reasons.push("scalar generic identity i64");
+    }
+    if materialized_collection_operation_candidate {
+        reasons.push("materialized List/Set operation");
+    }
+    // A complete ordinary owned-get receipt owns the heterogeneous Map/Any
+    // graph, including its scalar println/tail values.  The scalar
+    // collection scanner quite deliberately reports that graph as
+    // MixedCoverage because DynamicAny is outside the standalone scalar
+    // island; that is not an unvalidated fallback here: the ordinary owner
+    // receipt and its MIR consumer validate the whole graph.  Keep the
+    // composition boundary for every other owner, and whenever a real
+    // List/Set operation would cross the scalar island.
+    // The owned-get Any composition exception is intentionally narrower than
+    // the scalar collection admission itself.  A bare List/Set literal is
+    // still an independent collection candidate even when no List/Set
+    // operation was emitted; the only List shape admitted here is the
+    // `values()` List<DynamicAny>/List<ManagedAny> pair owned by this receipt.
+    let ordinary_owned_get_scalar_tail = admission.ordinary_map_owned_get_i32_string_v1_complete()
+        && !materialized_collection_operation_candidate
+        && !contains_unadmitted_collection_materialization(
+            canonical,
+            admission.ordinary_map_owned_get_i32_string_v1_complete()
+                && contains_ordinary_map_owned_get_values_instruction(canonical),
+        );
+    if !ordinary_owned_get_scalar_tail
+        && !matches!(
             admission.collection,
             ScalarCollectionAdmission::OutsideProfile
-        ) && !admission.collection_complete()
-        || !matches!(admission.record, FlatCopyRecordAdmission::OutsideProfile)
-        || !matches!(admission.flow, S8FlowAdmission::OutsideProfile)
-        || admission.flow_failure_retry
-        || !matches!(
-            admission.option_string,
-            OptionStringVariantAdmission::OutsideProfile
         )
-        || !matches!(
-            admission.option_nested_tuple,
-            OptionNestedTupleVariantAdmission::OutsideProfile
+        && !admission.collection_complete()
+    {
+        reasons.push("mixed scalar-collection admission");
+    }
+    if !matches!(admission.record, FlatCopyRecordAdmission::OutsideProfile) {
+        reasons.push("flat Copy-record profile");
+    }
+    if !matches!(admission.flow, S8FlowAdmission::OutsideProfile) {
+        reasons.push("Flow profile");
+    }
+    if admission.flow_failure_retry {
+        reasons.push("Flow failure-retry profile");
+    }
+    if !matches!(
+        admission.option_string,
+        OptionStringVariantAdmission::OutsideProfile
+    ) {
+        reasons.push("Option<string> profile");
+    }
+    if !matches!(
+        admission.option_nested_tuple,
+        OptionNestedTupleVariantAdmission::OutsideProfile
+    ) {
+        reasons.push("nested Option tuple profile");
+    }
+    if !matches!(
+        admission.generic_variant,
+        GenericVariantPredicateAdmission::OutsideProfile
+    ) {
+        reasons.push("generic variant profile");
+    }
+    if !matches!(
+        admission.generic_option_projection,
+        GenericOptionProjectionAdmission::OutsideProfile
+    ) {
+        reasons.push("generic Option projection profile");
+    }
+    if !matches!(
+        admission.generic_option_projection_fallback,
+        GenericOptionProjectionFallbackAdmission::OutsideProfile
+    ) {
+        reasons.push("generic Option fallback profile");
+    }
+    if !matches!(
+        admission.generic_result_projection,
+        GenericResultProjectionAdmission::OutsideProfile
+    ) {
+        reasons.push("generic Result projection profile");
+    }
+    if !matches!(
+        admission.generic_result_projection_fallback,
+        GenericResultProjectionFallbackAdmission::OutsideProfile
+    ) {
+        reasons.push("generic Result fallback profile");
+    }
+    if !matches!(
+        admission.managed_result_call,
+        ManagedResultCallAdmission::OutsideProfile
+    ) {
+        reasons.push("managed Result call profile");
+    }
+    if !matches!(
+        admission.copy_option_i32,
+        CopyOptionI32VariantAdmission::OutsideProfile
+    ) {
+        reasons.push("Copy Option<i32> profile");
+    }
+    if !matches!(
+        admission.copy_option_bool,
+        CopyOptionI32VariantAdmission::OutsideProfile
+    ) {
+        reasons.push("Copy Option<bool> profile");
+    }
+    if !matches!(
+        admission.copy_option_i64,
+        CopyOptionI32VariantAdmission::OutsideProfile
+    ) {
+        reasons.push("Copy Option<i64> profile");
+    }
+    if !matches!(
+        admission.copy_option_f64,
+        CopyOptionI32VariantAdmission::OutsideProfile
+    ) {
+        reasons.push("Copy Option<f64> profile");
+    }
+    if !matches!(
+        admission.copy_result_i32,
+        CopyResultI32VariantAdmission::OutsideProfile
+    ) {
+        reasons.push("Copy Result<i32, i32> profile");
+    }
+    if !matches!(admission.session, SessionChannelAdmission::OutsideProfile) {
+        reasons.push("session-channel profile");
+    }
+    reasons
+}
+
+fn map_owner_composition_failure(
+    admission: CanonicalMirRouteAdmission,
+    blockers: &[&'static str],
+) -> Option<CanonicalMirRouteMaterializationError> {
+    if blockers.is_empty() {
+        return None;
+    }
+    let (profile, label) = if admission.ordinary_map_owned_get_i32_string_v1_complete() {
+        (
+            CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+            "ordinary typed owned-get Map profile",
         )
-        || !matches!(
-            admission.generic_variant,
-            GenericVariantPredicateAdmission::OutsideProfile
+    } else if admission.ordinary_map_owner_lifecycle_i32_string_v1_complete() {
+        (
+            CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+            "ordinary Map owner lifecycle profile",
         )
-        || !matches!(
-            admission.generic_option_projection,
-            GenericOptionProjectionAdmission::OutsideProfile
+    } else if admission.map_any_owner_complete() {
+        (
+            CanonicalMirRouteProfile::MapAnyOwnerV1,
+            "MapAnyOwner v1 profile",
         )
-        || !matches!(
-            admission.generic_option_projection_fallback,
-            GenericOptionProjectionFallbackAdmission::OutsideProfile
+    } else if admission.map_root_complete() {
+        (CanonicalMirRouteProfile::MapRoot, "MapRoot profile")
+    } else {
+        return None;
+    };
+    Some(CanonicalMirRouteMaterializationError::Complete {
+        profile,
+        stage: CanonicalMirRouteFailureStage::Coverage,
+        message: format!("{label} cannot be combined with another candidate: {blockers:?}"),
+    })
+}
+
+/// The same Map-owner composition hard gate used after materialization,
+/// exposed for default dispatchers that must decide before an unrelated
+/// compatibility disposition can hide the typed owner combination.
+pub fn scalar_ffi_map_owner_composition_failure(
+    admission: CanonicalMirRouteAdmission,
+) -> Option<CanonicalMirRouteMaterializationError> {
+    if admission.scalar_ffi {
+        map_owner_composition_failure(admission, &["scalar FFI"])
+    } else {
+        None
+    }
+}
+
+fn contains_ordinary_map_owner_lifecycle_i32_string_v1_candidate(program: &MirProgram) -> bool {
+    program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+                        | crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+                        | crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+                        | crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+                        | crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+                        | crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+                )
+            })
+        })
+    })
+}
+
+fn contains_ordinary_map_owned_get_i32_string_v1_candidate(program: &MirProgram) -> bool {
+    program.functions().values().any(|function| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+            && function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+                            | crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+                    )
+                })
+            })
+    })
+}
+
+fn contains_ordinary_map_owned_get_values_instruction(program: &MirProgram) -> bool {
+    program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values {
+                        ..
+                    }
+                )
+            })
+        })
+    })
+}
+
+/// Return true when a canonical ordinary owned-get graph materializes a
+/// collection value without an admitted collection profile.  A complete
+/// Values receipt owns both the checker `List<DynamicAny>` descriptor and its
+/// executable `List<ManagedAny>` successor; every other List/Set remains a
+/// separate ownership boundary and is rejected here. Checking both the
+/// TypeDesc catalog and instruction stream keeps the gate closed for a bare
+/// literal as well as for an operation candidate.
+fn contains_unadmitted_collection_materialization(
+    program: &MirProgram,
+    allow_managed_any_values_list: bool,
+) -> bool {
+    let catalog_contains_collection = program.type_catalog().iter().any(|(ty, descriptor)| {
+        // The canonical catalog retains the original checker `List<DynamicAny>`
+        // descriptor as well as the executable `List<ManagedAny>` identity.
+        // Both are one Values receipt's type graph; permitting only the latter
+        // would make a complete Values body look like an unrelated collection.
+        let values_list = allow_managed_any_values_list
+            && is_managed_any_values_list_type(program, ty, descriptor);
+        matches!(
+            &descriptor.kind,
+            crate::core::mir::types::MirTypeKind::List | crate::core::mir::types::MirTypeKind::Set
+        ) && !values_list
+    });
+    if catalog_contains_collection {
+        return true;
+    }
+    program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::ConstructList { .. }
+                        | crate::core::mir::MirInstructionKind::ConstructSet { .. }
+                )
+            })
+        })
+    })
+}
+
+fn is_managed_any_values_list_type(
+    program: &MirProgram,
+    ty: &crate::core::ir::ResolvedTypeId,
+    descriptor: &crate::core::mir::types::MirTypeDesc,
+) -> bool {
+    // A source `List<DynamicAny>` is exempt only when this exact source type
+    // has a checker-receipted synthetic `List<ManagedAny>` successor.  The
+    // synthetic id is content-hashed, so compare through the catalog's
+    // canonicalization instead of guessing from an id prefix.  This keeps an
+    // unrelated bare `List<DynamicAny>` in a typed-get program on the mixed
+    // collection rejection path.
+    let canonical = program.type_catalog().canonical_managed_any_type(ty);
+    let paired_source = canonical != *ty
+        && program
+            .type_catalog()
+            .validate_managed_any_list_type(&canonical)
+            .is_ok();
+    let canonical_list = program
+        .type_catalog()
+        .validate_managed_any_list_type(ty)
+        .is_ok();
+    let _ = descriptor;
+    paired_source || canonical_list
+}
+
+/// The `values()` result is a move-owned `List<ManagedAny>`, so its `len()`
+/// read is part of the ordinary Map owned-get receipt rather than the scalar
+/// Copy-list island. Keep the collection composition gate closed for every
+/// other List/Set operation and generic instance.
+fn contains_only_managed_any_values_list_len(program: &MirProgram) -> bool {
+    let mut saw_values_len = false;
+    for function in program.functions().values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                match &instruction.kind {
+                    crate::core::mir::MirInstructionKind::ListOp {
+                        operation: crate::core::mir::MirListOperation::Len,
+                        list,
+                        ..
+                    } => {
+                        let is_values_list = function.values.get(list).is_some_and(|value| {
+                            program
+                                .type_catalog()
+                                .get(&value.ty)
+                                .is_some_and(|descriptor| {
+                                    is_managed_any_values_list_type(program, &value.ty, descriptor)
+                                })
+                        });
+                        if !is_values_list {
+                            return false;
+                        }
+                        saw_values_len = true;
+                    }
+                    crate::core::mir::MirInstructionKind::ListOp { .. }
+                    | crate::core::mir::MirInstructionKind::SetOp { .. } => return false,
+                    crate::core::mir::MirInstructionKind::Project {
+                        list_index_contract: Some(contract),
+                        ..
+                    } if contract.mode
+                        == crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    if program.instances().values().any(|instance| {
+        matches!(
+            instance.contract,
+            crate::core::mir::MirGenericInstanceContract::ScalarSetFacade { .. }
+                | crate::core::mir::MirGenericInstanceContract::ScalarListFacade { .. }
+                | crate::core::mir::MirGenericInstanceContract::ScalarListConstruct { .. }
+                | crate::core::mir::MirGenericInstanceContract::ScalarListProjection { .. }
         )
-        || !matches!(
-            admission.generic_result_projection,
-            GenericResultProjectionAdmission::OutsideProfile
-        )
-        || !matches!(
-            admission.generic_result_projection_fallback,
-            GenericResultProjectionFallbackAdmission::OutsideProfile
-        )
-        || !matches!(
-            admission.managed_result_call,
-            ManagedResultCallAdmission::OutsideProfile
-        )
-        || !matches!(
-            admission.copy_option_i32,
-            CopyOptionI32VariantAdmission::OutsideProfile
-        )
-        || !matches!(
-            admission.copy_option_bool,
-            CopyOptionI32VariantAdmission::OutsideProfile
-        )
-        || !matches!(
-            admission.copy_option_i64,
-            CopyOptionI32VariantAdmission::OutsideProfile
-        )
-        || !matches!(
-            admission.copy_option_f64,
-            CopyOptionI32VariantAdmission::OutsideProfile
-        )
-        || !matches!(
-            admission.copy_result_i32,
-            CopyResultI32VariantAdmission::OutsideProfile
-        )
-        || !matches!(admission.session, SessionChannelAdmission::OutsideProfile)
+    }) {
+        return false;
+    }
+    saw_values_len
 }
 
 fn match_complete_or_compatibility(
@@ -1194,7 +2547,31 @@ fn match_complete_or_compatibility(
     stage: CanonicalMirRouteFailureStage,
     message: String,
 ) -> CanonicalMirRouteMaterializationError {
-    if admission.map_root.is_candidate() {
+    if admission
+        .ordinary_map_owned_get_i32_string_v1
+        .is_candidate()
+    {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+            stage,
+            message,
+        }
+    } else if admission
+        .ordinary_map_owner_lifecycle_i32_string_v1
+        .is_candidate()
+    {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+            stage,
+            message,
+        }
+    } else if admission.map_any_owner.is_candidate() {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
+            stage,
+            message,
+        }
+    } else if admission.map_root.is_candidate() {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::MapRoot,
             stage,
@@ -1203,6 +2580,12 @@ fn match_complete_or_compatibility(
     } else if admission.scalar_ffi {
         CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::ScalarFfi,
+            stage,
+            message,
+        }
+    } else if admission.scalar_nested {
+        CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::ScalarNested,
             stage,
             message,
         }
@@ -1346,6 +2729,7 @@ fn match_complete_or_compatibility(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{mir::MirInstructionKind, NodeId};
 
     fn checked(source: &str) -> CheckedProgram {
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -1568,6 +2952,798 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_map_owned_get_v1_has_precedence_and_materializes_its_exact_profile() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let key = "answer"
+                    let source = map_new()
+                    let inserted = map_set(source, key, 17)
+                    let integer = map_get_i32(inserted, key)
+                    let with_text = map_set(inserted, key, "seventeen")
+                    let text = map_get_string(with_text, key)
+                    drop(source)
+                    drop(inserted)
+                    drop(with_text)
+                    0
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage
+        );
+        assert!(CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.is_admitted(admission));
+        assert_eq!(
+            CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.as_str(),
+            ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+        );
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::OutsideProfile
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
+        );
+
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete independent typed-get receipt must materialize");
+        assert!(CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.is_materialized(&route));
+        assert!(!route.materialized_map_root_candidate);
+        assert!(!route.materialized_map_any_owner_candidate);
+        assert!(!route.materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate);
+    }
+
+    #[test]
+    fn ordinary_map_owner_keeps_persistent_roots_with_a_reused_dynamic_key() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let key = "pre" + "fix"
+                    let source = map_new()
+                    let updated = map_set(source, key, 7)
+                    let removed = map_remove(updated, key)
+                    let present = has_key(source, key)
+                    drop(source)
+                    drop(updated)
+                    drop(removed)
+                    if present { 1 } else { 0 }
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage
+        );
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::OutsideProfile
+        );
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("persistent ordinary Map roots retain the ordinary owner route");
+        assert!(route.materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate);
+        assert!(!route.materialized_map_any_owner_candidate);
+
+        let function = route
+            .program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR");
+        function
+            .validate()
+            .expect("the settled prefix and scalar tail branch keep complete Map receipts");
+        let has_key_receipt = function
+            .ownership
+            .checker_ordinary_map_owner_lifecycle_v1
+            .iter()
+            .position(|receipt| receipt.kind == OrdinaryMapOwnerLifecycleActionKind::HasKey)
+            .expect("HasKey receipt from the original branched fixture");
+        let mut forged_key_local = function.clone();
+        forged_key_local
+            .ownership
+            .checker_ordinary_map_owner_lifecycle_v1[has_key_receipt]
+            .key_local = Some(crate::core::ir::ResolvedLocalId(NodeId(
+            "function:main/node:pattern.variable@forged/local".into(),
+        )));
+        assert!(
+            forged_key_local.validate().is_err(),
+            "a complete CFG route still rejects a key-local-only Checker receipt forgery"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_mixed_typed_and_values_materializes_complete_coverage() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let typed = map_get_i32(root, "answer")
+                    let snapshot = values(root)
+                    drop(snapshot)
+                    drop(root)
+                    0
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage
+        );
+        assert!(admission
+            .ordinary_map_owned_get_i32_string_v1
+            .has_profile_signal());
+        assert!(admission
+            .ordinary_map_owned_get_i32_string_v1
+            .is_candidate());
+        assert!(CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.is_admitted(admission));
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::OutsideProfile
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
+        );
+
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("typed GetI32 and Values can share one owned-get root receipt");
+        assert!(CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.is_materialized(&route));
+        let function = route
+            .program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("mixed typed-get/Values MIR");
+        function
+            .validate()
+            .expect("mixed typed-get/Values root lifecycle validates");
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_values_materializes_managed_any_list() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let snapshot = values(root)
+                    let count = snapshot.len()
+                    drop(snapshot)
+                    drop(root)
+                    count
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
+        );
+        assert!(CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.is_admitted(admission));
+
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("ordinary Map values must materialize its owned-get route");
+        assert!(CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.is_materialized(&route));
+        assert!(!route.materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate);
+        let function = route
+            .program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR");
+        function
+            .validate()
+            .expect("Values route MIR must satisfy structural validation");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_any_materializes_a_get_any_only_candidate() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let pair = map_get(root, "answer")
+                    let found = pair.0
+                    drop(pair)
+                    drop(root)
+                    if found { 1 } else { 0 }
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage,
+            "GetAny must count as an owned-get profile action"
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
+        );
+
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("GetAny-only ordinary Map route must materialize");
+        assert!(CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1.is_materialized(&route));
+        let function = route
+            .program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("main MIR");
+        function
+            .validate()
+            .expect("GetAny-only route MIR must satisfy structural validation");
+        assert!(function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_admits_persistent_set_and_remove_with_isolated_identity() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let source = map_new()
+                    let inserted = map_set(source, "answer", 42)
+                    let removed = map_remove(inserted, "answer")
+                    let source_size = map_size(source)
+                    let inserted_size = map_size(inserted)
+                    drop(source)
+                    drop(inserted)
+                    drop(removed)
+                    source_size + inserted_size
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage
+        );
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::OutsideProfile
+        );
+        assert!(
+            CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1.is_admitted(admission)
+        );
+        assert_eq!(
+            CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1.as_str(),
+            ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
+        );
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::OutsideProfile
+        );
+
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete ordinary Map lifecycle must materialize its own profile");
+        assert!(
+            CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1.is_materialized(&route)
+        );
+        assert!(!route.materialized_map_root_candidate);
+        assert!(!route.materialized_map_any_owner_candidate);
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_attempts_without_complete_actions_stay_compatibility() {
+        let unsupported_only = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let unsupported = keys(root)
+                    drop(unsupported)
+                    drop(root)
+                    0
+                }
+            "#,
+        );
+        let unsupported_admission = classify_canonical_mir_route_admission(&unsupported_only);
+        assert_eq!(
+            unsupported_admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage
+        );
+        assert!(
+            !CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1
+                .is_admitted(unsupported_admission)
+        );
+        assert!(!unsupported_admission
+            .ordinary_map_owner_lifecycle_i32_string_v1
+            .is_candidate());
+        assert_eq!(
+            unsupported_admission.map_root,
+            MapRootAdmission::OutsideProfile
+        );
+        assert_eq!(
+            unsupported_admission.map_any_owner,
+            MapAnyOwnerAdmission::OutsideProfile
+        );
+
+        let partially_covered = checked(
+            r#"
+                func unsupported_helper() -> i32 {
+                    let root = map_new()
+                    let size = map_size(root)
+                    let unsupported = keys(root)
+                    drop(unsupported)
+                    drop(root)
+                    size
+                }
+                func main() -> i32 {
+                    let source = map_new()
+                    let inserted = map_set(source, "answer", 42)
+                    let removed = map_remove(inserted, "answer")
+                    drop(source)
+                    drop(inserted)
+                    drop(removed)
+                    0
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&partially_covered);
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage
+        );
+        assert!(!admission
+            .ordinary_map_owner_lifecycle_i32_string_v1
+            .is_candidate());
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::OutsideProfile
+        );
+
+        let direct_error = materialize_canonical_mir_route(&partially_covered, None).expect_err(
+            "direct canonical materialization must reject incomplete ordinary coverage",
+        );
+        assert!(matches!(
+            direct_error,
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn complete_map_any_owner_identity_wins_only_when_it_covers_all_ordinary_attempts() {
+        let covered = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let updated = map_set(root, "answer", 42)
+                    let size = map_size(updated)
+                    drop(updated)
+                    size
+                }
+            "#,
+        );
+        let analysis = covered
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("main resource analysis");
+        assert!(analysis.has_ordinary_map_owner_lifecycle_v1_receipt());
+        assert!(analysis.map_any_owner_v1_actions_are_within_ordinary_map_profile());
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_operation_attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.kind != OrdinaryMapOwnerLifecycleAttemptKind::ScopeDrop
+                })
+                .count(),
+            analysis.map_any_owner_actions.len(),
+            "same-source actions and supported attempts form a complete one-to-one census"
+        );
+        assert!(ordinary_map_attempts_fully_covered_by_map_any_owner_v1(
+            &covered
+        ));
+        let admission = classify_canonical_mir_route_admission(&covered);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::CompleteCoverage
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
+            "covered source attempts share the selected MapAnyOwner identity"
+        );
+        let route = materialize_canonical_mir_route(&covered, None)
+            .expect("complete covering MapAnyOwner receipt materializes");
+        assert!(CanonicalMirRouteProfile::MapAnyOwnerV1.is_materialized(&route));
+        assert!(!route.materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate);
+
+        let independent_ordinary_owner = checked(
+            r#"
+                func map_any_owner() -> i32 {
+                    let root = map_new()
+                    let updated = map_set(root, "fixed", 42)
+                    let size = map_size(updated)
+                    drop(updated)
+                    size
+                }
+                func ordinary_dynamic_owner() -> i32 {
+                    let key = "dyn" + "amic"
+                    let root = map_new()
+                    let updated = map_set(root, key, 7)
+                    let removed = map_remove(updated, key)
+                    let present = has_key(root, key)
+                    drop(root)
+                    drop(updated)
+                    drop(removed)
+                    if present { 1 } else { 0 }
+                }
+                func main() -> i32 { 0 }
+            "#,
+        );
+        let mixed_admission = classify_canonical_mir_route_admission(&independent_ordinary_owner);
+        let any_analysis = independent_ordinary_owner
+            .resource_analysis(&NodeId("function:map_any_owner".into()))
+            .expect("MapAnyOwner callable analysis");
+        let ordinary_analysis = independent_ordinary_owner
+            .resource_analysis(&NodeId("function:ordinary_dynamic_owner".into()))
+            .expect("independent ordinary callable analysis");
+        assert!(any_analysis.map_any_owner_v1_actions_are_within_ordinary_map_profile());
+        assert!(
+            ordinary_analysis.map_any_owner_actions.is_empty(),
+            "the second owner has no MapAny action receipt to cover its dynamic-key operations"
+        );
+        assert!(
+            !ordinary_map_attempts_fully_covered_by_map_any_owner_v1(&independent_ordinary_owner),
+            "coverage is whole-program and cannot omit a separate callable/root"
+        );
+        assert_eq!(
+            mixed_admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage
+        );
+        assert_eq!(
+            mixed_admission.map_any_owner,
+            MapAnyOwnerAdmission::IncompleteCoverage,
+            "the separate dynamic-key owner is absent from MapAnyOwner's source receipts"
+        );
+        let error = materialize_canonical_mir_route(&independent_ordinary_owner, None)
+            .expect_err("an independent ordinary owner cannot be hidden by the other owner");
+        assert!(matches!(
+            error,
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ordinary_map_owner_profile_selection_preserves_raw_profiles_and_blocks_fallback() {
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::OutsideProfile,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
+                false
+            ),
+            (
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::OutsideProfile
+            )
+        );
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::CompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
+                false
+            ),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::CompleteCoverage
+            )
+        );
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::CompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
+                false
+            ),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::OutsideProfile
+            ),
+            "incomplete ordinary coverage keeps the default compatibility fallback"
+        );
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::CompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage,
+                false
+            ),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::CompleteCoverage
+            ),
+            "two complete but incompatible profile ledgers must not select ordinary Map"
+        );
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::CompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
+                true),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::CompleteCoverage
+            ),
+            "only the fully covered consuming-root v1 exception may survive incomplete ordinary coverage"
+        );
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::IncompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
+                true),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::IncompleteCoverage
+            ),
+            "missing or extra MapAnyOwner receipts remain incomplete even when ordinary coverage is complete"
+        );
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::CompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage,
+                true
+            ),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::CompleteCoverage
+            ),
+            "a fully covered ordinary operation set preserves the older MapAnyOwner v1 route"
+        );
+    }
+
+    #[test]
+    fn incomplete_map_any_owner_remains_a_hard_boundary_even_if_ordinary_is_complete() {
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::IncompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage,
+                false
+            ),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::IncompleteCoverage,
+            ),
+            "an incomplete MapAnyOwner ledger is never erased by ordinary coverage"
+        );
+        assert_eq!(
+            select_map_owner_admissions(
+                MapRootAdmission::CompleteCoverage,
+                MapAnyOwnerAdmission::IncompleteCoverage,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage,
+                false
+            ),
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::IncompleteCoverage,
+            ),
+            "an uncovered MapAny action preserves its incomplete hard boundary"
+        );
+    }
+
+    #[test]
+    fn map_any_owner_v1_admits_only_a_complete_new_ledger() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let inserted = map_set(root, "answer", 42)
+                    let size = map_size(inserted)
+                    drop(inserted)
+                    size
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::CompleteCoverage
+        );
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::OutsideProfile,
+            "ordinary Maps without typed-get attempts must remain eligible for the independent older route"
+        );
+        assert!(
+            admission
+                .ordinary_map_owner_lifecycle_i32_string_v1
+                .has_profile_signal(),
+            "recognized ordinary Map attempts stay visible when MapAnyOwner v1 selects their shared identity"
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::CoveredByMapAnyOwnerV1,
+            "a complete overlapping ordinary ledger remains visible after MapAnyOwner v1 wins identity selection"
+        );
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+        assert!(CanonicalMirRouteProfile::MapAnyOwnerV1.is_admitted(admission));
+        assert_eq!(
+            CanonicalMirRouteProfile::MapAnyOwnerV1.as_str(),
+            "map-any-owner-v1"
+        );
+
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("complete independent MapAnyOwner v1 route must materialize");
+        assert!(route.materialized_map_any_owner_candidate);
+        assert!(CanonicalMirRouteProfile::MapAnyOwnerV1.is_materialized(&route));
+    }
+
+    #[test]
+    fn ordinary_map_owner_does_not_cross_a_branch_with_live_roots_or_branch_local_mutations() {
+        let live_root = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let result = if true { 1 } else { 0 }
+                    drop(root)
+                    result
+                }
+            "#,
+        );
+        let live_root_admission = classify_canonical_mir_route_admission(&live_root);
+        assert_eq!(
+            live_root_admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
+            "a root that remains live across the scalar branch cannot receive a prefix-only receipt"
+        );
+
+        let branch_local_action = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    if true {
+                        let updated = map_set(root, "branch", 1)
+                        drop(updated)
+                    } else {
+                    }
+                    drop(root)
+                    0
+                }
+            "#,
+        );
+        let branch_action_admission = classify_canonical_mir_route_admission(&branch_local_action);
+        assert_eq!(
+            branch_action_admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
+            "branch-local Map mutations require full path-specific ledgers before admission"
+        );
+        assert!(materialize_canonical_mir_route(&branch_local_action, None).is_err());
+    }
+
+    #[test]
+    fn missing_or_partial_map_any_owner_ledger_cannot_fall_back_to_map_root() {
+        // A complete legacy MapRoot receipt is only a candidate signal when
+        // the independent v1 ledger is absent. It cannot grant the new
+        // profile, and the selection rule suppresses the old route fallback.
+        let missing = classify_map_any_owner_ledger(
+            false,
+            false,
+            false,
+            false,
+            MapRootAdmission::CompleteCoverage,
+        );
+        assert_eq!(missing, MapAnyOwnerAdmission::IncompleteCoverage);
+        assert_eq!(
+            select_map_root_admission(MapRootAdmission::CompleteCoverage, missing),
+            MapRootAdmission::OutsideProfile
+        );
+
+        // `map_new()` attempts by themselves do not identify a typed v1
+        // candidate. Unsupported ordinary Map/Any operations must preserve
+        // their compatibility route when both lifecycle ledgers are empty.
+        let unsupported = classify_map_any_owner_ledger(
+            false,
+            true,
+            false,
+            false,
+            MapRootAdmission::OutsideProfile,
+        );
+        assert_eq!(unsupported, MapAnyOwnerAdmission::OutsideProfile);
+        assert_eq!(
+            select_map_root_admission(MapRootAdmission::OutsideProfile, unsupported),
+            MapRootAdmission::OutsideProfile
+        );
+
+        // A legacy receipt is still evidence that the Checker recognized a
+        // lifecycle. Missing independent v1 authority stays a hard boundary.
+        let missing_with_legacy_receipt = classify_map_any_owner_ledger(
+            false,
+            true,
+            false,
+            false,
+            MapRootAdmission::IncompleteCoverage,
+        );
+        assert_eq!(
+            missing_with_legacy_receipt,
+            MapAnyOwnerAdmission::IncompleteCoverage
+        );
+
+        // An observed extra construction attempt makes real Checker coverage
+        // partial. Materialization must hard-fail at the v1 profile boundary,
+        // even though the older MapRoot classifier also sees Map activity.
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let inserted = map_set(root, "answer", 42)
+                    let size = map_size(inserted)
+                    let extra = map_size(map_new())
+                    let unsupported = map_get(map_new(), "missing")
+                    drop(inserted)
+                    size + extra
+                }
+            "#,
+        );
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::IncompleteCoverage
+        );
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("partial v1 coverage must not retry the raw MapRoot route");
+        assert!(matches!(
+            error,
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn map_root_and_map_any_owner_are_outside_without_a_closed_candidate() {
+        let program = checked("func main() -> i32 { 42 }");
+        let admission = classify_canonical_mir_route_admission(&program);
+        assert_eq!(admission.map_root, MapRootAdmission::OutsideProfile);
+        assert_eq!(
+            admission.map_any_owner,
+            MapAnyOwnerAdmission::OutsideProfile
+        );
+        let route = materialize_canonical_mir_route(&program, None)
+            .expect("ordinary non-Map program remains a compatibility materialization");
+        assert!(!route.materialized_map_root_candidate);
+        assert!(!route.materialized_map_any_owner_candidate);
+    }
+
+    #[test]
     fn complete_s8_flow_materialization_carries_one_receipt() {
         let program = checked(
             "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) c2.n }",
@@ -1661,7 +3837,15 @@ mod tests {
     fn compatibility_materialization_error_preserves_candidate_admission() {
         let admission = CanonicalMirRouteAdmission {
             map_root: MapRootAdmission::OutsideProfile,
+            map_any_owner: MapAnyOwnerAdmission::OutsideProfile,
+            ordinary_map_owner_lifecycle_i32_string_v1:
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
+            ordinary_map_owned_get_i32_string_v1:
+                OrdinaryMapOwnedGetI32StringV1Admission::OutsideProfile,
+            scalar_export: false,
             scalar_ffi: false,
+            scalar_nested: false,
+            scalar_actor: false,
             scalar_generic_identity_i32: ScalarGenericIdentityAdmission::OutsideProfile,
             scalar_generic_identity_i64: ScalarGenericIdentityAdmission::OutsideProfile,
             collection: ScalarCollectionAdmission::MixedCoverage,
@@ -2235,6 +4419,9 @@ mod tests {
             .expect("scalar collection route must materialize");
         let admission = route.admission;
         let profiles = [
+            CanonicalMirRouteProfile::MapRoot,
+            CanonicalMirRouteProfile::MapAnyOwnerV1,
+            CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
             CanonicalMirRouteProfile::ScalarGenericIdentityI32,
             CanonicalMirRouteProfile::ScalarGenericIdentityI64,
             CanonicalMirRouteProfile::ScalarCollection,

@@ -1,7 +1,6 @@
 use crate::ast::*;
 use crate::verifier::ctx::Z3VarMap;
 use crate::verifier::helpers::{block_tail_expr, extract_string_empty_cmp, is_string_empty_cmp};
-use std::str::FromStr;
 use z3::ast::String as Z3String;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
 
@@ -1050,7 +1049,7 @@ fn float_to_z3_real(f: f64) -> Option<Z3Real> {
 fn resolve_string_expr(expr: &Expr, vars: &mut Z3VarMap) -> Option<Z3String> {
     match expr.unlocated() {
         Expr::Ident(name) => vars.get_string_var(name).cloned(),
-        Expr::Literal(Lit::String(s)) => Z3String::from_str(s).ok(),
+        Expr::Literal(Lit::String(s)) => super::mir::symbolic_string_literal(s).ok(),
         Expr::Old(inner) => {
             if let Expr::Ident(name) = inner.unlocated() {
                 // §11-#37: dot separator for namespace consistency.

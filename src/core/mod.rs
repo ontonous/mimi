@@ -42,7 +42,18 @@ pub use ownership::{
     IndexProjection, Loan, LoanId, LoanKind, LocalId, Place, PlaceProjection, ResourceAnalysis,
     ResourceFact, ResourceId,
 };
-pub(crate) use ownership::{MapRootAction, MapRootActionKind};
+pub(crate) use ownership::{
+    ManagedAnyCfgMatchCase, ManagedAnyCfgReceipt, MapAnyOwnerAction, MapAnyOwnerActionKind,
+    MapAnyOwnerProfileVersion, MapRootAction, MapRootActionKind,
+    OrdinaryMapOwnedGetI32StringV1Action, OrdinaryMapOwnedGetI32StringV1ActionKind,
+    OrdinaryMapOwnedGetI32StringV1Attempt, OrdinaryMapOwnedGetI32StringV1AttemptKind,
+    OrdinaryMapOwnedGetI32StringV1CfgBlock, OrdinaryMapOwnedGetI32StringV1CfgProfileVersion,
+    OrdinaryMapOwnedGetI32StringV1CfgReceipt, OrdinaryMapOwnedGetI32StringV1ProfileVersion,
+    OrdinaryMapOwnerLifecycleAction, OrdinaryMapOwnerLifecycleActionKind,
+    OrdinaryMapOwnerLifecycleAttempt, OrdinaryMapOwnerLifecycleAttemptKind,
+    OrdinaryMapOwnerLifecycleProfileVersion,
+};
+#[cfg(test)]
 pub(crate) use resolved::LegacyBodyConsumer;
 pub use resolved::{
     BackendProfile, CheckedProgram, FlowId, NodeId, NodeMeta, Origin, ResolvedActor,

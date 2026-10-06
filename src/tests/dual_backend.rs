@@ -9019,7 +9019,7 @@ fn dual_actor_nested_func_captures_local() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    dual_assert_prod!(
         r#"
         actor Counter {
             base: i32 = 0;
@@ -9051,7 +9051,7 @@ fn dual_actor_nested_func_shadows_global() {
     if !can_link() {
         return;
     }
-    dual_assert!(
+    dual_assert_prod!(
         r#"
         func helper(x: i32) -> i32 {
             x + 100
@@ -21405,6 +21405,51 @@ fn assert_both_backends_trap_e0802(src: &str, what: &str) {
     );
 }
 
+/// Checked production-pipeline trap parity for the integer `**` operator.
+/// Unlike the older helper, this checks the VM's structured code and the
+/// native typed prefix as well as the stable message fragment.
+fn assert_checked_pow_trap(src: &str, expected_code: &str, expected_message: &str) {
+    let file = parse_prod(src);
+    let checked = crate::core::check_program(&file).unwrap_or_else(|diags| {
+        panic!(
+            "checked power trap source must typecheck:\n{}",
+            diags
+                .iter()
+                .map(|diagnostic| format!("{diagnostic}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    });
+    let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+    compiler.install_checked_program(&checked);
+    let bytecode = compiler
+        .compile_file(&file)
+        .expect("checked power trap source must compile to bytecode");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    let vm_error = vm
+        .run_value()
+        .expect_err("checked VM must trap for this integer power input");
+    assert_eq!(vm_error.code(), expected_code, "VM trap class: {vm_error}");
+    assert!(
+        vm_error.message().contains(expected_message),
+        "VM trap message must contain {expected_message:?}: {vm_error}"
+    );
+
+    if !can_link() {
+        return;
+    }
+    let native_error = checked_codegen_compile_and_run(src)
+        .expect_err("checked native backend must trap for this integer power input");
+    assert!(
+        native_error.contains(&format!("[{expected_code}]")),
+        "native trap must carry {expected_code}: {native_error}"
+    );
+    assert!(
+        native_error.contains(expected_message),
+        "native trap message must contain {expected_message:?}: {native_error}"
+    );
+}
+
 fn assert_both_backends_stdout(src: &str, expected: &str, what: &str) {
     let (_, vm_out) = run_source_with_stdout(src);
     assert_eq!(vm_out.trim(), expected, "VM {what}");
@@ -21604,6 +21649,144 @@ fn dual_literal_pow_wraps_unanchored_position() {
         }",
         "-2147483648",
         "unanchored literal pow wrap (2 ** 31)",
+    );
+}
+
+#[test]
+fn dual_operator_pow_i32_wraps_after_checked_i64_at_31_and_32() {
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            let base: i32 = 2
+            let exp31: i32 = 31
+            let exp32: i32 = 32
+            println(base ** exp31)
+            println(base ** exp32)
+            0
+        }",
+        "-2147483648\n0",
+        "i32 Power compatibility profile: checked i64 then WrapI32",
+    );
+}
+
+#[test]
+fn dual_operator_pow_i32_traps_when_the_i64_intermediate_overflows() {
+    assert_checked_pow_trap(
+        "func main() -> i32 {
+            let base: i32 = 2
+            let exponent: i32 = 63
+            let value = base ** exponent
+            println(value)
+            0
+        }",
+        "E0802",
+        "integer overflow in power",
+    );
+}
+
+#[test]
+fn dual_operator_pow_i64_minimum_boundary_and_overflow() {
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            let base: i64 = -2
+            let exponent: i64 = 63
+            let minimum = base ** exponent
+            let one: i64 = 1
+            println(minimum)
+            println(minimum ** one)
+            0
+        }",
+        "-9223372036854775808\n-9223372036854775808",
+        "i64 Power checked_pow and MIN-to-one boundary",
+    );
+    assert_checked_pow_trap(
+        "func main() -> i32 {
+            let base: i64 = 2
+            let exponent: i64 = 63
+            let value = base ** exponent
+            println(value)
+            0
+        }",
+        "E0802",
+        "integer overflow in power",
+    );
+}
+
+#[test]
+fn dual_operator_pow_negative_and_oversized_exponents_are_typed_e0800() {
+    assert_checked_pow_trap(
+        "func main() -> i32 {
+            let base: i32 = 2
+            let exponent: i32 = -1
+            let value = base ** exponent
+            println(value)
+            0
+        }",
+        "E0800",
+        "negative exponent",
+    );
+    assert_checked_pow_trap(
+        "func main() -> i32 {
+            let base: i64 = 1
+            let exponent: i64 = 4294967296
+            let value = base ** exponent
+            println(value)
+            0
+        }",
+        "E0800",
+        "exponent exceeds u32::MAX",
+    );
+}
+
+#[test]
+fn dual_operator_pow_large_u32_exponents_keep_safe_special_bases() {
+    assert_checked_backends_stdout(
+        "func main() -> i32 {
+            let exponent: i64 = 4294967295
+            let zero: i64 = 0
+            let one: i64 = 1
+            let minus_one: i64 = -1
+            println(zero ** exponent)
+            println(one ** exponent)
+            println(minus_one ** exponent)
+            0
+        }",
+        "0\n1\n-1",
+        "i64 Power special bases at u32::MAX",
+    );
+}
+
+#[test]
+fn dual_operator_pow_evaluates_effectful_operands_left_to_right() {
+    assert_checked_backends_stdout(
+        "func base() -> i32 {
+            println(\"base\")
+            2
+        }
+        func exponent() -> i32 {
+            println(\"exponent\")
+            31
+        }
+        func main() -> i32 {
+            println(base() ** exponent())
+            0
+        }",
+        "base\nexponent\n-2147483648",
+        "integer Power preserves source operand evaluation order",
+    );
+}
+
+#[test]
+fn dual_operator_pow_keeps_trapping_left_operand_definedness() {
+    assert_checked_pow_trap(
+        "func main() -> i32 {
+            let numerator: i32 = 1
+            let denominator: i32 = 0
+            let base = numerator / denominator
+            println(base ** 0)
+            0
+        }",
+        "E0801",
+        "division by zero",
     );
 }
 
@@ -21881,6 +22064,218 @@ fn dual_prod_map_string_copy_preserves_transparent_aliases() {
             "String aliases preserve owning Map ingress in resolved and exported legacy bodies",
         );
     }
+}
+
+#[test]
+fn dual_checked_generic_impl_method_uses_canonical_text_instantiation() {
+    // The impl and method binders are instantiated from the checked call, not
+    // recovered from receiver display text. Returned Text crosses the native
+    // generic body boundary with its full {pointer, byte_length} ABI.
+    // String.len counts Unicode scalar values (including embedded NUL), not bytes.
+    assert_checked_backends_stdout(
+        r#"
+        trait Echo<T> {
+            func echo(value: T) -> T;
+            func echo_local<U>(value: U) -> U;
+        }
+        type Holder { marker: i32 }
+        impl<T> Echo<T> for Holder {
+            func echo(value: T) -> T { value }
+            func echo_local<U>(value: U) -> U { value }
+        }
+        func main() -> i32 {
+            let holder = Holder { marker: 0 }
+            let impl_generic = holder.echo("A\0雪")
+            println(impl_generic == "A\0雪")
+            println(impl_generic.len())
+            let method_generic = holder.echo_local("B\0木")
+            println(method_generic == "B\0木")
+            println(method_generic.len())
+            0
+        }
+        "#,
+        "true\n3\ntrue\n3",
+        "generic impl and method binders use checker-instantiated Text ABI",
+    );
+}
+
+#[test]
+fn dual_generic_trait_impl_specializations_have_distinct_native_bodies() {
+    assert_checked_backends_stdout(
+        r#"
+        trait Marker<T> { func read() -> i32; }
+        impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+        func main() -> i32 {
+            let numbers: List<i32> = [1]
+            let words: List<string> = ["x"]
+            println(numbers.read())
+            println(words.read())
+            0
+        }
+        "#,
+        "11\n22",
+        "generic trait impl methods have distinct checked native symbols",
+    );
+}
+
+#[test]
+fn dual_checked_generic_trait_vm_dispatch_uses_exact_impl_owner() {
+    // All three impls have the same legacy display key (`List_read`). Calls
+    // intentionally run in a different order from the declarations so an
+    // overwrite or spelling-based fallback cannot make the VM appear correct.
+    assert_checked_backends_stdout(
+        r#"
+        trait Marker<T> { func read() -> i32; }
+        impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+        impl Marker<i64> for List<i64> { func read() -> i32 { 33 } }
+        func main() -> i32 {
+            let numbers: List<i32> = [1]
+            let words: List<string> = ["x"]
+            let wide: List<i64> = [1]
+            println(words.read())
+            println(numbers.read())
+            println(wide.read())
+            0
+        }
+        "#,
+        "22\n11\n33",
+        "checked VM dispatch uses distinct generic impl callable owners",
+    );
+}
+
+#[test]
+fn dual_checked_option_result_and_container_method_dispatch() {
+    // Checked BuiltinId identities must select their receiver-family VM
+    // semantics. This covers combinators whose names overlap across Option
+    // and Result, plus Weak.upgrade → Option<Shared<T>>. The neighboring
+    // compiler census enumerates every checker-accepted BuiltinId exactly.
+    assert_checked_backends_stdout(
+        r#"
+        func twice(value: i32) -> i32 { value * 2 }
+        func option_next(value: i32) -> Option<i32> { Some(value + 1) }
+        func result_next(value: i32) -> Result<i32, string> { Ok(value + 1) }
+        func append_mark(value: string) -> string { value + "!" }
+        func main() -> i32 {
+            let present: Option<i32> = Some(4)
+            let absent: Option<i32> = None
+            println(present.is_some())
+            println(absent.is_none())
+            println(present.unwrap())
+            println(absent.unwrap_or(9))
+            println(present.expect("present"))
+            println(present.map(twice).unwrap())
+            println(absent.map(twice).is_none())
+            println(present.and_then(option_next).unwrap())
+            println(absent.and_then(option_next).is_none())
+            println(present.map_err(append_mark).unwrap())
+            println(absent.map_err(append_mark).is_none())
+
+            let present_result: Result<i32, string> = present.ok_or("missing")
+            let absent_result: Result<i32, string> = absent.ok_or("missing")
+            println(present_result.is_ok())
+            println(absent_result.is_err())
+            let good: Result<i32, string> = Ok(3)
+            let bad: Result<i32, string> = Err("bad")
+            println(good.unwrap())
+            println(bad.unwrap_or(8))
+            println(good.expect("good"))
+            println(good.map(twice).unwrap())
+            println(bad.map(twice).is_err())
+            println(good.and_then(result_next).unwrap())
+            println(bad.and_then(result_next).is_err())
+            let changed_error: Result<i32, string> = bad.map_err(append_mark)
+            match changed_error {
+                Ok(_) => println("unexpected success")
+                Err(message) => println(message)
+            }
+            println(good.map_err(append_mark).unwrap())
+            println(good.ok_or().unwrap())
+            println(bad.ok_or().is_none())
+
+            shared owner = 42
+            let copied = owner.clone()
+            println(copied.inner())
+            weak observer = owner
+            println(observer.upgrade().deref())
+
+            let left: List<i32> = [1, 2]
+            let right: List<i32> = [3, 4]
+            let joined = left.concat(right)
+            println(joined.len())
+            let reversed = joined.reverse()
+            println(reversed[0])
+            let initial: Set<i32> = {1, 2}
+            println(initial.size())
+            println(initial.len())
+            println(initial.is_empty())
+            println(initial.contains(2))
+            let inserted = initial.insert(3)
+            let updated = inserted.remove(1)
+            println(updated.size())
+            println(updated.to_list().len())
+            0
+        }
+        "#,
+        "true\ntrue\n4\n9\n4\n8\ntrue\n5\ntrue\n4\ntrue\ntrue\ntrue\n3\n8\n3\n6\ntrue\n4\ntrue\nbad!\n3\n3\ntrue\n42\n42\n4\n4\n2\n2\nfalse\ntrue\n2\n2",
+        "checker-selected Option/Result, Shared/Weak, List, and Set builtin methods",
+    );
+}
+
+#[test]
+fn dual_checked_session_methods_use_exact_builtin_ids() {
+    assert_checked_backends_stdout(
+        r#"
+        session Echo = !i32 . ?i32 . end
+        func main() -> i32 {
+            let (sender, receiver) = session_pair::<Echo>()
+            sender.send(17)
+            let value = receiver.recv()
+            receiver.send(value + 1)
+            let response = sender.recv()
+            sender.close()
+            receiver.close()
+            println(value)
+            println(response)
+            0
+        }
+        "#,
+        "17\n18",
+        "checked SessionChan methods map by exact BuiltinId",
+    );
+}
+
+#[test]
+fn dual_checked_flow_state_method_uses_exact_transition_id() {
+    // The same event has two source-state edges. Checked state.method calls
+    // must carry the complete FlowId/event/source StateId; name-first HashMap
+    // selection can otherwise route the second call to the Zero transition.
+    assert_checked_backends_stdout(
+        r#"
+        flow Counter {
+            state Zero { value: i32 }
+            state One { value: i32 }
+            state Done { value: i32 }
+            transition advance(Zero) -> One {
+                return One { value: self.value + 1 }
+            }
+            transition advance(One) -> Done {
+                return Done { value: self.value + 1 }
+            }
+        }
+        func main() -> i32 {
+            let start = Zero { value: 4 }
+            let middle = start.advance()
+            println(middle.value)
+            let finished = middle.advance()
+            println(finished.value)
+            0
+        }
+        "#,
+        "5\n6",
+        "checked Flow state.method uses the exact transition source state",
+    );
 }
 
 #[test]

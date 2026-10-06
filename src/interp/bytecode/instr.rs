@@ -41,6 +41,36 @@ pub type VariantIdx = u16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Op {
+    /// Typed canonical Actor operations. The instruction constant is the
+    /// checker-owned MIR identity, sealed with the complete function body.
+    MirActorSpawn {
+        rd: Reg,
+        descriptor: u32,
+        instruction: ConstIdx,
+    },
+    MirActorCall {
+        rd: Reg,
+        ra: Reg,
+        descriptor: u32,
+        method: u32,
+        instruction: ConstIdx,
+        args_base: Reg,
+        argc: u16,
+    },
+    MirActorFieldLoad {
+        rd: Reg,
+        state: Reg,
+        descriptor: u32,
+        field: u32,
+        instruction: ConstIdx,
+    },
+    MirActorFieldStore {
+        state: Reg,
+        value: Reg,
+        descriptor: u32,
+        field: u32,
+        instruction: ConstIdx,
+    },
     // ═══════════════════════════════════════════════════════════
     // Constants & moves
     // ═══════════════════════════════════════════════════════════
@@ -626,6 +656,13 @@ pub enum Op {
         rd: Reg,
         ra: Reg,
     },
+    /// rd = Unicode scalar count of a checked String receiver.
+    /// Kept distinct from legacy Len so checked String.len validates a String
+    /// receiver without altering collection or raw-AST compatibility paths.
+    StringScalarLen {
+        rd: Reg,
+        ra: Reg,
+    },
 
     /// rd = new Tuple with `arity` elements from [base .. base+arity)
     NewTuple {
@@ -856,6 +893,144 @@ pub enum Op {
         key: ConstIdx,
     },
     MirMapRootDrop {
+        ra: Reg,
+    },
+    /// The separately receipted MapAnyOwner v1 operations. These use a
+    /// distinct opcode family and runtime value so a legacy MapRoot receipt
+    /// can never authorize a typed Any-owner lifecycle.
+    MirMapAnyOwnerV1New {
+        rd: Reg,
+    },
+    MirMapAnyOwnerV1Set {
+        rd: Reg,
+        ra: Reg,
+        key: ConstIdx,
+        value: Reg,
+    },
+    MirMapAnyOwnerV1Remove {
+        rd: Reg,
+        ra: Reg,
+        key: ConstIdx,
+    },
+    MirMapAnyOwnerV1Size {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirMapAnyOwnerV1Contains {
+        rd: Reg,
+        ra: Reg,
+        key: ConstIdx,
+    },
+    MirMapAnyOwnerV1Drop {
+        ra: Reg,
+    },
+    /// Independent source-Map owner lifecycle profile. Unlike MapRoot and
+    /// MapAnyOwner v1, updates preserve the source root and use a dynamic
+    /// String key register. This opcode family has its own bytecode receipt
+    /// and runtime Value identity.
+    MirOrdinaryMapOwnerLifecycleI32StringV1New {
+        rd: Reg,
+    },
+    /// Fresh independent root; the source remains live.
+    MirOrdinaryMapOwnerLifecycleI32StringV1Clone {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnerLifecycleI32StringV1Set {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        value: Reg,
+    },
+    MirOrdinaryMapOwnerLifecycleI32StringV1Remove {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    MirOrdinaryMapOwnerLifecycleI32StringV1Size {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnerLifecycleI32StringV1Contains {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    MirOrdinaryMapOwnerLifecycleI32StringV1Drop {
+        ra: Reg,
+    },
+    /// Persistent ordinary-Map profile with typed owned reads. Set and
+    /// Remove read `ra` and produce a distinct result root. Get operations
+    /// carry the TypeDesc-derived canonical Result variant shape table.
+    MirOrdinaryMapOwnedGetI32StringV1New {
+        rd: Reg,
+    },
+    /// Fresh independent root; the source remains live.
+    MirOrdinaryMapOwnedGetI32StringV1Clone {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnedGetI32StringV1Set {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        value: Reg,
+    },
+    MirOrdinaryMapOwnedGetI32StringV1Remove {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    MirOrdinaryMapOwnedGetI32StringV1Size {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnedGetI32StringV1Contains {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        shapes: ConstIdx,
+    },
+    MirOrdinaryMapOwnedGetI32StringV1GetString {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        shapes: ConstIdx,
+    },
+    /// A fresh `(found, owned Any)` snapshot; missing uses a fresh owned i32 zero.
+    MirOrdinaryMapOwnedGetI32StringV1GetAny {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    /// Borrow a typed ordinary Map root and return a move-owned `List<Any>`
+    /// snapshot. List elements are independent managed Any owners.
+    MirOrdinaryMapOwnedGetI32StringV1Values {
+        rd: Reg,
+        ra: Reg,
+    },
+    /// Dedicated descriptor-checked Any operation. The complete checker contract
+    /// is retained in the constant pool and pinned by the independent profile receipt.
+    MirManagedAnyOp {
+        rd: Option<Reg>,
+        ra: Reg,
+        operation: crate::core::mir::MirManagedAnyOperation,
+        contract: ConstIdx,
+    },
+    /// Borrow a canonical owned Any and exact String peer for a sealed
+    /// equality/inequality operation. Neither input register is consumed.
+    MirManagedAnyStringCompare {
+        rd: Reg,
+        any: Reg,
+        string: Reg,
+        equal: bool,
+    },
+    MirOrdinaryMapOwnedGetI32StringV1Drop {
         ra: Reg,
     },
     /// rd = canonical Option/Result predicate(ra). The receipt is mandatory
@@ -1093,6 +1268,9 @@ pub enum Op {
         rd: Reg,
         flow: ConstIdx,
         method: ConstIdx,
+        /// Exact checker-selected source state for checked transitions.
+        /// Raw compatibility transitions leave this empty.
+        checked_source_state: Option<ConstIdx>,
         args_base: Reg,
         argc: u16,
     },
@@ -1204,6 +1382,7 @@ impl Op {
             | Or { rd, .. }
             | ConcatStr { rd, .. }
             | Len { rd, .. }
+            | StringScalarLen { rd, .. }
             | NewList { rd, .. }
             | NewTuple { rd, .. }
             | NewRecord { rd, .. }
@@ -1221,6 +1400,18 @@ impl Op {
             | MirListConcat { rd, .. }
             | MirMapRootRemove { rd, .. }
             | MirMapRootContains { rd, .. }
+            | MirMapAnyOwnerV1Remove { rd, .. }
+            | MirMapAnyOwnerV1Contains { rd, .. }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1Clone { rd, .. }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1Remove { rd, .. }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1Contains { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1Clone { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1Remove { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1Contains { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1GetI32 { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1GetString { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1GetAny { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1Values { rd, .. }
             | MirVariantPredicate { rd, .. }
             | MirVariantProjectOr { rd, .. }
             | TupleGet { rd, .. }
@@ -1315,6 +1506,7 @@ impl Op {
             | Op::Or { rd, .. }
             | Op::ConcatStr { rd, .. }
             | Op::Len { rd, .. }
+            | Op::StringScalarLen { rd, .. }
             | Op::NewList { rd, .. }
             | Op::NewTuple { rd, .. }
             | Op::NewRecord { rd, .. }
@@ -1328,6 +1520,18 @@ impl Op {
             | Op::ListPop { rd, .. }
             | Op::MirMapRootRemove { rd, .. }
             | Op::MirMapRootContains { rd, .. }
+            | Op::MirMapAnyOwnerV1Remove { rd, .. }
+            | Op::MirMapAnyOwnerV1Contains { rd, .. }
+            | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Clone { rd, .. }
+            | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Remove { rd, .. }
+            | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Contains { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1Clone { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1Remove { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1Contains { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1GetString { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1GetAny { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1Values { rd, .. }
             | Op::TupleGet { rd, .. }
             | Op::RecordGet { rd, .. }
             | Op::RecordMoveGet { rd, .. }
@@ -1379,6 +1583,19 @@ impl Op {
             reg >= base && reg < base + count
         }
         match self {
+            MirActorSpawn { .. } => false,
+            MirActorCall {
+                ra,
+                args_base,
+                argc,
+                ..
+            } => {
+                *ra == reg
+                    || (u32::from(reg) >= u32::from(*args_base)
+                        && u32::from(reg) < u32::from(*args_base) + u32::from(*argc))
+            }
+            MirActorFieldLoad { state, .. } => *state == reg,
+            MirActorFieldStore { state, value, .. } => *state == reg || *value == reg,
             // Ops that read no register:
             LoadConst { .. }
             | LoadUnit { .. }
@@ -1389,6 +1606,9 @@ impl Op {
             | NewSet { .. }
             | MirSetNew { .. }
             | MirMapRootNew { .. }
+            | MirMapAnyOwnerV1New { .. }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1New { .. }
+            | MirOrdinaryMapOwnedGetI32StringV1New { .. }
             | NewCap { .. }
             | Nop
             | Jmp { .. }
@@ -1449,6 +1669,23 @@ impl Op {
             | TupleSet { ra, rb, .. }
             | SharedSet { ra, rb, .. } => *ra == reg || *rb == reg,
             MirMapRootSet { ra, value, .. } => *ra == reg || *value == reg,
+            MirMapAnyOwnerV1Set { ra, value, .. } => *ra == reg || *value == reg,
+            MirOrdinaryMapOwnerLifecycleI32StringV1Set { ra, key, value, .. } => {
+                *ra == reg || *key == reg || *value == reg
+            }
+            MirOrdinaryMapOwnedGetI32StringV1Set { ra, key, value, .. } => {
+                *ra == reg || *key == reg || *value == reg
+            }
+            MirOrdinaryMapOwnerLifecycleI32StringV1Remove { ra, key, .. }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1Contains { ra, key, .. } => {
+                *ra == reg || *key == reg
+            }
+            MirOrdinaryMapOwnedGetI32StringV1Remove { ra, key, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1Contains { ra, key, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1GetI32 { ra, key, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1GetString { ra, key, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1GetAny { ra, key, .. } => *ra == reg || *key == reg,
+            MirOrdinaryMapOwnedGetI32StringV1Values { ra, .. } => *ra == reg,
             NegInt { ra, .. }
             | NegFloat { ra, .. }
             | BitNot { ra, .. }
@@ -1476,6 +1713,7 @@ impl Op {
             | RecordMoveGet { ra, .. }
             | RecordMoveDropGet { ra, .. }
             | Len { ra, .. }
+            | StringScalarLen { ra, .. }
             | ListPop { ra, .. }
             | MirSetSize { ra, .. }
             | MirSetIsEmpty { ra, .. }
@@ -1487,6 +1725,17 @@ impl Op {
             | MirMapRootSize { ra, .. }
             | MirMapRootContains { ra, .. }
             | MirMapRootDrop { ra }
+            | MirMapAnyOwnerV1Remove { ra, .. }
+            | MirMapAnyOwnerV1Size { ra, .. }
+            | MirMapAnyOwnerV1Contains { ra, .. }
+            | MirMapAnyOwnerV1Drop { ra }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1Clone { ra, .. }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1Size { ra, .. }
+            | MirOrdinaryMapOwnerLifecycleI32StringV1Drop { ra }
+            | MirOrdinaryMapOwnedGetI32StringV1Clone { ra, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1Size { ra, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1Drop { ra }
+            | MirManagedAnyOp { ra, .. }
             | MirVariantPredicate { ra, .. }
             | SharedNew { ra, .. }
             | WeakNew { ra, .. }
@@ -1494,6 +1743,7 @@ impl Op {
             | RetEarly { ra, .. }
             | JmpIf { ra, .. }
             | JmpIfNot { ra, .. } => *ra == reg,
+            MirManagedAnyStringCompare { any, string, .. } => *any == reg || *string == reg,
             MirVariantProjectOr { ra, rb, .. } => *ra == reg || *rb == reg,
             MaskShiftAmt { rb, .. } => *rb == reg,
             CheckI32 { rd, .. } | WrapI32 { rd, .. } => *rd == reg,
@@ -1623,6 +1873,8 @@ pub enum ConstValue {
     /// arity copied only from a validated MIR TypeDesc table; the VM must
     /// reject tags or payloads outside it.
     VariantShapes(Vec<VariantShape>),
+    /// Exact checker identity plus selected Any opcode, separate from legacy dynamic Any.
+    ManagedAnyContract(CanonicalManagedAnyBytecodeContract),
     /// Canonical record projection receipts encoded for the bytecode physical
     /// ABI. The MIR adapter copies this only from a validated TypeDesc.
     RecordProjection(RecordProjectionShape),
@@ -1646,6 +1898,13 @@ pub enum ConstValue {
     /// Canonical Result.unwrap_or receipt encoded for the bytecode physical
     /// ABI. The fallback arm and selected payload remain checker identities.
     VariantProjectionFallback(VariantProjectionFallbackShape),
+}
+
+/// Fully materialized checker receipt for one canonical managed Any operation.
+#[derive(Debug, Clone)]
+pub struct CanonicalManagedAnyBytecodeContract {
+    pub operation: crate::core::mir::MirManagedAnyOperation,
+    pub contract: crate::core::mir::MirManagedAnyContract,
 }
 
 /// One canonical variant shape in the bytecode physical contract.
@@ -1959,11 +2218,17 @@ pub struct BytecodeProgram {
     /// Checker-owned MapRoot actions. Compatibility bytecode has no snapshot;
     /// the VM then rejects any injected MIR MapRoot opcode.
     pub(crate) canonical_map_root_receipt: Option<CanonicalMapRootBytecodeReceipt>,
+    /// Independent private snapshot for Checker-owned MapAnyOwner v1
+    /// actions. This profile-specific receipt cannot authorize raw MapRoot
+    /// opcodes or values.
+    pub(crate) canonical_map_any_owner_v1_receipt: Option<CanonicalMapAnyOwnerV1BytecodeReceipt>,
     /// Route receipt anchor for canonical MIR bytecode. Compatibility
     /// bytecode leaves this unset; receipt-bound consumers copy the checked
     /// admission snapshot here so VM children and re-entry share one source
     /// of truth.
     pub(crate) canonical_ffi_route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
+    /// Sealed typed Actor manifest emitted only by the AST-free MIR adapter.
+    pub(crate) canonical_actors: Option<super::actor::CanonicalActorManifest>,
     /// Actor definitions (for spawn at runtime).
     pub actor_defs: std::collections::HashMap<String, crate::ast::ActorDef>,
     /// Flow definitions (for transition dispatch).
@@ -2001,6 +2266,11 @@ pub struct BytecodeProgram {
 pub(crate) struct CanonicalMapRootBytecodeReceipt {
     expected_has_map_root: bool,
     expected_program: String,
+    /// Independent canonical-MIR presence marker for the Any/CFG snapshot.
+    /// This marker lives beside, rather than inside, the Map-owner receipt
+    /// carrier so deleting that carrier or its CFG child cannot be hidden by
+    /// a still-valid Map snapshot.
+    expected_managed_any_cfg_receipt: bool,
 }
 
 impl CanonicalMapRootBytecodeReceipt {
@@ -2013,7 +2283,16 @@ impl CanonicalMapRootBytecodeReceipt {
             } else {
                 String::new()
             },
+            expected_managed_any_cfg_receipt: false,
         }
+    }
+
+    pub(crate) fn require_managed_any_cfg_receipt(&mut self) {
+        self.expected_managed_any_cfg_receipt = true;
+    }
+
+    pub(crate) fn expects_managed_any_cfg_receipt(&self) -> bool {
+        self.expected_managed_any_cfg_receipt
     }
 
     pub(crate) fn validate(
@@ -2021,6 +2300,29 @@ impl CanonicalMapRootBytecodeReceipt {
         entry: FuncIdx,
         functions: &[FunctionProto],
     ) -> Result<(), String> {
+        if self.expected_has_map_root && functions.iter().any(function_has_map_any_owner_v1_ops) {
+            return Err(
+                "canonical MapRoot receipt cannot authorize MapAnyOwner v1 bytecode".into(),
+            );
+        }
+        if self.expected_has_map_root
+            && functions
+                .iter()
+                .any(function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops)
+        {
+            return Err(
+                "MapRoot receipt cannot authorize ordinary Map owner lifecycle v1 bytecode".into(),
+            );
+        }
+        if self.expected_has_map_root
+            && functions
+                .iter()
+                .any(function_has_ordinary_map_owned_get_i32_string_v1_ops)
+        {
+            return Err(
+                "MapRoot receipt cannot authorize ordinary Map owned-Get v1 bytecode".into(),
+            );
+        }
         let has_map_root = functions.iter().any(function_has_map_root_ops);
         if !self.expected_has_map_root && !has_map_root {
             return Ok(());
@@ -2032,6 +2334,1642 @@ impl CanonicalMapRootBytecodeReceipt {
             return Err(
                 "canonical MapRoot bytecode disagrees with its Checker-owned receipt snapshot"
                     .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Compiler-owned VM snapshot for a Checker-sealed generic ManagedAny
+/// identity instance. This is kept separate from the ordinary Map owner
+/// receipts: a ManagedAny TypeDesc alone never authorizes a generic call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalManagedAnyIdentityInstanceBinding {
+    pub(crate) instance_id: String,
+    pub(crate) template: String,
+    /// The source generic argument (DynamicAny), not the specialized ABI ID.
+    pub(crate) type_argument: String,
+    pub(crate) managed_type_argument: String,
+    pub(crate) owner: String,
+    pub(crate) function: FuncIdx,
+    pub(crate) parameter: String,
+    pub(crate) parameter_type: String,
+    pub(crate) clone_result: String,
+    pub(crate) result_type: String,
+    pub(crate) clone_instruction: String,
+    pub(crate) clone_origin: String,
+    pub(crate) drop_instruction: String,
+    pub(crate) drop_origin: String,
+}
+
+/// A direct generic identity call as emitted by the MIR adapter. The
+/// immediately preceding `Move` is pinned to establish opaque-owner transfer
+/// into the one-register `CallMove` argument window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalManagedAnyIdentityCallBinding {
+    pub(crate) instance_id: String,
+    pub(crate) caller: String,
+    pub(crate) caller_index: FuncIdx,
+    pub(crate) instruction: String,
+    pub(crate) callee: String,
+    pub(crate) callee_index: FuncIdx,
+    pub(crate) type_argument: String,
+    pub(crate) argument: String,
+    pub(crate) argument_type: String,
+    pub(crate) result: String,
+    pub(crate) result_type: String,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) args_base: Reg,
+    pub(crate) argc: u16,
+    pub(crate) transfer_pc: u32,
+    pub(crate) transfer_rd: Reg,
+    pub(crate) transfer_rs: Reg,
+}
+
+/// One source MIR function whose signature, values, or call boundary contains
+/// DynamicAny/ManagedAny.  The source type summary is Checker/MIR-derived;
+/// the bytecode index/name binding prevents a public function-table edit from
+/// detaching that source census from its emitted function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalManagedAnyCfgFunctionBinding {
+    pub(crate) owner: String,
+    pub(crate) function_index: FuncIdx,
+    pub(crate) source_signature: String,
+}
+
+/// A direct Any-bearing MIR call or receipted ClosureInvoke paired with its
+/// exact emitted CallMove site.  Existing identity/trap receipts further bind
+/// their specialized instance and transfer Move; this census records all
+/// other source call-edge identities and keeps ClosureInvoke distinct from an
+/// ordinary direct call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalManagedAnyCfgCallBinding {
+    pub(crate) caller: String,
+    pub(crate) caller_index: FuncIdx,
+    pub(crate) source_block: String,
+    pub(crate) source_instruction: String,
+    pub(crate) source_kind: String,
+    pub(crate) callee: String,
+    pub(crate) callee_index: FuncIdx,
+    pub(crate) source_type_arguments: Vec<String>,
+    pub(crate) source_arguments: Vec<String>,
+    pub(crate) source_result: Option<String>,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) args_base: Reg,
+    pub(crate) argc: u16,
+}
+
+/// Compiler-owned receipt for the exact instance table, callee bodies, and
+/// call edges. A complete bytecode snapshot makes tampering fail during VM
+/// preflight, before output or other user effects.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalManagedAnyIdentityBytecodeReceipt {
+    profile_version: u16,
+    instances: Vec<CanonicalManagedAnyIdentityInstanceBinding>,
+    calls: Vec<CanonicalManagedAnyIdentityCallBinding>,
+    expected_program: String,
+}
+
+impl CanonicalManagedAnyIdentityBytecodeReceipt {
+    pub(crate) fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        instances: Vec<CanonicalManagedAnyIdentityInstanceBinding>,
+        calls: Vec<CanonicalManagedAnyIdentityCallBinding>,
+    ) -> Self {
+        let expected_program = if instances.is_empty() {
+            String::new()
+        } else {
+            managed_any_identity_program_snapshot(entry, functions)
+        };
+        Self {
+            profile_version: 1,
+            instances,
+            calls,
+            expected_program,
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        if self.profile_version != 1 {
+            return Err(
+                "ManagedAny generic identity receipt has an unsupported profile version".into(),
+            );
+        }
+        let mut candidates = std::collections::BTreeSet::new();
+        for (index, function) in functions.iter().enumerate() {
+            if function_is_managed_any_identity_candidate(function) {
+                candidates.insert(
+                    FuncIdx::try_from(index)
+                        .map_err(|_| "ManagedAny generic identity callee index exceeds u32 ABI")?,
+                );
+            }
+        }
+        let instance_functions = self
+            .instances
+            .iter()
+            .map(|instance| instance.function)
+            .collect::<std::collections::BTreeSet<_>>();
+        if self.instances.is_empty() {
+            if !self.calls.is_empty() || !candidates.is_empty() {
+                return Err(
+                    "ManagedAny generic identity bytecode has no Checker instance receipt".into(),
+                );
+            }
+            return Ok(());
+        }
+        if self.calls.is_empty() {
+            return Err("ManagedAny generic identity receipt has no direct call site".into());
+        }
+        if candidates != instance_functions {
+            return Err(
+                "ManagedAny generic identity candidate/callee set disagrees with Checker instances"
+                    .into(),
+            );
+        }
+        if managed_any_identity_program_snapshot(entry, functions) != self.expected_program {
+            return Err(
+                "ManagedAny generic identity bytecode disagrees with its private Checker snapshot"
+                    .into(),
+            );
+        }
+
+        let managed_type = crate::core::mir::types::managed_any_i32_string_v1_type_id();
+        let managed_type_text = managed_type.as_str();
+        let mut instance_ids = std::collections::BTreeSet::new();
+        let mut callee_indices = std::collections::BTreeSet::new();
+        for instance in &self.instances {
+            if instance.instance_id.trim().is_empty()
+                || instance.template.trim().is_empty()
+                || instance.type_argument.trim().is_empty()
+                || instance.type_argument == instance.managed_type_argument
+                || instance.managed_type_argument != managed_type_text
+                || instance.owner.trim().is_empty()
+                || instance.parameter.trim().is_empty()
+                || instance.parameter_type != managed_type_text
+                || instance.clone_result.trim().is_empty()
+                || instance.result_type != managed_type_text
+                || instance.clone_instruction.trim().is_empty()
+                || instance.clone_origin.trim().is_empty()
+                || instance.drop_instruction.trim().is_empty()
+                || instance.drop_origin.trim().is_empty()
+                || !instance_ids.insert(instance.instance_id.clone())
+                || !callee_indices.insert(instance.function)
+            {
+                return Err(
+                    "ManagedAny generic identity instance binding is incomplete or duplicated"
+                        .into(),
+                );
+            }
+            let function = functions.get(instance.function as usize).ok_or_else(|| {
+                format!(
+                    "ManagedAny generic identity callee {} is outside the bytecode function table",
+                    instance.function
+                )
+            })?;
+            validate_managed_any_identity_callee(function, instance)?;
+        }
+
+        let by_function = self
+            .instances
+            .iter()
+            .map(|instance| (instance.function, instance))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut expected_sites = std::collections::BTreeSet::new();
+        for call in &self.calls {
+            if call.instance_id.trim().is_empty()
+                || call.caller.trim().is_empty()
+                || call.instruction.trim().is_empty()
+                || call.callee.trim().is_empty()
+                || call.type_argument.trim().is_empty()
+                || call.argument.trim().is_empty()
+                || call.argument_type != managed_type_text
+                || call.result.trim().is_empty()
+                || call.result_type != managed_type_text
+                || call.argc != 1
+                || call.pc == 0
+                || call.transfer_pc.checked_add(1) != Some(call.pc)
+                || call.transfer_rd != call.args_base
+                || !expected_sites.insert((call.caller_index, call.pc))
+            {
+                return Err("ManagedAny generic identity call binding is incomplete, duplicated, or not owner-moving".into());
+            }
+            let instance = by_function.get(&call.callee_index).ok_or_else(|| {
+                format!(
+                    "ManagedAny generic identity call at {} pc {} has no Checker instance",
+                    call.caller, call.pc
+                )
+            })?;
+            if call.instance_id != instance.instance_id
+                || call.callee != instance.owner
+                || call.type_argument != instance.type_argument
+            {
+                return Err(
+                    "ManagedAny generic identity call does not match its source instance receipt"
+                        .into(),
+                );
+            }
+            let caller = functions.get(call.caller_index as usize).ok_or_else(|| {
+                format!(
+                    "ManagedAny generic identity caller {} is outside the bytecode function table",
+                    call.caller_index
+                )
+            })?;
+            let register_count = caller.register_count as usize;
+            let argument_end = (call.args_base as usize).checked_add(call.argc as usize);
+            if caller.name != call.caller
+                || call.rd as usize >= register_count
+                || call.transfer_rd as usize >= register_count
+                || call.transfer_rs as usize >= register_count
+                || argument_end.is_none_or(|end| end > register_count)
+            {
+                return Err(
+                    "ManagedAny generic identity caller identity or owner-transfer registers disagree with its function frame".into(),
+                );
+            }
+            match caller.code.get(call.pc as usize) {
+                Some(Op::CallMove {
+                    rd,
+                    func,
+                    args_base,
+                    argc,
+                }) if *rd == call.rd
+                    && *func == call.callee_index
+                    && *args_base == call.args_base
+                    && *argc == call.argc => {}
+                _ => {
+                    return Err(
+                        "ManagedAny generic identity call no longer matches its CallMove binding"
+                            .into(),
+                    )
+                }
+            }
+            match caller.code.get(call.transfer_pc as usize) {
+                Some(Op::Move { rd, rs }) if *rd == call.transfer_rd && *rs == call.transfer_rs => {
+                }
+                _ => {
+                    return Err(
+                        "ManagedAny generic identity call argument is not the receipted owner Move"
+                            .into(),
+                    )
+                }
+            }
+        }
+
+        let mut actual_sites = std::collections::BTreeSet::new();
+        for (caller_index, caller) in functions.iter().enumerate() {
+            for (pc, op) in caller.code.iter().enumerate() {
+                match op {
+                    Op::CallMove { func, .. } if callee_indices.contains(func) => {
+                        let pc = u32::try_from(pc)
+                            .map_err(|_| "ManagedAny generic identity call pc exceeds u32 ABI")?;
+                        let caller_index = FuncIdx::try_from(caller_index).map_err(|_| {
+                            "ManagedAny generic identity caller index exceeds u32 ABI"
+                        })?;
+                        if !actual_sites.insert((caller_index, pc)) {
+                            return Err(
+                                "ManagedAny generic identity call site is duplicated".into()
+                            );
+                        }
+                    }
+                    Op::Call { func, .. } if callee_indices.contains(func) => {
+                        return Err("ManagedAny generic identity direct call must use owner-moving CallMove".into());
+                    }
+                    Op::NewClosure { proto, .. } if callee_indices.contains(proto) => {
+                        return Err(
+                            "ManagedAny generic identity callee cannot escape through a closure"
+                                .into(),
+                        );
+                    }
+                    Op::Spawn { func, .. } if callee_indices.contains(func) => {
+                        return Err("ManagedAny generic identity callee cannot be invoked as a spawned task".into());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if actual_sites != expected_sites {
+            return Err("ManagedAny generic identity bytecode has a missing or unreceipted direct call site".into());
+        }
+        for instance in &self.instances {
+            if !self
+                .calls
+                .iter()
+                .any(|call| call.callee_index == instance.function)
+            {
+                return Err(
+                    "ManagedAny generic identity instance is not referenced by a direct call"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn managed_any_identity_program_snapshot(entry: FuncIdx, functions: &[FunctionProto]) -> String {
+    let mut snapshot = format!(
+        "profile=managed-any-generic-identity;version=1;entry={entry};functions={}",
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+pub(crate) fn function_is_managed_any_identity_candidate(function: &FunctionProto) -> bool {
+    if !function.name.starts_with("function:mir:instance:")
+        || function.param_count != 1
+        || function.is_async
+    {
+        return false;
+    }
+    matches!(function.code.as_slice(), [
+        Op::MirManagedAnyOp {
+            rd: Some(clone_rd), ra: clone_ra,
+            operation: crate::core::mir::MirManagedAnyOperation::Clone, ..
+        },
+        Op::MirManagedAnyOp {
+            rd: None, ra: drop_ra,
+            operation: crate::core::mir::MirManagedAnyOperation::Drop, ..
+        },
+        Op::Ret { ra: return_ra },
+    ] if clone_ra == drop_ra && clone_rd == return_ra)
+}
+
+fn validate_managed_any_identity_callee(
+    function: &FunctionProto,
+    instance: &CanonicalManagedAnyIdentityInstanceBinding,
+) -> Result<(), String> {
+    if function.name != instance.owner
+        || function.param_count != 1
+        || function.is_async
+        || function.register_count < 2
+    {
+        return Err("ManagedAny generic identity callee owner/signature disagrees with its Checker instance".into());
+    }
+    let [Op::MirManagedAnyOp {
+        rd: Some(clone_rd),
+        ra: clone_ra,
+        operation: crate::core::mir::MirManagedAnyOperation::Clone,
+        contract: clone_contract,
+    }, Op::MirManagedAnyOp {
+        rd: None,
+        ra: drop_ra,
+        operation: crate::core::mir::MirManagedAnyOperation::Drop,
+        contract: drop_contract,
+    }, Op::Ret { ra: return_ra }] = function.code.as_slice()
+    else {
+        return Err("ManagedAny generic identity callee must be exactly Clone; Drop(parameter); Return(clone)".into());
+    };
+    if *clone_ra != 0
+        || *drop_ra != *clone_ra
+        || *clone_rd == *clone_ra
+        || *clone_rd >= function.register_count
+        || *return_ra != *clone_rd
+    {
+        return Err(
+            "ManagedAny generic identity callee does not preserve the checked owner schedule"
+                .into(),
+        );
+    }
+    let clone = managed_any_contract_from_constant(function, *clone_contract, "Clone")?;
+    let drop = managed_any_contract_from_constant(function, *drop_contract, "Drop")?;
+    let managed_type = crate::core::mir::types::managed_any_i32_string_v1_type_id();
+    if clone.operation != crate::core::mir::MirManagedAnyOperation::Clone
+        || clone.contract.owner.0 != instance.owner
+        || clone.contract.origin.0 != instance.clone_origin
+        || clone.contract.source.as_str() != instance.parameter
+        || clone.contract.result.as_ref().map(|id| id.as_str())
+            != Some(instance.clone_result.as_str())
+        || clone.contract.source_type != managed_type
+        || clone.contract.target_type.as_ref() != Some(&managed_type)
+        || clone.contract.expected_kind.is_some()
+        || drop.operation != crate::core::mir::MirManagedAnyOperation::Drop
+        || drop.contract.owner.0 != instance.owner
+        || drop.contract.origin.0 != instance.drop_origin
+        || drop.contract.source.as_str() != instance.parameter
+        || drop.contract.result.is_some()
+        || drop.contract.source_type != managed_type
+        || drop.contract.target_type.is_some()
+        || drop.contract.expected_kind.is_some()
+    {
+        return Err(
+            "ManagedAny generic identity callee operation constants disagree with the Checker seal"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn managed_any_contract_from_constant<'a>(
+    function: &'a FunctionProto,
+    index: ConstIdx,
+    operation: &str,
+) -> Result<&'a CanonicalManagedAnyBytecodeContract, String> {
+    match function.constants.get(index as usize) {
+        Some(ConstValue::ManagedAnyContract(contract))
+            if contract.contract.schema_version == 1
+                && contract.contract.descriptor_version == 1
+                && contract.contract.owner.0 == function.name =>
+        {
+            Ok(contract)
+        }
+        Some(_) => Err(format!(
+            "ManagedAny generic identity {operation} has a missing or wrong contract constant"
+        )),
+        None => Err(format!(
+            "ManagedAny generic identity {operation} contract constant is out of range"
+        )),
+    }
+}
+
+/// Checker instance binding for the separate generic ManagedAny trap-cleanup
+/// profile. The source argument remains DynamicAny while the executable
+/// parameter and call argument use canonical ManagedAny.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalManagedAnyTrapCleanupInstanceBinding {
+    pub(crate) instance_id: String,
+    pub(crate) template: String,
+    pub(crate) type_argument: String,
+    pub(crate) managed_type_argument: String,
+    pub(crate) owner: String,
+    pub(crate) function: FuncIdx,
+    pub(crate) trap: crate::core::mir::MirManagedAnyTrapKind,
+    pub(crate) parameter: String,
+    pub(crate) parameter_type: String,
+    pub(crate) trap_result: String,
+    pub(crate) result_type: String,
+    pub(crate) drop_instruction: String,
+    pub(crate) drop_origin: String,
+    pub(crate) trap_instruction: String,
+    pub(crate) trap_origin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalManagedAnyTrapCleanupCallBinding {
+    pub(crate) instance_id: String,
+    pub(crate) caller: String,
+    pub(crate) caller_index: FuncIdx,
+    pub(crate) instruction: String,
+    pub(crate) callee: String,
+    pub(crate) callee_index: FuncIdx,
+    pub(crate) type_argument: String,
+    pub(crate) argument: String,
+    pub(crate) argument_type: String,
+    pub(crate) result: String,
+    pub(crate) result_type: String,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) args_base: Reg,
+    pub(crate) argc: u16,
+    pub(crate) transfer_pc: u32,
+    pub(crate) transfer_rd: Reg,
+    pub(crate) transfer_rs: Reg,
+}
+
+/// Private bytecode receipt for generic callees that consume their canonical
+/// ManagedAny parameter immediately before one sealed, guaranteed i32 trap.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalManagedAnyTrapCleanupBytecodeReceipt {
+    profile_version: u16,
+    instances: Vec<CanonicalManagedAnyTrapCleanupInstanceBinding>,
+    calls: Vec<CanonicalManagedAnyTrapCleanupCallBinding>,
+    expected_program: String,
+}
+
+impl CanonicalManagedAnyTrapCleanupBytecodeReceipt {
+    pub(crate) fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        instances: Vec<CanonicalManagedAnyTrapCleanupInstanceBinding>,
+        calls: Vec<CanonicalManagedAnyTrapCleanupCallBinding>,
+    ) -> Self {
+        let expected_program = if instances.is_empty() {
+            String::new()
+        } else {
+            managed_any_trap_cleanup_program_snapshot(entry, functions)
+        };
+        Self {
+            profile_version: 1,
+            instances,
+            calls,
+            expected_program,
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        if self.profile_version != 1 {
+            return Err(
+                "ManagedAny trap-cleanup receipt has an unsupported profile version".into(),
+            );
+        }
+        let mut candidates = std::collections::BTreeSet::new();
+        for (index, function) in functions.iter().enumerate() {
+            if function_is_managed_any_trap_cleanup_candidate(function) {
+                candidates.insert(
+                    FuncIdx::try_from(index)
+                        .map_err(|_| "ManagedAny trap-cleanup callee index exceeds u32 ABI")?,
+                );
+            }
+        }
+        let instance_functions = self
+            .instances
+            .iter()
+            .map(|instance| instance.function)
+            .collect::<std::collections::BTreeSet<_>>();
+        if self.instances.is_empty() {
+            if !self.calls.is_empty() || !candidates.is_empty() {
+                return Err(
+                    "ManagedAny trap-cleanup bytecode has no Checker instance receipt".into(),
+                );
+            }
+            return Ok(());
+        }
+        if self.calls.is_empty() {
+            return Err("ManagedAny trap-cleanup receipt has no direct call site".into());
+        }
+        if candidates != instance_functions {
+            return Err(
+                "ManagedAny trap-cleanup candidate/callee set disagrees with Checker instances"
+                    .into(),
+            );
+        }
+        if managed_any_trap_cleanup_program_snapshot(entry, functions) != self.expected_program {
+            return Err(
+                "ManagedAny trap-cleanup bytecode disagrees with its private Checker snapshot"
+                    .into(),
+            );
+        }
+
+        let managed_type = crate::core::mir::types::managed_any_i32_string_v1_type_id();
+        let managed_type_text = managed_type.as_str();
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::ir::PrimitiveType::I32);
+        let i32_type_text = i32_type.as_str();
+        let mut instance_ids = std::collections::BTreeSet::new();
+        let mut callee_indices = std::collections::BTreeSet::new();
+        for instance in &self.instances {
+            if instance.instance_id.trim().is_empty()
+                || instance.template.trim().is_empty()
+                || instance.type_argument.trim().is_empty()
+                || instance.type_argument == instance.managed_type_argument
+                || instance.managed_type_argument != managed_type_text
+                || instance.instance_id
+                    != format!("instance:{}<{}>", instance.template, instance.type_argument)
+                || instance.owner.trim().is_empty()
+                || instance.owner != format!("function:mir:{}", instance.instance_id)
+                || instance.parameter.trim().is_empty()
+                || instance.parameter_type != managed_type_text
+                || instance.trap_result.trim().is_empty()
+                || instance.result_type != i32_type_text
+                || instance.drop_instruction
+                    != format!(
+                        "inst:managed_any_trap_cleanup_drop:{}",
+                        instance.instance_id
+                    )
+                || instance.drop_origin.trim().is_empty()
+                || instance.trap_instruction != format!("inst:binary:{}", instance.trap_origin)
+                || !instance_ids.insert(instance.instance_id.clone())
+                || !callee_indices.insert(instance.function)
+            {
+                return Err(
+                    "ManagedAny trap-cleanup instance binding is incomplete or duplicated".into(),
+                );
+            }
+            let function = functions.get(instance.function as usize).ok_or_else(|| {
+                format!(
+                    "ManagedAny trap-cleanup callee {} is outside the bytecode function table",
+                    instance.function
+                )
+            })?;
+            validate_managed_any_trap_cleanup_callee(function, instance)?;
+        }
+
+        let by_function = self
+            .instances
+            .iter()
+            .map(|instance| (instance.function, instance))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut expected_sites = std::collections::BTreeSet::new();
+        for call in &self.calls {
+            if call.instance_id.trim().is_empty()
+                || call.caller.trim().is_empty()
+                || call.instruction.trim().is_empty()
+                || call.callee.trim().is_empty()
+                || call.type_argument.trim().is_empty()
+                || call.argument.trim().is_empty()
+                || call.argument_type != managed_type_text
+                || call.result.trim().is_empty()
+                || call.result_type != i32_type_text
+                || call.argc != 1
+                || call.pc == 0
+                || call.transfer_pc.checked_add(1) != Some(call.pc)
+                || call.transfer_rd != call.args_base
+                || !expected_sites.insert((call.caller_index, call.pc))
+            {
+                return Err("ManagedAny trap-cleanup call binding is incomplete, duplicated, or not owner-moving".into());
+            }
+            let instance = by_function.get(&call.callee_index).ok_or_else(|| {
+                format!(
+                    "ManagedAny trap-cleanup call at {} pc {} has no Checker instance",
+                    call.caller, call.pc
+                )
+            })?;
+            if call.instance_id != instance.instance_id
+                || call.callee != instance.owner
+                || call.type_argument != instance.type_argument
+            {
+                return Err(
+                    "ManagedAny trap-cleanup call does not match its source instance receipt"
+                        .into(),
+                );
+            }
+            let caller = functions.get(call.caller_index as usize).ok_or_else(|| {
+                format!(
+                    "ManagedAny trap-cleanup caller {} is outside the bytecode function table",
+                    call.caller_index
+                )
+            })?;
+            let register_count = caller.register_count as usize;
+            let argument_end = (call.args_base as usize).checked_add(call.argc as usize);
+            if caller.name != call.caller
+                || call.rd as usize >= register_count
+                || call.transfer_rd as usize >= register_count
+                || call.transfer_rs as usize >= register_count
+                || argument_end.is_none_or(|end| end > register_count)
+            {
+                return Err(
+                    "ManagedAny trap-cleanup caller identity or owner-transfer registers disagree with its function frame".into(),
+                );
+            }
+            match caller.code.get(call.pc as usize) {
+                Some(Op::CallMove {
+                    rd,
+                    func,
+                    args_base,
+                    argc,
+                }) if *rd == call.rd
+                    && *func == call.callee_index
+                    && *args_base == call.args_base
+                    && *argc == call.argc => {}
+                _ => {
+                    return Err(
+                        "ManagedAny trap-cleanup call no longer matches its CallMove binding"
+                            .into(),
+                    );
+                }
+            }
+            match caller.code.get(call.transfer_pc as usize) {
+                Some(Op::Move { rd, rs }) if *rd == call.transfer_rd && *rs == call.transfer_rs => {
+                }
+                _ => {
+                    return Err(
+                        "ManagedAny trap-cleanup argument is not the receipted owner Move".into(),
+                    );
+                }
+            }
+        }
+
+        let mut actual_sites = std::collections::BTreeSet::new();
+        for (caller_index, caller) in functions.iter().enumerate() {
+            for (pc, op) in caller.code.iter().enumerate() {
+                match op {
+                    Op::CallMove { func, .. } if callee_indices.contains(func) => {
+                        let pc = u32::try_from(pc)
+                            .map_err(|_| "ManagedAny trap-cleanup call pc exceeds u32 ABI")?;
+                        let caller_index = FuncIdx::try_from(caller_index)
+                            .map_err(|_| "ManagedAny trap-cleanup caller index exceeds u32 ABI")?;
+                        if !actual_sites.insert((caller_index, pc)) {
+                            return Err("ManagedAny trap-cleanup call site is duplicated".into());
+                        }
+                    }
+                    Op::Call { func, .. } if callee_indices.contains(func) => {
+                        return Err(
+                            "ManagedAny trap-cleanup direct call must use owner-moving CallMove"
+                                .into(),
+                        );
+                    }
+                    Op::NewClosure { proto, .. } if callee_indices.contains(proto) => {
+                        return Err(
+                            "ManagedAny trap-cleanup callee cannot escape through a closure".into(),
+                        );
+                    }
+                    Op::Spawn { func, .. } if callee_indices.contains(func) => {
+                        return Err(
+                            "ManagedAny trap-cleanup callee cannot be invoked as a spawned task"
+                                .into(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if actual_sites != expected_sites {
+            return Err(
+                "ManagedAny trap-cleanup bytecode has a missing or unreceipted direct call site"
+                    .into(),
+            );
+        }
+        for instance in &self.instances {
+            if !self
+                .calls
+                .iter()
+                .any(|call| call.callee_index == instance.function)
+            {
+                return Err(
+                    "ManagedAny trap-cleanup instance is not referenced by a direct call".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn managed_any_trap_cleanup_program_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    let mut snapshot = format!(
+        "profile=managed-any-trap-cleanup;version=1;entry={entry};functions={}",
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+pub(crate) fn function_is_managed_any_trap_cleanup_candidate(function: &FunctionProto) -> bool {
+    if !function.name.starts_with("function:mir:instance:")
+        || function.param_count != 1
+        || function.is_async
+        || !function.capture_names.is_empty()
+    {
+        return false;
+    }
+    let code = function.code.as_slice();
+    if code.len() != 8
+        || !matches!(&code[0], Op::LoadConst { .. })
+        || !matches!(&code[1], Op::Mov { .. })
+        // Division's checked body materializes `1` then clones the bound
+        // zero; overflow's source expression is `MAX + 1`, so MIR emits the
+        // clone before the literal addend. Both are the same sealed
+        // four-operation setup and are distinguished by the trap tail below.
+        || !(matches!(&code[2], Op::LoadConst { .. }) && matches!(&code[3], Op::Mov { .. })
+            || matches!(&code[2], Op::Mov { .. }) && matches!(&code[3], Op::LoadConst { .. }))
+        || !matches!(
+            &code[4],
+            Op::MirManagedAnyOp {
+                rd: None,
+                operation: crate::core::mir::MirManagedAnyOperation::Drop,
+                ..
+            }
+        )
+    {
+        return false;
+    }
+    matches!(
+        &code[5..],
+        [Op::CheckI32DivRem { .. }, Op::DivInt { .. }, Op::Ret { .. }]
+            | [
+                Op::AddInt { .. },
+                Op::CheckI32 { kind: 0, .. },
+                Op::Ret { .. }
+            ]
+    )
+}
+
+fn validate_managed_any_trap_cleanup_callee(
+    function: &FunctionProto,
+    instance: &CanonicalManagedAnyTrapCleanupInstanceBinding,
+) -> Result<(), String> {
+    if function.name != instance.owner
+        || function.param_count != 1
+        || function.is_async
+        || function.has_mut_params
+        || !function.mut_param_indices.is_empty()
+        || !function.capture_names.is_empty()
+        || function.has_requires
+        || function.has_ensures
+        || !function.requires_funcs.is_empty()
+        || !function.ensures_funcs.is_empty()
+        || function.register_count != 6
+        || !function.param_names.is_empty()
+    {
+        return Err(
+            "ManagedAny trap-cleanup callee owner/signature disagrees with its Checker instance"
+                .into(),
+        );
+    }
+    let (drop_ra, drop_contract) =
+        match function.code.get(4) {
+            Some(Op::MirManagedAnyOp {
+                rd: None,
+                ra,
+                operation: crate::core::mir::MirManagedAnyOperation::Drop,
+                contract,
+            }) => (ra, contract),
+            _ => return Err(
+                "ManagedAny trap-cleanup callee has no receipted parameter Drop before its trap"
+                    .into(),
+            ),
+        };
+    let (initial_rd, bound_rd, one_rd, read_rd, trap_rd, trap_ra, trap_rb, terminal_shape_ok) =
+        match instance.trap {
+            crate::core::mir::MirManagedAnyTrapKind::DivisionByZeroI32 => {
+                let [Op::LoadConst {
+                    rd: initial_rd,
+                    idx: initial_idx,
+                }, Op::Mov {
+                    rd: bound_rd,
+                    rs: bound_rs,
+                }, Op::LoadConst {
+                    rd: one_rd,
+                    idx: one_idx,
+                }, Op::Mov {
+                    rd: read_rd,
+                    rs: read_rs,
+                }, Op::MirManagedAnyOp {
+                    rd: None,
+                    ra: scheduled_drop_ra,
+                    operation: crate::core::mir::MirManagedAnyOperation::Drop,
+                    contract: scheduled_drop_contract,
+                }, Op::CheckI32DivRem {
+                    ra: check_ra,
+                    rb: check_rb,
+                }, Op::DivInt {
+                    rd: div_rd,
+                    ra: div_ra,
+                    rb: div_rb,
+                }, Op::Ret { ra: return_ra }] = function.code.as_slice()
+                else {
+                    return Err(
+                        "ManagedAny division trap callee has unexpected bytecode operations".into(),
+                    );
+                };
+                let constants_ok = bytecode_int_constant(function, *initial_idx, 0)
+                    && bytecode_int_constant(function, *one_idx, 1);
+                let links_ok = scheduled_drop_ra == drop_ra
+                    && scheduled_drop_contract == drop_contract
+                    && *bound_rs == *initial_rd
+                    && *read_rs == *bound_rd
+                    && *check_ra == *one_rd
+                    && *check_rb == *read_rd
+                    && *div_ra == *check_ra
+                    && *div_rb == *check_rb
+                    && *return_ra == *div_rd;
+                (
+                    *initial_rd,
+                    *bound_rd,
+                    *one_rd,
+                    *read_rd,
+                    *div_rd,
+                    *div_ra,
+                    *div_rb,
+                    constants_ok && links_ok,
+                )
+            }
+            crate::core::mir::MirManagedAnyTrapKind::SignedOverflowI32 => {
+                // The source `MAX + 1` can be emitted in either setup order:
+                // a Clone followed by the literal addend (the direct MIR
+                // lowering), or the literal followed by the Clone (a legacy
+                // register scheduler). Both are accepted only with the same
+                // sealed links and constants below.
+                let (
+                    initial_rd,
+                    initial_idx,
+                    bound_rd,
+                    bound_rs,
+                    one_rd,
+                    one_idx,
+                    read_rd,
+                    read_rs,
+                    scheduled_drop_ra,
+                    scheduled_drop_contract,
+                    add_rd,
+                    add_ra,
+                    add_rb,
+                    check_rd,
+                    return_ra,
+                ) =
+                    match function.code.as_slice() {
+                        [Op::LoadConst {
+                            rd: initial_rd,
+                            idx: initial_idx,
+                        }, Op::Mov {
+                            rd: bound_rd,
+                            rs: bound_rs,
+                        }, Op::Mov {
+                            rd: read_rd,
+                            rs: read_rs,
+                        }, Op::LoadConst {
+                            rd: one_rd,
+                            idx: one_idx,
+                        }, Op::MirManagedAnyOp {
+                            rd: None,
+                            ra: scheduled_drop_ra,
+                            operation: crate::core::mir::MirManagedAnyOperation::Drop,
+                            contract: scheduled_drop_contract,
+                        }, Op::AddInt {
+                            rd: add_rd,
+                            ra: add_ra,
+                            rb: add_rb,
+                        }, Op::CheckI32 {
+                            rd: check_rd,
+                            kind: 0,
+                        }, Op::Ret { ra: return_ra }] => (
+                            initial_rd,
+                            initial_idx,
+                            bound_rd,
+                            bound_rs,
+                            one_rd,
+                            one_idx,
+                            read_rd,
+                            read_rs,
+                            scheduled_drop_ra,
+                            scheduled_drop_contract,
+                            add_rd,
+                            add_ra,
+                            add_rb,
+                            check_rd,
+                            return_ra,
+                        ),
+                        [Op::LoadConst {
+                            rd: initial_rd,
+                            idx: initial_idx,
+                        }, Op::Mov {
+                            rd: bound_rd,
+                            rs: bound_rs,
+                        }, Op::LoadConst {
+                            rd: one_rd,
+                            idx: one_idx,
+                        }, Op::Mov {
+                            rd: read_rd,
+                            rs: read_rs,
+                        }, Op::MirManagedAnyOp {
+                            rd: None,
+                            ra: scheduled_drop_ra,
+                            operation: crate::core::mir::MirManagedAnyOperation::Drop,
+                            contract: scheduled_drop_contract,
+                        }, Op::AddInt {
+                            rd: add_rd,
+                            ra: add_ra,
+                            rb: add_rb,
+                        }, Op::CheckI32 {
+                            rd: check_rd,
+                            kind: 0,
+                        }, Op::Ret { ra: return_ra }] => (
+                            initial_rd,
+                            initial_idx,
+                            bound_rd,
+                            bound_rs,
+                            one_rd,
+                            one_idx,
+                            read_rd,
+                            read_rs,
+                            scheduled_drop_ra,
+                            scheduled_drop_contract,
+                            add_rd,
+                            add_ra,
+                            add_rb,
+                            check_rd,
+                            return_ra,
+                        ),
+                        _ => return Err(
+                            "ManagedAny overflow trap callee has unexpected bytecode operations"
+                                .into(),
+                        ),
+                    };
+                let constants_ok = bytecode_int_constant(function, *initial_idx, i32::MAX as i64)
+                    && bytecode_int_constant(function, *one_idx, 1);
+                let links_ok = scheduled_drop_ra == drop_ra
+                    && scheduled_drop_contract == drop_contract
+                    && *bound_rs == *initial_rd
+                    && *read_rs == *bound_rd
+                    && *add_ra == *read_rd
+                    && *add_rb == *one_rd
+                    && *check_rd == *add_rd
+                    && *return_ra == *add_rd;
+                (
+                    *initial_rd,
+                    *bound_rd,
+                    *one_rd,
+                    *read_rd,
+                    *add_rd,
+                    *add_ra,
+                    *add_rb,
+                    constants_ok && links_ok,
+                )
+            }
+        };
+    if !terminal_shape_ok
+        || *drop_ra != 0
+        || initial_rd == 0
+        || bound_rd == 0
+        || one_rd == 0
+        || read_rd == 0
+        || initial_rd == bound_rd
+        || bound_rd == read_rd
+        || one_rd == read_rd
+        || trap_rd == 0
+        || trap_rd >= function.register_count
+        || trap_ra >= function.register_count
+        || trap_rb >= function.register_count
+        || [initial_rd, bound_rd, one_rd, read_rd]
+            .iter()
+            .any(|reg| *reg >= function.register_count)
+        || [initial_rd, bound_rd, one_rd, read_rd, trap_rd]
+            .iter()
+            .enumerate()
+            .any(|(index, reg)| {
+                [initial_rd, bound_rd, one_rd, read_rd, trap_rd][..index].contains(reg)
+            })
+    {
+        return Err(
+            "ManagedAny trap-cleanup callee does not preserve the exact checked i32 trap schedule"
+                .into(),
+        );
+    }
+    let contract =
+        managed_any_contract_from_constant(function, *drop_contract, "trap-cleanup Drop")?;
+    let managed_type = crate::core::mir::types::managed_any_i32_string_v1_type_id();
+    if contract.operation != crate::core::mir::MirManagedAnyOperation::Drop
+        || contract.contract.owner.0 != instance.owner
+        || contract.contract.origin.0 != instance.drop_origin
+        || contract.contract.source.as_str() != instance.parameter
+        || contract.contract.result.is_some()
+        || contract.contract.source_type != managed_type
+        || contract.contract.target_type.is_some()
+        || contract.contract.expected_kind.is_some()
+        || function.constants.len() != 3
+    {
+        return Err("ManagedAny trap-cleanup Drop constant disagrees with the Checker seal".into());
+    }
+    Ok(())
+}
+
+fn bytecode_int_constant(function: &FunctionProto, index: ConstIdx, expected: i64) -> bool {
+    matches!(function.constants.get(index as usize), Some(ConstValue::Int(value)) if *value == expected)
+}
+
+/// Independent private snapshot for the separately versioned typed
+/// Any-owner bytecode profile. Its validation explicitly rejects legacy
+/// MapRoot operations.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalMapAnyOwnerV1BytecodeReceipt {
+    expected_has_map_any_owner_v1: bool,
+    expected_program: String,
+    /// Third, independent profile receipt. The separate type, namespace, and
+    /// snapshot prevent this carrier from lending MapAnyOwner v1 authority to
+    /// ordinary source-Map owner opcodes. It is carried here only to avoid
+    /// changing the public BytecodeProgram construction surface used by
+    /// compatibility compiler entry points.
+    ordinary_map_owner_lifecycle_i32_string_v1:
+        Option<CanonicalOrdinaryMapOwnerLifecycleBytecodeReceipt>,
+    ordinary_map_owned_get_i32_string_v1: Option<CanonicalOrdinaryMapOwnedGetBytecodeReceipt>,
+    managed_any_identity: Option<CanonicalManagedAnyIdentityBytecodeReceipt>,
+    managed_any_trap_cleanup: Option<CanonicalManagedAnyTrapCleanupBytecodeReceipt>,
+    /// Independent whole-program Any/CFG bytecode seal.  The expected bit is
+    /// deliberately separate from this optional child so deleting the CFG
+    /// receipt cannot be masked by a still-valid Map snapshot.
+    expected_managed_any_cfg_receipt: bool,
+    managed_any_cfg: Option<CanonicalManagedAnyCfgBytecodeReceipt>,
+}
+
+impl CanonicalMapAnyOwnerV1BytecodeReceipt {
+    pub(crate) fn capture(entry: FuncIdx, functions: &[FunctionProto]) -> Self {
+        let expected_has_map_any_owner_v1 = functions.iter().any(function_has_map_any_owner_v1_ops);
+        Self {
+            expected_has_map_any_owner_v1,
+            expected_program: if expected_has_map_any_owner_v1 {
+                map_any_owner_v1_program_snapshot(entry, functions)
+            } else {
+                String::new()
+            },
+            ordinary_map_owner_lifecycle_i32_string_v1: None,
+            ordinary_map_owned_get_i32_string_v1: None,
+            managed_any_identity: None,
+            managed_any_trap_cleanup: None,
+            expected_managed_any_cfg_receipt: false,
+            managed_any_cfg: None,
+        }
+    }
+
+    pub(crate) fn capture_with_ordinary_map_owner_lifecycle_i32_string_v1(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Self {
+        let mut receipt = Self::capture(entry, functions);
+        receipt.ordinary_map_owner_lifecycle_i32_string_v1 = Some(
+            CanonicalOrdinaryMapOwnerLifecycleBytecodeReceipt::capture(entry, functions),
+        );
+        receipt.ordinary_map_owned_get_i32_string_v1 = Some(
+            CanonicalOrdinaryMapOwnedGetBytecodeReceipt::capture(entry, functions),
+        );
+        receipt
+    }
+
+    pub(crate) fn set_managed_any_identity(
+        &mut self,
+        receipt: CanonicalManagedAnyIdentityBytecodeReceipt,
+    ) {
+        self.managed_any_identity = Some(receipt);
+    }
+
+    pub(crate) fn set_managed_any_trap_cleanup(
+        &mut self,
+        receipt: CanonicalManagedAnyTrapCleanupBytecodeReceipt,
+    ) {
+        self.managed_any_trap_cleanup = Some(receipt);
+    }
+
+    pub(crate) fn set_managed_any_cfg(&mut self, receipt: CanonicalManagedAnyCfgBytecodeReceipt) {
+        self.expected_managed_any_cfg_receipt = true;
+        self.managed_any_cfg = Some(receipt);
+    }
+
+    pub(crate) fn validate_managed_any_cfg(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        externally_required: bool,
+    ) -> Result<(), String> {
+        if externally_required != self.expected_managed_any_cfg_receipt {
+            return Err(
+                "Any/CFG bytecode required marker disagrees with the independent canonical MIR receipt".into(),
+            );
+        }
+        match (
+            externally_required && self.expected_managed_any_cfg_receipt,
+            &self.managed_any_cfg,
+        ) {
+            (true, Some(receipt)) => receipt.validate(
+                entry,
+                functions,
+                &self.existing_managed_any_receipts_snapshot(),
+            ),
+            (true, None) => Err(
+                "Any-bearing canonical MIR bytecode is missing its independent CFG receipt".into(),
+            ),
+            (false, Some(_)) => Err(
+                "Any/CFG bytecode receipt is present without its independent census marker".into(),
+            ),
+            (false, None) => Ok(()),
+        }
+    }
+
+    pub(crate) fn existing_managed_any_receipts_snapshot(&self) -> String {
+        format!(
+            "map-any-owner-v1={}:{}|ordinary-map-owner={:?}|ordinary-map-owned-get={:?}|managed-any-identity={:?}|managed-any-trap-cleanup={:?}",
+            self.expected_has_map_any_owner_v1,
+            self.expected_program,
+            self.ordinary_map_owner_lifecycle_i32_string_v1,
+            self.ordinary_map_owned_get_i32_string_v1,
+            self.managed_any_identity,
+            self.managed_any_trap_cleanup,
+        )
+    }
+
+    pub(crate) fn validate_managed_any_identity(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        match &self.managed_any_identity {
+            Some(receipt) => receipt.validate(entry, functions),
+            None if functions
+                .iter()
+                .any(function_is_managed_any_identity_candidate) =>
+            {
+                Err(
+                    "ManagedAny generic identity bytecode has no private Checker instance receipt"
+                        .into(),
+                )
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn validate_managed_any_trap_cleanup(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        match &self.managed_any_trap_cleanup {
+            Some(receipt) => receipt.validate(entry, functions),
+            None if functions
+                .iter()
+                .any(function_is_managed_any_trap_cleanup_candidate) =>
+            {
+                Err(
+                    "ManagedAny trap-cleanup bytecode has no private Checker instance receipt"
+                        .into(),
+                )
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn validate_ordinary_map_owner_lifecycle_i32_string_v1(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        match &self.ordinary_map_owner_lifecycle_i32_string_v1 {
+            Some(receipt) => receipt.validate(entry, functions),
+            None if functions
+                .iter()
+                .any(function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops) =>
+            {
+                Err(
+                    "ordinary Map owner lifecycle v1 bytecode has no independent Checker receipt"
+                        .into(),
+                )
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn validate_ordinary_map_owned_get_i32_string_v1(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        match &self.ordinary_map_owned_get_i32_string_v1 {
+            Some(receipt) => receipt.validate(entry, functions),
+            None if functions
+                .iter()
+                .any(function_has_ordinary_map_owned_get_i32_string_v1_ops) =>
+            {
+                Err("ordinary Map owned-Get v1 bytecode has no independent Checker receipt".into())
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        let has_map_root = functions.iter().any(function_has_map_root_ops);
+        let has_map_any_owner_v1 = functions.iter().any(function_has_map_any_owner_v1_ops);
+        if !self.expected_has_map_any_owner_v1 && !has_map_any_owner_v1 {
+            return Ok(());
+        }
+        if has_map_root {
+            return Err("MapAnyOwner v1 receipt cannot authorize legacy MapRoot bytecode".into());
+        }
+        if functions
+            .iter()
+            .any(function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops)
+        {
+            return Err(
+                "MapAnyOwner v1 receipt cannot authorize ordinary Map owner lifecycle v1 bytecode"
+                    .into(),
+            );
+        }
+        if functions
+            .iter()
+            .any(function_has_ordinary_map_owned_get_i32_string_v1_ops)
+        {
+            return Err(
+                "MapAnyOwner v1 receipt cannot authorize ordinary Map owned-Get v1 bytecode".into(),
+            );
+        }
+        if !self.expected_has_map_any_owner_v1 && has_map_any_owner_v1 {
+            return Err(
+                "canonical MapAnyOwner v1 bytecode has no independent Checker receipt".into(),
+            );
+        }
+        if !has_map_any_owner_v1
+            || map_any_owner_v1_program_snapshot(entry, functions) != self.expected_program
+        {
+            return Err(
+                "canonical MapAnyOwner v1 bytecode disagrees with its independent Checker receipt snapshot".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Independent full-program postcompile seal for source-receipted
+/// Any-bearing CFGs and their direct call edges.  Unlike the narrower Map,
+/// identity, and trap snapshots, this receipt always captures the complete
+/// bytecode function table for canonical MIR programs, including signatures
+/// represented by source bindings, register counts, constants, all
+/// instruction operands, branches, and call targets.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalManagedAnyCfgBytecodeReceipt {
+    profile_version: u16,
+    source_census: String,
+    /// Exact Checker source-plan snapshot from the validated MIR program.
+    /// This remains bound even when the plan has no direct call bindings.
+    interprocedural_source_snapshot: Option<String>,
+    /// Independent source-plan presence bit; deleting only the Option child
+    /// cannot silently turn a source-receipted program into a no-plan case.
+    expected_has_interprocedural_source_snapshot: bool,
+    source_functions: Vec<CanonicalManagedAnyCfgFunctionBinding>,
+    calls: Vec<CanonicalManagedAnyCfgCallBinding>,
+    previous_receipts: String,
+    expected_program: String,
+}
+
+impl CanonicalManagedAnyCfgBytecodeReceipt {
+    pub(crate) fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        source_census: String,
+        source_functions: Vec<CanonicalManagedAnyCfgFunctionBinding>,
+        calls: Vec<CanonicalManagedAnyCfgCallBinding>,
+        previous_receipts: String,
+        interprocedural_source_snapshot: Option<String>,
+        expected_has_interprocedural_source_snapshot: bool,
+    ) -> Self {
+        Self {
+            profile_version: 1,
+            source_census,
+            interprocedural_source_snapshot,
+            expected_has_interprocedural_source_snapshot,
+            source_functions,
+            calls,
+            previous_receipts,
+            expected_program: managed_any_cfg_program_snapshot(entry, functions),
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        previous_receipts: &str,
+    ) -> Result<(), String> {
+        if self.profile_version != 1 {
+            return Err("Any/CFG bytecode receipt has an unsupported profile version".into());
+        }
+        if self.source_census.is_empty() {
+            return Err("Any/CFG bytecode receipt has no Checker source census".into());
+        }
+        if self.expected_has_interprocedural_source_snapshot
+            != self.interprocedural_source_snapshot.is_some()
+        {
+            return Err(
+                "Any/CFG bytecode receipt has an inconsistent interprocedural source-plan presence marker".into(),
+            );
+        }
+        let source_plan_marker = format!(
+            "|interprocedural-source-snapshot={:?}|expected-presence={}",
+            self.interprocedural_source_snapshot, self.expected_has_interprocedural_source_snapshot,
+        );
+        if !self.source_census.contains(&source_plan_marker) {
+            return Err(
+                "Any/CFG source census disagrees with its exact interprocedural source-plan snapshot".into(),
+            );
+        }
+        if self.previous_receipts != previous_receipts {
+            return Err(
+                "Any/CFG bytecode receipt disagrees with the independent Map/identity/trap snapshots".into(),
+            );
+        }
+        let mut source_functions = std::collections::BTreeSet::new();
+        for binding in &self.source_functions {
+            if !source_functions.insert((binding.function_index, binding.owner.as_str())) {
+                return Err("Any/CFG source function census contains a duplicate binding".into());
+            }
+            let function = functions
+                .get(binding.function_index as usize)
+                .ok_or("Any/CFG source function index is outside bytecode table")?;
+            if function.name != binding.owner || binding.source_signature.is_empty() {
+                return Err(
+                    "Any/CFG source function binding disagrees with emitted bytecode".into(),
+                );
+            }
+        }
+        let mut call_sites = std::collections::BTreeSet::new();
+        for binding in &self.calls {
+            if !call_sites.insert((binding.caller_index, binding.pc)) {
+                return Err("Any/CFG source call census contains a duplicate bytecode site".into());
+            }
+            let caller = functions
+                .get(binding.caller_index as usize)
+                .ok_or("Any/CFG caller index is outside bytecode table")?;
+            let callee = functions
+                .get(binding.callee_index as usize)
+                .ok_or("Any/CFG callee index is outside bytecode table")?;
+            if caller.name != binding.caller || callee.name != binding.callee {
+                return Err("Any/CFG call binding disagrees with emitted function owners".into());
+            }
+            match caller.code.get(binding.pc as usize) {
+                Some(Op::CallMove {
+                    rd,
+                    func,
+                    args_base,
+                    argc,
+                }) if *rd == binding.rd
+                    && *func == binding.callee_index
+                    && *args_base == binding.args_base
+                    && *argc == binding.argc => {}
+                _ => {
+                    return Err(
+                        "Any/CFG source call no longer matches its emitted owner-moving call site"
+                            .into(),
+                    )
+                }
+            }
+            if binding.source_instruction.is_empty()
+                || binding.source_block.is_empty()
+                || binding.source_kind.is_empty()
+            {
+                return Err("Any/CFG source call binding has incomplete MIR identity".into());
+            }
+        }
+        if managed_any_cfg_program_snapshot(entry, functions) != self.expected_program {
+            return Err(
+                "canonical Any/CFG bytecode disagrees with its whole-program Checker snapshot"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn managed_any_cfg_program_snapshot(entry: FuncIdx, functions: &[FunctionProto]) -> String {
+    let mut snapshot = format!(
+        "profile=managed-any-cfg-v1;entry={entry};functions={}",
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+/// Independent compiler snapshot for the ordinary source-Map owner lifecycle
+/// profile. Its namespace and version are intentionally distinct from both
+/// MapRoot and MapAnyOwner v1.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalOrdinaryMapOwnerLifecycleBytecodeReceipt {
+    profile_version: u16,
+    expected_has_ordinary_map_owner_lifecycle_i32_string_v1: bool,
+    expected_program: String,
+}
+
+impl CanonicalOrdinaryMapOwnerLifecycleBytecodeReceipt {
+    pub(crate) fn capture(entry: FuncIdx, functions: &[FunctionProto]) -> Self {
+        let expected_has_ordinary_map_owner_lifecycle_i32_string_v1 = functions
+            .iter()
+            .any(function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops);
+        Self {
+            profile_version: 1,
+            expected_has_ordinary_map_owner_lifecycle_i32_string_v1,
+            expected_program: if expected_has_ordinary_map_owner_lifecycle_i32_string_v1 {
+                ordinary_map_owner_lifecycle_i32_string_v1_program_snapshot(entry, functions)
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        if self.profile_version != 1 {
+            return Err(
+                "ordinary Map owner lifecycle receipt has an unsupported profile version".into(),
+            );
+        }
+        let has_ordinary_map_owner_lifecycle_i32_string_v1 = functions
+            .iter()
+            .any(function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops);
+        if !self.expected_has_ordinary_map_owner_lifecycle_i32_string_v1
+            && !has_ordinary_map_owner_lifecycle_i32_string_v1
+        {
+            return Ok(());
+        }
+        if !self.expected_has_ordinary_map_owner_lifecycle_i32_string_v1
+            && has_ordinary_map_owner_lifecycle_i32_string_v1
+        {
+            return Err(
+                "ordinary Map owner lifecycle v1 bytecode has no independent Checker receipt"
+                    .into(),
+            );
+        }
+        if functions.iter().any(function_has_map_root_ops) {
+            return Err(
+                "ordinary Map owner lifecycle v1 receipt cannot authorize MapRoot bytecode".into(),
+            );
+        }
+        if functions.iter().any(function_has_map_any_owner_v1_ops) {
+            return Err(
+                "ordinary Map owner lifecycle v1 receipt cannot authorize MapAnyOwner v1 bytecode"
+                    .into(),
+            );
+        }
+        if functions
+            .iter()
+            .any(function_has_ordinary_map_owned_get_i32_string_v1_ops)
+        {
+            return Err(
+                "ordinary Map owner lifecycle v1 receipt cannot authorize ordinary Map owned-Get v1 bytecode".into(),
+            );
+        }
+        if !has_ordinary_map_owner_lifecycle_i32_string_v1
+            || ordinary_map_owner_lifecycle_i32_string_v1_program_snapshot(entry, functions)
+                != self.expected_program
+        {
+            return Err(
+                "ordinary Map owner lifecycle v1 bytecode disagrees with its independent Checker receipt snapshot".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Independent snapshot for the ordinary Map typed owned-Get bytecode
+/// profile. It binds the emitted Get result-shape constants together with
+/// every register read/write in the program.
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalOrdinaryMapOwnedGetBytecodeReceipt {
+    profile_version: u16,
+    expected_has_ordinary_map_owned_get_i32_string_v1: bool,
+    expected_program: String,
+}
+
+impl CanonicalOrdinaryMapOwnedGetBytecodeReceipt {
+    pub(crate) fn capture(entry: FuncIdx, functions: &[FunctionProto]) -> Self {
+        let expected_has_ordinary_map_owned_get_i32_string_v1 = functions
+            .iter()
+            .any(function_has_ordinary_map_owned_get_i32_string_v1_ops);
+        Self {
+            profile_version: 1,
+            expected_has_ordinary_map_owned_get_i32_string_v1,
+            expected_program: if expected_has_ordinary_map_owned_get_i32_string_v1 {
+                ordinary_map_owned_get_i32_string_v1_program_snapshot(entry, functions)
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        if self.profile_version != 1 {
+            return Err("ordinary Map owned-Get receipt has an unsupported profile version".into());
+        }
+        let has_owned_get = functions
+            .iter()
+            .any(function_has_ordinary_map_owned_get_i32_string_v1_ops);
+        if !self.expected_has_ordinary_map_owned_get_i32_string_v1 && !has_owned_get {
+            return Ok(());
+        }
+        if !self.expected_has_ordinary_map_owned_get_i32_string_v1 && has_owned_get {
+            return Err(
+                "ordinary Map owned-Get v1 bytecode has no independent Checker receipt".into(),
+            );
+        }
+        if functions.iter().any(function_has_map_root_ops) {
+            return Err(
+                "ordinary Map owned-Get v1 receipt cannot authorize MapRoot bytecode".into(),
+            );
+        }
+        if functions.iter().any(function_has_map_any_owner_v1_ops) {
+            return Err(
+                "ordinary Map owned-Get v1 receipt cannot authorize MapAnyOwner v1 bytecode".into(),
+            );
+        }
+        if functions
+            .iter()
+            .any(function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops)
+        {
+            return Err(
+                "ordinary Map owned-Get v1 receipt cannot authorize ordinary Map owner lifecycle v1 bytecode".into(),
+            );
+        }
+        if !has_owned_get
+            || ordinary_map_owned_get_i32_string_v1_program_snapshot(entry, functions)
+                != self.expected_program
+        {
+            return Err(
+                "ordinary Map owned-Get v1 bytecode disagrees with its independent Checker receipt snapshot".into(),
             );
         }
         Ok(())
@@ -2052,8 +3990,127 @@ pub(crate) fn function_has_map_root_ops(function: &FunctionProto) -> bool {
     })
 }
 
+pub(crate) fn function_has_map_any_owner_v1_ops(function: &FunctionProto) -> bool {
+    function.code.iter().any(|op| {
+        matches!(
+            op,
+            Op::MirMapAnyOwnerV1New { .. }
+                | Op::MirMapAnyOwnerV1Set { .. }
+                | Op::MirMapAnyOwnerV1Remove { .. }
+                | Op::MirMapAnyOwnerV1Size { .. }
+                | Op::MirMapAnyOwnerV1Contains { .. }
+                | Op::MirMapAnyOwnerV1Drop { .. }
+        )
+    })
+}
+
+pub(crate) fn function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops(
+    function: &FunctionProto,
+) -> bool {
+    function.code.iter().any(|op| {
+        matches!(
+            op,
+            Op::MirOrdinaryMapOwnerLifecycleI32StringV1New { .. }
+                | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Clone { .. }
+                | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Set { .. }
+                | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Remove { .. }
+                | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Size { .. }
+                | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Contains { .. }
+                | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Drop { .. }
+        )
+    })
+}
+
+pub(crate) fn function_has_ordinary_map_owned_get_i32_string_v1_ops(
+    function: &FunctionProto,
+) -> bool {
+    function.code.iter().any(|op| {
+        matches!(
+            op,
+            Op::MirOrdinaryMapOwnedGetI32StringV1New { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Clone { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Set { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Remove { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Size { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Contains { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1GetString { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1GetAny { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Values { .. }
+                | Op::MirManagedAnyOp { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Drop { .. }
+        )
+    })
+}
+
+/// Bytecode-level candidates that require the independent canonical MIR
+/// Any/CFG receipt even when a narrower Map, identity, or trap receipt was
+/// removed. Source-only Any signatures are covered by the canonical MIR
+/// marker plus its required census receipt.
+pub(crate) fn function_has_managed_any_cfg_candidate(function: &FunctionProto) -> bool {
+    // Map owner profiles have their own receipts. They are not themselves
+    // evidence that a ManagedAny CFG receipt is required: hand-built
+    // owned-Get bytecode may contain only typed i32/String operations.
+    function.code.iter().any(|op| {
+        matches!(
+            op,
+            Op::MirOrdinaryMapOwnedGetI32StringV1GetAny { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1Values { .. }
+                | Op::MirManagedAnyOp { .. }
+                | Op::MirManagedAnyStringCompare { .. }
+        )
+    }) || function_is_managed_any_identity_candidate(function)
+        || function_is_managed_any_trap_cleanup_candidate(function)
+        || function
+            .constants
+            .iter()
+            .any(|constant| matches!(constant, ConstValue::ManagedAnyContract(_)))
+}
+
 fn map_root_program_snapshot(entry: FuncIdx, functions: &[FunctionProto]) -> String {
     let mut snapshot = format!("entry={entry};functions={}", functions.len());
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+fn map_any_owner_v1_program_snapshot(entry: FuncIdx, functions: &[FunctionProto]) -> String {
+    let mut snapshot = format!(
+        "profile=map-any-owner-v1;entry={entry};functions={}",
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+fn ordinary_map_owner_lifecycle_i32_string_v1_program_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    let mut snapshot = format!(
+        "profile=ordinary-map-owner-lifecycle-i32-string-v1;version=1;entry={entry};functions={}",
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+fn ordinary_map_owned_get_i32_string_v1_program_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    let mut snapshot = format!(
+        "profile=ordinary-map-owned-get-i32-string-v1;version=1;entry={entry};functions={}",
+        functions.len()
+    );
     for (index, function) in functions.iter().enumerate() {
         use std::fmt::Write as _;
         let _ = write!(snapshot, "|function[{index}]={function:?}");
@@ -2148,10 +4205,23 @@ pub struct CanonicalFfiDescriptor {
     pub callee: String,
     pub symbol: String,
     pub abi: String,
+    /// Number of declaration parameters before the C ellipsis. This is not
+    /// the bytecode call's actual operand count: `arguments` and
+    /// `parameter_conversions` contain one entry per actual operand.
+    pub fixed_argument_count: usize,
+    /// Whether the declaration has a C variadic tail. The receipt remains
+    /// explicit even when this particular call supplies no tail operands.
+    pub variadic: bool,
+    /// Physical ABI type for each actual call operand. The fixed prefix uses
+    /// declaration parameter types; the tail uses checker-promoted types.
     pub arguments: Vec<CanonicalFfiScalarType>,
-    /// Checker-owned conversion receipt for each argument, from the MIR value
-    /// ABI to the declaration ABI.
+    /// Checker-owned conversion receipt for each actual operand, from its
+    /// source MIR value ABI to the physical ABI type above.
     pub parameter_conversions: Vec<crate::core::mir::MirFfiAbiConversion>,
+    /// Ordered checker-owned promotion receipts for the actual C variadic
+    /// operands. Each index is absolute in `arguments` and therefore binds a
+    /// source identity, source type, and physical promoted type to one slot.
+    pub variadic_arguments: Vec<CanonicalFfiVariadicArgument>,
     pub result: CanonicalFfiScalarType,
     /// Checker-owned conversion receipt from declaration ABI to the MIR result
     /// ABI. Calls without a MIR result identity carry `None`; unit-return calls
@@ -2169,6 +4239,18 @@ pub struct CanonicalFfiDescriptor {
     pub ensures: Option<crate::core::mir::MirContractExpr>,
 }
 
+/// One C default-promotion receipt carried into the AST-free bytecode VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalFfiVariadicArgument {
+    pub argument_index: usize,
+    pub source_node: crate::core::NodeId,
+    /// Source ABI class, distinct from the physical promoted type because
+    /// C's default promotions include i8/i16/u8/u16 source values.
+    pub source_type: crate::core::mir::types::MirAbiClass,
+    pub promoted_type: CanonicalFfiScalarType,
+    pub promotion: crate::core::mir::MirFfiDefaultPromotion,
+}
+
 impl BytecodeProgram {
     /// Look up a function index by name.
     pub fn function_index(&self, name: &str) -> Option<FuncIdx> {
@@ -2181,7 +4263,11 @@ impl BytecodeProgram {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConstValue, FunctionProto};
+    use super::{
+        function_has_managed_any_cfg_candidate, CanonicalManagedAnyCfgBytecodeReceipt,
+        CanonicalMapAnyOwnerV1BytecodeReceipt, CanonicalMapRootBytecodeReceipt, ConstValue,
+        FunctionProto, Op,
+    };
 
     #[test]
     fn checked_constant_pool_indices_preserve_dedup_and_reject_u32_overflow() {
@@ -2208,5 +4294,160 @@ mod tests {
             FunctionProto::checked_const_idx(first_unrepresentable),
             Err("constant pool index exceeds u32 ABI")
         );
+    }
+
+    #[test]
+    fn managed_any_opcode_is_a_cfg_candidate_without_its_contract_constant() {
+        let mut proto = FunctionProto::new("function:main".into(), 1);
+        proto.emit(Op::MirManagedAnyOp {
+            rd: None,
+            ra: 0,
+            operation: crate::core::mir::MirManagedAnyOperation::Drop,
+            contract: 0,
+        });
+        assert!(proto.constants.is_empty());
+        assert!(function_has_managed_any_cfg_candidate(&proto));
+    }
+
+    #[test]
+    fn managed_any_string_compare_is_a_cfg_candidate_without_a_contract_constant() {
+        let mut proto = FunctionProto::new("function:main".into(), 3);
+        proto.emit(Op::MirManagedAnyStringCompare {
+            rd: 2,
+            any: 0,
+            string: 1,
+            equal: true,
+        });
+        assert!(proto.constants.is_empty());
+        assert!(function_has_managed_any_cfg_candidate(&proto));
+        assert!(proto.code[0].reads_reg(0));
+        assert!(proto.code[0].reads_reg(1));
+        assert!(!proto.code[0].reads_reg(2));
+        assert_eq!(
+            proto.code[0].dest_reg(),
+            None,
+            "the checked comparison may trap"
+        );
+    }
+
+    #[test]
+    fn managed_any_println_opcode_is_a_cfg_candidate_without_a_contract_constant() {
+        let mut proto = FunctionProto::new("function:main".into(), 2);
+        proto.emit(Op::MirManagedAnyOp {
+            rd: Some(1),
+            ra: 0,
+            operation: crate::core::mir::MirManagedAnyOperation::Println,
+            contract: u32::MAX,
+        });
+        assert!(proto.constants.is_empty());
+        assert!(function_has_managed_any_cfg_candidate(&proto));
+    }
+
+    #[test]
+    fn cfg_child_removal_does_not_use_a_valid_map_receipt_as_authority() {
+        let mut proto = FunctionProto::new("function:main".into(), 0);
+        let rd = proto.alloc_reg();
+        proto.emit(Op::MirMapAnyOwnerV1New { rd });
+        let functions = vec![proto];
+        let mut root = CanonicalMapRootBytecodeReceipt::capture(0, &functions);
+        root.require_managed_any_cfg_receipt();
+
+        let mut carrier = CanonicalMapAnyOwnerV1BytecodeReceipt::capture(0, &functions);
+        let previous_receipts = carrier.existing_managed_any_receipts_snapshot();
+        carrier.set_managed_any_cfg(CanonicalManagedAnyCfgBytecodeReceipt::capture(
+            0,
+            &functions,
+            "checked source census|interprocedural-source-snapshot=None|expected-presence=false"
+                .into(),
+            Vec::new(),
+            Vec::new(),
+            previous_receipts,
+            None,
+            false,
+        ));
+        assert!(carrier.validate(0, &functions).is_ok());
+        assert!(root.expects_managed_any_cfg_receipt());
+
+        carrier.managed_any_cfg = None;
+        assert!(carrier.validate(0, &functions).is_ok());
+        assert!(carrier
+            .validate_managed_any_cfg(0, &functions, true)
+            .unwrap_err()
+            .contains("missing its independent CFG receipt"));
+    }
+
+    #[test]
+    fn full_cfg_snapshot_rejects_function_deletion_and_added_unreceipted_call() {
+        let mut entry = FunctionProto::new("function:main".into(), 0);
+        let rd = entry.alloc_reg();
+        entry.emit(Op::LoadUnit { rd });
+        let helper = FunctionProto::new("function:ordinary_helper".into(), 1);
+        let functions = vec![entry, helper];
+        let receipt = CanonicalManagedAnyCfgBytecodeReceipt::capture(
+            0,
+            &functions,
+            "checked source census with no such call edge|interprocedural-source-snapshot=None|expected-presence=false"
+                .into(),
+            Vec::new(),
+            Vec::new(),
+            "prior receipts".into(),
+            None,
+            false,
+        );
+        assert!(receipt.validate(0, &functions, "prior receipts").is_ok());
+
+        let mut removed_function = functions.clone();
+        removed_function.pop();
+        assert!(receipt
+            .validate(0, &removed_function, "prior receipts")
+            .unwrap_err()
+            .contains("whole-program Checker snapshot"));
+
+        let mut added_call = functions.clone();
+        added_call[0].emit(Op::CallMove {
+            rd: 0,
+            func: 1,
+            args_base: 0,
+            argc: 1,
+        });
+        assert!(receipt
+            .validate(0, &added_call, "prior receipts")
+            .unwrap_err()
+            .contains("whole-program Checker snapshot"));
+    }
+
+    #[test]
+    fn cfg_source_plan_snapshot_binds_presence_and_exact_bytes_without_call_edges() {
+        let functions = vec![FunctionProto::new("function:main".into(), 0)];
+        let source_snapshot = Some("v2-source-plan;bindings=[];generation=7".to_owned());
+        let marker =
+            format!("|interprocedural-source-snapshot={source_snapshot:?}|expected-presence=true");
+        let receipt = CanonicalManagedAnyCfgBytecodeReceipt::capture(
+            0,
+            &functions,
+            format!("checked source census{marker}"),
+            Vec::new(),
+            Vec::new(),
+            "prior receipt set".into(),
+            source_snapshot,
+            true,
+        );
+        assert!(receipt.validate(0, &functions, "prior receipt set").is_ok());
+
+        let mut changed_source = receipt.clone();
+        changed_source.interprocedural_source_snapshot =
+            Some("v2-source-plan;bindings=[];generation=8".into());
+        assert!(changed_source
+            .validate(0, &functions, "prior receipt set")
+            .unwrap_err()
+            .contains("source-plan snapshot"));
+
+        let mut missing_child = receipt;
+        missing_child.interprocedural_source_snapshot = None;
+        missing_child.expected_has_interprocedural_source_snapshot = false;
+        assert!(missing_child
+            .validate(0, &functions, "prior receipt set")
+            .unwrap_err()
+            .contains("source-plan snapshot"));
     }
 }

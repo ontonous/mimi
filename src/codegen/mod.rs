@@ -6,6 +6,7 @@ mod compile;
 mod expr;
 mod float_chain;
 mod func;
+mod generic_trait_dispatch;
 pub mod gep;
 #[cfg(feature = "llvm18-host-dynamic")]
 mod llvm_host;
@@ -21,6 +22,7 @@ mod tests;
 
 use crate::ast::*;
 use crate::error::CompileError;
+use generic_trait_dispatch::CheckedTraitMethodDispatchIndex;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -226,6 +228,35 @@ pub struct CodeGenerator<'ctx> {
     pub(super) current_generic_def: Option<crate::ast::FuncDef>,
     type_defs: HashMap<String, crate::ast::TypeDef>,
     type_llvm: HashMap<String, BasicTypeEnum<'ctx>>,
+    /// Transparent Alias declarations installed from checker-owned target
+    /// identities. The target-to-LLVM cache is populated only for closed
+    /// canonical targets; nominal targets may be supplied later by the native
+    /// declaration registry or the retained compatibility type registry.
+    checked_alias_type_targets: HashMap<String, crate::core::ResolvedTypeId>,
+    checked_alias_llvm_types: HashMap<String, BasicTypeEnum<'ctx>>,
+    checked_alias_primitives: HashMap<String, crate::core::PrimitiveType>,
+    /// Canonical declaration schema and resolved type table installed at the
+    /// checked-program boundary for native type consumers.
+    checked_native_declarations: Option<crate::core::ir::ResolvedNativeDeclarations>,
+    checked_native_types: Option<crate::core::ResolvedTypeTable>,
+    /// AST function bodies indexed by checked callable identity. This keeps
+    /// compatibility code generation's body payload while moving production
+    /// impl selection and dispatch off `type_impls` name scans.
+    checked_impl_method_bodies:
+        HashMap<crate::core::NodeId, (crate::ast::FuncDef, crate::ast::Type)>,
+    /// Checker-issued LLVM symbol for each impl method callable.  The
+    /// resolved emitter lowers an admitted impl body directly from Typed IR,
+    /// while the native declaration catalog/vtable uses this stable symbol.
+    /// Keeping the mapping at the checked boundary prevents a compatibility
+    /// `Type_method` spelling from being reconstructed by a backend consumer.
+    checked_impl_method_symbols: HashMap<crate::core::NodeId, String>,
+    /// Exact checker-selected protocol targets indexed by source call span.
+    /// This prevents legacy emission from reselecting a trait implementation
+    /// by receiver spelling or hash-map/declaration traversal order.
+    checked_trait_method_dispatch: CheckedTraitMethodDispatchIndex,
+    /// Canonical generic binder identities to source-level spelling, captured
+    /// from checked function records for formatting resolved result types.
+    checked_generic_binder_names: HashMap<crate::core::NodeId, String>,
     cap_vars: Vec<HashMap<String, (inkwell::values::PointerValue<'ctx>, bool)>>,
     cap_type_names: std::collections::HashSet<String>,
     /// Combined capability components: cap name → component names
@@ -375,7 +406,8 @@ pub struct CodeGenerator<'ctx> {
     /// Held so `Expr::Comptime` block paths can construct a fresh
     /// interpreter per fold without re-borrowing the original argument.
     comptime_file: Option<std::sync::Arc<crate::ast::File>>,
-    trait_defs: HashMap<String, crate::ast::TraitDef>,
+    /// Vtable slot order from checker-owned trait declaration catalogs.
+    trait_method_names: HashMap<String, Vec<String>>,
     type_impls: HashMap<String, HashMap<String, Vec<FuncDef>>>,
     /// Generic type arguments for each type that has trait impls.
     /// For `impl<T> ListExt<T> for List<T>`, this stores `"List" → [T]`.
@@ -785,6 +817,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             ieee_depth: 0,
             type_defs: HashMap::new(),
             type_llvm: HashMap::new(),
+            checked_alias_type_targets: HashMap::new(),
+            checked_alias_llvm_types: HashMap::new(),
+            checked_alias_primitives: HashMap::new(),
+            checked_native_declarations: None,
+            checked_native_types: None,
+            checked_impl_method_bodies: HashMap::new(),
+            checked_impl_method_symbols: HashMap::new(),
+            checked_trait_method_dispatch: CheckedTraitMethodDispatchIndex::default(),
+            checked_generic_binder_names: HashMap::new(),
             cap_vars: vec![HashMap::new()],
             cap_type_names: std::collections::HashSet::new(),
             cap_components: std::collections::HashMap::new(),
@@ -831,7 +872,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             comptime_file: None,
             in_parasteps: false,
             parasteps_future_ptrs: Vec::new(),
-            trait_defs: HashMap::new(),
+            trait_method_names: HashMap::new(),
             type_impls: HashMap::new(),
             impl_type_args: HashMap::new(),
             vtable_globals: HashMap::new(),
@@ -5326,6 +5367,21 @@ impl<'ctx> CodeGenerator<'ctx> {
             {
                 self.llvm_type_for(ty)
             }
+            // Transparent aliases keep their registered LLVM representation
+            // when used as tuple fields. The checked mailbox header resolves
+            // aliases before constructing its tuple layout (e.g. `Text =
+            // string` becomes `{ptr, i64}`); falling through to
+            // `mimi_type_to_llvm` here erased an alias field to `i64`, so the
+            // actor worker unpacked a different tuple layout than the typed
+            // caller packed.
+            Type::Name(name, args)
+                if args.is_empty() && self.checked_alias_type_targets.contains_key(name) =>
+            {
+                self.checked_alias_llvm_types
+                    .get(name)
+                    .copied()
+                    .or_else(|| self.type_llvm.get(name).copied())
+            }
             _ => crate::codegen::types::mimi_type_to_llvm(self.context, ty),
         }
     }
@@ -5497,6 +5553,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         if name.is_empty() {
             return String::new();
         }
+        if let Some(primitive) = self.checked_alias_primitives.get(name) {
+            return if *primitive == crate::core::PrimitiveType::Unit {
+                "unit".to_string()
+            } else {
+                primitive.language_name().to_string()
+            };
+        }
         // Already a product-tuple or container form — leave as-is.
         if name.starts_with('(')
             || name.starts_with("List")
@@ -5527,8 +5590,25 @@ impl<'ctx> CodeGenerator<'ctx> {
         cur
     }
 
+    /// Return the canonical surface spelling of a closed primitive alias
+    /// from the checker-owned declaration catalog. JSON decoding uses this
+    /// before the legacy AST alias fallback so removing an alias from
+    /// `type_defs` cannot change the scalar ABI selected by `from_json`.
+    pub(super) fn checked_alias_primitive_type(&self, name: &str) -> Option<Type> {
+        let primitive = *self.checked_alias_primitives.get(name)?;
+        let name = if primitive == crate::core::PrimitiveType::Unit {
+            "unit"
+        } else {
+            primitive.language_name()
+        };
+        Some(Type::Name(name.to_owned(), Vec::new()))
+    }
+
     /// True when `name` is a type alias whose underlying type is a product tuple.
     pub(super) fn is_product_tuple_alias(&self, name: &str) -> bool {
+        if self.checked_alias_primitives.contains_key(name) {
+            return false;
+        }
         if name.is_empty() || !self.type_defs.contains_key(name) {
             return false;
         }
@@ -5541,6 +5621,33 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// order), used to map named constructor-pattern fields to struct indices.
     pub(super) fn record_fields_of(&self, ty: &Type) -> Option<Vec<String>> {
         let type_name = self.get_full_type_name(ty)?;
+        if let Some(catalog) = &self.checked_native_declarations {
+            let mut matches = catalog.types.values().filter(|declaration| {
+                declaration.name == type_name
+                    || declaration.name.ends_with(&format!("::{type_name}"))
+            });
+            if let Some(declaration) = matches.next() {
+                if matches.next().is_none() {
+                    if let crate::core::ir::NativeTypeDeclarationKind::Record { fields } =
+                        &declaration.kind
+                    {
+                        return Some(fields.iter().map(|field| field.name.clone()).collect());
+                    }
+                }
+            }
+            let state_matches = catalog
+                .flows
+                .values()
+                .flat_map(|flow| flow.states.iter().map(move |state| (flow, state)))
+                .filter(|(flow, state)| {
+                    format!("flow::{}::{}", flow.name, state.name).as_str() == type_name.as_str()
+                })
+                .map(|(_, state)| &state.fields)
+                .collect::<Vec<_>>();
+            if let [fields] = state_matches.as_slice() {
+                return Some(fields.iter().map(|field| field.name.clone()).collect());
+            }
+        }
         let def = self.type_defs.get(&type_name).or_else(|| {
             self.type_defs.values().find(|td| {
                 td.name == type_name || td.name.rsplit("::").next() == Some(type_name.as_str())
@@ -5706,6 +5813,26 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// G2: Find the owning type name and ordinal of an enum variant name.
     /// Returns `None` if `name` is not a variant in any registered enum type.
     fn find_variant_info(&self, name: &str) -> Option<(String, u64)> {
+        if let Some(catalog) = &self.checked_native_declarations {
+            for owner in &catalog.type_order {
+                let Some(declaration) = catalog.types.get(owner) else {
+                    continue;
+                };
+                if declaration.name.ends_with("::StateId")
+                    || declaration.name.ends_with("::EventId")
+                {
+                    continue;
+                }
+                let crate::core::ir::NativeTypeDeclarationKind::Enum { variants } =
+                    &declaration.kind
+                else {
+                    continue;
+                };
+                if let Some(variant) = variants.iter().find(|variant| variant.name == name) {
+                    return Some((declaration.name.clone(), variant.native_tag));
+                }
+            }
+        }
         for td in self.type_defs.values() {
             if let crate::ast::TypeDefKind::Enum(variants) = &td.kind {
                 // 0.36.4 Fault nominal: the flow-scoped StateId/EventId enums

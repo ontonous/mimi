@@ -302,6 +302,16 @@ pub(super) fn analyze_canonical(
         loans,
         map_root_actions: Vec::new(),
         map_root_new_attempts: BTreeSet::new(),
+        map_any_owner_actions: Vec::new(),
+        map_any_owner_new_attempts: BTreeSet::new(),
+        ordinary_map_owner_lifecycle_v1_actions: Vec::new(),
+        ordinary_map_owner_lifecycle_v1_new_attempts: BTreeSet::new(),
+        ordinary_map_owner_lifecycle_v1_operation_attempts: BTreeSet::new(),
+        ordinary_map_owned_get_i32_string_v1_actions: Vec::new(),
+        ordinary_map_owned_get_i32_string_v1_new_attempts: BTreeSet::new(),
+        ordinary_map_owned_get_i32_string_v1_operation_attempts: BTreeSet::new(),
+        ordinary_map_owned_get_i32_string_v1_cfg_receipt: None,
+        managed_any_cfg_receipt: None,
         in_states: in_flow
             .into_iter()
             .map(|(block, state)| (block, state.resources))

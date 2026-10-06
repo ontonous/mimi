@@ -16,6 +16,10 @@ use std::sync::{Condvar, Mutex};
 /// Per-handle generation. Distinct from Flow `TransitionEpoch`.
 pub type HandleGeneration = u32;
 
+/// Largest Map/Set slot index. The low-word high bit is reserved for
+/// canonical Any owner tokens and must not be used as a Map/Set table index.
+const MAX_MAP_SET_SLOT_INDEX: u32 = 0x7fff_ffff;
+
 /// Typed handle-op result codes (C ABI `i32`).
 pub const HANDLE_OK: i32 = 0;
 pub const HANDLE_ERR_INVALID: i32 = 1;
@@ -53,7 +57,7 @@ thread_local! {
 /// and monotonic identity provide the same reentry check without allocation
 /// or a destructor, including for foreign threads calling the runtime ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct LeaseThreadId(u64);
+pub(super) struct LeaseThreadId(u64);
 
 static NEXT_LEASE_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -66,7 +70,7 @@ fn allocate_lease_thread_id(counter: &AtomicU64) -> Option<LeaseThreadId> {
         .map(LeaseThreadId)
 }
 
-fn current_lease_thread_id() -> LeaseThreadId {
+pub(super) fn current_lease_thread_id() -> LeaseThreadId {
     LEASE_THREAD_ID.with(|cached| {
         let value = cached.get();
         if value != 0 {
@@ -79,6 +83,19 @@ fn current_lease_thread_id() -> LeaseThreadId {
         cached.set(identity.0);
         identity
     })
+}
+
+/// Read the allocation-free thread identity without assigning a new one.
+/// Orderly trap cleanup must not abort on identity exhaustion or initialize
+/// thread state when this thread has never created an ordinary Map root.
+pub(super) fn cached_lease_thread_id() -> Option<LeaseThreadId> {
+    LEASE_THREAD_ID
+        .try_with(|cached| {
+            let value = cached.get();
+            (value != 0).then_some(LeaseThreadId(value))
+        })
+        .ok()
+        .flatten()
 }
 
 pub fn set_handle_error(err: HandleError) {
@@ -144,7 +161,8 @@ impl<T: Send> Table<T> {
 
 fn pack(index: u32, gen: HandleGeneration) -> i64 {
     // low 32: index, high 32: generation. handle 0 remains invalid because
-    // we never allocate index 0.
+    // we never allocate index 0. The low-word high bit remains reserved for
+    // canonical Any owner tokens.
     ((gen as i64) << 32) | (index as i64)
 }
 
@@ -154,10 +172,26 @@ fn unpack(handle: i64) -> Result<(u32, HandleGeneration), HandleError> {
     }
     let index = handle as u32;
     let gen = (handle >> 32) as HandleGeneration;
-    if index == 0 {
+    if index == 0 || index > MAX_MAP_SET_SLOT_INDEX {
         return Err(HandleError::Invalid);
     }
     Ok((index, gen))
+}
+
+/// A missing Map-table index can still identify an expired handle if the
+/// table has been compacted since that handle was issued. Issued generations
+/// below the retained floor predate every allocation after compaction;
+/// generation zero and current/future generations at a never-allocated index
+/// remain invalid.
+fn missing_map_slot_error(
+    generation: HandleGeneration,
+    generation_floor: HandleGeneration,
+) -> HandleError {
+    if generation != 0 && generation < generation_floor {
+        HandleError::StaleGeneration
+    } else {
+        HandleError::Invalid
+    }
 }
 
 static MAP_TABLE: std::sync::OnceLock<Mutex<Table<super::MimiMap>>> = std::sync::OnceLock::new();
@@ -364,7 +398,9 @@ fn alloc_slot<T: Send>(table: &mut Table<T>, obj: T) -> i64 {
 }
 
 fn checked_slot_index(slot_count: usize) -> Option<u32> {
-    u32::try_from(slot_count).ok().filter(|index| *index != 0)
+    u32::try_from(slot_count)
+        .ok()
+        .filter(|index| *index != 0 && *index <= MAX_MAP_SET_SLOT_INDEX)
 }
 
 fn record_alloc_result(handle: i64) -> i64 {
@@ -449,6 +485,58 @@ pub fn map_new_handle(obj: super::MimiMap) -> i64 {
     record_alloc_result(alloc_slot(&mut t, obj))
 }
 
+/// Fallible root allocation used by ordinary snapshot maps. Unlike the
+/// legacy constructor, capacity failure returns the uninstalled Map so its
+/// typed owners can be dropped after `MAP_TABLE` is unlocked.
+pub(super) fn map_new_handle_fallible(obj: super::MimiMap) -> Result<i64, Box<super::MimiMap>> {
+    clear_handle_error();
+    let mut table = lock_maps();
+    // Trap retirement and registration rollback cannot allocate a free-list
+    // entry. Reuse their empty metadata slots in this fallible profile path;
+    // legacy constructors and normal Drop queues keep their existing route.
+    if table.free.is_empty() {
+        if let Some(index) = unqueued_reusable_map_slot(&table) {
+            let generation_floor = table.generation_floor;
+            let slot = &mut table.slots[index as usize];
+            let generation = slot.generation.max(generation_floor);
+            slot.generation = generation;
+            slot.leases.store(0, Ordering::SeqCst);
+            slot.active_owner = None;
+            slot.pins.store(0, Ordering::SeqCst);
+            slot.retired.store(false, Ordering::SeqCst);
+            slot.pending_free.store(false, Ordering::SeqCst);
+            slot.obj = Some(Box::new(obj));
+            return Ok(pack(index, generation));
+        }
+    }
+    let slot_count = table.slots.len().max(1);
+    if table.free.is_empty() && checked_slot_index(slot_count).is_none() {
+        set_handle_error(HandleError::Invalid);
+        drop(table);
+        return Err(Box::new(obj));
+    }
+    let handle = alloc_slot(&mut table, obj);
+    debug_assert_ne!(handle, 0, "preflighted Map slot allocation must succeed");
+    Ok(handle)
+}
+
+/// Find a reusable slot omitted from the free queue by no-allocation
+/// retirement. The reserved null slot and exhausted generations never qualify.
+fn unqueued_reusable_map_slot(table: &Table<super::MimiMap>) -> Option<u32> {
+    table
+        .slots
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, slot)| {
+            if slot.obj.is_none() && !slot.retired.load(Ordering::SeqCst) {
+                u32::try_from(index).ok()
+            } else {
+                None
+            }
+        })
+}
+
 /// MapRoot's closed-profile operations run under the registry lock itself.
 /// This avoids acquiring a thread-id lease while preserving the production
 /// Map object and handle validation rules.
@@ -460,6 +548,7 @@ pub(super) fn map_root_set(handle: i64, key: String, value: i64) -> Result<(), H
         .get_mut(index as usize)
         .ok_or(HandleError::Invalid)?;
     validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     slot.obj
         .as_mut()
         .ok_or(HandleError::Destroyed)?
@@ -485,6 +574,7 @@ pub(super) fn map_root_set_owned_any_string(
             .get_mut(index as usize)
             .ok_or(HandleError::Invalid)?;
         validate_map_root_slot(slot, gen)?;
+        validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
         let map = slot.obj.as_mut().ok_or(HandleError::Destroyed)?;
         if map.owned.contains_key(&value) {
             return Err(HandleError::Invalid);
@@ -518,6 +608,7 @@ pub(super) fn map_root_remove(handle: i64, key: &str) -> Result<(), HandleError>
             .get_mut(index as usize)
             .ok_or(HandleError::Invalid)?;
         validate_map_root_slot(slot, gen)?;
+        validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
         let map = slot.obj.as_mut().ok_or(HandleError::Destroyed)?;
         let Some(removed_value) = map.inner.remove(key) else {
             return Ok(());
@@ -540,6 +631,7 @@ pub(super) fn map_root_contains(handle: i64, key: &str) -> Result<bool, HandleEr
     let t = lock_maps();
     let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
     validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     let map = slot.obj.as_ref().ok_or(HandleError::Destroyed)?;
     Ok(map.inner.contains_key(key))
 }
@@ -549,6 +641,7 @@ pub(super) fn map_root_size(handle: i64) -> Result<usize, HandleError> {
     let t = lock_maps();
     let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
     validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     Ok(slot.obj.as_ref().ok_or(HandleError::Destroyed)?.inner.len())
 }
 
@@ -557,8 +650,105 @@ pub(super) fn map_root_drop(handle: i64) -> Result<(), HandleError> {
     let mut t = lock_maps();
     let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
     validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     let retired_map = finish_map_free(&mut t, index);
     drop(t);
+    drop(retired_map);
+    Ok(())
+}
+
+/// Retire one MapAnyOwner v1 root and return the removed Map object. The
+/// caller releases its typed owner tokens only after this function has
+/// invalidated the Map handle and released MAP_TABLE.
+pub(super) fn map_any_owner_drop(handle: i64) -> Result<Box<super::MimiMap>, HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut t = lock_maps();
+    let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::CanonicalAnyOwnerV1)?;
+    let retired_map = finish_map_free(&mut t, index).ok_or(HandleError::Destroyed)?;
+    drop(t);
+    Ok(retired_map)
+}
+
+/// Retire one ordinary Map lifecycle v1 root. Typed entry owners are released
+/// only after the shared Map table has invalidated the handle and unlocked.
+pub(super) fn ordinary_map_owner_lifecycle_i32_string_v1_drop(
+    handle: i64,
+) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut table = lock_maps();
+    let slot = table
+        .slots
+        .get(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(
+        slot,
+        super::MapStorageMode::OrdinaryMapOwnerLifecycleI32StringV1,
+    )?;
+    let retired_map = finish_map_free(&mut table, index);
+    drop(table);
+    drop(retired_map);
+    Ok(())
+}
+
+/// Retire one ordinary Map owned-Get v1 root. This profile shares the typed
+/// snapshot storage implementation with lifecycle v1, while retaining its
+/// own Map storage mode so no other root API can accept its handle.
+pub(super) fn ordinary_map_owned_get_i32_string_v1_drop(handle: i64) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut table = lock_maps();
+    let slot = table
+        .slots
+        .get(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::OrdinaryMapOwnedGetI32StringV1)?;
+    let retired_map = finish_map_free(&mut table, index);
+    drop(table);
+    drop(retired_map);
+    Ok(())
+}
+
+/// Raw cleanup for an unpublished or trapping-thread lifecycle-profile
+/// root. It never allocates a free-list entry or invokes the trapping ABI.
+pub(super) fn ordinary_map_owner_lifecycle_i32_string_v1_drop_for_trap(
+    handle: i64,
+) -> Result<(), HandleError> {
+    ordinary_map_profile_drop_for_trap(
+        handle,
+        super::MapStorageMode::OrdinaryMapOwnerLifecycleI32StringV1,
+    )
+}
+
+/// Raw cleanup for the owned-Get profile, with the same no-allocation and
+/// exact-profile validation contract as lifecycle cleanup.
+pub(super) fn ordinary_map_owned_get_i32_string_v1_drop_for_trap(
+    handle: i64,
+) -> Result<(), HandleError> {
+    ordinary_map_profile_drop_for_trap(
+        handle,
+        super::MapStorageMode::OrdinaryMapOwnedGetI32StringV1,
+    )
+}
+
+fn ordinary_map_profile_drop_for_trap(
+    handle: i64,
+    expected: super::MapStorageMode,
+) -> Result<(), HandleError> {
+    let (index, generation) = unpack(handle)?;
+    let mut table = lock_maps();
+    let slot = table
+        .slots
+        .get(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, generation)?;
+    validate_map_slot_mode(slot, expected)?;
+    let retired_map = finish_map_free_for_trap(&mut table, index);
+    drop(table);
+    // Any descriptor Drop glue must remain outside both MAP_TABLE and the
+    // execution-domain registry. The caller has detached its domain record.
     drop(retired_map);
     Ok(())
 }
@@ -580,6 +770,25 @@ fn validate_map_root_slot<T>(
         return Err(HandleError::Reentrant);
     }
     Ok(())
+}
+
+fn validate_map_slot_mode(
+    slot: &Slot<super::MimiMap>,
+    expected: super::MapStorageMode,
+) -> Result<(), HandleError> {
+    let map = slot.obj.as_deref().ok_or(HandleError::Destroyed)?;
+    validate_map_storage_mode(map, expected)
+}
+
+fn validate_map_storage_mode(
+    map: &super::MimiMap,
+    expected: super::MapStorageMode,
+) -> Result<(), HandleError> {
+    if map.mode == expected {
+        Ok(())
+    } else {
+        Err(HandleError::Invalid)
+    }
 }
 
 fn compact_empty_map_table(t: &mut Table<super::MimiMap>) {
@@ -619,17 +828,54 @@ pub fn set_new_handle(obj: super::MimiSet) -> i64 {
 }
 
 pub fn map_acquire(handle: i64) -> Result<MapLease, HandleError> {
+    map_acquire_mode(handle, super::MapStorageMode::LegacyRaw)
+}
+
+/// Lease a MapAnyOwner v1 object without making it eligible for ordinary
+/// ValueHandle-based Map helpers.
+pub(super) fn map_any_owner_acquire(handle: i64) -> Result<MapLease, HandleError> {
+    map_acquire_mode(handle, super::MapStorageMode::CanonicalAnyOwnerV1)
+}
+
+/// Lease a persistent ordinary-Map lifecycle v1 root. Its dedicated runtime
+/// operations cannot be reached through legacy `ValueHandle` helpers.
+pub(super) fn ordinary_map_owner_lifecycle_i32_string_v1_acquire(
+    handle: i64,
+) -> Result<MapLease, HandleError> {
+    map_acquire_mode(
+        handle,
+        super::MapStorageMode::OrdinaryMapOwnerLifecycleI32StringV1,
+    )
+}
+
+/// Lease a persistent ordinary-Map owned-Get v1 root. The distinct storage
+/// mode prevents lifecycle-v1, MapAnyOwner, MapRoot, and legacy helpers from
+/// accepting this handle.
+pub(super) fn ordinary_map_owned_get_i32_string_v1_acquire(
+    handle: i64,
+) -> Result<MapLease, HandleError> {
+    map_acquire_mode(
+        handle,
+        super::MapStorageMode::OrdinaryMapOwnedGetI32StringV1,
+    )
+}
+
+fn map_acquire_mode(handle: i64, expected: super::MapStorageMode) -> Result<MapLease, HandleError> {
     let (index, gen) = unpack(handle)?;
     let mut t = lock_maps();
     let current = current_lease_thread_id();
     loop {
-        let slot = t.slots.get(index as usize).ok_or(HandleError::Invalid)?;
+        let slot = match t.slots.get(index as usize) {
+            Some(slot) => slot,
+            None => return Err(missing_map_slot_error(gen, t.generation_floor)),
+        };
         if slot.generation != gen {
             return Err(HandleError::StaleGeneration);
         }
         if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
             return Err(HandleError::Destroyed);
         }
+        validate_map_slot_mode(slot, expected)?;
         match slot.active_owner {
             Some(owner) if owner == current => return Err(HandleError::Reentrant),
             Some(_) => {
@@ -769,6 +1015,7 @@ fn map_pin(handle: i64) -> Result<i64, HandleError> {
     if slot.retired.load(Ordering::SeqCst) || slot.obj.is_none() {
         return Err(HandleError::Destroyed);
     }
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     let pins = slot.pins.load(Ordering::SeqCst);
     let next = pins.checked_add(1).ok_or(HandleError::Invalid)?;
     slot.pins.store(next, Ordering::SeqCst);
@@ -807,6 +1054,7 @@ fn map_unpin(handle: i64) -> Result<i64, HandleError> {
         if slot.generation != gen {
             return Err(HandleError::StaleGeneration);
         }
+        validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
         let pins = slot.pins.load(Ordering::SeqCst);
         if pins == 0 {
             return Err(HandleError::Invalid);
@@ -888,6 +1136,30 @@ fn finish_map_free(t: &mut Table<super::MimiMap>, index: u32) -> Option<Box<supe
     retired_map
 }
 
+/// Retire without growing the free queue or compacting its metadata.
+/// The fallible ordinary-profile constructor finds these empty slots directly,
+/// so repeated registration failures reuse capacity rather than growing slots.
+fn finish_map_free_for_trap(
+    table: &mut Table<super::MimiMap>,
+    index: u32,
+) -> Option<Box<super::MimiMap>> {
+    let slot = &mut table.slots[index as usize];
+    let retired_map = slot.obj.take();
+    if let Some(next) = slot.generation.checked_add(1) {
+        slot.generation = next;
+        table.generation_floor = table.generation_floor.max(next);
+        slot.retired.store(false, Ordering::SeqCst);
+    } else {
+        slot.retired.store(true, Ordering::SeqCst);
+        table.generation_exhausted = true;
+    }
+    slot.pending_free.store(false, Ordering::SeqCst);
+    slot.leases.store(0, Ordering::SeqCst);
+    slot.active_owner = None;
+    slot.pins.store(0, Ordering::SeqCst);
+    retired_map
+}
+
 fn finish_set_free(t: &mut Table<super::MimiSet>, index: u32) {
     let slot = &mut t.slots[index as usize];
     if let Some(set) = slot.obj.take() {
@@ -928,6 +1200,7 @@ pub fn map_begin_destroy(handle: i64) -> Result<(), HandleError> {
     if slot.obj.is_none() {
         return Err(HandleError::Destroyed);
     }
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     slot.retired.store(true, Ordering::SeqCst);
     clear_handle_error();
     map_condvar().notify_all();
@@ -970,6 +1243,7 @@ pub fn map_finish_destroy(handle: i64) -> Result<(), HandleError> {
         if slot.obj.is_none() {
             return Ok(());
         }
+        validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
         slot.retired.store(true, Ordering::SeqCst);
         slot.leases.load(Ordering::SeqCst) == 0 && slot.pins.load(Ordering::SeqCst) == 0
     };
@@ -1049,6 +1323,7 @@ pub fn map_generation(handle: i64) -> Result<HandleGeneration, HandleError> {
     if slot.obj.is_none() {
         return Err(HandleError::Destroyed);
     }
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     Ok(slot.generation)
 }
 
@@ -1072,6 +1347,7 @@ pub fn map_lease_count(handle: i64) -> Result<i64, HandleError> {
     if slot.generation != gen {
         return Err(HandleError::StaleGeneration);
     }
+    validate_map_slot_mode(slot, super::MapStorageMode::LegacyRaw)?;
     Ok(slot
         .leases
         .load(Ordering::SeqCst)
@@ -1304,17 +1580,11 @@ mod tests {
     use std::time::Duration;
 
     fn new_map() -> i64 {
-        map_new_handle(super::super::MimiMap {
-            inner: Default::default(),
-            owned: Default::default(),
-        })
+        map_new_handle(super::super::MimiMap::legacy_raw())
     }
 
     fn empty_map() -> super::super::MimiMap {
-        super::super::MimiMap {
-            inner: std::collections::HashMap::new(),
-            owned: std::collections::HashMap::new(),
-        }
+        super::super::MimiMap::legacy_raw()
     }
 
     #[test]
@@ -1338,6 +1608,37 @@ mod tests {
         compact_empty_map_table(&mut table);
         assert!(table.slots[other_idx as usize].obj.is_some());
         assert!(table.slots.len() > 1);
+    }
+
+    #[test]
+    fn compacted_map_index_distinguishes_stale_generation_from_invalid_future_handle() {
+        let mut table = Table::new();
+        let old = alloc_slot(&mut table, empty_map());
+        let (index, old_generation) = unpack(old).unwrap();
+        drop(finish_map_free(&mut table, index));
+        compact_empty_map_table(&mut table);
+        assert!(table.slots.is_empty());
+        assert!(table.generation_floor > old_generation);
+
+        assert_eq!(
+            missing_map_slot_error(old_generation, table.generation_floor),
+            HandleError::StaleGeneration
+        );
+        assert_eq!(
+            missing_map_slot_error(0, table.generation_floor),
+            HandleError::Invalid,
+            "generation zero was never issued and remains invalid"
+        );
+        assert_eq!(
+            missing_map_slot_error(table.generation_floor, table.generation_floor),
+            HandleError::Invalid
+        );
+        if table.generation_floor < HandleGeneration::MAX {
+            assert_eq!(
+                missing_map_slot_error(table.generation_floor + 1, table.generation_floor),
+                HandleError::Invalid
+            );
+        }
     }
 
     #[test]
@@ -1397,13 +1698,71 @@ mod tests {
     }
 
     #[test]
-    fn slot_index_conversion_rejects_zero_and_out_of_range() {
+    fn ordinary_map_trap_retirement_keeps_free_capacity_and_reusable_metadata() {
+        let mut table = Table::new();
+        let guard = alloc_slot(&mut table, empty_map());
+        let root = alloc_slot(&mut table, empty_map());
+        let (index, generation) = unpack(root).unwrap();
+        let slot_count = table.slots.len();
+        let free_capacity = table.free.capacity();
+        drop(finish_map_free_for_trap(&mut table, index));
+        assert_eq!(table.free.capacity(), free_capacity);
+        assert!(table.free.is_empty());
+        assert_eq!(table.slots.len(), slot_count);
+        assert_eq!(unqueued_reusable_map_slot(&table), Some(index));
+        assert_eq!(
+            validate_map_root_slot(&table.slots[index as usize], generation),
+            Err(HandleError::StaleGeneration)
+        );
+        drop(finish_map_free(&mut table, unpack(guard).unwrap().0));
+    }
+
+    #[test]
+    fn slot_index_conversion_reserves_bit_31_for_any_owner_tokens() {
         assert_eq!(checked_slot_index(0), None);
         assert_eq!(checked_slot_index(1), Some(1));
-        assert_eq!(checked_slot_index(u32::MAX as usize), Some(u32::MAX));
-        if let Ok(out_of_range) = usize::try_from(u64::from(u32::MAX) + 1) {
-            assert_eq!(checked_slot_index(out_of_range), None);
-        }
+        assert_eq!(
+            checked_slot_index(MAX_MAP_SET_SLOT_INDEX as usize),
+            Some(MAX_MAP_SET_SLOT_INDEX)
+        );
+        assert_eq!(
+            checked_slot_index(MAX_MAP_SET_SLOT_INDEX as usize + 1),
+            None,
+            "the first index with the class bit set is forbidden"
+        );
+        assert_eq!(unpack(pack(0, 1)), Err(HandleError::Invalid));
+        assert_eq!(
+            unpack(pack(MAX_MAP_SET_SLOT_INDEX + 1, 1)),
+            Err(HandleError::Invalid)
+        );
+        assert_eq!(
+            unpack(pack(0x8000_0001, 1)),
+            Err(HandleError::Invalid),
+            "class-tagged low words must be rejected before table access"
+        );
+    }
+
+    #[test]
+    fn map_and_set_handles_keep_signed_full_width_generations() {
+        let generation = 0x8000_0000;
+        let mut map_table = Table::new();
+        map_table.generation_floor = generation;
+        let map_handle = alloc_slot(&mut map_table, empty_map());
+
+        let mut set_table = Table::new();
+        set_table.generation_floor = generation;
+        let set_handle = alloc_slot(
+            &mut set_table,
+            super::super::MimiSet {
+                inner: Default::default(),
+                string_values: Default::default(),
+            },
+        );
+
+        assert!(map_handle < 0);
+        assert!(set_handle < 0);
+        assert_eq!(unpack(map_handle), Ok((1, generation)));
+        assert_eq!(unpack(set_handle), Ok((1, generation)));
     }
 
     #[test]

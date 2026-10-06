@@ -94,6 +94,346 @@ fn canonical_ffi_scalar_kind_is_closed_at_the_mir_boundary() {
 }
 
 #[test]
+fn ordinary_map_lifecycle_runtime_helpers_are_reserved_source_ffi_symbols() {
+    for symbol in [
+        "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_new",
+        "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_string",
+        "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop",
+    ] {
+        assert!(!canonical_ffi_symbol_is_manifest_safe(symbol));
+        assert_eq!(
+            validate_ffi_symbol_manifest_safety(symbol),
+            Err(
+                "FFI symbol is not manifest-safe (FFI symbol names a reserved Canonical MIR ordinary Map lifecycle runtime helper)"
+                    .into()
+            )
+        );
+    }
+}
+
+#[test]
+fn ordinary_map_owned_get_runtime_helpers_are_reserved_source_ffi_symbols() {
+    const RESERVED: &str = "mimi_mir_ordinary_map_owned_get_i32_string_v1_get";
+    assert_eq!(
+        validate_ffi_symbol_manifest_safety(RESERVED),
+        Err("FFI symbol is not manifest-safe (FFI symbol names a reserved Canonical MIR ordinary Map owned-get runtime helper)".into())
+    );
+    assert!(validate_ffi_symbol_manifest_safety(
+        "mimi_mir_ordinary_map_owned_get_i32_string_v1x_user_function"
+    )
+    .is_ok());
+
+    let checked = checked_program(
+        r#"
+extern "C" { func mimi_mir_ordinary_map_owned_get_i32_string_v1_get(value: i64) -> i64; }
+func main() -> i64 { mimi_mir_ordinary_map_owned_get_i32_string_v1_get(1 as i64) }
+"#,
+    );
+    let errors = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("source imports must not claim ordinary Map owned-get runtime symbols");
+    assert!(
+        errors.to_diagnostics().iter().any(|diagnostic| {
+            diagnostic.code.is_none()
+                && diagnostic
+                    .message
+                    .contains("FFI symbol is not manifest-safe")
+                && diagnostic
+                    .message
+                    .contains("reserved Canonical MIR ordinary Map owned-get runtime helper")
+        }),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn owned_get_profile_receipt_binds_typed_get_and_root_lifecycle() {
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind as K;
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ProfileVersion as V;
+
+    let owner_ty = types::ordinary_map_owned_get_i32_string_v1_type_id();
+    let i32_ty = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+    let string_ty = crate::core::ir::primitive_type_id(PrimitiveType::String);
+    let result_ty = crate::core::ir::result_type_id(i32_ty.clone(), i32_ty.clone());
+    let result_string_ty = crate::core::ir::result_type_id(string_ty.clone(), i32_ty.clone());
+    let root = MirValueId::new("local:root").expect("root identity");
+    let key = MirValueId::new("expr:node:key").expect("key identity");
+    let getter_result = MirValueId::new("expr:pget").expect("getter result identity");
+    let answer = MirValueId::new("v.answer").expect("return identity");
+    let root_name = "ordinary-map-owned-get-i32-string-v1:root".to_string();
+
+    let action = |kind: K,
+                  point: &str,
+                  result: Option<MirValueId>,
+                  key_node: Option<NodeId>,
+                  action_result_type: Option<ResolvedTypeId>| {
+        let key = key_node
+            .as_ref()
+            .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok());
+        let key_type = key_node.as_ref().map(|_| string_ty.clone());
+        MirCheckerOrdinaryMapOwnedGetI32StringV1Action {
+            profile_version: V::V1,
+            kind,
+            point: NodeId(point.into()),
+            local: root.clone(),
+            result,
+            root: root_name.clone(),
+            key_node,
+            key,
+            key_type,
+            key_local: None,
+            value: None,
+            value_type: None,
+            result_type: action_result_type,
+            source_local: None,
+            source: None,
+            instruction: MirInstructionId::new(format!(
+                "inst:ordinary_map_owned_get_i32_string_v1_{}:{}:{point}",
+                kind.as_str(),
+                root
+            ))
+            .expect("owned-get instruction identity"),
+        }
+    };
+    let receipts = vec![
+        action(K::New, "pnew", Some(root.clone()), None, None),
+        action(
+            K::GetI32,
+            "pget",
+            Some(getter_result.clone()),
+            Some(NodeId("node:key".into())),
+            Some(result_ty.clone()),
+        ),
+        action(K::Drop, "pdrop", None, None, None),
+    ];
+    let mut values = BTreeMap::new();
+    for (id, ty) in [
+        (root.clone(), owner_ty),
+        (key.clone(), string_ty.clone()),
+        (getter_result.clone(), result_ty.clone()),
+        (answer.clone(), i32_ty.clone()),
+    ] {
+        values.insert(id.clone(), MirValue { id, ty });
+    }
+    let entry = MirBlockId::new("bb.entry").expect("entry block");
+    let instructions = vec![
+        MirInstruction {
+            id: receipts[0].instruction.clone(),
+            kind: MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New {
+                result: root.clone(),
+            },
+        },
+        MirInstruction {
+            id: MirInstructionId::new("inst:key").expect("key instruction"),
+            kind: MirInstructionKind::Const {
+                result: key.clone(),
+                literal: ResolvedLiteral::String("missing".into()),
+            },
+        },
+        MirInstruction {
+            id: receipts[1].instruction.clone(),
+            kind: MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 {
+                result: getter_result.clone(),
+                root: root.clone(),
+                key: key.clone(),
+            },
+        },
+        MirInstruction {
+            id: MirInstructionId::new("inst:key_drop").expect("key drop instruction"),
+            kind: MirInstructionKind::Drop { value: key.clone() },
+        },
+        MirInstruction {
+            id: receipts[2].instruction.clone(),
+            kind: MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root: root.clone() },
+        },
+        MirInstruction {
+            id: MirInstructionId::new("inst:return").expect("return instruction"),
+            kind: MirInstructionKind::Const {
+                result: answer.clone(),
+                literal: ResolvedLiteral::Int(0),
+            },
+        },
+    ];
+    let function = MirFunction {
+        owner: NodeId("function:test_owned_get".into()),
+        parameters: Vec::new(),
+        parameter_permissions: Some(Vec::new()),
+        result: i32_ty.clone(),
+        entry: entry.clone(),
+        values,
+        blocks: BTreeMap::from([(
+            entry.clone(),
+            MirBlock {
+                id: entry,
+                parameters: Vec::new(),
+                instructions,
+                terminator: MirTerminator::Return {
+                    value: Some(answer),
+                },
+            },
+        )]),
+        contracts: Vec::new(),
+        proof_worklist: None,
+        ownership: MirOwnershipSummary {
+            checker_ordinary_map_owned_get_i32_string_v1: receipts,
+            ..MirOwnershipSummary::default()
+        },
+    };
+
+    assert!(function.validate().is_ok(), "{:?}", function.validate());
+    let mut forged_result = function.clone();
+    forged_result
+        .values
+        .get_mut(&getter_result)
+        .expect("getter result value")
+        .ty = result_string_ty.clone();
+    forged_result
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1[1]
+        .result_type = Some(result_string_ty.clone());
+    assert!(
+        forged_result.validate().is_err(),
+        "GetI32 must reject a forged Result<string, i32> result shape"
+    );
+
+    let mut get_string_function = function.clone();
+    let old_instruction = get_string_function
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1[1]
+        .instruction
+        .clone();
+    let string_get_instruction = MirInstructionId::new(format!(
+        "inst:ordinary_map_owned_get_i32_string_v1_get_string:{root}:pget"
+    ))
+    .expect("GetString instruction identity");
+    {
+        let receipt = &mut get_string_function
+            .ownership
+            .checker_ordinary_map_owned_get_i32_string_v1[1];
+        receipt.kind = K::GetString;
+        receipt.result_type = Some(result_string_ty.clone());
+        receipt.instruction = string_get_instruction.clone();
+    }
+    for instruction in get_string_function
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+    {
+        if instruction.id == old_instruction {
+            instruction.id = string_get_instruction.clone();
+            instruction.kind = MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString {
+                result: getter_result.clone(),
+                root: root.clone(),
+                key: key.clone(),
+            };
+        }
+    }
+    get_string_function
+        .values
+        .get_mut(&getter_result)
+        .expect("GetString result value")
+        .ty = result_string_ty.clone();
+    assert!(
+        get_string_function.validate().is_ok(),
+        "canonical GetString receipt and instruction must validate"
+    );
+
+    let mut forged_string_result = get_string_function.clone();
+    forged_string_result
+        .values
+        .get_mut(&getter_result)
+        .expect("GetString result value")
+        .ty = result_ty.clone();
+    forged_string_result
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1[1]
+        .result_type = Some(result_ty.clone());
+    assert!(
+        forged_string_result.validate().is_err(),
+        "GetString must reject a forged Result<i32, i32> result shape"
+    );
+
+    let forge_kind = |function: &mut MirFunction, kind: K| {
+        let old_instruction = function
+            .ownership
+            .checker_ordinary_map_owned_get_i32_string_v1[1]
+            .instruction
+            .clone();
+        let new_instruction = MirInstructionId::new(format!(
+            "inst:ordinary_map_owned_get_i32_string_v1_{}:{root}:pget",
+            kind.as_str()
+        ))
+        .expect("forged getter instruction identity");
+        {
+            let receipt = &mut function
+                .ownership
+                .checker_ordinary_map_owned_get_i32_string_v1[1];
+            receipt.kind = kind;
+            receipt.instruction = new_instruction.clone();
+        }
+        for instruction in function
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+        {
+            if instruction.id == old_instruction {
+                instruction.id = new_instruction.clone();
+            }
+        }
+    };
+    let mut forged_i32_kind = function.clone();
+    forge_kind(&mut forged_i32_kind, K::GetString);
+    assert!(
+        forged_i32_kind.validate().is_err(),
+        "GetI32 instruction must reject a forged GetString Checker kind"
+    );
+    let mut forged_string_kind = get_string_function.clone();
+    forge_kind(&mut forged_string_kind, K::GetI32);
+    assert!(
+        forged_string_kind.validate().is_err(),
+        "GetString instruction must reject a forged GetI32 Checker kind"
+    );
+
+    assert!(function.canonical_text().contains(
+        "ordinary_map_owned_get_i32_string_v1_get_i32 expr:pget <- local:root[expr:node:key]"
+    ));
+    let getter = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .find(|instruction| {
+            instruction
+                .id
+                .as_str()
+                .starts_with("inst:ordinary_map_owned_get_i32_string_v1_get_i32:")
+        })
+        .expect("typed owned-get instruction");
+    assert_eq!(mir_instruction_value_uses(&getter.kind), [root, key]);
+}
+
+#[test]
+fn actor_execution_domain_runtime_helpers_are_reserved_source_ffi_symbols() {
+    let checked = checked_program(
+        r#"
+extern "C" { func mimi_mir_actor_domain_test_helper(value: i64) -> i64; }
+func main() -> i64 { mimi_mir_actor_domain_test_helper(1 as i64) }
+"#,
+    );
+    let errors = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect_err("source imports must not claim ActorExecutionDomain runtime symbols");
+    assert!(
+        errors.to_diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("FFI symbol is not manifest-safe")
+                && diagnostic
+                    .message
+                    .contains("reserved Canonical MIR ActorExecutionDomain runtime helper")
+        }),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn canonical_ffi_unit_endpoint_requires_complete_shape() {
     let checked = checked_program(
         r#"
@@ -5262,6 +5602,7 @@ fn fixture() -> MirFunction {
             ),
         ]),
         contracts: Vec::new(),
+        proof_worklist: None,
         ownership: MirOwnershipSummary::default(),
     }
 }
@@ -5558,9 +5899,11 @@ fn record_move_drop_projection_receipt_and_source_use_fail_closed() {
         fixture.program.type_catalog().clone(),
     )
     .expect_err("incomplete residual receipt must fail before consumers");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("record move/drop projection receipt disagrees")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("record move/drop projection receipt disagrees")
+    }));
 
     let mut double_use = fixture
         .program
@@ -6004,9 +6347,11 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
         .retain(|event| event.kind != MirOwnershipEventKind::BorrowEnd);
     let errors = rebuild(missing_all_ends)
         .expect_err("all checker-owned end sites must be represented in the event stream");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("borrow-end receipts do not match the checker-owned loan contract")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("borrow-end receipts do not match the checker-owned loan contract")
+    }));
 
     let mut wrong_kind = original.clone();
     let start = wrong_kind
@@ -6162,9 +6507,11 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
         .expect("borrow-end receipt");
     end.source = Some("unrelated.place".into());
     let errors = rebuild(wrong_source).expect_err("borrow end source must preserve loan place");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("disagrees with its checker borrow start")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("disagrees with its checker borrow start")
+    }));
 
     let mut missing_end_source = original.clone();
     let end = missing_end_source
@@ -6176,9 +6523,11 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
     end.source = None;
     let errors = rebuild(missing_end_source)
         .expect_err("end source omission must disagree with the checker-owned expected site");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("borrow-end receipts do not match the checker-owned loan contract")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("borrow-end receipts do not match the checker-owned loan contract")
+    }));
 
     let mut forged_end_location = original.clone();
     let end = forged_end_location
@@ -6191,9 +6540,11 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
     end.checker_edge = Some(NodeId("forged/nonexistent-edge".into()));
     let errors = rebuild(forged_end_location)
         .expect_err("end CFG location must match the independent checker contract");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("borrow-end receipts do not match the checker-owned loan contract")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("borrow-end receipts do not match the checker-owned loan contract")
+    }));
 
     let mut duplicate_end = original.clone();
     let end = duplicate_end
@@ -6205,9 +6556,11 @@ fn forged_or_duplicate_checker_loan_end_receipts_are_rejected_before_consumers()
         .clone();
     duplicate_end.ownership.events.push(end);
     let errors = rebuild(duplicate_end).expect_err("duplicate edge receipt must fail closed");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("duplicate checker borrow-end receipt")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("duplicate checker borrow-end receipt")
+    }));
 
     let mut drifted_operation = original;
     let borrow = drifted_operation
@@ -6302,9 +6655,11 @@ func main() -> i32 { read(7) }
     let errors = missing_end
         .validate()
         .expect_err("public per-function validation rejects omitted checker end sites");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("borrow-end receipts do not match the checker-owned loan contract")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("borrow-end receipts do not match the checker-owned loan contract")
+    }));
 }
 
 #[test]
@@ -6872,9 +7227,11 @@ fn list_index_projection_materializes_type_desc_receipt() {
     assert_eq!(&receipt.1.index_ty, index_ty);
     assert_eq!(&receipt.1.result_ty, result_ty);
     assert_eq!(&receipt.1.element_ty, result_ty);
-    assert!(canonical.functions().values().any(|function| function
-        .canonical_text()
-        .contains("list_index=MirListIndexProjectionContract")));
+    assert!(canonical.functions().values().any(|function| {
+        function
+            .canonical_text()
+            .contains("list_index=MirListIndexProjectionContract")
+    }));
 }
 
 #[test]
@@ -6965,8 +7322,7 @@ fn canonical_program_gate_rejects_missing_or_stale_list_index_receipt() {
 
 #[test]
 fn list_len_operation_materializes_type_desc_receipt() {
-    let source =
-        "func main() -> i32 { let values = [10, 20, 30]; let count = len(values); drop(values); count }";
+    let source = "func main() -> i32 { let values = [10, 20, 30]; let count = len(values); drop(values); count }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7211,8 +7567,7 @@ fn canonical_list_concat_receipt_rejects_missing_second_input_type() {
 
 #[test]
 fn canonical_list_concat_rejects_aliasing_move_inputs_before_consumers() {
-    let source =
-        "func main() -> List<i32> { let values = [1, 2]; let joined = values.concat(values); joined }";
+    let source = "func main() -> List<i32> { let values = [1, 2]; let joined = values.concat(values); joined }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7259,9 +7614,11 @@ fn canonical_program_gate_rejects_missing_or_stale_list_operation_receipt() {
         canonical.type_catalog().clone(),
     )
     .expect_err("missing List operation receipt must fail before backend");
-    assert!(errors.iter().any(|error| error
-        .message
-        .contains("List operation has no canonical receipt")));
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("List operation has no canonical receipt")
+    }));
 
     let mut stale = canonical.functions().get(&owner).cloned().expect("main");
     let instruction = stale
@@ -9404,4 +9761,657 @@ fn generic_record_owned_set_float_remains_rejected_before_consumers() {
             || message.contains("scalar contract"),
         "unexpected generic Set<f64> rejection: {message}"
     );
+}
+
+fn reclassify_map_any_owner_as_raw_map_root_for_cross_profile_test(function: &mut MirFunction) {
+    let typed_receipts = std::mem::take(&mut function.ownership.checker_map_any_owners);
+    assert!(
+        !typed_receipts.is_empty(),
+        "fixture must carry typed-owner receipts"
+    );
+    for receipt in typed_receipts {
+        assert_eq!(
+            receipt.profile_version,
+            crate::core::MapAnyOwnerProfileVersion::V1
+        );
+        let (kind, role) = match receipt.kind {
+            crate::core::MapAnyOwnerActionKind::New => {
+                (crate::core::MapRootActionKind::New, "map_root_new")
+            }
+            crate::core::MapAnyOwnerActionKind::Set => {
+                (crate::core::MapRootActionKind::Set, "map_root_set")
+            }
+            crate::core::MapAnyOwnerActionKind::Remove => {
+                (crate::core::MapRootActionKind::Remove, "map_root_remove")
+            }
+            crate::core::MapAnyOwnerActionKind::Size => {
+                (crate::core::MapRootActionKind::Size, "map_root_size")
+            }
+            crate::core::MapAnyOwnerActionKind::Contains => (
+                crate::core::MapRootActionKind::Contains,
+                "map_root_contains",
+            ),
+            crate::core::MapAnyOwnerActionKind::Drop => {
+                (crate::core::MapRootActionKind::Drop, "map_root_drop")
+            }
+        };
+        let instruction = MirInstructionId::new(format!(
+            "inst:{role}:{}:{}",
+            receipt.local.0, receipt.point.0
+        ))
+        .expect("legacy MapRoot instruction identity");
+        let mut matches = 0;
+        for block in function.blocks.values_mut() {
+            for instruction_in_block in &mut block.instructions {
+                if instruction_in_block.id == receipt.instruction {
+                    instruction_in_block.id = instruction.clone();
+                    matches += 1;
+                }
+            }
+        }
+        assert_eq!(matches, 1, "each receipt must bind one instruction");
+        let root = receipt
+            .local
+            .as_str()
+            .strip_prefix("local:")
+            .expect("local identity")
+            .to_owned();
+        let source = receipt.source.map(|source| {
+            source
+                .strip_prefix("map-any-owner-v1:")
+                .unwrap_or(&source)
+                .to_owned()
+        });
+        function
+            .ownership
+            .checker_map_roots
+            .push(MirCheckerMapRootAction {
+                kind,
+                point: receipt.point,
+                local: receipt.local,
+                result: receipt.result,
+                root,
+                key: receipt.key,
+                value: receipt.value,
+                value_type: receipt.value_type,
+                source_local: receipt.source_local,
+                source,
+                instruction,
+            });
+    }
+    for value in function.values.values_mut() {
+        if value.ty == types::map_any_owner_v1_type_id() {
+            value.ty = types::map_root_type_id();
+        }
+    }
+    if function.result == types::map_any_owner_v1_type_id() {
+        function.result = types::map_root_type_id();
+    }
+}
+
+#[test]
+fn verifier_and_native_reject_two_complete_but_incompatible_map_profiles() {
+    let checked = checked_program(
+        r#"
+            func legacy_map_profile() -> i32 {
+                let root = map_new()
+                let updated = map_set(root, "legacy", 1)
+                let size = map_size(updated)
+                drop(updated)
+                size
+            }
+            func main() -> i32 {
+                let root = map_new()
+                let updated = map_set(root, "typed", 2)
+                let size = map_size(updated)
+                drop(updated)
+                size
+            }
+        "#,
+    );
+    let typed = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("both callables initially lower under the typed v1 profile");
+    let legacy_owner = crate::core::NodeId("function:legacy_map_profile".into());
+    let mut functions = typed.functions().clone();
+    let mut legacy = functions
+        .get(&legacy_owner)
+        .expect("legacy profile fixture")
+        .clone();
+    reclassify_map_any_owner_as_raw_map_root_for_cross_profile_test(&mut legacy);
+    legacy
+        .validate()
+        .expect("converted fixture carries a complete raw-owner receipt");
+    functions.insert(legacy_owner, legacy);
+
+    // The canonical catalog selects either private owner descriptor based on
+    // the checked operation profile. Add a real Checker-produced legacy
+    // descriptor from a deliberately non-v1 MapGet callable for this
+    // whole-program composition fixture.
+    let raw_checked = checked_program(
+        r#"
+            type Point { x: i32 }
+            func main() -> i32 {
+                let point = Point { x: 7 }
+                let root = map_new()
+                let updated = map_set(root, "answer", point.x)
+                let size = map_size(updated)
+                drop(updated)
+                let outside_profile = map_get(map_new(), "unreceipted")
+                size
+            }
+        "#,
+    );
+    let raw_catalog = types::MirTypeCatalog::from_checked_program(&raw_checked)
+        .expect("raw MapRoot TypeDesc materializes from its Checker profile");
+    let root_ty = types::map_root_type_id();
+    let mut catalog = typed.type_catalog().clone();
+    catalog.replace_for_test_only(
+        root_ty.clone(),
+        raw_catalog
+            .get(&root_ty)
+            .expect("Checker-produced raw MapRoot TypeDesc")
+            .clone(),
+    );
+    let combined = crate::core::mir::reference::MirProgram::with_type_catalog(functions, catalog)
+        .expect("both profile receipts and descriptors are internally complete");
+
+    let verifier_errors = crate::verifier::validate_mir_capabilities(&combined)
+        .expect_err("verifier rejects whole-program profile mixing");
+    assert!(
+        verifier_errors.iter().any(|error| {
+            error.contains("independent profiles and cannot share one MIR program")
+        }),
+        "unexpected verifier mixed-profile errors: {verifier_errors:?}"
+    );
+    let native_errors = crate::codegen::mir::validate_mir_native(&combined)
+        .expect_err("native admission rejects the same profile mixing");
+    assert!(native_errors.iter().any(|error| {
+        error
+            .to_string()
+            .contains("cannot share one native MIR program")
+    }));
+}
+
+#[test]
+fn ordinary_map_alias_clone_and_automatic_cleanup_are_checker_sealed() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    let source = map_new()
+    let numbers = map_set(source, "number", 42)
+    let mixed = map_set(numbers, "text", "owned")
+    let alias = mixed
+    drop(mixed)
+    map_size(alias) - 2
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("ordinary alias canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("main");
+    function.validate().expect("alias and cleanup receipt");
+    let clones = function
+        .ownership
+        .checker_ordinary_map_owner_lifecycle_v1
+        .iter()
+        .filter(|action| action.kind == crate::core::OrdinaryMapOwnerLifecycleActionKind::Clone)
+        .collect::<Vec<_>>();
+    assert_eq!(clones.len(), 1);
+    let clone_id = clones[0].instruction.clone();
+    assert_ne!(clones[0].source_local.as_ref(), Some(&clones[0].local));
+    assert_eq!(
+        function
+            .ownership
+            .checker_ordinary_map_owner_lifecycle_v1
+            .iter()
+            .filter(|action| action.kind == crate::core::OrdinaryMapOwnerLifecycleActionKind::Drop)
+            .count(),
+        4
+    );
+
+    let mut omitted = function.clone();
+    omitted
+        .ownership
+        .checker_ordinary_map_owner_lifecycle_v1
+        .retain(|action| action.instruction != clone_id);
+    assert!(
+        omitted.validate().is_err(),
+        "a live clone cannot lose its private Checker receipt"
+    );
+    let mut forged = function.clone();
+    let clone = forged
+        .ownership
+        .checker_ordinary_map_owner_lifecycle_v1
+        .iter_mut()
+        .find(|action| action.instruction == clone_id)
+        .expect("clone");
+    clone.source_local = Some(clone.local.clone());
+    assert!(
+        forged.validate().is_err(),
+        "alias receipt cannot clone its undefined destination"
+    );
+    let mut leaked = function.clone();
+    leaked
+        .ownership
+        .checker_ordinary_map_owner_lifecycle_v1
+        .pop();
+    assert!(
+        leaked.validate().is_err(),
+        "automatic cleanup is a required operation receipt"
+    );
+}
+
+#[test]
+fn ordinary_map_v1_reuses_direct_string_key_without_cloning_or_early_drop() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    let key = "pre" + "fix"
+    let source = map_new()
+    let updated = map_set(source, key, 7)
+    let removed = map_remove(updated, key)
+    let present = has_key(source, key)
+    drop(source)
+    drop(updated)
+    drop(removed)
+    if present { 1 } else { 0 }
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("dynamic reusable String key uses the closed ordinary Map profile");
+    let function = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    let entry = function.blocks.get(&function.entry).expect("entry block");
+    let keyed_operations = entry
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            let key = match &instruction.kind {
+                MirInstructionKind::OrdinaryMapOwnerLifecycleSet { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { key, .. } => key,
+                _ => return None,
+            };
+            Some((instruction, key))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keyed_operations.len(),
+        3,
+        "Set, Remove, and Contains all use the key"
+    );
+    let key = keyed_operations[0].1;
+    assert!(
+        key.as_str().starts_with("local:"),
+        "key is the local value: {key}"
+    );
+    assert!(
+        keyed_operations.iter().all(|(_, used)| *used == key),
+        "all three operations borrow the same local String value"
+    );
+    let last_use = entry
+        .instructions
+        .iter()
+        .rposition(|instruction| {
+            keyed_operations
+                .iter()
+                .any(|(operation, _)| operation.id == instruction.id)
+        })
+        .expect("last key use");
+    assert!(
+        !entry.instructions[..=last_use].iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Drop { value } if value == key
+            )
+        }),
+        "the borrowed local remains live through its last Map operation"
+    );
+    assert!(
+        !entry.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Clone { result, .. } if result == key
+            )
+        }),
+        "Map key uses do not manufacture an alias as a temporary clone"
+    );
+    assert_eq!(
+        reference::MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference execution with borrowed Map keys"),
+        reference::MirRuntimeValue::Int(0)
+    );
+}
+
+#[test]
+fn ordinary_map_v1_straight_line_direct_local_key_receipt_is_checker_sealed() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    let key = "pre" + "fix"
+    let source = map_new()
+    let updated = map_set(source, key, 7)
+    let removed = map_remove(updated, key)
+    let present = has_key(source, key)
+    drop(source)
+    drop(updated)
+    drop(removed)
+    0
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("straight-line Map operations borrow a direct String key");
+    let function = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    function
+        .validate()
+        .expect("every lifecycle key keeps its private Checker receipt");
+    let entry = function.blocks.get(&function.entry).expect("entry block");
+    let keyed_operations = entry
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            let key = match &instruction.kind {
+                MirInstructionKind::OrdinaryMapOwnerLifecycleSet { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { key, .. } => key,
+                _ => return None,
+            };
+            Some((instruction, key))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keyed_operations.len(), 3);
+    let key = keyed_operations[0].1;
+    assert!(key.as_str().starts_with("local:"));
+    assert!(keyed_operations.iter().all(|(_, used)| *used == key));
+    assert!(!entry.instructions.iter().any(|instruction| {
+        matches!(
+            &instruction.kind,
+            MirInstructionKind::Clone { result, .. } if result == key
+        )
+    }));
+    let last_keyed_operation = entry
+        .instructions
+        .iter()
+        .rposition(|instruction| {
+            keyed_operations
+                .iter()
+                .any(|(operation, _)| operation.id == instruction.id)
+        })
+        .expect("last keyed operation");
+    assert!(!entry.instructions[..=last_keyed_operation]
+        .iter()
+        .any(|instruction| matches!(&instruction.kind, MirInstructionKind::Drop { value } if value == key)));
+
+    let has_key_receipt = function
+        .ownership
+        .checker_ordinary_map_owner_lifecycle_v1
+        .iter()
+        .position(|receipt| {
+            receipt.kind == crate::core::OrdinaryMapOwnerLifecycleActionKind::HasKey
+        })
+        .expect("HasKey key receipt");
+    let mut forged_key_local = function.clone();
+    forged_key_local
+        .ownership
+        .checker_ordinary_map_owner_lifecycle_v1[has_key_receipt]
+        .key_local = Some(crate::core::ir::ResolvedLocalId(NodeId(
+        "function:main/node:pattern.variable@forged/local".into(),
+    )));
+    assert!(
+        forged_key_local.validate().is_err(),
+        "lifecycle must reject a key local that disagrees with Checker source identity"
+    );
+    assert_eq!(
+        reference::MirReferenceInterpreter::new(&program)
+            .execute(&NodeId("function:main".into()), &[])
+            .expect("reference execution with borrowed Map keys"),
+        reference::MirRuntimeValue::Int(0)
+    );
+}
+
+#[test]
+fn ordinary_map_owned_get_v1_preserves_direct_local_key_receipts() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    let key = "answer"
+    let source = map_new()
+    let updated = map_set(source, key, 17)
+    let integer = map_get_i32(updated, key)
+    drop(source)
+    drop(updated)
+    drop(integer)
+    0
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("typed owned-get accepts its exact borrowed direct String key");
+    let function = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    function
+        .validate()
+        .expect("all typed Map operations match their private Checker key receipts");
+    let entry = function.blocks.get(&function.entry).expect("entry block");
+    let keyed_operations = entry
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            let key = match &instruction.kind {
+                MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { key, .. } => key,
+                _ => return None,
+            };
+            Some((instruction, key))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keyed_operations.len(), 2);
+    let key = keyed_operations[0].1;
+    assert!(key.as_str().starts_with("local:"));
+    assert!(keyed_operations.iter().all(|(_, used)| *used == key));
+    assert!(!entry.instructions.iter().any(|instruction| {
+        matches!(
+            &instruction.kind,
+            MirInstructionKind::Clone { result, .. } if result == key
+        )
+    }));
+    let last_keyed_operation = entry
+        .instructions
+        .iter()
+        .rposition(|instruction| {
+            keyed_operations
+                .iter()
+                .any(|(operation, _)| operation.id == instruction.id)
+        })
+        .expect("last keyed operation");
+    assert!(!entry.instructions[..=last_keyed_operation]
+        .iter()
+        .any(|instruction| matches!(&instruction.kind, MirInstructionKind::Drop { value } if value == key)));
+
+    let get_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1
+        .iter()
+        .position(|receipt| {
+            receipt.kind == crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetI32
+        })
+        .expect("GetI32 key receipt");
+    let mut forged_key_local = function.clone();
+    forged_key_local
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1[get_receipt]
+        .key_local = Some(crate::core::ir::ResolvedLocalId(NodeId(
+        "function:main/node:pattern.variable@forged/local".into(),
+    )));
+    assert!(
+        forged_key_local.validate().is_err(),
+        "owned-get must reject a key local that disagrees with its private Checker source"
+    );
+}
+
+#[test]
+fn ordinary_map_owned_get_clone_and_scope_cleanup_keep_their_separate_identity() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    let source = map_new()
+    let full = map_set(source, "text", "kept")
+    let alias = full
+    let snapshot = map_get_string(alias, "text")
+    drop(full)
+    drop(snapshot)
+    map_size(alias) - 1
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("owned-get alias canonical MIR");
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("main");
+    function.validate().expect("clone and cleanup receipts");
+    assert!(function
+        .ownership
+        .checker_ordinary_map_owner_lifecycle_v1
+        .is_empty());
+    let clone = function
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1
+        .iter()
+        .find(|action| action.kind == crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Clone)
+        .expect("owned-get clone");
+    assert_ne!(clone.source_local.as_ref(), Some(&clone.local));
+    let mut forged = function.clone();
+    let action = forged
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1
+        .iter_mut()
+        .find(|action| action.kind == crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Clone)
+        .expect("clone");
+    action.profile_version = crate::core::OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1;
+    action.source = Some("ordinary-map-owner-lifecycle-i32-string-v1:forged".into());
+    assert!(
+        forged.validate().is_err(),
+        "lifecycle root identity cannot satisfy an owned-get clone receipt"
+    );
+}
+
+#[test]
+fn ordinary_map_string_domain_helper_is_reserved_source_ffi() {
+    let checked = checked_program(
+        r#"
+extern "C" { func mimi_mir_ordinary_map_domain_own_string(pointer: i64, length: i64) -> i32; }
+func main() -> i32 { mimi_mir_ordinary_map_domain_own_string(0 as i64, 0 as i64) }
+"#,
+    );
+    let error = reference::MirProgram::from_checked_program(&checked)
+        .expect_err("source cannot manufacture a canonical String execution-domain owner receipt");
+    assert!(
+        error.to_diagnostics().iter().any(|diagnostic| diagnostic
+            .message
+            .contains("reserved Canonical MIR ordinary Map execution-domain runtime helper")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn ordinary_map_owned_get_string_unwrap_preserves_its_result_snapshot() {
+    let source = r#"
+func main() -> i32 {
+    let empty = map_new()
+    let mixed = map_set(empty, "text", "kept")
+    let snapshot = map_get_string(mixed, "text")
+    let text = snapshot.unwrap()
+    drop(snapshot)
+    drop(text)
+    0
+}
+"#;
+    let checked = checked_program(source);
+    let program = super::reference::MirProgram::from_checked_program(&checked)
+        .expect("owned getter unwrap uses the exact managed Result projection");
+    let main = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    let projection = main
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::VariantProjectMove {
+                base,
+                contract: Some(contract),
+                ..
+            } => Some((base, contract)),
+            _ => None,
+        })
+        .expect("owned String uses a receipted move projection");
+    assert_eq!(
+        projection.1.projection.move_out_glue,
+        types::MirGlueKind::OwnedString
+    );
+    let snapshot = main
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Clone { result, source } if result == projection.0 => Some(source),
+            _ => None,
+        })
+        .expect("projection consumes a cloned Result and preserves the source snapshot");
+    assert!(main
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| {
+            matches!(&instruction.kind, MirInstructionKind::Drop { value } if value == snapshot)
+        }));
+    let mut forged_main = main.clone();
+    for instruction in forged_main
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+    {
+        if let MirInstructionKind::VariantProjectMove { base, .. } = &mut instruction.kind {
+            *base = snapshot.clone();
+        }
+    }
+    let mut forged_functions = program.functions().clone();
+    forged_functions.insert(forged_main.owner.clone(), forged_main);
+    let errors = super::reference::MirProgram::with_type_catalog(
+        forged_functions,
+        program.type_catalog().clone(),
+    )
+    .expect_err("a same-TypeDesc projection cannot consume the original retained Result");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("use after consuming")),
+        "{errors:?}"
+    );
+    let value = super::reference::MirReferenceInterpreter::new(&program)
+        .execute(&NodeId("function:main".into()), &[])
+        .expect("the source Result and projected String have independent destruction");
+    assert_eq!(value, super::reference::MirRuntimeValue::Int(0));
 }

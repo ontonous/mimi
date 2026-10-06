@@ -1486,40 +1486,13 @@ fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
         .parse_file()
         .expect("parse direct f32 literal FFI fixture");
     let checked = crate::core::check_program(&file).expect("check direct f32 literal FFI fixture");
-    let mut mir =
+    let mir =
         MirProgram::from_checked_program(&checked).expect("materialize direct f32 literal FFI MIR");
     let owner = crate::core::NodeId("function:main".into());
-    let mut function = mir
-        .functions()
-        .get(&owner)
-        .cloned()
-        .expect("direct f32 literal main MIR");
-    let mut replaced = false;
-    for block in function.blocks.values_mut() {
-        for instruction in &mut block.instructions {
-            let crate::core::mir::MirInstructionKind::Convert { result, .. } = &instruction.kind
-            else {
-                continue;
-            };
-            let result = result.clone();
-            instruction.kind = crate::core::mir::MirInstructionKind::Const {
-                result,
-                literal: crate::core::ir::ResolvedLiteral::float(1.5),
-            };
-            replaced = true;
-            break;
-        }
-        if replaced {
-            break;
-        }
-    }
-    assert!(
-        replaced,
-        "direct f32 literal fixture must contain a narrowing conversion"
-    );
-    // Keep the checker-owned FFI receipt table intact while replacing only the
-    // test-owned instruction shape.
-    mir.replace_function_for_test_only(function);
+    // The checker-owned FFI source witness seals the conversion instruction
+    // together with the call receipt.  Exercise the real narrowing conversion
+    // emitted for the literal instead of replacing it with an unreceipted MIR
+    // Const, which must be rejected as a forged post-checker mutation.
 
     struct DirectF32LiteralOracle;
     impl MirReferenceFfiResolver for DirectF32LiteralOracle {
@@ -4257,6 +4230,9 @@ fn scalar_ffi_runtime_rebinds_same_symbol_by_library_path() {
         symbol: "mir_ffi_rebindable".into(),
         abi: "C".into(),
         arguments: vec![CanonicalFfiScalarType::I64],
+        fixed_argument_count: 1,
+        variadic: false,
+        variadic_arguments: Vec::new(),
         parameter_conversions: vec![crate::core::mir::MirFfiAbiConversion {
             from: i64_abi,
             to: i64_abi,
@@ -4320,6 +4296,9 @@ fn scalar_ffi_runtime_missing_symbol_does_not_poison_cached_libraries() {
         symbol: "mir_ffi_rebindable".into(),
         abi: "C".into(),
         arguments: vec![CanonicalFfiScalarType::I64],
+        fixed_argument_count: 1,
+        variadic: false,
+        variadic_arguments: Vec::new(),
         parameter_conversions: vec![crate::core::mir::MirFfiAbiConversion {
             from: i64_abi,
             to: i64_abi,
@@ -16483,6 +16462,10 @@ fn scalar_ffi_manifest_symbol_safety_classifier_covers_all_rejection_classes() {
             "mimi_mir_map_root_new",
             "FFI symbol names a reserved Canonical MIR MapRoot runtime helper",
         ),
+        (
+            "mimi_mir_actor_domain_open",
+            "FFI symbol names a reserved Canonical MIR ActorExecutionDomain runtime helper",
+        ),
     ] {
         let error = crate::core::mir::validate_ffi_symbol_manifest_safety(symbol)
             .expect_err("malformed symbol must be rejected");
@@ -16558,6 +16541,69 @@ func main() -> i64 { foreign_handle() }
     assert!(capability_errors
         .iter()
         .any(|error| { error.contains("reserved Canonical MIR MapRoot runtime helper") }));
+}
+
+#[test]
+fn actor_execution_domain_ffi_symbols_are_reserved_before_host_resolution() {
+    const RESERVED_SOURCE: &str = r#"
+extern "C" { func mimi_mir_actor_domain_open() -> i64; }
+func main() -> i64 { mimi_mir_actor_domain_open() }
+"#;
+    let reserved_checked = crate::core::check_program(&super::parse(RESERVED_SOURCE))
+        .expect("reserved ActorExecutionDomain import remains a well-typed source declaration");
+    let lowering_error = MirProgram::from_checked_program(&reserved_checked)
+        .expect_err("source must not materialize an internal ActorExecutionDomain FFI receipt");
+    assert!(
+        lowering_error
+            .to_string()
+            .contains("reserved Canonical MIR ActorExecutionDomain runtime helper"),
+        "{lowering_error}"
+    );
+
+    const SOURCE: &str = r#"
+extern "C" { func foreign_handle() -> i64; }
+func main() -> i64 { foreign_handle() }
+"#;
+    let checked = crate::core::check_program(&super::parse(SOURCE))
+        .expect("ordinary scalar FFI source checks before receipt mutation");
+    let mut program = MirProgram::from_checked_program(&checked)
+        .expect("ordinary scalar FFI source lowers before receipt mutation");
+    let mut receipts = program.ffi_calls().clone();
+    receipts
+        .values_mut()
+        .next()
+        .expect("one ordinary scalar FFI receipt")
+        .symbol = "mimi_mir_actor_domain_open".into();
+    program.replace_ffi_calls_for_test_only(receipts);
+
+    let reference_error = MirReferenceInterpreter::new(&program)
+        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .expect_err("reference must reject reserved ActorExecutionDomain names before host lookup");
+    assert!(reference_error
+        .to_string()
+        .contains("reserved Canonical MIR ActorExecutionDomain runtime helper"));
+
+    let bytecode_errors = compile_mir_program(&program)
+        .expect_err("bytecode must reject reserved ActorExecutionDomain names before host lookup");
+    assert!(bytecode_errors.iter().any(|error| {
+        error
+            .message
+            .contains("reserved Canonical MIR ActorExecutionDomain runtime helper")
+    }));
+
+    let native_errors = crate::codegen::mir::validate_mir_native(&program)
+        .expect_err("native admission must reject reserved names before declaration");
+    assert!(native_errors.iter().any(|error| {
+        error
+            .message
+            .contains("reserved Canonical MIR ActorExecutionDomain runtime helper")
+    }));
+
+    let capability_errors = crate::verifier::validate_mir_capabilities(&program)
+        .expect_err("the public capability gate must reject reserved ActorExecutionDomain names");
+    assert!(capability_errors.iter().any(|error| {
+        error.contains("reserved Canonical MIR ActorExecutionDomain runtime helper")
+    }));
 }
 
 #[test]
@@ -29965,25 +30011,293 @@ fn ffi_checked_ignores_unrelated_callable_contract_without_legacy() {
 }
 
 #[test]
-fn ffi_checked_preserves_legacy_for_unmigrated_string_contract() {
+fn ffi_checked_compatibility_verifies_string_requires_positive_and_negative() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    for (argument, expected) in [
+        ("\"mimi\"", crate::verifier::VerifStatus::Verified),
+        ("\"\"", crate::verifier::VerifStatus::Failed),
+    ] {
+        let source = format!(
+            r#"
+                extern "C" {{ func foreign(value: string) -> i64 requires: value != ""; }}
+                func main() -> i64 {{ foreign({argument}) }}
+            "#
+        );
+        let checked = crate::core::check_program(&super::parse_prod(&source))
+            .expect("requires-only String FFI compatibility fixture");
+        assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        let results = crate::verifier::verify_ffi_checked(&checked)
+            .expect("supported String requires must use checked contract roots");
+        assert_eq!(results.len(), 1, "String FFI result: {results:?}");
+        assert_eq!(results[0].status, expected, "{argument}: {results:?}");
+        assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    }
+}
+
+#[test]
+fn ffi_checked_compatibility_checks_aggregate_parameter_and_result() {
     if !crate::verifier::is_z3_available() {
         return;
     }
     let source = r#"
-        extern "C" { func foreign(value: string) -> i64 requires: value != ""; }
+        #[repr(C)]
+        type Pair { value: i64 }
+        extern "C" {
+            func foreign(value: Pair) -> Pair requires: value.value >= 0;
+        }
+        func caller_positive(value: Pair) -> Pair {
+            requires: value.value >= 0
+            foreign(value)
+        }
+        func caller_negative(value: Pair) -> Pair {
+            requires: value.value < 0
+            foreign(value)
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("aggregate parameter/result with scalar FFI requires fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("AST/Z3-expressible field requires should not be rejected by ABI layout alone");
+    assert_eq!(results.len(), 2, "aggregate FFI call results: {results:?}");
+    let positive = results
+        .iter()
+        .find(|result| result.func_name.contains("caller_positive"))
+        .expect("positive aggregate caller result");
+    assert_eq!(positive.status, crate::verifier::VerifStatus::Verified);
+    let negative = results
+        .iter()
+        .find(|result| result.func_name.contains("caller_negative"))
+        .expect("negative aggregate caller result");
+    assert_eq!(negative.status, crate::verifier::VerifStatus::Failed);
+    assert_eq!(positive.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    assert_eq!(negative.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn ffi_checked_verifies_ensures_only_foreign_call_through_mir() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let source = r#"
+        extern "C" { func foreign(value: i64) -> i64 ensures: result == value; }
+        func main() -> i64 { foreign(7) }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("ensures-only scalar FFI fixture");
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    crate::core::mir::reset_test_route_materialization_count();
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("complete ensures-only scalar FFI contract should use canonical MIR");
+    assert_eq!(results.len(), 1, "ensures-only result: {results:?}");
+    assert_eq!(
+        results[0].status,
+        crate::verifier::VerifStatus::Disproven,
+        "the unconstrained foreign result can violate result == value: {results:?}"
+    );
+    let artifact = results[0]
+        .artifact
+        .as_ref()
+        .expect("canonical FFI counterexample artifact");
+    assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+    assert_eq!(
+        artifact
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some("scalar-ffi-v1")
+    );
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn ffi_checked_rejects_called_contract_with_unsupported_abi_metadata() {
+    let source = r#"
+        extern "Rust" { func foreign(value: i64) -> i64 ensures: result == value; }
+        func main() -> i64 { foreign(7) }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("unsupported ABI metadata fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+
+    let error = crate::verifier::verify_ffi_checked(&checked)
+        .expect_err("called contract with non-C ABI must fail closed");
+    assert!(
+        error.contains(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE),
+        "{error}"
+    );
+    assert!(
+        error.contains("ABI 'Rust' is outside the canonical C ABI"),
+        "{error}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn ffi_checked_compatibility_preserves_requires_and_reports_unmodeled_ensures() {
+    let source = r#"
+        extern "C" {
+            func foreign(value: i64) -> i64 requires: value >= 0 ensures: true;
+        }
+        extern "C" func internal_export(value: i64) -> i64 { value + 1 }
+        func main() -> i64 { foreign(7) }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("noncanonical scalar FFI ensures fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("the supported Requires obligation remains independently checkable");
+    assert_eq!(
+        results.len(),
+        2,
+        "requires and ensures results: {results:?}"
+    );
+    assert!(
+        results.iter().any(|result| {
+            result.status == crate::verifier::VerifStatus::Proven
+                && !result.func_name.ends_with("Ensures")
+        }),
+        "Requires result missing: {results:?}"
+    );
+    let ensures = results
+        .iter()
+        .find(|result| result.func_name.ends_with("Ensures"))
+        .expect("separate Ensures result");
+    assert_eq!(
+        ensures.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset
+    );
+    assert!(
+        ensures
+            .message
+            .contains("does not prove the foreign postcondition"),
+        "{ensures:?}"
+    );
+    let requires = results
+        .iter()
+        .find(|result| !result.func_name.ends_with("Ensures"))
+        .expect("typed Requires result");
+    assert_eq!(requires.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn ffi_checked_compatibility_rejects_ensures_only_without_a_false_proof() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let source = r#"
+        extern "C" {
+            func foreign(value: string) -> i64 ensures: result >= 0;
+        }
         func main() -> i64 { foreign("ok") }
     "#;
     let checked = crate::core::check_program(&super::parse_prod(source))
-        .expect("unmigrated string FFI contract fixture");
+        .expect("noncanonical scalar ensures-only FFI fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
     crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let results =
-        crate::verifier::verify_ffi_checked(&checked).expect("legacy string FFI contract verifier");
-    assert_eq!(results.len(), 1, "string FFI call-site proof: {results:?}");
+
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("an unmodeled Ensures obligation is an explicit result");
+    assert_eq!(results.len(), 1, "ensures-only result: {results:?}");
     assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::FfiVerifierCompatibility]
+        results[0].status,
+        crate::verifier::VerifStatus::NotInTrustedSubset
     );
+    assert!(results[0].artifact.is_none());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn ffi_checked_compatibility_preserves_requires_with_invocation_metadata() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    for extern_block in [
+        r#"#[errno] extern "C" { func foreign(value: i64) -> i64 requires: value >= 0; }"#,
+        r#"#[no_panic] extern "C" { func foreign(value: i64) -> i64 requires: value >= 0; }"#,
+        r#"extern "C" { func foreign(&value: i64) -> i64 requires: value >= 0; }"#,
+        r#"extern "C" { func foreign(value: i64 ...) -> i64 requires: value >= 0; }"#,
+    ] {
+        for (argument, expected) in [
+            ("7", crate::verifier::VerifStatus::Proven),
+            ("-1", crate::verifier::VerifStatus::Disproven),
+        ] {
+            let source = format!("{extern_block} func main() -> i64 {{ foreign({argument}) }}");
+            let checked =
+                crate::core::check_program(&super::parse_prod(&source)).unwrap_or_else(|errors| {
+                    panic!("check metadata Requires fixture {extern_block}: {errors:?}")
+                });
+            assert!(
+                !crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
+                "metadata fixture should remain outside executable ScalarFfi: {extern_block}"
+            );
+            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let results = crate::verifier::verify_ffi_checked(&checked)
+                .unwrap_or_else(|error| panic!("verify {extern_block}: {error}"));
+            assert_eq!(results.len(), 1, "{extern_block} / {argument}: {results:?}");
+            assert_eq!(
+                results[0].status, expected,
+                "{extern_block} / {argument}: {}",
+                results[0].message
+            );
+            assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+            assert!(
+                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+                "pure input Requires use typed roots with invocation metadata"
+            );
+        }
+    }
+}
+
+#[test]
+fn ffi_checked_rejects_mixed_scalar_ffi_and_map_owner_profiles() {
+    let source = r#"
+        extern "C" {
+            func scalar_probe(value: i32) -> i32 requires: value >= 0;
+        }
+        func main() -> i32 {
+            let root = map_new()
+            let updated = map_set(root, "answer", scalar_probe(41 as i32))
+            let size = map_size(updated)
+            drop(updated)
+            size
+        }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("mixed scalar FFI and canonical Map owner fixture");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert!(admission.scalar_ffi, "scalar FFI profile: {admission:?}");
+    assert!(
+        admission.map_root_complete()
+            || admission.map_any_owner_complete()
+            || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+            || admission.ordinary_map_owned_get_i32_string_v1_complete(),
+        "a complete canonical Map owner profile: {admission:?}"
+    );
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+
+    let error = crate::verifier::verify_ffi_checked(&checked)
+        .expect_err("mixed canonical owner profiles must fail closed before compatibility");
+    assert!(
+        error.contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+        "{error}"
+    );
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -30047,14 +30361,12 @@ fn ffi_checked_compatibility_keeps_only_called_contract_externs() {
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
     crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_ffi_checked(&checked)
-        .expect("called string contract should use compatibility verifier");
+        .expect("called String requires use typed roots with an uncontracted sibling");
     assert_eq!(results.len(), 1, "called contract results: {results:?}");
     assert!(results[0].func_name.contains("guarded"));
     assert!(!results[0].func_name.contains("plain"));
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![crate::core::LegacyBodyConsumer::FfiVerifierCompatibility]
-    );
+    assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 const SWEEP_C_SOURCE: &str = r#"
@@ -30546,7 +30858,7 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
 }
 
 #[test]
-fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
+fn map_any_owner_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
     const CASES: &[(&str, &str)] = &[
         (
             "ffi-before-map-root",
@@ -30597,19 +30909,19 @@ fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
             .unwrap_or_else(|error| panic!("{label} check: {error:?}"));
         let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
         assert_eq!(
-            admission.map_root,
-            crate::core::mir::MapRootAdmission::CompleteCoverage,
-            "{label} must be a complete checker-receipted MapRoot lifecycle"
+            admission.map_any_owner,
+            crate::core::mir::MapAnyOwnerAdmission::CompleteCoverage,
+            "{label} must be a complete independently checker-receipted MapAnyOwner v1 lifecycle"
         );
         assert!(admission.scalar_ffi, "{label} must carry a scalar FFI call");
 
         match crate::core::mir::materialize_canonical_mir_route(&checked, None) {
             Err(crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
-                profile: crate::core::mir::CanonicalMirRouteProfile::MapRoot,
+                profile: crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1,
                 stage: crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
                 message,
             }) => assert!(
-                message.contains("MapRoot profile cannot be combined"),
+                message.contains("MapAnyOwner v1 profile cannot be combined"),
                 "{label}: {message}"
             ),
             other => panic!("{label} must hard-reject the profile composition: {other:?}"),
@@ -30619,7 +30931,7 @@ fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
         let error = crate::verifier::verify_checked(&checked, format!("{label}-single"))
             .expect_err("single verifier must reject unsupported profile composition");
         assert!(
-            error.contains("MapRoot profile cannot be combined"),
+            error.contains("MapAnyOwner v1 profile cannot be combined"),
             "{label}: {error}"
         );
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
@@ -30628,7 +30940,7 @@ fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
         let error = crate::verifier::verify_checked_dual(&checked, format!("{label}-dual"))
             .expect_err("dual verifier must reject unsupported profile composition");
         assert!(
-            error.contains("MapRoot profile cannot be combined"),
+            error.contains("MapAnyOwner v1 profile cannot be combined"),
             "{label}: {error}"
         );
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
@@ -30637,7 +30949,7 @@ fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
         let error = crate::verifier::verify_ffi_checked(&checked)
             .expect_err("FFI verifier must reject unsupported profile composition");
         assert!(
-            error.contains("MapRoot profile cannot be combined"),
+            error.contains("MapAnyOwner v1 profile cannot be combined"),
             "{label}: {error}"
         );
         assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
@@ -30652,7 +30964,7 @@ fn map_root_and_scalar_ffi_composition_fails_closed_at_every_public_entry() {
             diagnostics.iter().any(|diagnostic| {
                 diagnostic
                     .message
-                    .contains("MapRoot profile cannot be combined")
+                    .contains("MapAnyOwner v1 profile cannot be combined")
             }),
             "{label}: {diagnostics:?}"
         );

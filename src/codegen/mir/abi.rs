@@ -189,6 +189,24 @@ pub(super) fn native_list_kind(
     if matches!(element_desc.layout, MirLayout::List { .. }) {
         return Ok(crate::runtime::ListElementKind::List as i8);
     }
+    // Values snapshots use a move-owned List<ManagedAny> whose elements are
+    // generation-bearing i64 owner tokens.  The TypeDesc (and list glue
+    // validator) proves this exact element identity; the native adapter must
+    // never infer it from the raw i64 storage.
+    if element_desc.kind == MirTypeKind::ManagedAnyI32StringV1
+        || matches!(element_desc.layout, MirLayout::ManagedAnyI32StringV1)
+    {
+        catalog
+            .validate_glue(element, crate::core::mir::types::MirGlueOperation::MoveOut)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        catalog
+            .validate_glue(element, crate::core::mir::types::MirGlueOperation::Clone)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        catalog
+            .validate_glue(element, crate::core::mir::types::MirGlueOperation::Drop)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        return Ok(crate::runtime::ListElementKind::ManagedAny as i8);
+    }
     match element_desc.abi {
         MirAbiClass::Integer {
             bits: 32 | 64,
@@ -603,6 +621,9 @@ pub(super) fn native_basic_type<'ctx>(
     let desc = catalog
         .get(ty)
         .ok_or_else(|| NativeMirError::new(ty.as_str(), "TypeDesc is absent"))?;
+    if let Some(ty) = super::actor::actor_descriptor_native_type(context, catalog, ty)? {
+        return Ok(ty);
+    }
     if matches!(
         desc.abi,
         MirAbiClass::Integer { .. } | MirAbiClass::Float { .. } | MirAbiClass::Bool
@@ -657,6 +678,24 @@ pub(super) fn native_basic_type<'ctx>(
         }
         MirAbiClass::OpaqueHandle => match &desc.layout {
             MirLayout::List { .. } => Ok(context.ptr_type(inkwell::AddressSpace::default()).into()),
+            MirLayout::ManagedAnyI32StringV1 => {
+                super::ordinary_map_any_get::validate_managed_any_type(catalog, ty)
+                    .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                Ok(context.i64_type().into())
+            }
+            MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
+            | MirLayout::OrdinaryMapOwnedGetI32StringV1 => {
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    catalog
+                        .validate_glue(ty, operation)
+                        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                }
+                Ok(context.i64_type().into())
+            }
             MirLayout::MapRoot => {
                 catalog
                     .validate_glue(ty, MirGlueOperation::MoveOut)
@@ -668,6 +707,21 @@ pub(super) fn native_basic_type<'ctx>(
                     return Err(NativeMirError::new(
                         ty.as_str(),
                         "canonical MapRoot must not expose generic Clone glue",
+                    ));
+                }
+                Ok(context.i64_type().into())
+            }
+            MirLayout::MapAnyOwnerV1 => {
+                catalog
+                    .validate_glue(ty, MirGlueOperation::MoveOut)
+                    .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                catalog
+                    .validate_glue(ty, MirGlueOperation::Drop)
+                    .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                if catalog.validate_glue(ty, MirGlueOperation::Clone).is_ok() {
+                    return Err(NativeMirError::new(
+                        ty.as_str(),
+                        "canonical MapAnyOwner v1 must not expose generic Clone glue",
                     ));
                 }
                 Ok(context.i64_type().into())

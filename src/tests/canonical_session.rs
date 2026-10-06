@@ -9,8 +9,8 @@
 //! (`classify_session_channel_admission`); every other session-bearing shape
 //! stays `MixedCoverage` on the explicit compatibility route, unchanged from
 //! before the island existed.  The faces outside any profile — non-integer
-//! session payloads (checker E0444), actor handles without canonical glue
-//! (structural validation), and assign statements outside MIR Phase 0 — are
+//! session payloads (checker E0444), non-i32 Actor state, and assign
+//! statements outside MIR Phase 0 — are
 //! pinned with their owning layer named.
 
 use super::*;
@@ -215,23 +215,22 @@ fn session_protocol_order_violation_is_rejected_at_the_checker_with_e0414() {
     );
 }
 
-// Actor handles are outside the canonical ownership contract: lowering
-// succeeds, but the structural validator rejects every local and call shape
-// touching the handle type because it has no canonical MoveOut/Clone/Drop
-// glue.  The rejection must stay fail-closed — never a silent legacy
-// fallback or a partial canonical emission.
+// Scalar Actor handles use their explicit checker-owned Actor operations and
+// no-op handle ABI. They do not need generic record MoveOut lowering. Verify
+// that the full graph is accepted by each canonical consumer and that both
+// execution oracles close the Actor root after the mailbox turn.
 #[test]
-fn actor_handle_without_canonical_glue_fails_closed_at_materialization() {
+fn scalar_actor_handle_uses_explicit_operations_and_closes_the_canonical_root() {
     let source = r#"
         actor Scale {
-            factor: i64 = 3 as i64
+            factor: i32 = 3;
 
-            func scale(v: i64) -> i64 { v * 3 as i64 }
+            func scale(v: i32) -> i32 { v * self.factor }
         }
 
-        func main() -> i64 {
+        func main() -> i32 {
             let s = Scale.spawn()
-            let out = s.scale(14 as i64)
+            let out = s.scale(14)
             println(out)
             0
         }
@@ -242,13 +241,64 @@ fn actor_handle_without_canonical_glue_fails_closed_at_materialization() {
         .expect("parse");
     let checked = crate::core::check_program(&file)
         .unwrap_or_else(|diags| panic!("check scalar actor: {diags:?}"));
-    let error = MirProgram::from_checked_program(&checked)
-        .expect_err("actor handles must fail canonical materialization");
-    let messages = format!("{error:?}");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .unwrap_or_else(|error| panic!("materialize scalar Actor route: {error:?}"));
+    assert!(route.admission.scalar_actor);
     assert!(
-        messages.contains("no canonical MoveOut glue"),
-        "the rejection must name the missing canonical glue: {messages}"
+        crate::core::mir::CanonicalMirRouteProfile::ScalarActor.is_materialized(&route),
+        "the supported scalar Actor graph must close through its canonical route"
     );
+    let receipt = route
+        .program
+        .route_receipt(crate::core::mir::SCALAR_ACTOR_ISLAND);
+    crate::core::mir::validate_scalar_actor_island(&route.program)
+        .expect("scalar Actor whole-graph receipt");
+    crate::codegen::mir::validate_mir_native(&route.program)
+        .expect("scalar Actor native consumer preflight");
+    assert!(
+        crate::interp::bytecode::compile_mir_program_with_route_receipt(&route.program, &receipt)
+            .is_ok(),
+        "scalar Actor bytecode consumer must accept the same graph"
+    );
+    assert!(crate::verifier::verify_mir_with_route_receipt(
+        &route.program,
+        &receipt,
+        String::new()
+    )
+    .expect("scalar Actor verifier consumer")
+    .is_empty());
+
+    let reference = MirReferenceInterpreter::new(&route.program).with_route_receipt(&receipt);
+    let observation = reference
+        .execute_with_output(&NodeId("function:main".into()), &[])
+        .expect("scalar Actor reference execution");
+    assert_eq!(observation.output, "42\n");
+    let lifecycle = reference.actor_lifecycle_for_test();
+    assert!(!lifecycle.open);
+    assert_eq!(lifecycle.live_instances, 0);
+    assert_eq!(lifecycle.active_turns, 0);
+    assert_eq!(lifecycle.spawned, 1);
+    assert_eq!(lifecycle.completed, 1);
+    assert_eq!(lifecycle.failed, 0);
+
+    let bytecode =
+        crate::interp::bytecode::compile_mir_program_with_route_receipt(&route.program, &receipt)
+            .expect("scalar Actor bytecode program");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    vm.run().expect("scalar Actor bytecode execution");
+    assert_eq!(vm.stdout(), "42\n");
+    let counts = vm
+        .canonical_actor_domain_counts()
+        .expect("Actor domain is installed");
+    assert_eq!(counts.live_roots, 0);
+    assert_eq!(counts.live_workers, 0);
+    assert_eq!(counts.live_states, 0);
+    assert_eq!(counts.live_controls, 0);
+    assert_eq!(counts.live_tasks, 0);
+    assert_eq!(counts.pending_replies, 0);
+    assert_eq!(counts.live_message_buffers, 0);
+    assert_eq!(counts.live_reply_buffers, 0);
+    assert_eq!(counts.joined_workers, 1);
 }
 
 // R6-1049 opened the root-level scalar-assign face (Identity/NumericWiden

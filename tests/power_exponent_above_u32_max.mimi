@@ -1,0 +1,8 @@
+// Even base 1 traps above the implementation's checked u32 exponent domain.
+func main() -> i32 {
+    let base: i64 = 1
+    let exponent: i64 = 4294967296
+    let value = base ** exponent
+    println(value)
+    0
+}

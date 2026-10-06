@@ -86,6 +86,7 @@ pub(crate) mod loader;
 pub(crate) mod lsp;
 pub(crate) mod lsp_extended;
 pub(crate) mod manifest;
+pub(crate) mod map_record_coverage;
 pub(crate) mod mms_integration;
 pub(crate) mod net;
 pub(crate) mod package_management;

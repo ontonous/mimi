@@ -163,8 +163,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .context
             .i8_type()
             .const_int(kind as u64, false);
+        let managed_any_mode = kind == crate::runtime::ListElementKind::ManagedAny as i8;
         let nested_mode = receipt.mode == crate::core::mir::types::MirListOperationMode::Nested;
+        if managed_any_mode && operation != MirListOperation::Len {
+            return Err(NativeMirError::new(
+                subject,
+                "List<ManagedAny> supports only borrow-only Len in the canonical native Values ABI",
+            ));
+        }
         let runtime_name = match (operation, nested_mode) {
+            (MirListOperation::Len, _) if managed_any_mode => "mimi_mir_list_len_managed_any",
             (MirListOperation::Len, true) => "mimi_mir_list_len_nested",
             (MirListOperation::Len, false) => "mimi_mir_list_len_scalar",
             (MirListOperation::Reverse, true) => "mimi_mir_list_reverse_nested",
@@ -186,7 +194,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if let Some(argument_handle) = argument_handle {
             call_arguments.push(BasicMetadataValueEnum::from(argument_handle));
         }
-        if !nested_mode {
+        if !nested_mode && !managed_any_mode {
             call_arguments.push(BasicMetadataValueEnum::from(kind_value));
         }
         let value = call_try_basic_value(
@@ -1207,6 +1215,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "non-Copy Result call result is outside the canonical call ABI contract",
             ));
         }
+        if super::actor_status::is_actor_tagged(self.program, &owner) {
+            return self.emit_actor_tagged_call(result, &owner, arguments, subject);
+        }
         self.emit_call_target(result, function, arguments, subject)
     }
 
@@ -1217,7 +1228,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         arguments: &[MirValueId],
         subject: &str,
     ) -> Result<(), NativeMirError> {
-        let ResolvedCallee::Extern(_) = callee else {
+        let ResolvedCallee::Extern(callee_owner) = callee else {
             return Err(NativeMirError::new(
                 subject,
                 "emit_ffi_call called for a non-extern callee",
@@ -1230,6 +1241,18 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .ffi_calls()
             .get(&instruction)
             .ok_or_else(|| NativeMirError::new(subject, "extern call has no FFI receipt"))?;
+        if receipt.instruction != instruction
+            || receipt.caller != self.function.owner
+            || receipt.callee != *callee_owner
+            || receipt.arguments.as_slice() != arguments
+            || receipt.result.as_ref() != result
+            || receipt.abi != "C"
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI invocation does not match its checker-owned caller, callee, argument, result, or C ABI receipt",
+            ));
+        }
         let function = self
             .ffi_functions
             .get(&receipt.symbol)
@@ -1250,14 +1273,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         {
             self.emit_ffi_requires(condition, subject)?;
         }
-        self.emit_ffi_call_target(
-            result,
-            function,
-            arguments,
-            &receipt.parameter_conversions,
-            receipt.result_conversion.as_ref(),
-            subject,
-        )?;
+        self.emit_ffi_call_target(result, function, arguments, receipt, subject)?;
         if let Some(condition) = receipt
             .ensures
             .as_ref()
@@ -1371,13 +1387,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(())
     }
 
-    fn emit_ffi_call_target(
+    pub(super) fn emit_ffi_call_target(
         &mut self,
         result: Option<&MirValueId>,
         function: FunctionValue<'ctx>,
         arguments: &[MirValueId],
-        parameter_conversions: &[crate::core::mir::MirFfiAbiConversion],
-        result_conversion: Option<&crate::core::mir::MirFfiAbiConversion>,
+        receipt: &crate::core::mir::MirFfiCallContract,
         subject: &str,
     ) -> Result<(), NativeMirError> {
         // Native admission has already proven the receipt conversion belongs
@@ -1385,18 +1400,47 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         // that depend on LLVM declarations and materialized values.
         let function_type = function.get_type();
         let parameter_types = function_type.get_param_types();
-        if parameter_types.len() != parameter_conversions.len() {
+        if receipt.fixed_argument_count > arguments.len()
+            || receipt.arguments.as_slice() != arguments
+            || arguments.len() != receipt.parameter_types.len()
+            || arguments.len() != receipt.parameter_conversions.len()
+            || (!receipt.variadic && arguments.len() != receipt.fixed_argument_count)
+            || arguments.len() - receipt.fixed_argument_count != receipt.variadic_arguments.len()
+        {
             return Err(NativeMirError::new(
                 subject,
-                "FFI native declaration parameter count disagrees with conversion receipt",
+                "FFI call arguments disagree with the call-specific fixed/variadic receipt",
             ));
         }
-        for (index, (parameter_type, conversion)) in parameter_types
+        if parameter_types.len() != receipt.fixed_argument_count
+            || function_type.is_var_arg() != receipt.variadic
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI native declaration disagrees with the receipted fixed prefix or variadic flag",
+            ));
+        }
+        for (index, (parameter_type, (declared_type, conversion))) in parameter_types
             .iter()
-            .zip(parameter_conversions)
+            .zip(
+                receipt
+                    .parameter_types
+                    .iter()
+                    .zip(&receipt.parameter_conversions)
+                    .take(receipt.fixed_argument_count),
+            )
             .enumerate()
         {
-            if !native_ffi_metadata_type_matches(*parameter_type, conversion.to) {
+            let descriptor = self
+                .program
+                .type_catalog()
+                .get(declared_type)
+                .ok_or_else(|| {
+                    NativeMirError::new(subject, "FFI fixed parameter TypeDesc is absent")
+                })?;
+            if !native_ffi_metadata_type_matches(*parameter_type, conversion.to)
+                || descriptor.abi != conversion.to
+            {
                 return Err(NativeMirError::new(
                     subject,
                     format!(
@@ -1407,9 +1451,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
         }
         let mut values = Vec::with_capacity(arguments.len());
-        for (index, (argument, conversion)) in
-            arguments.iter().zip(parameter_conversions).enumerate()
-        {
+        for index in 0..receipt.fixed_argument_count {
+            let argument = &arguments[index];
+            let conversion = &receipt.parameter_conversions[index];
             let value = self.value(argument, subject)?;
             let value = self.coerce_ffi_value(
                 value,
@@ -1417,6 +1461,39 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 conversion.to,
                 subject,
                 &format!("ffi_arg_{index}"),
+            )?;
+            values.push(value.into());
+        }
+        for (tail_offset, tail) in receipt.variadic_arguments.iter().enumerate() {
+            let index = receipt.fixed_argument_count + tail_offset;
+            let argument = arguments.get(index).ok_or_else(|| {
+                NativeMirError::new(subject, "FFI variadic receipt names an absent argument")
+            })?;
+            let conversion = receipt.parameter_conversions.get(index).ok_or_else(|| {
+                NativeMirError::new(subject, "FFI variadic argument has no ABI conversion")
+            })?;
+            let physical_type = receipt.parameter_types.get(index).ok_or_else(|| {
+                NativeMirError::new(subject, "FFI variadic argument has no physical TypeDesc")
+            })?;
+            if tail.argument_index != index
+                || physical_type != &tail.promoted_type
+                || argument.as_str() != format!("expr:{}", tail.source_node.0)
+                || self.value_type(argument, subject)? != tail.source_type
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    format!("FFI variadic argument {index} disagrees with its typed receipt"),
+                ));
+            }
+            let value = self.value(argument, subject)?;
+            let value = self.promote_ffi_vararg_value(
+                value,
+                tail.promotion,
+                &tail.source_type,
+                &tail.promoted_type,
+                *conversion,
+                subject,
+                &format!("ffi_vararg_{index}"),
             )?;
             values.push(value.into());
         }
@@ -1434,7 +1511,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 }
                 None
             } else {
-                let conversion = result_conversion.ok_or_else(|| {
+                let conversion = receipt.result_conversion.as_ref().ok_or_else(|| {
                     NativeMirError::new(subject, "non-unit FFI result has no conversion receipt")
                 })?;
                 let Some(native_return_type) = function_type.get_return_type() else {
@@ -1477,6 +1554,156 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             self.coerce_ffi_value(value, conversion.from, conversion.to, subject, "ffi_result")?;
         self.values.insert(result.clone(), value);
         Ok(())
+    }
+
+    fn promote_ffi_vararg_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        promotion: crate::core::mir::MirFfiDefaultPromotion,
+        source_type: &crate::core::ResolvedTypeId,
+        promoted_type: &crate::core::ResolvedTypeId,
+        conversion: crate::core::mir::MirFfiAbiConversion,
+        subject: &str,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let catalog = self.program.type_catalog();
+        let source_abi = catalog
+            .get(source_type)
+            .ok_or_else(|| NativeMirError::new(subject, "FFI variadic source TypeDesc is absent"))?
+            .abi;
+        let promoted_abi = catalog
+            .get(promoted_type)
+            .ok_or_else(|| {
+                NativeMirError::new(subject, "FFI variadic promoted TypeDesc is absent")
+            })?
+            .abi;
+        if conversion.from != source_abi || conversion.to != promoted_abi {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI variadic conversion endpoints disagree with the receipted source and physical TypeDescs",
+            ));
+        }
+        let conversion_kind = conversion.kind().ok_or_else(|| {
+            NativeMirError::new(subject, "FFI variadic conversion has no canonical ABI kind")
+        })?;
+        if !native_ffi_promotion_source_value_matches(&value, source_abi) {
+            return Err(NativeMirError::new(
+                subject,
+                format!(
+                    "FFI variadic source ABI {source_abi:?} disagrees with its native LLVM value"
+                ),
+            ));
+        }
+
+        let physical_type =
+            super::native_ffi_scalar_type(self.generator.context, catalog, promoted_type, subject)?;
+        if !native_ffi_basic_type_matches(&physical_type, promoted_abi) {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI variadic promoted TypeDesc disagrees with its native physical type",
+            ));
+        }
+
+        let value = match promotion {
+            crate::core::mir::MirFfiDefaultPromotion::Identity => {
+                let default_identity = matches!(
+                    source_abi,
+                    MirAbiClass::Integer {
+                        bits: 32 | 64,
+                        signed: true,
+                    } | MirAbiClass::Float { bits: 64 }
+                );
+                if source_type != promoted_type
+                    || source_abi != promoted_abi
+                    || conversion.from != conversion.to
+                    || conversion_kind != (MirFfiConversionKind::Identity { abi: source_abi })
+                    || !default_identity
+                {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "FFI default-promotion identity receipt does not preserve an already-promoted C scalar",
+                    ));
+                }
+                value
+            }
+            crate::core::mir::MirFfiDefaultPromotion::IntegerToI32 => {
+                let target_i32 = promoted_abi
+                    == (MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    });
+                let integer_source = matches!(
+                    source_abi,
+                    MirAbiClass::Integer { bits: 8 | 16, .. } | MirAbiClass::Bool
+                );
+                if !target_i32
+                    || !integer_source
+                    || source_type == promoted_type
+                    || conversion_kind
+                        != (MirFfiConversionKind::IntegerPromotionToI32 { from: source_abi })
+                {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "FFI IntegerToI32 receipt is not a low-width integer or bool to signed i32 promotion",
+                    ));
+                }
+                let value = value.into_int_value();
+                let target = self.generator.context.i32_type();
+                match source_abi {
+                    MirAbiClass::Integer { signed: true, .. } => self
+                        .generator
+                        .builder
+                        .build_int_s_extend(value, target, name)
+                        .map(BasicValueEnum::from)
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                    MirAbiClass::Integer { signed: false, .. } | MirAbiClass::Bool => self
+                        .generator
+                        .builder
+                        .build_int_z_extend(value, target, name)
+                        .map(BasicValueEnum::from)
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                    _ => {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "FFI IntegerToI32 source lost its admitted integer ABI class",
+                        ))
+                    }
+                }
+            }
+            crate::core::mir::MirFfiDefaultPromotion::FloatToF64 => {
+                if source_abi != (MirAbiClass::Float { bits: 32 })
+                    || promoted_abi != (MirAbiClass::Float { bits: 64 })
+                    || source_type == promoted_type
+                    || conversion_kind
+                        != (MirFfiConversionKind::FloatWiden {
+                            from_bits: 32,
+                            to_bits: 64,
+                        })
+                {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "FFI FloatToF64 receipt is not an f32 to f64 promotion",
+                    ));
+                }
+                self.generator
+                    .builder
+                    .build_float_ext(
+                        value.into_float_value(),
+                        self.generator.context.f64_type(),
+                        name,
+                    )
+                    .map(BasicValueEnum::from)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            }
+        };
+
+        if !native_ffi_value_matches(&value, promoted_abi) {
+            return Err(NativeMirError::new(
+                subject,
+                "FFI variadic promotion produced a value outside its physical ABI class",
+            ));
+        }
+        Ok(value)
     }
 
     fn coerce_ffi_value(
@@ -1653,6 +1880,28 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 
 fn native_ffi_value_matches<'ctx>(value: &BasicValueEnum<'ctx>, abi: MirAbiClass) -> bool {
     native_ffi_basic_type_matches(&value.get_type(), abi)
+}
+
+fn native_ffi_promotion_source_value_matches<'ctx>(
+    value: &BasicValueEnum<'ctx>,
+    abi: MirAbiClass,
+) -> bool {
+    match (abi, value) {
+        (
+            MirAbiClass::Integer {
+                bits: bits @ (8 | 16 | 32 | 64),
+                ..
+            },
+            BasicValueEnum::IntValue(value),
+        ) => value.get_type().get_bit_width() == u32::from(bits),
+        (MirAbiClass::Bool, BasicValueEnum::IntValue(value)) => {
+            value.get_type().get_bit_width() == 1
+        }
+        (MirAbiClass::Float { bits }, BasicValueEnum::FloatValue(value)) => {
+            matches!(bits, 32 | 64) && value.get_type().get_bit_width() == u32::from(bits)
+        }
+        _ => false,
+    }
 }
 
 fn native_ffi_metadata_type_matches<'ctx>(

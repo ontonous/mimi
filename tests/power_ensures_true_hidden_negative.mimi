@@ -1,0 +1,15 @@
+// Must be disproven for normal completion despite a result-free nominal return
+// and a trivially true postcondition: exponent may be negative at runtime.
+newtype Receipt = i32
+
+func make_receipt(exponent: i32) -> Receipt {
+    ensures: true
+    let base: i32 = 2
+    let ignored = base ** exponent
+    Receipt(7)
+}
+
+func main() -> i32 {
+    let receipt = make_receipt(-1)
+    0
+}

@@ -2,9 +2,11 @@
 //! MIR slice. A nested declaration is compile-time scope metadata: MIR omits
 //! its runtime instruction only when the checked owner identity is an
 //! immediate child of a top-level user function, the helper has no closure
-//! environment/default/generic ABI, the graph carries a validated scalar FFI
-//! receipt (owned by the helper or another function), and every materialized
-//! use is a direct call from that declaring function.
+//! environment/default/generic ABI, and every materialized use is a direct
+//! call from that declaring function.  The original scalar-FFI slice remains
+//! available for the wider C scalar ABI; the direct-root profile below adds
+//! only the copy scalar Mimi shapes whose ABI is closed without an external
+//! receipt (i32/i64/bool).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -73,9 +75,11 @@ pub(crate) fn checked_nested_callable_scope_plan(
     excluded_sources: Option<&HashSet<SourceId>>,
 ) -> CheckedNestedCallableScopePlan {
     let mut plan = CheckedNestedCallableScopePlan::default();
-    // Nested declarations are admitted only as part of the closed scalar FFI
-    // profile. A pure helper may be used by that graph, but must not broaden
-    // the general MIR construction boundary on its own.
+    // Nested declarations are admitted when either the legacy scalar FFI
+    // profile authorizes their wider C scalar ABI, or they are a direct-root
+    // copy-scalar helper (i32/i64/bool) whose ABI is closed by Mimi itself.
+    // Captures, branch-local declarations, defaults, generics, contracts,
+    // nested declarations and recursive call graphs remain fail-closed below.
     let scalar_ffi_profile =
         super::eligibility::is_scalar_ffi_candidate_excluding_sources(program, excluded_sources);
     for (parent_owner, parent) in program.callables() {
@@ -115,6 +119,68 @@ pub(crate) fn checked_nested_callable_scope_plan(
     plan
 }
 
+/// Whether the checked program contains at least one direct-root nested helper
+/// in the closed Mimi scalar profile.  This is the route-admission signal for
+/// a pure nested program; scalar-FFI admission remains independent and can
+/// still authorize the wider f32/f64 C ABI shape.
+pub(crate) fn is_scalar_nested_candidate(program: &CheckedProgram) -> bool {
+    is_scalar_nested_candidate_excluding_sources(program, None)
+}
+
+pub(crate) fn is_scalar_nested_candidate_excluding_sources(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<SourceId>>,
+) -> bool {
+    let plan = checked_nested_callable_scope_plan(program, excluded_sources);
+    plan.declarations.iter().any(|(owner, (parent, _))| {
+        let Some(target) = program.callable(owner) else {
+            return false;
+        };
+        let Some(parent_callable) = program.callable(parent) else {
+            return false;
+        };
+        is_direct_root_copy_scalar_target(program, parent, parent_callable, target)
+    })
+}
+
+/// Return a stable coverage diagnostic for any ordinary nested callable that
+/// is not represented by the direct-root copy-scalar or scalar-FFI receipt
+/// plan. Actor method helpers are owned by the dedicated Actor lowering route
+/// and are intentionally left to that producer.
+pub fn unsupported_nested_callable_boundary_reason(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<SourceId>>,
+) -> Option<String> {
+    let plan = checked_nested_callable_scope_plan(program, excluded_sources);
+    for (owner, callable) in program.callables() {
+        if !owner.0.contains("/function:")
+            || owner.0.starts_with("actor:")
+            || owner
+                .0
+                .split_once("/function:")
+                .map(|(parent, _)| NodeId(parent.to_owned()))
+                .is_some_and(|parent| is_actor_method_owner(program, &parent))
+            || source_is_excluded(callable, excluded_sources)
+        {
+            continue;
+        }
+        if !plan.declarations.contains_key(owner) {
+            return Some(format!(
+                "nested callable '{}' is outside the canonical scalar nested-callable slice",
+                owner.0
+            ));
+        }
+    }
+    None
+}
+
+fn is_actor_method_owner(program: &CheckedProgram, owner: &NodeId) -> bool {
+    program
+        .actor_descriptors()
+        .values()
+        .any(|actor| actor.methods.iter().any(|method| &method.owner == owner))
+}
+
 fn source_is_excluded(
     callable: &crate::core::ResolvedCallable,
     excluded_sources: Option<&HashSet<SourceId>>,
@@ -138,6 +204,18 @@ fn is_admissible_nested_target(
     let Some(owner_tail) = target.owner.0.strip_prefix(&prefix) else {
         return false;
     };
+    // Compute the direct-root Mimi profile before applying the historical FFI
+    // receipt guard below.  A copy-scalar helper is self-authenticating and
+    // must not inherit the external-FFI requirement merely because it has no
+    // C callsite in the checked program.
+    let direct_root_copy_scalar = is_direct_root_copy_scalar_target(
+        program,
+        parent,
+        program
+            .callable(parent)
+            .expect("nested callable parent checked before admission"),
+        target,
+    );
     // Unit is admitted as an extern result ABI, but this receipt also
     // certifies a local MIR call result. The native emitter represents Unit
     // as LLVM void and has no BasicValue to bind; this scope receipt does not
@@ -159,7 +237,8 @@ fn is_admissible_nested_target(
             .call_sites()
             .values()
             .any(|site| site.owner == target.owner.0 && site.kind == ResolvedCallKind::Extern)
-            && !scalar_ffi_profile)
+            && !scalar_ffi_profile
+            && !direct_root_copy_scalar)
         || target
             .body
             .root
@@ -170,6 +249,10 @@ fn is_admissible_nested_target(
     {
         return false;
     }
+    // A direct-root helper can enter the general nested slice only for the
+    // copy scalar ABI.  The scalar-FFI path below deliberately keeps its
+    // historical wider C scalar set (including f32/f64) behind an actual FFI
+    // receipt/profile; pure float helpers do not enter this route.
     let Some(function) = program.functions().get(&target.owner) else {
         return false;
     };
@@ -179,6 +262,81 @@ fn is_admissible_nested_target(
         && function.extern_abi.is_none()
         && function.generics.is_empty()
         && function.generic_binders.is_empty()
+        && (direct_root_copy_scalar || scalar_ffi_profile)
+}
+
+/// Checker-owned direct-root shape admitted without an external FFI receipt.
+/// The parent/target relationship is repeated here instead of relying on the
+/// caller's source traversal so forged plans and future call sites cannot
+/// widen the profile by accident.
+fn is_direct_root_copy_scalar_target(
+    program: &CheckedProgram,
+    parent: &NodeId,
+    parent_callable: &crate::core::ResolvedCallable,
+    target: &crate::core::ResolvedCallable,
+) -> bool {
+    let prefix = format!("{}/function:", parent.0);
+    let Some(tail) = target.owner.0.strip_prefix(&prefix) else {
+        return false;
+    };
+    if tail.is_empty()
+        || tail.contains('/')
+        || !is_top_level_function_owner(parent)
+        || target.owner != target.body.owner
+        || target.owner != target.signature.owner
+        || !target.body.captures.is_empty()
+        || !target.body.default_values.is_empty()
+        || !target.contracts.is_empty()
+        || !target.signature.generic_parameters.is_empty()
+        || target.signature.parameters.len() != target.body.parameters.len()
+        || target
+            .signature
+            .parameters
+            .iter()
+            .any(|parameter| parameter.has_default || parameter.permission.is_some())
+        || target
+            .body
+            .root
+            .statements
+            .iter()
+            .any(|statement| matches!(&statement.kind, ResolvedStmtKind::NestedCallable(_)))
+    {
+        return false;
+    }
+    if !matches!(
+        program
+            .functions()
+            .get(&target.owner)
+            .map(|function| &function.origin),
+        Some(Origin::User(_))
+    ) {
+        return false;
+    }
+    if target
+        .signature
+        .parameters
+        .iter()
+        .any(|parameter| !is_direct_copy_scalar(program, &parameter.ty))
+        || !is_direct_copy_scalar(program, &target.signature.result)
+    {
+        return false;
+    }
+    // The declaration must be an immediate root statement in source order.
+    // `checked_nested_callable_scope_plan` only visits those statements, but
+    // keeping this fact in the predicate makes the receipt validator's
+    // direct-root contract explicit and testable.
+    parent_callable.body.root.statements.iter().any(|statement| {
+        matches!(&statement.kind, ResolvedStmtKind::NestedCallable(owner) if owner == &target.owner)
+    })
+}
+
+fn is_direct_copy_scalar(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool {
+    matches!(
+        program.resolved_types().get(ty),
+        Some(ResolvedType::Primitive(
+            PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+        ))
+    )
 }
 
 fn is_checker_scalar(program: &CheckedProgram, ty: &ResolvedTypeId, allow_unit: bool) -> bool {
@@ -342,7 +500,12 @@ pub(crate) fn validate_nested_callable_scope_receipts(
         let target_has_ffi_receipt = ffi_calls
             .values()
             .any(|ffi_call| ffi_call.caller == receipt.callee);
-        if !target_has_ffi_receipt && ffi_calls.is_empty() {
+        let direct_root_copy_scalar = receipt
+            .parameter_types
+            .iter()
+            .all(|ty| is_direct_copy_scalar_desc(type_catalog, ty))
+            && is_direct_copy_scalar_desc(type_catalog, &receipt.result_type);
+        if !target_has_ffi_receipt && ffi_calls.is_empty() && !direct_root_copy_scalar {
             errors.push(format!(
                 "nested callable '{}' has no validated scalar FFI receipt in itself or the MIR program",
                 receipt.callee.0
@@ -516,6 +679,20 @@ fn is_canonical_scalar(catalog: &MirTypeCatalog, ty: &ResolvedTypeId, allow_unit
     }
 }
 
+fn is_direct_copy_scalar_desc(catalog: &MirTypeCatalog, ty: &ResolvedTypeId) -> bool {
+    let Some(descriptor) = catalog.get(ty) else {
+        return false;
+    };
+    descriptor.ownership == MirOwnership::Copy
+        && descriptor.layout == MirLayout::Scalar
+        && matches!(
+            &descriptor.kind,
+            super::types::MirTypeKind::Primitive(
+                PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
+            )
+        )
+}
+
 fn push_frame(output: &mut String, value: &str) {
     output.push_str(&value.len().to_string());
     output.push(':');
@@ -634,6 +811,11 @@ mod tests {
         assert!(checked_nested_callable_scope_plan(&captured, None)
             .declarations
             .is_empty());
+        assert!(
+            unsupported_nested_callable_boundary_reason(&captured, None).is_some_and(|reason| {
+                reason.contains("outside the canonical scalar nested-callable slice")
+            })
+        );
         let error = MirProgram::from_checked_program(&captured)
             .expect_err("captured helper has no environment ABI");
         assert!(format!("{error}").contains("lexical capture"), "{error}");
@@ -654,6 +836,7 @@ mod tests {
         assert!(checked_nested_callable_scope_plan(&branch_local, None)
             .declarations
             .is_empty());
+        assert!(unsupported_nested_callable_boundary_reason(&branch_local, None).is_some());
         assert!(
             MirProgram::from_checked_program(&branch_local).is_err(),
             "branch-local declarations remain outside the root-scope MIR slice"
@@ -709,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn pure_root_scalar_helper_is_outside_the_ffi_scope_slice() {
+    fn pure_root_copy_scalar_helper_gets_a_scope_receipt_without_ffi() {
         let program = checked(
             r#"
                 func main() -> i64 {
@@ -718,14 +901,22 @@ mod tests {
                 }
             "#,
         );
-        assert!(checked_nested_callable_scope_plan(&program, None)
-            .declarations
-            .is_empty());
-        let error = MirProgram::from_checked_program(&program)
-            .expect_err("a pure nested helper does not gain general MIR admission");
+        let plan = checked_nested_callable_scope_plan(&program, None);
+        assert_eq!(plan.declarations.len(), 1);
+        let mir = MirProgram::from_checked_program(&program)
+            .expect("direct-root copy-scalar helper enters the canonical MIR slice");
+        assert!(mir.ffi_calls().is_empty());
+        assert_eq!(mir.nested_callable_scopes().len(), 1);
+        let errors = validate_nested_callable_scope_receipts(
+            mir.functions(),
+            mir.type_catalog(),
+            mir.transitions(),
+            &BTreeMap::new(),
+            mir.nested_callable_scopes(),
+        );
         assert!(
-            format!("{error}").contains("outside the canonical root-scope MIR slice"),
-            "{error}"
+            errors.is_empty(),
+            "direct copy-scalar receipt errors: {errors:?}"
         );
     }
 
@@ -733,9 +924,9 @@ mod tests {
     fn excluded_ffi_callers_cannot_authorize_retained_nested_helpers() {
         let (program, _primary_source, ffi_source) = checked_split_sources(
             r#"
-                func main() -> i64 {
-                    func increment(value: i64) -> i64 { value + 1 as i64 }
-                    increment(41 as i64)
+                func main() -> f32 {
+                    func increment(value: f32) -> f32 { value }
+                    increment(41.0 as f32)
                 }
             "#,
             r#"
@@ -815,10 +1006,8 @@ mod tests {
             mir.nested_callable_scopes(),
         );
         assert!(
-            errors.iter().any(|error| {
-                error.contains("no validated scalar FFI receipt in itself or the MIR program")
-            }),
-            "a nested scope cannot be validated without an FFI receipt in the graph: {errors:?}"
+            errors.is_empty(),
+            "direct copy-scalar nested receipt remains valid alongside an FFI call: {errors:?}"
         );
     }
 
@@ -826,9 +1015,9 @@ mod tests {
     fn forged_pure_nested_scope_receipt_cannot_create_a_non_ffi_mir_graph() {
         let program = checked(
             r#"
-                func main() -> i64 {
-                    func increment(value: i64) -> i64 { value + 1 as i64 }
-                    increment(41 as i64)
+                func main() -> f32 {
+                    func increment(value: f32) -> f32 { value }
+                    increment(41.0 as f32)
                 }
             "#,
         );

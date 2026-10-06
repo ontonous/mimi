@@ -203,36 +203,32 @@ fn legacy_owner_reachability_report_stays_conservative() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for (owner, dependency_class, evidence_marker, accessor_context, guard_name, guard_context) in [
+    for (owner, dependency_class, evidence_marker, guard_name, guard_context) in [
         (
             "CodegenLegacyRemainder",
             "legacy-codegen-remainder",
-            "LegacyBodyConsumer::CodegenLegacyRemainder",
-            "src/codegen/compile.rs::fn compile_file_with_resolved(",
+            "MIR-COVERAGE-001",
             "try_compile_exact_migrated_mir_island",
             "src/codegen/compile.rs::pub fn compile_checked(",
         ),
         (
             "FlowVerifierCompatibility",
             "flow-body-compatibility",
-            "LegacyBodyConsumer::FlowVerifierCompatibility",
-            "src/verifier/mod.rs::pub fn verify_checked(",
+            "test_legacy_body_access().is_empty()",
             "verify_closed_mir_program",
             "src/verifier/mod.rs::pub fn verify_checked(",
         ),
         (
             "FfiVerifierCompatibility",
             "ffi-declaration-compatibility",
-            "LegacyBodyConsumer::FfiVerifierCompatibility",
-            "src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
-            "materialize_closed_mir_island",
-            "src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
+            "Vec::<crate::core::LegacyBodyConsumer>::new()",
+            "scalar_ffi_admission",
+            "src/verifier/mod.rs::pub fn verify_ffi_checked_with_source_hash(",
         ),
         (
             "DualVerifierCompatibility",
             "secondary-flow-vir-compatibility",
-            "LegacyBodyConsumer::DualVerifierCompatibility",
-            "src/verifier/mod.rs::pub fn verify_checked_dual(",
+            "test_legacy_body_access().is_empty()",
             "verify_closed_mir_program",
             "src/verifier/mod.rs::pub fn verify_checked_dual(",
         ),
@@ -243,22 +239,17 @@ fn legacy_owner_reachability_report_stays_conservative() {
             .find(|line| line.starts_with(&evidence_prefix))
             .unwrap_or_else(|| panic!("missing evidence report for {owner}"));
         assert!(
-            evidence.contains("closed scalar bypass"),
-            "owner evidence for {owner} must document the closed scalar bypass"
+            evidence.contains("without") || evidence.contains("rejected"),
+            "owner evidence for {owner} must document a closed or rejected route"
         );
         assert!(
             evidence.contains(&format!("evidence_marker={evidence_marker}")),
             "owner evidence for {owner} must expose its legacy access marker"
         );
-        let accessor = format!("owner={owner} production_accessor_call_sites=1");
+        let accessor = format!("owner={owner} production_accessor_call_sites=0");
         assert!(
             stdout.lines().any(|line| line == accessor),
-            "owner {owner} must retain exactly one production accessor"
-        );
-        let context = format!("owner={owner} accessor_context={accessor_context}");
-        assert!(
-            stdout.lines().any(|line| line == context),
-            "owner {owner} accessor context drifted: expected {context}"
+            "owner {owner} must have zero production accessors"
         );
         let guard =
             format!("owner={owner} closed_route_guard={guard_name} context={guard_context}");
@@ -266,7 +257,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
             stdout.lines().any(|line| line == guard),
             "owner {owner} closed route guard drifted: expected {guard}"
         );
-        let status_prefix = format!("owner={owner} status=retained");
+        let status_prefix = format!("owner={owner} status=closed");
         let status = stdout
             .lines()
             .find(|line| line.starts_with(&status_prefix))
@@ -287,17 +278,28 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]",
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
         "closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call",
-        "codegen_legacy_body_class_tripwire=dynamic-trait test=compile_checked_keeps_dynamic_protocol_method_on_legacy_owner",
-        "codegen_legacy_body_class_tripwire=flow-transition test=compile_checked_keeps_flow_transition_on_legacy_owner",
-        "codegen_legacy_body_class_tripwire=trait-impl-specialization test=compile_checked_keeps_trait_impl_specialization_on_legacy_owner markers=Data__Computable__compute",
-        "codegen_legacy_body_class_tripwire=nested-function-body test=compile_checked_keeps_captured_nested_helper_on_legacy_owner markers=nested_increment",
-        "codegen_legacy_body_class_tripwire=export-wrapper test=compile_checked_keeps_export_wrapper_body_on_legacy_owner",
-        "codegen_legacy_body_class_tripwire=actor-method test=compile_checked_keeps_actor_method_on_legacy_owner",
-        "codegen_legacy_body_class_tripwire=map-any-borrowed test=compile_checked_keeps_map_any_borrowed_access_on_legacy_owner markers=map_get,values",
+        "test_only_legacy_body_adapter_context=core::CheckedProgram::legacy_body_file+codegen::tests",
+        "test_only_ast_verifier_modules=expr,ffi,flow,func,helpers,vir;ctx::verify_file;helpers::mock_verify_file",
+        "codegen_legacy_consumer_boundary=llvm_compile_file_cfg_test;native_build_no_bytecode_legacy;run-test-disasm_explicit_legacy_route",
+        "closed_codegen_route_tripwire=dynamic-trait test=compile_checked_rejects_dynamic_protocol_method_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
+        "closed_codegen_route_tripwire=flow-transition test=compile_checked_routes_multi_transition_flow_through_canonical_mir markers=test_legacy_body_access().is_empty(),canonical multi-transition Flow must emit main",
+        "closed_codegen_route_tripwire=trait-impl-specialization test=compile_checked_rejects_trait_impl_specialization_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
+        "closed_codegen_route_tripwire=nested-function-body test=compile_checked_rejects_captured_nested_helper_without_legacy_owner markers=MIR-COVERAGE-001,test_legacy_body_access().is_empty(),nested_increment",
+        "closed_codegen_route_tripwire=export-wrapper test=compile_checked_routes_scalar_export_wrapper_without_legacy_access markers=test_legacy_body_access().is_empty(),owner_tripwire_export",
+        "closed_codegen_route_tripwire=actor-method test=compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access markers=CanonicalMirRouteProfile::ScalarActor,Vec::<crate::core::LegacyBodyConsumer>::new(),OwnerTripwireWorker__read__method",
+        "closed_codegen_route_tripwire=actor-method-rejected test=compile_checked_rejects_contract_bearing_actor_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
+        "closed_codegen_route_tripwire=map-any-owned test=compile_checked_routes_closed_map_any_owner_v1_without_legacy_access markers=test_legacy_body_access().is_empty(),MapAnyOwnerAdmission::CompleteCoverage",
+        "closed_codegen_route_tripwire=map-any-rejected test=compile_checked_rejects_map_any_borrowed_access_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
         "direct_mir_no_legacy_tripwire=compile_checked_routes_exact_s8_flow_through_canonical_mir",
-        "production_legacy_body_file_call_sites=4",
+        "production_direct_legacy_file_accessors=0 source-metadata-reads=0 body_bypasses=0",
+        "test_only_legacy_file_accessor=src/core/resolved/mod.rs::legacy_body_file",
+        "production_legacy_body_file_call_sites=0",
         "production_raw_ast_call_sites=0",
-        "production_compile_func_legacy_call_sites=6",
+        "production_compile_func_legacy_call_sites=0",
+        "test_only_codegen_legacy_body_compiler=src/codegen/func.rs::compile_func_legacy+inner+clean",
+        "production_compile_generic_func_call_sites=0",
+        "test_only_codegen_func_generic_adapter_refs=2 excluded_from_production=1",
+        "test_only_codegen_legacy_adapter_refs=6 excluded_from_production=1",
         "scalar_ffi_direct_expression_legacy_refs=0",
         "receiptless_bytecode_ffi=raw_compiler_reject+vm_whole_program_preflight+old_loader_removed",
         "ast_ffi_compatibility=retired+canonical_mir_runtime_only",
@@ -354,8 +356,8 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
     let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
         .expect("read legacy owner audit script");
     let tampered_script = source_script.replacen(
-        "    'fn compile_file_with_resolved(' \\\n",
-        "    'fn missing_compile_context(' \\\n",
+        "    if ! rg -U -q '#\\[cfg\\(test\\)\\]\\n    pub\\(crate\\) fn legacy_body_file\\(' \\\n",
+        "    if ! rg -U -q '#\\[cfg\\(test\\)\\]\\n    pub\\(crate\\) fn missing_legacy_body_file\\(' \\\n",
         1,
     );
     assert!(
@@ -376,18 +378,18 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
     );
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("owner_audit_error=CodegenLegacyRemainder accessor_context_missing="),
-        "context drift omitted fail-closed diagnostic:\n{}",
+            .contains("owner_audit_error=legacy_body_file_accessor_lost_cfg_test"),
+        "test-only accessor drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let tampered_owner_tripwire_script = source_script.replacen(
-        "    compile_checked_keeps_actor_method_on_legacy_owner \\\n",
-        "    compile_checked_missing_actor_method_owner_test \\\n",
+        "    compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access \\\n",
+        "    compile_checked_missing_scalar_actor_route_test \\\n",
         1,
     );
     assert!(
         source_script != tampered_owner_tripwire_script,
-        "owner tripwire fixture must replace the actor-class test name"
+        "owner tripwire fixture must replace the actor fallback test name"
     );
     std::fs::write(&script_path, tampered_owner_tripwire_script)
         .expect("write tampered owner-class tripwire audit script");
@@ -398,52 +400,78 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("run tampered owner-class tripwire audit");
     assert!(
         !owner_tripwire_output.status.success(),
-        "missing actor-class owner evidence must fail closed:\n{}",
+        "missing actor fallback evidence must fail closed:\n{}",
         String::from_utf8_lossy(&owner_tripwire_output.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&owner_tripwire_output.stderr).contains(
-            "owner_audit_error=missing_codegen_legacy_body_class_tripwire class=actor-method"
-        ),
-        "missing owner-class tripwire omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&owner_tripwire_output.stderr)
+            .contains("owner_audit_error=missing_codegen_closed_route_tripwire class=actor-method"),
+        "missing actor canonical route tripwire omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&owner_tripwire_output.stderr)
     );
+    let tampered_closed_actor_route_script = source_script.replacen(
+        "    compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access \\\n",
+        "    compile_checked_missing_scalar_actor_route_test \\\n",
+        1,
+    );
+    assert!(
+        source_script != tampered_closed_actor_route_script,
+        "closed-route fixture must replace the scalar Actor test name"
+    );
+    std::fs::write(&script_path, tampered_closed_actor_route_script)
+        .expect("write tampered closed Actor route audit script");
+    let closed_actor_route_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run tampered closed Actor route audit");
+    assert!(
+        !closed_actor_route_output.status.success(),
+        "missing closed ScalarActor route evidence must fail closed:\n{}",
+        String::from_utf8_lossy(&closed_actor_route_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&closed_actor_route_output.stderr)
+            .contains("owner_audit_error=missing_codegen_closed_route_tripwire class=actor-method"),
+        "missing closed ScalarActor route tripwire omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&closed_actor_route_output.stderr)
+    );
     let tampered_map_tripwire_script = source_script.replacen(
-        "    compile_checked_keeps_map_any_borrowed_access_on_legacy_owner \\\n",
-        "    compile_checked_missing_map_any_borrowed_owner_test \\\n",
+        "    compile_checked_routes_closed_map_any_owner_v1_without_legacy_access \\\n",
+        "    compile_checked_missing_map_any_owner_route_test \\\n",
         1,
     );
     assert!(
         source_script != tampered_map_tripwire_script,
-        "owner tripwire fixture must replace the Map/Any borrowed test name"
+        "closed-route fixture must replace the Map/Any owner test name"
     );
     std::fs::write(&script_path, tampered_map_tripwire_script)
-        .expect("write tampered Map/Any owner-class tripwire audit script");
+        .expect("write tampered Map/Any closed-route tripwire audit script");
     let map_tripwire_output = std::process::Command::new("bash")
         .arg(&script_path)
         .current_dir(&temp_root)
         .output()
-        .expect("run tampered Map/Any owner-class tripwire audit");
+        .expect("run tampered Map/Any closed-route tripwire audit");
     assert!(
         !map_tripwire_output.status.success(),
-        "missing Map/Any owner evidence must fail closed:\n{}",
+        "missing Map/Any canonical route evidence must fail closed:\n{}",
         String::from_utf8_lossy(&map_tripwire_output.stdout)
     );
     assert!(
         String::from_utf8_lossy(&map_tripwire_output.stderr).contains(
-            "owner_audit_error=missing_codegen_legacy_body_class_tripwire class=map-any-borrowed"
+            "owner_audit_error=missing_codegen_closed_route_tripwire class=map-any-owned"
         ),
-        "missing Map/Any owner-class tripwire omitted fail-closed diagnostic:\n{}",
+        "missing Map/Any closed-route tripwire omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&map_tripwire_output.stderr)
     );
     let tampered_map_markers_script =
-        source_script.replacen("    'map_get' \\\n    'values'\n", "", 1);
+        source_script.replacen("    'MapAnyOwnerAdmission::CompleteCoverage'\n", "", 1);
     assert!(
         source_script != tampered_map_markers_script,
-        "owner tripwire fixture must remove both borrowed API markers"
+        "owner tripwire fixture must remove the MapAny admission marker"
     );
     std::fs::write(&script_path, tampered_map_markers_script)
-        .expect("write tampered Map/Any class-marker audit script");
+        .expect("write tampered Map/Any admission-marker audit script");
     let map_markers_output = std::process::Command::new("bash")
         .arg(&script_path)
         .current_dir(&temp_root)
@@ -456,9 +484,9 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
     );
     assert!(
         String::from_utf8_lossy(&map_markers_output.stderr).contains(
-            "owner_audit_error=codegen_legacy_body_class_tripwire_missing_class_marker_configuration class=map-any-borrowed"
+            "owner_audit_error=codegen_closed_route_tripwire_missing_marker class=map-any-owned"
         ),
-        "empty Map/Any marker configuration omitted fail-closed diagnostic:\n{}",
+        "empty Map/Any canonical marker configuration omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&map_markers_output.stderr)
     );
     let tampered_guard_script = source_script.replacen(
@@ -1050,12 +1078,21 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
     let mut first_round_results = Vec::new();
     for round in 1..=2 {
         for test_name in [
-            "compile_checked_tags_unmigrated_generic_body_with_legacy_owner",
+            "compile_checked_rejects_unmigrated_generic_body_without_legacy_owner",
             "compile_checked_routes_exact_s8_flow_through_canonical_mir",
-            "compile_checked_keeps_trait_impl_specialization_on_legacy_owner",
-            "compile_checked_keeps_captured_nested_helper_on_legacy_owner",
-            "compatibility_verifier_access_is_explicitly_tagged",
-            "ffi_checked_preserves_legacy_for_unmigrated_string_contract",
+            "compile_checked_routes_multi_transition_flow_through_canonical_mir",
+            "compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access",
+            "compile_checked_rejects_contract_bearing_actor_without_legacy_owner",
+            "compile_checked_routes_concrete_protocol_method_without_legacy_access",
+            "compile_checked_rejects_dynamic_protocol_method_without_legacy_owner",
+            "compile_checked_rejects_trait_impl_specialization_without_legacy_owner",
+            "compile_checked_rejects_captured_nested_helper_without_legacy_owner",
+            "compile_checked_routes_scalar_export_wrapper_without_legacy_access",
+            "compile_checked_routes_closed_map_any_owner_v1_without_legacy_access",
+            "compile_checked_rejects_map_any_borrowed_access_without_legacy_owner",
+            "unsupported_contract_returns_structured_coverage_without_legacy_access",
+            "typed_ffi_deferred_actual_argument_preserves_old_conditional_proof",
+            "typed_ffi_deferred_context_is_checker_owned_without_legacy_access",
         ] {
             let output = std::process::Command::new(&cargo)
                 .args([
@@ -1083,9 +1120,11 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
             );
             assert!(
                 stdout.lines().any(|line| {
-                    line.starts_with("test result: ok.") && line.contains("0 failed")
+                    line.starts_with("test result: ok.")
+                        && line.contains("1 passed;")
+                        && line.contains("0 failed")
                 }),
-                "owner evidence test {test_name} (round {round}) omitted a passing result:\n{stdout}"
+                "owner evidence test {test_name} (round {round}) must execute exactly one passing test:\n{stdout}"
             );
             let result_summary = stdout
                 .lines()
@@ -1173,6 +1212,12 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     );
     assert!(
         stdout.contains(
+            "bytecode_vm_ffi_preflight_order=canonical-receipts-before-actor-root+host-symbols-before-execution"
+        ),
+        "legacy owner audit must pin whole-program FFI receipt preflight before Actor setup and host symbol resolution"
+    );
+    assert!(
+        stdout.contains(
             "native_route_receipt_anchor=program-anchor+semantic-replay consumer=src/codegen/mir/eligibility.rs"
         ),
         "legacy owner audit must pin the native program-level route receipt anchor"
@@ -1210,8 +1255,8 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
     let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
         .expect("read legacy owner audit script");
     let tampered_script = source_script.replacen(
-        "LegacyBodyConsumer::CodegenLegacyRemainder",
-        "LegacyBodyConsumer::MissingMarker",
+        "    'MIR-COVERAGE-001'\n",
+        "    'MIR-COVERAGE-MISSING'\n",
         1,
     );
     let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
@@ -1246,7 +1291,7 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        stderr.contains("evidence_test_missing_marker=compile_checked_tags_unmigrated_generic_body_with_legacy_owner"),
+        stderr.contains("evidence_test_missing_marker=compile_checked_rejects_unmigrated_generic_body_without_legacy_owner"),
         "tampered owner evidence omitted marker failure:\n{stderr}"
     );
     std::fs::remove_dir_all(&temp_root).expect("remove audit temp root");
@@ -2663,6 +2708,10 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
                     || line.starts_with("production_direct_legacy_file_accessors=")
                     || line.starts_with("production_raw_ast_call_sites=")
                     || line.starts_with("production_compile_func_legacy_call_sites=")
+                    || line.starts_with("test_only_codegen_legacy_body_compiler=")
+                    || line.starts_with("production_compile_generic_func_call_sites=")
+                    || line.starts_with("test_only_codegen_func_generic_adapter_refs=")
+                    || line.starts_with("test_only_codegen_legacy_adapter_refs=")
                     || line.starts_with("owner_count=")
                     || line.starts_with("scalar_ffi_direct_expression_legacy_refs=")
             })
@@ -2684,7 +2733,7 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
     );
     assert!(
         baseline_summary.iter().any(|line| {
-            line == "production_direct_legacy_file_accessors=1 source-metadata-reads=0 body_bypasses=0"
+            line == "production_direct_legacy_file_accessors=0 source-metadata-reads=0 body_bypasses=0"
         }),
         "owner audit must keep metadata reads off the retained legacy AST"
     );
@@ -2752,7 +2801,7 @@ fn legacy_owner_condition_digest_drift_fails_closed() {
         .expect("link integration tests into digest audit temp root");
     let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
         .expect("read legacy owner audit script");
-    let expected_digest = "2568b029a170043114b68ea0d35f9061617cc969ea2f9c8b7288d3d7f4f5e40c";
+    let expected_digest = "fc5d620ce5d0ca2182f85bcc629ab0729cd0f162b511cfccd0b6bf9bb682a7b3";
     let tampered_script = source_script.replacen(
         expected_digest,
         "0000000000000000000000000000000000000000000000000000000000000000",

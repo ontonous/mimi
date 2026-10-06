@@ -56,6 +56,118 @@ impl<'a> Checker<'a> {
         *ret = subst_type_params(ret, &gen_slice, &type_map);
     }
 
+    /// Instantiate a trait implementation's declared protocol arguments from
+    /// the exact checked receiver application. Impls such as
+    /// `impl<T> Echo<T> for Holder` carry T on the implementation, not on
+    /// Holder; when the receiver cannot determine T, keep a fresh inference
+    /// variable so the method's argument/result positions can determine it.
+    /// The resolved lowering pass still assigns the stable impl and callable
+    /// NodeIds, so this checker inference never selects a backend by a display
+    /// key.
+    fn checked_impl_trait_arguments(
+        &mut self,
+        receiver_type: &Type,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<Vec<Type>> {
+        let (receiver_name, receiver_args) = match receiver_type.unlocated() {
+            Type::Name(name, args) => (name.clone(), args.clone()),
+            Type::Newtype(name, _) => (name.clone(), Vec::new()),
+            _ => return None,
+        };
+        let receiver = Type::Name(receiver_name.clone(), receiver_args);
+
+        let candidates = self
+            .file
+            .items
+            .iter()
+            .filter_map(|item| {
+                let Item::Impl(implementation) = item else {
+                    return None;
+                };
+                if implementation.type_name != receiver_name
+                    || implementation.trait_name != trait_name
+                {
+                    return None;
+                }
+                implementation
+                    .methods
+                    .iter()
+                    .any(|method| method.name == method_name)
+                    .then(|| implementation.clone())
+            })
+            .collect::<Vec<_>>();
+
+        let mut compatible = Vec::new();
+        for implementation in candidates {
+            let generic_scope_len = self.generic_scope.len();
+            self.generic_scope.extend(
+                implementation
+                    .generics
+                    .iter()
+                    .map(|generic| generic.name.clone()),
+            );
+            let target_args = implementation
+                .type_args
+                .iter()
+                .map(|argument| self.resolve_type(argument))
+                .collect::<Vec<_>>();
+            let trait_args = implementation
+                .trait_args
+                .iter()
+                .map(|argument| self.resolve_type(argument))
+                .collect::<Vec<_>>();
+            self.generic_scope.truncate(generic_scope_len);
+
+            let generic_substitutions = implementation
+                .generics
+                .iter()
+                .map(|generic| (generic.name.clone(), self.fresh_var()))
+                .collect::<HashMap<_, _>>();
+            let target_args = target_args
+                .iter()
+                .map(|argument| {
+                    subst_type_params(argument, &implementation.generics, &generic_substitutions)
+                })
+                .collect::<Vec<_>>();
+            let target = Type::Name(implementation.type_name.clone(), target_args);
+            if self.unification.probe_compatible(&target, &receiver) {
+                compatible.push((implementation, target, trait_args, generic_substitutions));
+            }
+        }
+
+        let [(implementation, target, trait_args, generic_substitutions)] = compatible.as_slice()
+        else {
+            // An unresolved or overlapping impl set must not be selected by
+            // source order. The canonical resolved call pass independently
+            // requires one stable impl owner and rejects any ambiguity.
+            return None;
+        };
+        self.unification.unify(target, &receiver).ok()?;
+
+        let instantiated_args = trait_args
+            .iter()
+            .map(|argument| {
+                subst_type_params(argument, &implementation.generics, generic_substitutions)
+            })
+            .map(|argument| self.unification.zonk_or_unknown(&argument))
+            .collect::<Vec<_>>();
+        let Some(trait_generic_names) = self.trait_generics.get(trait_name) else {
+            return if instantiated_args.is_empty() {
+                Some(Vec::new())
+            } else {
+                None
+            };
+        };
+        if trait_generic_names.len() != instantiated_args.len() {
+            return None;
+        }
+        // Keep the vector in the declaration's order. The caller zips it with
+        // the checked trait generic binders below; no name-derived identity is
+        // exported from this inference helper.
+        Some(instantiated_args)
+    }
+
     /// P3: locate the flow that owns `state_name` and declares a transition
     /// named `transition_name`. Enables desugaring `state.transition(args)`
     /// into `Flow::transition(state, args)`. Returns None when the receiver
@@ -843,37 +955,46 @@ impl<'a> Checker<'a> {
                         .get(&(trait_name.clone(), method_name.to_string()))
                         .cloned()
                     {
-                        let (method_params, method_ret) = if let Some(trait_generic_names) =
-                            self.trait_generics.get(&trait_name)
+                        let trait_generic_names = self
+                            .trait_generics
+                            .get(&trait_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let method_generic_names = self
+                            .trait_method_generics
+                            .get(&(trait_name.clone(), method_name.to_string()))
+                            .cloned()
+                            .unwrap_or_default();
+                        let impl_trait_args =
+                            self.checked_impl_trait_arguments(&obj_ty, &trait_name, method_name);
+                        let (method_params, method_ret) = if let Some(impl_trait_args) =
+                            impl_trait_args
+                                .filter(|arguments| arguments.len() == trait_generic_names.len())
                         {
-                            if !trait_generic_names.is_empty()
-                                && trait_generic_names.len() == type_args.len()
-                            {
-                                let type_map: HashMap<String, Type> = trait_generic_names
-                                    .iter()
-                                    .zip(type_args.iter())
-                                    .map(|(g, a)| (g.clone(), a.clone()))
-                                    .collect();
-                                let gen_slice: Vec<GenericParam> = trait_generic_names
-                                    .iter()
-                                    .map(|g| GenericParam {
-                                        meta: AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(
-                                            "infer.trait_generic_substitution",
-                                        )),
-                                        name: g.clone(),
-                                        bounds: vec![],
-                                        kind: crate::ast::GenericKind::Free,
-                                    })
-                                    .collect();
-                                let subst_params: Vec<Type> = params
-                                    .iter()
-                                    .map(|p| subst_type_params(p, &gen_slice, &type_map))
-                                    .collect();
-                                let subst_ret = subst_type_params(&ret, &gen_slice, &type_map);
-                                (subst_params, subst_ret)
-                            } else {
-                                (params, ret)
-                            }
+                            let type_map: HashMap<String, Type> = trait_generic_names
+                                .iter()
+                                .cloned()
+                                .zip(impl_trait_args)
+                                .filter(|(name, _)| !method_generic_names.contains(name))
+                                .collect();
+                            let gen_slice: Vec<GenericParam> = trait_generic_names
+                                .iter()
+                                .filter(|name| !method_generic_names.contains(name))
+                                .map(|name| GenericParam {
+                                    meta: AstNodeMeta::synthetic(AstOrigin::RuntimeSystem(
+                                        "infer.trait_generic_substitution",
+                                    )),
+                                    name: name.clone(),
+                                    bounds: vec![],
+                                    kind: crate::ast::GenericKind::Free,
+                                })
+                                .collect();
+                            let subst_params: Vec<Type> = params
+                                .iter()
+                                .map(|p| subst_type_params(p, &gen_slice, &type_map))
+                                .collect();
+                            let subst_ret = subst_type_params(&ret, &gen_slice, &type_map);
+                            (subst_params, subst_ret)
                         } else {
                             (params, ret)
                         };
@@ -885,15 +1006,11 @@ impl<'a> Checker<'a> {
                         // zonk 出具体型。
                         let mut method_params = method_params;
                         let mut method_ret = method_ret;
-                        if let Some(mg) = self
-                            .trait_method_generics
-                            .get(&(trait_name.clone(), method_name.to_string()))
-                            .cloned()
-                        {
+                        if !method_generic_names.is_empty() {
                             self.instantiate_method_generics(
                                 &mut method_params,
                                 &mut method_ret,
-                                &mg,
+                                &method_generic_names,
                             );
                         }
                         if user_args.len() != method_params.len() {

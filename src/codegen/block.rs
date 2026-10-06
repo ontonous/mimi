@@ -612,6 +612,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let impl_ret = self.infer_impl_method_return_type(
                                                 &obj_type,
                                                 method_name,
+                                                init.meta(),
                                             );
                                             if !impl_ret.is_empty() {
                                                 register_qualified_var_type(
@@ -676,6 +677,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let impl_ret = self.infer_impl_method_return_type(
                                                 &obj_type,
                                                 method_name,
+                                                init.meta(),
                                             );
                                             if !impl_ret.is_empty() {
                                                 register_qualified_var_type(
@@ -688,8 +690,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         // Q3: trait-impl method on a
                                         // non-flow/non-string receiver.
-                                        let impl_ret = self
-                                            .infer_impl_method_return_type(&obj_type, method_name);
+                                        let impl_ret = self.infer_impl_method_return_type(
+                                            &obj_type,
+                                            method_name,
+                                            init.meta(),
+                                        );
                                         if !impl_ret.is_empty() {
                                             register_qualified_var_type(
                                                 &mut self.var_type_names,
@@ -2487,12 +2492,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             self.infer_impl_method_return_type(
                                                 &obj_type,
                                                 method_name,
+                                                init.meta(),
                                             )
                                         } else {
                                             r
                                         }
                                     } else {
-                                        self.infer_impl_method_return_type(&obj_type, method_name)
+                                        self.infer_impl_method_return_type(
+                                            &obj_type,
+                                            method_name,
+                                            init.meta(),
+                                        )
                                     };
                                     if !ret.is_empty() {
                                         register_qualified_var_type(

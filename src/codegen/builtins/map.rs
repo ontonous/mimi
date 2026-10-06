@@ -225,6 +225,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             let crate::ast::Type::Name(name, arguments) = ty.unlocated() else {
                 return false;
             };
+            if arguments.is_empty()
+                && self.checked_alias_primitives.get(name)
+                    == Some(&crate::core::PrimitiveType::String)
+            {
+                return true;
+            }
             if name == "string" && arguments.is_empty() {
                 return true;
             }

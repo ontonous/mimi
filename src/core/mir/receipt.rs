@@ -98,7 +98,8 @@ impl MirProgram {
     /// validity and island capability gates.
     pub fn route_receipt(&self, profile: impl Into<String>) -> CanonicalMirRouteReceipt {
         let type_desc_text = self.type_catalog().canonical_text();
-        let abi_text = self.type_catalog().abi_canonical_text();
+        let mut abi_text = self.type_catalog().abi_canonical_text();
+        abi_text.push_str(&self.export_contract_text());
         let ffi_text = canonical_ffi_text(self);
         let ownership_text = canonical_ownership_text(self);
         CanonicalMirRouteReceipt {
@@ -588,6 +589,8 @@ fn canonical_mir_text(program: &MirProgram) -> String {
     text.push_str(MIR_IDENTITY_SCHEMA);
     text.push('\n');
     text.push_str(&program.type_catalog().canonical_text());
+    text.push_str(&program.actor_contract_text());
+    text.push_str(&program.export_contract_text());
     for instance in program.instances().values() {
         text.push_str("mir.instance ");
         text.push_str(instance.id.as_str());
@@ -613,6 +616,9 @@ fn canonical_mir_text(program: &MirProgram) -> String {
     }
     text.push_str(&canonical_ffi_text(program));
     text.push_str(&super::nested_callable::canonical_nested_callable_scope_text(program));
+    for receipt in program.closure_callable_receipts().values() {
+        text.push_str(&receipt.canonical_text());
+    }
     for function in program.functions().values() {
         text.push_str(&function.canonical_text());
     }

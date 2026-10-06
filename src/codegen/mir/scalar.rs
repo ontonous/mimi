@@ -1,6 +1,7 @@
 //! Scalar constants and checked arithmetic for native MIR.
 
 use super::*;
+use crate::codegen::CallSiteValueExt;
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     pub(super) fn emit_const(
@@ -189,6 +190,28 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .get(&left_ty)
             .ok_or_else(|| NativeMirError::new(subject, "binary left TypeDesc is absent"))?;
+        let managed_any_ty = crate::core::mir::types::managed_any_i32_string_v1_type_id();
+        let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let bool_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+        if matches!(op, ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual)
+            && result_ty == bool_ty
+            && ((left_ty == managed_any_ty && right_ty == string_ty)
+                || (right_ty == managed_any_ty && left_ty == string_ty))
+        {
+            let (owner, string) = if left_ty == managed_any_ty {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            return self.emit_managed_any_string_comparison(
+                op,
+                owner,
+                string,
+                &managed_any_ty,
+                &string_ty,
+                subject,
+            );
+        }
         if matches!(left_desc.abi, MirAbiClass::Float { bits: 32 | 64 }) {
             self.program
                 .type_catalog()
@@ -290,6 +313,124 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ResolvedBinaryOp::Remainder => self
                 .emit_checked_div_rem(left_value, right_value, false, subject)
                 .map(BasicValueEnum::from),
+            ResolvedBinaryOp::Power => {
+                if left_ty != right_ty || result_ty != left_ty {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "checked Power requires identical base, exponent, and result TypeDesc identities",
+                    ));
+                }
+                let operand_ty = left_value.get_type();
+                let operand_width = operand_ty.get_bit_width();
+                if !matches!(operand_width, 32 | 64) {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "checked Power requires a signed i32 or i64 TypeDesc",
+                    ));
+                }
+                let i64_ty = self.generator.context.i64_type();
+                let base_i64 = if operand_width == 32 {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(left_value, i64_ty, "mir_pow_base_ext")
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                } else {
+                    left_value
+                };
+                let exponent_i64 = if operand_width == 32 {
+                    self.generator
+                        .builder
+                        .build_int_s_extend(right_value, i64_ty, "mir_pow_exponent_ext")
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                } else {
+                    right_value
+                };
+                let checked = if super::actor_status::is_actor_tagged(
+                    self.program,
+                    &self.function.owner,
+                ) {
+                    // Actor-tagged workers must report trap codes through the
+                    // {status,value} ABI so the root can drain and join the
+                    // domain before reporting failure. The ordinary helper
+                    // exits the process and is therefore unsafe on this path.
+                    let i32_ty = self.generator.context.i32_type();
+                    let out_pointer_ty =
+                        self.generator.context.ptr_type(inkwell::AddressSpace::default());
+                    let status_helper = self
+                        .generator
+                        .module
+                        .get_function("__mimi_pow_i64_status")
+                        .unwrap_or_else(|| {
+                            self.generator.module.add_function(
+                                "__mimi_pow_i64_status",
+                                i32_ty.fn_type(
+                                    &[i64_ty.into(), i64_ty.into(), out_pointer_ty.into()],
+                                    false,
+                                ),
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                    let out_slot = self
+                        .generator
+                        .builder
+                        .build_alloca(i64_ty, "mir_pow_status_out")
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                    let status = self
+                        .generator
+                        .builder
+                        .build_call(
+                            status_helper,
+                            &[base_i64.into(), exponent_i64.into(), out_slot.into()],
+                            "mir_pow_status",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| {
+                            NativeMirError::new(subject, "checked Power status helper returned void")
+                        })?
+                        .into_int_value();
+                    self.emit_actor_status_guard(status, subject)?;
+                    self.generator
+                        .builder
+                        .build_load(i64_ty, out_slot, "mir_pow_checked_i64")
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                        .into_int_value()
+                } else {
+                    let helper = self
+                        .generator
+                        .module
+                        .get_function("__mimi_pow_i64")
+                        .unwrap_or_else(|| {
+                            self.generator.module.add_function(
+                                "__mimi_pow_i64",
+                                i64_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false),
+                                Some(inkwell::module::Linkage::External),
+                            )
+                        });
+                    self.generator
+                        .builder
+                        .build_call(
+                            helper,
+                            &[base_i64.into(), exponent_i64.into()],
+                            "mir_pow_checked_i64",
+                        )
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                        .try_as_basic_value_opt()
+                        .ok_or_else(|| {
+                            NativeMirError::new(subject, "checked Power runtime helper returned void")
+                        })?
+                        .into_int_value()
+                };
+                if operand_width == 32 {
+                    self.generator
+                        .builder
+                        .build_int_truncate(checked, operand_ty, "mir_pow_wrap_i32")
+                        .map(BasicValueEnum::from)
+                        .map_err(|error| NativeMirError::new(subject, error.to_string()))
+                } else {
+                    Ok(checked.into())
+                }
+            }
             ResolvedBinaryOp::Equal => {
                 self.compare(IntPredicate::EQ, left_value, right_value, subject)
             }
@@ -330,6 +471,413 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         })
     }
 
+    /// Compare the exact ManagedAny-i32/String profile by borrowing a fresh
+    /// length-bearing String snapshot from the runtime. The owner itself is
+    /// never cloned, dropped, or transferred by equality; its Checker-sealed
+    /// ownership ledger remains live after this read.
+    fn emit_managed_any_string_comparison(
+        &mut self,
+        op: ResolvedBinaryOp,
+        owner: &MirValueId,
+        string: &MirValueId,
+        managed_any_ty: &crate::core::ResolvedTypeId,
+        string_ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        super::ordinary_map_any_get::validate_managed_any_type(
+            self.program.type_catalog(),
+            managed_any_ty,
+        )
+        .map_err(|message| NativeMirError::new(subject, message))?;
+        self.program
+            .type_catalog()
+            .validate_owned_string(string_ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+
+        let c = self.generator.context;
+        let ptr_ty = c.ptr_type(inkwell::AddressSpace::default());
+        let owner_value = self.value(owner, subject)?.into_int_value();
+        let string_value = self.value(string, subject)?.into_struct_value();
+        let peer_data = self
+            .generator
+            .builder
+            .build_extract_value(string_value, 0, "mir_any_string_peer_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let peer_len = self
+            .generator
+            .builder
+            .build_extract_value(string_value, 1, "mir_any_string_peer_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+
+        let out_data = self
+            .generator
+            .builder
+            .build_alloca(ptr_ty, "mir_any_string_copy_data_out")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let out_len = self
+            .generator
+            .builder
+            .build_alloca(c.i64_type(), "mir_any_string_copy_len_out")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_store(out_data, ptr_ty.const_null())
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_store(out_len, c.i64_type().const_zero())
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        let copy_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_managed_any_i32_string_v1_copy_string")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let copy_status = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    copy_fn,
+                    &[
+                        owner_value.into(),
+                        c.i32_type().const_int(2, false).into(),
+                        c.i32_type().const_int(1, false).into(),
+                        out_data.into(),
+                        out_len.into(),
+                    ],
+                    "mir_any_string_copy_status",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "ManagedAny String copy returned void"))?
+        .into_int_value();
+        let is_ok = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                copy_status,
+                c.i32_type().const_zero(),
+                "mir_any_string_copy_ok",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let is_kind_mismatch = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                copy_status,
+                c.i32_type().const_int(2, false),
+                "mir_any_string_copy_kind_mismatch",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let status_is_supported = self
+            .generator
+            .builder
+            .build_or(is_ok, is_kind_mismatch, "mir_any_string_copy_status_valid")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_owned_get_root_guard(
+            status_is_supported,
+            "[E0800] ManagedAny String equality copy failed",
+            subject,
+        )?;
+
+        let mismatch = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_wrong_kind");
+        let compare = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_compare");
+        let result_merge = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_result");
+        self.generator
+            .builder
+            .build_conditional_branch(is_kind_mismatch, mismatch, compare)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(mismatch);
+        let mismatch_result = c
+            .bool_type()
+            .const_int(u64::from(op == ResolvedBinaryOp::NotEqual), false);
+        let mismatch_end = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "ManagedAny wrong-kind block has no insertion point",
+            )
+        })?;
+        self.generator
+            .builder
+            .build_unconditional_branch(result_merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(compare);
+        let copied_data = self
+            .generator
+            .builder
+            .build_load(ptr_ty, out_data, "mir_any_string_copy_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let copied_len = self
+            .generator
+            .builder
+            .build_load(c.i64_type(), out_len, "mir_any_string_copy_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let copied_nonnull = self
+            .generator
+            .builder
+            .build_is_not_null(copied_data, "mir_any_string_copy_nonnull")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let copied_len_nonnegative = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::SGE,
+                copied_len,
+                c.i64_type().const_zero(),
+                "mir_any_string_copy_len_nonnegative",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let copied_abi_valid = self
+            .generator
+            .builder
+            .build_and(
+                copied_nonnull,
+                copied_len_nonnegative,
+                "mir_any_string_copy_abi_valid",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_owned_get_root_guard(
+            copied_abi_valid,
+            "[E0800] malformed ManagedAny String equality copy",
+            subject,
+        )?;
+        self.emit_ordinary_map_domain_own_string(copied_data, copied_len, subject)?;
+
+        let peer_len_nonnegative = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::SGE,
+                peer_len,
+                c.i64_type().const_zero(),
+                "mir_any_string_peer_len_nonnegative",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_owned_get_root_guard(
+            peer_len_nonnegative,
+            "[E0800] malformed String operand in ManagedAny equality",
+            subject,
+        )?;
+        let peer_is_empty = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                peer_len,
+                c.i64_type().const_zero(),
+                "mir_any_string_peer_is_empty",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let peer_data_nonnull = self
+            .generator
+            .builder
+            .build_is_not_null(peer_data, "mir_any_string_peer_nonnull")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let peer_data_valid = self
+            .generator
+            .builder
+            .build_or(
+                peer_is_empty,
+                peer_data_nonnull,
+                "mir_any_string_peer_data_valid",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_owned_get_root_guard(
+            peer_data_valid,
+            "[E0800] malformed String pointer in ManagedAny equality",
+            subject,
+        )?;
+
+        let same_length = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                copied_len,
+                peer_len,
+                "mir_any_string_lengths_equal",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let compare_bytes = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_compare_bytes");
+        let lengths_differ = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_lengths_differ");
+        let compare_merge = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_compare_result");
+        self.generator
+            .builder
+            .build_conditional_branch(same_length, compare_bytes, lengths_differ)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(lengths_differ);
+        let different_length_equal = c.bool_type().const_zero();
+        let lengths_differ_end = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "ManagedAny length-mismatch block has no insertion point",
+            )
+        })?;
+        self.generator
+            .builder
+            .build_unconditional_branch(compare_merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(compare_bytes);
+        let is_empty = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                copied_len,
+                c.i64_type().const_zero(),
+                "mir_any_string_equal_length_is_zero",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let equal_empty = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_equal_empty");
+        let compare_nonempty = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_any_string_compare_nonempty");
+        self.generator
+            .builder
+            .build_conditional_branch(is_empty, equal_empty, compare_nonempty)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(equal_empty);
+        let empty_equal = c.bool_type().const_int(1, false);
+        let empty_end = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "ManagedAny empty-string block has no insertion point",
+            )
+        })?;
+        self.generator
+            .builder
+            .build_unconditional_branch(compare_merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(compare_nonempty);
+        let memcmp_fn = self
+            .generator
+            .module
+            .get_function("memcmp")
+            .unwrap_or_else(|| {
+                self.generator.module.add_function(
+                    "memcmp",
+                    c.i32_type()
+                        .fn_type(&[ptr_ty.into(), ptr_ty.into(), c.i64_type().into()], false),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let byte_cmp = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    memcmp_fn,
+                    &[copied_data.into(), peer_data.into(), copied_len.into()],
+                    "mir_any_string_memcmp",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "memcmp returned void"))?
+        .into_int_value();
+        let bytes_equal = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                byte_cmp,
+                c.i32_type().const_zero(),
+                "mir_any_string_bytes_equal",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let bytes_end = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "ManagedAny byte-comparison block has no insertion point",
+            )
+        })?;
+        self.generator
+            .builder
+            .build_unconditional_branch(compare_merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(compare_merge);
+        let payload_equal = self
+            .generator
+            .builder
+            .build_phi(c.bool_type(), "mir_any_string_payload_equal")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        payload_equal.add_incoming(&[
+            (&different_length_equal, lengths_differ_end),
+            (&empty_equal, empty_end),
+            (&bytes_equal, bytes_end),
+        ]);
+        let equal_value = payload_equal.as_basic_value().into_int_value();
+        let comparison_result = if op == ResolvedBinaryOp::Equal {
+            equal_value
+        } else {
+            self.generator
+                .builder
+                .build_not(equal_value, "mir_any_string_payload_not_equal")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+        };
+        let copied_string = self
+            .generator
+            .build_string_struct(copied_data, copied_len)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_owned_string_drop_value(copied_string, subject)?;
+        let success_end = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "ManagedAny comparison success has no insertion point",
+            )
+        })?;
+        self.generator
+            .builder
+            .build_unconditional_branch(result_merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(result_merge);
+        let final_result = self
+            .generator
+            .builder
+            .build_phi(c.bool_type(), "mir_any_string_comparison")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        final_result.add_incoming(&[
+            (&mismatch_result, mismatch_end),
+            (&comparison_result, success_end),
+        ]);
+        Ok(final_result.as_basic_value())
+    }
+
     /// SD-8 family: a ±0.0 float divisor traps E0801 through the same
     /// `mimi_trap_float_div_by_zero` runtime face the AST emitter uses, so
     /// the trap code and wording agree across the bytecode VM, the AST
@@ -359,6 +907,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_conditional_branch(is_zero, trap, ok)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.generator.builder.position_at_end(trap);
+        self.emit_ordinary_map_trap_cleanup(subject)?;
         let trap_fn = self
             .generator
             .get_runtime_fn("mimi_trap_float_div_by_zero")
@@ -433,6 +982,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_conditional_branch(not_finite, trap, ok)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.generator.builder.position_at_end(trap);
+        self.emit_ordinary_map_trap_cleanup(subject)?;
         let trap_fn = self
             .generator
             .get_runtime_fn("mimi_trap_float_not_finite")
@@ -717,18 +1267,23 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_conditional_branch(is_zero, zero_trap, zero_ok)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.generator.builder.position_at_end(zero_trap);
-        let trap_fn = self
-            .generator
-            .get_runtime_fn("mimi_trap_div_by_zero")
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.generator
-            .builder
-            .build_call(trap_fn, &[], "mir_div_zero_trap_call")
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.generator
-            .builder
-            .build_unreachable()
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        if super::actor_status::is_actor_tagged(self.program, &self.function.owner) {
+            self.emit_actor_trap_status(801, subject)?;
+        } else {
+            self.emit_ordinary_map_trap_cleanup(subject)?;
+            let trap_fn = self
+                .generator
+                .get_runtime_fn("mimi_trap_div_by_zero")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_call(trap_fn, &[], "mir_div_zero_trap_call")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_unreachable()
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        }
         self.generator.builder.position_at_end(zero_ok);
         let min_val = int_ty
             .const_int(1, false)
@@ -762,18 +1317,23 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_conditional_branch(min_over_neg_one, overflow_trap, safe)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.generator.builder.position_at_end(overflow_trap);
-        let overflow_fn = self
-            .generator
-            .get_runtime_fn("mimi_trap_div_overflow")
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.generator
-            .builder
-            .build_call(overflow_fn, &[], "mir_div_overflow_trap_call")
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.generator
-            .builder
-            .build_unreachable()
-            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        if super::actor_status::is_actor_tagged(self.program, &self.function.owner) {
+            self.emit_actor_trap_status(802, subject)?;
+        } else {
+            self.emit_ordinary_map_trap_cleanup(subject)?;
+            let overflow_fn = self
+                .generator
+                .get_runtime_fn("mimi_trap_div_overflow")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_call(overflow_fn, &[], "mir_div_overflow_trap_call")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator
+                .builder
+                .build_unreachable()
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        }
         self.generator.builder.position_at_end(safe);
         if divide {
             self.generator

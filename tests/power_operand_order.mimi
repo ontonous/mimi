@@ -1,0 +1,14 @@
+func base() -> i32 {
+    println("base")
+    2
+}
+
+func exponent() -> i32 {
+    println("exponent")
+    31
+}
+
+func main() -> i32 {
+    println(base() ** exponent())
+    0
+}

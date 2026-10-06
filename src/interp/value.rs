@@ -245,6 +245,105 @@ pub enum CanonicalMapRootValue {
     String(Arc<String>),
 }
 
+/// Values admitted by the separately versioned Checker-receipted
+/// MapAnyOwner v1 profile. Even though its first payload slice matches
+/// MapRoot, the distinct enum prevents a raw MapRoot value from crossing the
+/// typed Any-owner bytecode boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalMapAnyOwnerV1Value {
+    I32(i32),
+    String(Arc<String>),
+}
+
+/// Values admitted by the independent source-Map owner lifecycle profile.
+/// This has its own value identity even though the initial payload cases
+/// overlap MapRoot and MapAnyOwner v1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value {
+    I32(i32),
+    String(Arc<String>),
+}
+
+/// Values admitted by the independent ordinary Map owned-Get profile. Its
+/// runtime identity is separate from both the lifecycle profile and legacy
+/// dynamic Maps even though its initial stored payload set is the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalOrdinaryMapOwnedGetI32StringV1Value {
+    I32(i32),
+    String(Arc<String>),
+}
+
+/// Private-payload owned Any for the checker-receipted i32/String v1 slice.
+/// This VM oracle contains no native handle, raw token, or shared Map entry.
+/// Every clone recursively creates its own String owner.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CanonicalManagedAnyI32StringV1 {
+    descriptor_version: u32,
+    payload: CanonicalManagedAnyI32StringV1Payload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CanonicalManagedAnyI32StringV1Payload {
+    I32(i32),
+    String(String),
+}
+
+impl CanonicalManagedAnyI32StringV1 {
+    pub(crate) fn from_i32(value: i32) -> Self {
+        Self {
+            descriptor_version: 1,
+            payload: CanonicalManagedAnyI32StringV1Payload::I32(value),
+        }
+    }
+
+    pub(crate) fn from_string(value: String) -> Self {
+        Self {
+            descriptor_version: 1,
+            payload: CanonicalManagedAnyI32StringV1Payload::String(value),
+        }
+    }
+
+    pub(crate) fn descriptor_version(&self) -> u32 {
+        self.descriptor_version
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_descriptor_version_for_test(mut self, version: u32) -> Self {
+        self.descriptor_version = version;
+        self
+    }
+
+    pub(crate) fn kind(&self) -> u32 {
+        match &self.payload {
+            CanonicalManagedAnyI32StringV1Payload::I32(_) => 1,
+            CanonicalManagedAnyI32StringV1Payload::String(_) => 2,
+        }
+    }
+
+    pub(crate) fn read_i32(&self) -> Option<i32> {
+        match &self.payload {
+            CanonicalManagedAnyI32StringV1Payload::I32(value) => Some(*value),
+            CanonicalManagedAnyI32StringV1Payload::String(_) => None,
+        }
+    }
+
+    pub(crate) fn string_payload(&self) -> Option<&str> {
+        match &self.payload {
+            CanonicalManagedAnyI32StringV1Payload::I32(_) => None,
+            CanonicalManagedAnyI32StringV1Payload::String(value) => Some(value),
+        }
+    }
+}
+
+impl Clone for CanonicalManagedAnyI32StringV1 {
+    fn clone(&self) -> Self {
+        Self {
+            descriptor_version: self.descriptor_version,
+            payload: self.payload.clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Value {
     Int(i64),
@@ -270,6 +369,22 @@ pub enum Value {
     /// island. It is separate from legacy `Record(None, fields)` Maps and is
     /// only created/consumed by dedicated MIR bytecode operations.
     CanonicalMapRoot(Arc<BTreeMap<String, CanonicalMapRootValue>>),
+    /// Opaque root for the independently receipted MapAnyOwner v1 profile.
+    /// This deliberately has a different runtime identity from CanonicalMapRoot.
+    CanonicalMapAnyOwnerV1(Arc<BTreeMap<String, CanonicalMapAnyOwnerV1Value>>),
+    /// Opaque root for source-compatible persistent ordinary Map updates.
+    /// This runtime identity is independent from MapRoot and MapAnyOwner v1.
+    CanonicalOrdinaryMapOwnerLifecycleI32StringV1(
+        Arc<BTreeMap<String, CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value>>,
+    ),
+    /// Opaque root for the separately receipted typed owned-Get ordinary Map
+    /// profile. Persistent updates produce a new root and preserve the
+    /// source root value.
+    CanonicalOrdinaryMapOwnedGetI32StringV1(
+        Arc<BTreeMap<String, CanonicalOrdinaryMapOwnedGetI32StringV1Value>>,
+    ),
+    /// Dedicated owned Any; construction and extraction require canonical MIR receipts.
+    CanonicalManagedAnyI32StringV1(CanonicalManagedAnyI32StringV1),
     Record(Option<String>, HashMap<String, Value>),
     /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
     Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),
@@ -279,6 +394,8 @@ pub enum Value {
     QuoteAst(Box<QuotedAst>),
     Newtype(String, Box<Value>),
     Actor(super::ActorHandle),
+    CanonicalActorHandle(super::bytecode::actor::CanonicalActorHandleValue),
+    CanonicalActorState(super::bytecode::actor::CanonicalActorStateValue),
     Closure {
         params: Vec<Param>,
         ret: Option<Type>,
@@ -388,6 +505,16 @@ impl Clone for Value {
                 payload: payload.clone(),
             },
             Value::CanonicalMapRoot(root) => Value::CanonicalMapRoot(Arc::clone(root)),
+            Value::CanonicalMapAnyOwnerV1(root) => Value::CanonicalMapAnyOwnerV1(Arc::clone(root)),
+            Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(root) => {
+                Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(Arc::clone(root))
+            }
+            Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
+                Value::CanonicalOrdinaryMapOwnedGetI32StringV1(Arc::clone(root))
+            }
+            Value::CanonicalManagedAnyI32StringV1(value) => {
+                Value::CanonicalManagedAnyI32StringV1(value.clone())
+            }
             Value::Record(name, fields) => Value::Record(name.clone(), fields.clone()),
             Value::Future(v) => Value::Future(Arc::clone(v)),
             Value::Error(v) => Value::Error(v.clone()),
@@ -396,6 +523,8 @@ impl Clone for Value {
             Value::QuoteAst(v) => Value::QuoteAst(v.clone()),
             Value::Newtype(name, v) => Value::Newtype(name.clone(), v.clone()),
             Value::Actor(v) => Value::Actor(v.clone()),
+            Value::CanonicalActorHandle(v) => Value::CanonicalActorHandle(v.clone()),
+            Value::CanonicalActorState(v) => Value::CanonicalActorState(v.clone()),
             Value::Closure {
                 params,
                 ret,
@@ -1786,6 +1915,16 @@ impl std::fmt::Display for Value {
                 write!(f, ")")
             }
             Value::CanonicalMapRoot(_) => write!(f, "<canonical MapRoot>"),
+            Value::CanonicalMapAnyOwnerV1(_) => write!(f, "<canonical MapAnyOwner v1>"),
+            Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(_) => {
+                write!(f, "<canonical ordinary Map owner lifecycle v1>")
+            }
+            Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => {
+                write!(f, "<canonical ordinary Map owned-Get v1>")
+            }
+            Value::CanonicalManagedAnyI32StringV1(_) => {
+                write!(f, "<canonical managed Any i32/String v1>")
+            }
             Value::Record(type_name, fields) => {
                 // Untyped records (JSON/Map) print as JSON objects for dual
                 // with codegen Map handles (mimi_map_to_json_i64).
@@ -1860,6 +1999,8 @@ impl std::fmt::Display for Value {
             Value::QuoteAst(_) => write!(f, "QuoteAst(...)"),
             Value::Newtype(name, v) => write!(f, "{}({})", name, v),
             Value::Actor(_) => write!(f, "Actor(...)"),
+            Value::CanonicalActorHandle(_) => write!(f, "<canonical Actor handle>"),
+            Value::CanonicalActorState(_) => write!(f, "<canonical Actor state>"),
             Value::Closure { .. } => write!(f, "Closure(...)"),
             Value::BytecodeClosure { proto, .. } => write!(f, "BytecodeClosure(proto={})", proto),
             Value::Shared(arc) => {
@@ -2029,7 +2170,11 @@ pub(crate) fn contains_arena_ref(v: &Value, arena_id: usize) -> bool {
 
 pub(crate) fn is_copy(v: &Value) -> bool {
     match v {
-        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Unit => true,
+        Value::Int(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::Unit
+        | Value::CanonicalActorHandle(_) => true,
         Value::Tuple(elems) => elems.iter().all(is_copy),
         Value::Newtype(_, inner) => is_copy(inner),
         Value::Shared(_) | Value::LocalShared(_) => true,
@@ -2071,6 +2216,8 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
         return false; // assume not equal on cycle/overflow
     }
     match (a, b) {
+        (Value::CanonicalActorHandle(a), Value::CanonicalActorHandle(b)) => a == b,
+        (Value::CanonicalActorState(a), Value::CanonicalActorState(b)) => a == b,
         (Value::Int(a), Value::Int(b)) => a == b,
         // Cross numeric comparison: widen the integer side to float.
         // SD-10 (0.31.51b): exact comparison (matches codegen OEQ).
@@ -2158,6 +2305,18 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
                     .all(|(x, y)| values_equal_depth(x, y, depth + 1))
         }
         (Value::CanonicalMapRoot(a), Value::CanonicalMapRoot(b)) => a == b,
+        (Value::CanonicalMapAnyOwnerV1(a), Value::CanonicalMapAnyOwnerV1(b)) => a == b,
+        (
+            Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(a),
+            Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(b),
+        ) => a == b,
+        (
+            Value::CanonicalOrdinaryMapOwnedGetI32StringV1(a),
+            Value::CanonicalOrdinaryMapOwnedGetI32StringV1(b),
+        ) => a == b,
+        (Value::CanonicalManagedAnyI32StringV1(a), Value::CanonicalManagedAnyI32StringV1(b)) => {
+            a == b
+        }
         (Value::Record(_, a), Value::Record(_, b)) => {
             a.len() == b.len()
                 && a.iter().all(|(k, v)| {
@@ -2284,6 +2443,12 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::Variant(_, _) => "variant",
         Value::CanonicalVariant { .. } => "variant",
         Value::CanonicalMapRoot(_) => "map-root",
+        Value::CanonicalMapAnyOwnerV1(_) => "map-any-owner-v1",
+        Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(_) => {
+            "ordinary-map-owner-lifecycle-i32-string-v1"
+        }
+        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => "ordinary-map-owned-get-i32-string-v1",
+        Value::CanonicalManagedAnyI32StringV1(_) => "managed-any-i32-string-v1",
         Value::Record(Some(_), _) => "record",
         Value::Record(None, _) => "record",
         Value::Error(_) => "error",
@@ -2302,6 +2467,8 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         Value::PlaceRefMut { .. } => "borrowed_place_mut",
         Value::Cap(_) => "cap",
         Value::Actor(_) => "actor",
+        Value::CanonicalActorHandle(_) => "canonical-actor-handle",
+        Value::CanonicalActorState(_) => "canonical-actor-state",
         Value::Future(_) => "future",
         Value::ArenaRef(_, _, _) => "arena_ref",
         Value::ArenaBlock(_) => "arena_block",
@@ -2340,6 +2507,52 @@ impl PartialEq for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_managed_any_recursive_clone_has_independent_string_owners() {
+        let value = Value::Tuple(vec![Value::Tuple(vec![
+            Value::CanonicalManagedAnyI32StringV1(CanonicalManagedAnyI32StringV1::from_string(
+                "owned snapshot".into(),
+            )),
+        ])]);
+        let copy = value.clone();
+        let payload = |value: &Value| {
+            let Value::Tuple(outer) = value else {
+                panic!("outer tuple")
+            };
+            let Value::Tuple(inner) = &outer[0] else {
+                panic!("inner tuple")
+            };
+            let Value::CanonicalManagedAnyI32StringV1(any) = &inner[0] else {
+                panic!("managed Any")
+            };
+            any.string_payload().expect("String payload").as_ptr()
+        };
+        assert_ne!(payload(&value), payload(&copy));
+        drop(value);
+        let Value::Tuple(outer) = copy else {
+            panic!("copied outer tuple")
+        };
+        let Value::Tuple(inner) = &outer[0] else {
+            panic!("copied inner tuple")
+        };
+        let Value::CanonicalManagedAnyI32StringV1(any) = &inner[0] else {
+            panic!("copied Any")
+        };
+        assert_eq!(any.descriptor_version(), 1);
+        assert_eq!(any.kind(), 2);
+        assert_eq!(any.string_payload(), Some("owned snapshot"));
+        assert_eq!(any.read_i32(), None);
+    }
+
+    #[test]
+    fn canonical_managed_any_i32_zero_is_owned_and_descriptor_checked() {
+        let zero = CanonicalManagedAnyI32StringV1::from_i32(0);
+        assert_eq!(zero.descriptor_version(), 1);
+        assert_eq!(zero.kind(), 1);
+        assert_eq!(zero.read_i32(), Some(0));
+        assert_eq!(zero.string_payload(), None);
+    }
 
     /// H9 (0.35.37): compile-time enforcement that CBufferInner's unsafe
     /// Send + Sync impls remain in place. If a future refactor removes the

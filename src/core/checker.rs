@@ -204,6 +204,9 @@ pub(crate) struct Checker<'a> {
     /// 追加 C: names of extern "C" functions. `?` on extern calls is rejected
     /// because FFI failures are Faults (not Rejected) — architecture amendment clause 10.
     pub(crate) extern_funcs: std::collections::HashSet<String>,
+    /// Extern symbols whose declarations permit C variadic tail arguments.
+    /// Kept separately from `funcs`, whose signature only stores fixed params.
+    pub(crate) variadic_extern_funcs: std::collections::HashSet<String>,
     /// 0.31.17: lambda nesting depth + parameter names per level.
     /// Used to reject flow state captures in closures.
     pub(crate) lambda_depth: usize,
@@ -356,6 +359,7 @@ impl<'a> Checker<'a> {
             in_pinned_depth: 0,
             in_comptime: false,
             extern_funcs: std::collections::HashSet::new(),
+            variadic_extern_funcs: std::collections::HashSet::new(),
             lambda_depth: 0,
             lambda_param_names: Vec::new(),
             current_callable_owner: None,

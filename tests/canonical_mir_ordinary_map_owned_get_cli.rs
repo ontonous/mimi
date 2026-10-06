@@ -139,6 +139,86 @@ fn ordinary_map_owned_get_rejects_bare_list_composition_before_backend() {
 }
 
 #[test]
+fn ordinary_map_values_snapshot_uses_default_run_build_verify_route() {
+    let mimi = mimi_bin();
+    let source = fixture("mir_ordinary_map_values.mimi");
+
+    let run = Command::new(&mimi)
+        .env("MIMI_ROUTE_CENSUS", "1")
+        .arg("run")
+        .arg(&source)
+        .output()
+        .expect("run ordinary Map values fixture");
+    assert!(
+        run.status.success(),
+        "mimi run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "");
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains(
+            "canonical route disposition: canonical (ordinary-map-owned-get-i32-string-v1)"
+        ),
+        "ordinary Map values did not report the owned-get route: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let binary = std::env::temp_dir().join(format!(
+        "mimi-ordinary-map-values-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("cli")
+    ));
+    let build = Command::new(&mimi)
+        .env("MIMI_ROUTE_CENSUS", "1")
+        .arg("build")
+        .arg(&source)
+        .arg("--output")
+        .arg(&binary)
+        .output()
+        .expect("build ordinary Map values fixture");
+    assert!(
+        build.status.success(),
+        "mimi build failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let native = Command::new(&binary)
+        .output()
+        .expect("run built ordinary Map values binary");
+    let _ = std::fs::remove_file(&binary);
+    assert!(
+        native.status.success(),
+        "native ordinary Map values binary failed:\nstderr:\n{}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "");
+
+    let receipt = Command::new(&mimi)
+        .env("MIMI_ROUTE_CENSUS", "1")
+        .arg("mir")
+        .arg("--receipt")
+        .arg(&source)
+        .output()
+        .expect("inspect ordinary Map values MIR receipt");
+    assert!(
+        receipt.status.success(),
+        "MIR receipt inspection failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&receipt.stdout),
+        String::from_utf8_lossy(&receipt.stderr)
+    );
+    let receipt_stdout = String::from_utf8_lossy(&receipt.stdout);
+    let receipt_stderr = String::from_utf8_lossy(&receipt.stderr);
+    let receipt_transcript = format!("{receipt_stdout}{receipt_stderr}");
+    assert!(
+        receipt_transcript.contains("lowered 1 callable(s) to canonical MIR")
+            && !receipt_transcript.contains("canonical route disposition: legacy")
+            && !receipt_stderr.contains("canonical route disposition: legacy"),
+        "MIR receipt inspection did not report a canonical owned-get route:\nstdout:\n{receipt_stdout}\nstderr:\n{receipt_stderr}"
+    );
+}
+
+#[test]
 fn explicit_mir_verifier_rejects_incomplete_typed_owned_get_coverage() {
     let mimi = mimi_bin();
     let dir = std::env::temp_dir().join(format!(

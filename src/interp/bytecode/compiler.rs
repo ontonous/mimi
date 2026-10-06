@@ -8,9 +8,116 @@ use super::instr::*;
 use super::registry;
 use crate::ast::*;
 use crate::interp::error::InterpError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Stable lookup key for the source expression identity shared by the AST
+/// compatibility compiler and CheckedProgram's call-site directory. A full
+/// source span is used, never a method name or display type spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CheckedSourceSpanKey {
+    source_id: u32,
+    start_line: usize,
+    start_col: usize,
+    end_line: usize,
+    end_col: usize,
+}
+
+impl CheckedSourceSpanKey {
+    fn from_span(span: crate::span::Span) -> Option<Self> {
+        (span.start_line > 0 && span.start_col > 0 && span.end_line > 0 && span.end_col > 0)
+            .then_some(Self {
+                source_id: span.source_id.raw(),
+                start_line: span.start_line,
+                start_col: span.start_col,
+                end_line: span.end_line,
+                end_col: span.end_col,
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CheckedImplOwnerReceipt {
+    method_names: Vec<String>,
+    method_owners: Vec<crate::core::NodeId>,
+}
+
+#[derive(Debug, Clone)]
+struct CheckedCallSiteReceipt {
+    node_id: crate::core::NodeId,
+    callee: Option<crate::core::ResolvedCallee>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckedBuiltinMethodTarget {
+    Registry(&'static str),
+    Dynamic(&'static str),
+    OptionResultOpcode(&'static str),
+    StringScalarLen,
+}
+
+/// Map checker-owned builtin identities to an existing VM semantic entry.
+/// Receiver families are part of the identity; source spelling is never used
+/// to select a checked method implementation.
+fn checked_builtin_method_target(
+    builtin: &crate::core::BuiltinId,
+) -> Option<CheckedBuiltinMethodTarget> {
+    use CheckedBuiltinMethodTarget::{Dynamic, OptionResultOpcode, Registry, StringScalarLen};
+    Some(match builtin.as_str() {
+        "builtin.method.string.len" => StringScalarLen,
+        "builtin.method.list.len" => Registry("len"),
+        "builtin.method.option.is_some" | "builtin.method.result.is_ok" => {
+            OptionResultOpcode("is_some")
+        }
+        "builtin.method.option.is_none" | "builtin.method.result.is_err" => {
+            OptionResultOpcode("is_none")
+        }
+        "builtin.method.option.unwrap" | "builtin.method.result.unwrap" => {
+            OptionResultOpcode("unwrap")
+        }
+        "builtin.method.option.expect" | "builtin.method.result.expect" => {
+            OptionResultOpcode("expect")
+        }
+        "builtin.method.option.unwrap_or" | "builtin.method.result.unwrap_or" => {
+            OptionResultOpcode("unwrap_or")
+        }
+        "builtin.method.string.trim" => Registry("trim"),
+        "builtin.method.string.to_upper" => Registry("to_upper"),
+        "builtin.method.string.to_lower" => Registry("to_lower"),
+        "builtin.method.string.parse_int" => Registry("parse_int"),
+        "builtin.method.string.parse_float" => Registry("parse_float"),
+        "builtin.method.string.contains" => Registry("contains"),
+        "builtin.method.set.contains" => Dynamic("contains"),
+        "builtin.method.string.starts_with" => Registry("starts_with"),
+        "builtin.method.string.ends_with" => Registry("ends_with"),
+        "builtin.method.string.split" => Registry("split"),
+        "builtin.method.string.replace" => Registry("replace"),
+        "builtin.method.string.repeat" => Registry("repeat"),
+        "builtin.method.string.char_at" => Registry("char_at"),
+        "builtin.method.string.substring" => Registry("substring"),
+        "builtin.method.string.index_of" => Registry("index_of"),
+        "builtin.method.list.reverse" => Registry("reverse"),
+        "builtin.method.list.concat" => Dynamic("concat"),
+        "builtin.method.set.size" => Registry("size"),
+        "builtin.method.set.len" => Registry("len"),
+        "builtin.method.set.is_empty" => Registry("is_empty"),
+        "builtin.method.set.insert" => Registry("insert"),
+        "builtin.method.set.remove" => Registry("remove"),
+        "builtin.method.set.to_list" => Registry("to_list"),
+        "builtin.method.shared.clone" => Registry("clone"),
+        "builtin.method.shared.deref" | "builtin.method.shared.inner" => Registry("deref"),
+        "builtin.method.weak.upgrade" => Dynamic("upgrade"),
+        "builtin.method.option.deref" => Dynamic("deref"),
+        "builtin.method.option.ok_or" | "builtin.method.result.ok_or" => Dynamic("ok_or"),
+        "builtin.method.option.map" | "builtin.method.result.map" => Dynamic("map"),
+        "builtin.method.option.and_then" | "builtin.method.result.and_then" => Dynamic("and_then"),
+        "builtin.method.option.map_err" | "builtin.method.result.map_err" => Dynamic("map_err"),
+        "builtin.method.session.send" => Registry("session_send"),
+        "builtin.method.session.recv" => Registry("session_recv"),
+        "builtin.method.session.close" => Registry("session_close"),
+        _ => return None,
+    })
+}
 /// Bytecode compiler: transforms AST functions into FunctionProto.
 pub struct BytecodeCompiler {
     /// Function name → FuncIdx mapping (built during first pass).
@@ -65,6 +172,22 @@ pub struct BytecodeCompiler {
     /// (type_name, method_name) → mangled function name.
     /// Eliminates string prefix guessing (G1).
     method_table: HashMap<(String, String), String>,
+    /// Checked impl owner receipts indexed by the exact source span of the
+    /// `impl` declaration. Each entry preserves declaration-order method
+    /// owners from ResolvedImpl; duplicate spans are retained so consumers
+    /// reject ambiguity instead of selecting a HashMap winner.
+    checked_impl_owners_by_span: HashMap<CheckedSourceSpanKey, Vec<CheckedImplOwnerReceipt>>,
+    /// Checked implementation callable identities that were sealed by the
+    /// above owner table. ProtocolMethod dispatch may target only this set.
+    checked_impl_callable_owners: HashSet<String>,
+    /// The checked method owner must belong to exactly one impl declaration.
+    checked_impl_callable_owner_counts: HashMap<String, usize>,
+    /// Checked call-site target receipts indexed by the full AST call span.
+    checked_call_sites_by_span: HashMap<CheckedSourceSpanKey, Vec<CheckedCallSiteReceipt>>,
+    /// Set by install_checked_program. In this mode method dispatch must use
+    /// the checked call-site owner and cannot fall back to method_table or a
+    /// legacy `{Type}_{method}` spelling.
+    checked_program_installed: bool,
     /// Flow definitions (for transition compilation).
     flow_defs: HashMap<String, FlowDef>,
     /// Actor definitions (for runtime spawn).
@@ -450,6 +573,11 @@ impl BytecodeCompiler {
             type_hints: HashMap::new(),
             func_ret_types: HashMap::new(),
             method_table: HashMap::new(),
+            checked_impl_owners_by_span: HashMap::new(),
+            checked_impl_callable_owners: HashSet::new(),
+            checked_impl_callable_owner_counts: HashMap::new(),
+            checked_call_sites_by_span: HashMap::new(),
+            checked_program_installed: false,
             flow_defs: HashMap::new(),
             actor_defs: HashMap::new(),
             flow_transition_funcs: HashMap::new(),
@@ -469,9 +597,58 @@ impl BytecodeCompiler {
     /// Install type information from CheckedProgram (G1 integration).
     /// Populates `type_hints` (parameter types), `func_ret_types` (return
     /// types — the READ path that `infer_expr_type` consults for `Expr::Call`,
-    /// C-3 / Wave-2 #2) and `method_table` (impl dispatch).
+    /// C-3 / Wave-2 #2) and exact impl/call-site callable owners.
     /// Call this BEFORE `compile_file` to enable type-directed compilation.
     pub fn install_checked_program(&mut self, program: &crate::core::CheckedProgram) {
+        self.checked_program_installed = true;
+        self.checked_impl_owners_by_span.clear();
+        self.checked_impl_callable_owners.clear();
+        self.checked_impl_callable_owner_counts.clear();
+        self.checked_call_sites_by_span.clear();
+        self.method_table.clear();
+
+        // Preserve exact Checker call-site identities. The compatibility VM
+        // still compiles the retained AST, but a method call may use that AST
+        // only to locate the canonical checked target by its full source span.
+        for site in program.call_sites().values() {
+            let Some(span_key) = CheckedSourceSpanKey::from_span(site.origin.user_span()) else {
+                continue;
+            };
+            self.checked_call_sites_by_span
+                .entry(span_key)
+                .or_default()
+                .push(CheckedCallSiteReceipt {
+                    node_id: site.node_id.clone(),
+                    callee: site.resolved_callee.clone(),
+                });
+        }
+
+        // ResolvedImpl.method_owners is the authority for method bodies. Keep
+        // its ordered association with names only to validate that the AST
+        // declaration being compiled is the same declaration; emitted
+        // bytecode symbols are the stable callable owner IDs below.
+        for implementation in program.impls().values() {
+            let Some(span_key) = CheckedSourceSpanKey::from_span(implementation.origin.user_span())
+            else {
+                continue;
+            };
+            let receipt = CheckedImplOwnerReceipt {
+                method_names: implementation.methods.clone(),
+                method_owners: implementation.method_owners.clone(),
+            };
+            for owner in &receipt.method_owners {
+                self.checked_impl_callable_owners.insert(owner.0.clone());
+                *self
+                    .checked_impl_callable_owner_counts
+                    .entry(owner.0.clone())
+                    .or_default() += 1;
+            }
+            self.checked_impl_owners_by_span
+                .entry(span_key)
+                .or_default()
+                .push(receipt);
+        }
+
         // Extract parameter and return types for each function.
         for func in program.functions().values() {
             let param_types: Vec<VarType> = func
@@ -491,15 +668,74 @@ impl BytecodeCompiler {
                 surface_type_to_var_type(&func.ret),
             );
         }
+    }
 
-        // Build method resolution table from impls.
-        for impl_def in program.impls().values() {
-            for method_name in &impl_def.methods {
-                let mangled = format!("{}_{}", impl_def.type_name, method_name);
-                self.method_table
-                    .insert((impl_def.type_name.clone(), method_name.clone()), mangled);
-            }
+    fn checked_impl_method_owners(
+        &self,
+        impl_def: &ImplDef,
+    ) -> Result<Vec<crate::core::NodeId>, InterpError> {
+        let span_key = CheckedSourceSpanKey::from_span(impl_def.meta.span).ok_or_else(|| {
+            InterpError::new("checked impl declaration has no stable source span")
+        })?;
+        let Some(candidates) = self.checked_impl_owners_by_span.get(&span_key) else {
+            return Err(InterpError::new(
+                "checked impl declaration has no ResolvedImpl owner receipt",
+            ));
+        };
+        let [receipt] = candidates.as_slice() else {
+            return Err(InterpError::new(
+                "checked impl declaration has ambiguous ResolvedImpl owner receipts",
+            ));
+        };
+        let ast_names = impl_def
+            .methods
+            .iter()
+            .map(|method| method.name.clone())
+            .collect::<Vec<_>>();
+        if receipt.method_names != ast_names || receipt.method_owners.len() != ast_names.len() {
+            return Err(InterpError::new(
+                "checked impl method order or owner count disagrees with the AST declaration",
+            ));
         }
+        let mut seen = HashSet::new();
+        if receipt.method_owners.iter().any(|owner| {
+            !self.checked_impl_callable_owners.contains(&owner.0)
+                || self.checked_impl_callable_owner_counts.get(&owner.0) != Some(&1)
+                || !seen.insert(owner.clone())
+        }) {
+            return Err(InterpError::new(
+                "checked impl method owner is absent or ambiguous in the owner catalog",
+            ));
+        }
+        Ok(receipt.method_owners.clone())
+    }
+
+    fn checked_callsite_callee(
+        &self,
+        call_meta: Option<AstNodeMeta>,
+    ) -> Result<crate::core::ResolvedCallee, InterpError> {
+        let span = call_meta
+            .map(|meta| meta.span)
+            .and_then(CheckedSourceSpanKey::from_span)
+            .ok_or_else(|| {
+                InterpError::new("checked method call has no stable AST call-site span")
+            })?;
+        let Some(candidates) = self.checked_call_sites_by_span.get(&span) else {
+            return Err(InterpError::new(
+                "checked method call has no checker call-site receipt for its source span",
+            ));
+        };
+        let [site] = candidates.as_slice() else {
+            return Err(InterpError::new(
+                "checked method call has ambiguous checker call-site receipts for its source span",
+            ));
+        };
+        site.callee.clone().ok_or_else(|| {
+            InterpError::new(format!(
+                "checked method call '{}' has no checker-resolved callable owner",
+                site.node_id.0
+            ))
+        })
     }
 
     /// Compile a full AST file into a BytecodeProgram (Arc-shared so VMs,
@@ -650,32 +886,39 @@ impl BytecodeCompiler {
         // so that method calls in function bodies can resolve mangled names).
         for item in &file.items {
             if let Item::Impl(impl_def) = item {
+                let checked_owners = if self.checked_program_installed {
+                    Some(self.checked_impl_method_owners(impl_def)?)
+                } else {
+                    None
+                };
                 // Collect impl type name for method resolution.
                 if !self.impl_type_names.contains(&impl_def.type_name) {
                     self.impl_type_names.push(impl_def.type_name.clone());
                 }
-                for method in &impl_def.methods {
+                for (method_index, method) in impl_def.methods.iter().enumerate() {
                     let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
+                    let callable_owner = checked_owners
+                        .as_ref()
+                        .map(|owners| owners[method_index].0.clone())
+                        .unwrap_or_else(|| mangled_name.clone());
                     let idx = self.functions.len() as FuncIdx;
-                    self.func_table.insert(mangled_name.clone(), idx);
+                    self.func_table.insert(callable_owner.clone(), idx);
                     // Register the declared return type (C-3 return-type
-                    // directory). Method calls that resolve through the method
-                    // table dispatch to this mangled name.
+                    // directory). Checked method calls dispatch through this
+                    // exact callable owner.
                     self.func_ret_types
-                        .insert(mangled_name.clone(), ret_type_to_var_type(&method.ret));
-                    // 0.34.24: also register the (type, method) → mangled
-                    // mapping here, not only in install_checked_program —
-                    // callers that compile a raw file without a
-                    // CheckedProgram (test harness, disasm) still need
-                    // receiver-aware method dispatch (the builtin-shadow
-                    // gate and the G1 table both read method_table).
-                    self.method_table.insert(
-                        (impl_def.type_name.clone(), method.name.clone()),
-                        mangled_name.clone(),
-                    );
+                        .insert(callable_owner.clone(), ret_type_to_var_type(&method.ret));
+                    // Raw-AST callers without a CheckedProgram still use the
+                    // receiver/type spelling table for compatibility.
+                    if !self.checked_program_installed {
+                        self.method_table.insert(
+                            (impl_def.type_name.clone(), method.name.clone()),
+                            mangled_name.clone(),
+                        );
+                    }
                     // +1 for implicit `self` parameter.
                     let mut proto =
-                        FunctionProto::new(mangled_name, method.params.len() as u16 + 1);
+                        FunctionProto::new(callable_owner, method.params.len() as u16 + 1);
                     // Audit fix #3: pre-populate mut-param metadata at
                     // REGISTRATION time — impl-method bodies are compiled in
                     // pass 3, AFTER their callers (pass 2), and the call-site
@@ -714,13 +957,23 @@ impl BytecodeCompiler {
         // Pass 3: compile impl method bodies.
         for item in &file.items {
             if let Item::Impl(impl_def) = item {
-                for method in &impl_def.methods {
+                let checked_owners = if self.checked_program_installed {
+                    Some(self.checked_impl_method_owners(impl_def)?)
+                } else {
+                    None
+                };
+                for (method_index, method) in impl_def.methods.iter().enumerate() {
                     let mangled_name = format!("{}_{}", impl_def.type_name, method.name);
-                    if let Some(&idx) = self.func_table.get(&mangled_name) {
-                        let mut proto = self.compile_func_impl(method)?;
-                        // Runtime dyn dispatch looks methods up by mangled
-                        // name ({Type}_{method}) via function_index.
-                        proto.name = mangled_name;
+                    let callable_owner = checked_owners
+                        .as_ref()
+                        .map(|owners| owners[method_index].0.clone())
+                        .unwrap_or_else(|| mangled_name.clone());
+                    if let Some(&idx) = self.func_table.get(&callable_owner) {
+                        let mut proto = self.compile_func_impl(method, callable_owner.clone())?;
+                        // Raw-AST dynamic dispatch retains the legacy method
+                        // spelling. Checked method bodies keep their exact
+                        // Checker callable identity as the bytecode symbol.
+                        proto.name = callable_owner;
                         self.functions[idx as usize] = proto;
                     }
                 }
@@ -852,7 +1105,9 @@ impl BytecodeCompiler {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
+            canonical_actors: None,
             actor_defs: std::mem::take(&mut self.actor_defs),
             flow_defs: std::mem::take(&mut self.flow_defs),
             flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
@@ -1005,7 +1260,9 @@ impl BytecodeCompiler {
             canonical_ffi: Vec::new(),
             canonical_ffi_bindings: Vec::new(),
             canonical_map_root_receipt: None,
+            canonical_map_any_owner_v1_receipt: None,
             canonical_ffi_route_receipt: None,
+            canonical_actors: None,
             actor_defs: std::mem::take(&mut self.actor_defs),
             flow_defs: std::mem::take(&mut self.flow_defs),
             flow_transition_funcs: std::mem::take(&mut self.flow_transition_funcs),
@@ -1177,10 +1434,14 @@ impl BytecodeCompiler {
     }
 
     /// Compile an impl method (has implicit `self` at register 0).
-    fn compile_func_impl(&mut self, f: &FuncDef) -> Result<FunctionProto, InterpError> {
+    fn compile_func_impl(
+        &mut self,
+        f: &FuncDef,
+        callable_owner: String,
+    ) -> Result<FunctionProto, InterpError> {
         // param_count = explicit params + 1 (self).
         let total_params = f.params.len() as u16 + 1;
-        let mut fc = FuncCompiler::new(f.name.clone(), total_params);
+        let mut fc = FuncCompiler::new(callable_owner, total_params);
         fc.impl_method_self_name = Some(f.name.clone());
 
         // Bind `self` to register 0.
@@ -1912,7 +2173,7 @@ impl BytecodeCompiler {
             }
             Expr::Binary(op, l, r) => self.compile_binary(fc, *op, l, r),
             Expr::Unary(op, e) => self.compile_unary(fc, *op, e),
-            Expr::Call(callee, args) => self.compile_call(fc, callee, args),
+            Expr::Call(callee, args) => self.compile_call(fc, callee, args, expr.meta()),
             Expr::If { cond, then_, else_ } => self.compile_if_expr(fc, cond, then_, else_),
             Expr::Block(b) => {
                 fc.push_scope();
@@ -2290,7 +2551,7 @@ impl BytecodeCompiler {
                 }
                 // Other turbofish: type arguments ignored at runtime.
                 let callee = Expr::Ident(name.clone());
-                self.compile_call(fc, &callee, args)
+                self.compile_call(fc, &callee, args, expr.meta())
             }
 
             Expr::Try(inner) => {
@@ -3347,7 +3608,14 @@ impl BytecodeCompiler {
         fc: &mut FuncCompiler,
         callee: &Expr,
         args: &[Expr],
+        call_meta: Option<AstNodeMeta>,
     ) -> Result<Reg, InterpError> {
+        let checked_method_callee =
+            if self.checked_program_installed && matches!(callee.unlocated(), Expr::Field(_, _)) {
+                Some(self.checked_callsite_callee(call_meta)?)
+            } else {
+                None
+            };
         // ── Early-return special cases (no pre-allocation) ──
         if let Expr::Ident(name) = callee.unlocated() {
             // Special case: push(var, elem) → ListPush (in-place mutation).
@@ -3702,15 +3970,63 @@ impl BytecodeCompiler {
             // to `Flow::method(state, args)`. When the receiver's static type is a
             // flow state of a flow that declares a transition `method`, emit the
             // flow transition with the receiver prepended as the from-state value.
-            if let VarType::User(state_name) = self.infer_expr_type(fc, obj) {
-                if let Some(flow) = self
-                    .flow_transition_funcs
-                    .keys()
-                    .find(|(_, t, s)| t == method && s == &state_name)
-                    .map(|(f, _, _)| f.clone())
-                {
-                    // Compile [obj] + args into consecutive registers and emit the
-                    // flow transition (first register holds the source state).
+            if let Some(crate::core::ResolvedCallee::Transition(transition)) =
+                checked_method_callee.as_ref()
+            {
+                if transition.flow != transition.source.flow || transition.event != *method {
+                    return Err(InterpError::new(
+                        "checked Flow transition identity disagrees with its call-site event",
+                    ));
+                }
+                let key = (
+                    transition.flow.0.clone(),
+                    transition.event.clone(),
+                    transition.source.name.clone(),
+                );
+                let Some(flow_def) = self.flow_defs.get(&transition.flow.0) else {
+                    return Err(InterpError::new(format!(
+                        "checked Flow transition owner '{}' is absent from the AST flow catalog",
+                        transition.flow.0
+                    )));
+                };
+                let mut exact_defs = flow_def.transitions.iter().filter(|candidate| {
+                    candidate.name == transition.event
+                        && candidate.from_state == transition.source.name
+                });
+                let Some(definition) = exact_defs.next() else {
+                    return Err(InterpError::new(
+                        "checked Flow transition has no exact flow/event/source declaration",
+                    ));
+                };
+                if exact_defs.next().is_some() || definition.body.is_none() {
+                    return Err(InterpError::new(
+                        "checked Flow transition declaration is ambiguous or has no bytecode body",
+                    ));
+                }
+                if !self.flow_transition_funcs.contains_key(&key) {
+                    return Err(InterpError::new(
+                        "checked Flow transition has no exact bytecode flow/event/source entry",
+                    ));
+                }
+
+                let receiver_is_state = matches!(
+                    self.infer_expr_type(fc, obj),
+                    VarType::User(ref state_name) if state_name == &transition.source.name
+                );
+                let explicit_flow_call = !receiver_is_state
+                    && matches!(
+                        obj.unlocated(),
+                        Expr::Ident(flow_name) if flow_name == &transition.flow.0
+                    );
+                if !receiver_is_state && !explicit_flow_call {
+                    return Err(InterpError::new(
+                        "checked Flow transition receiver does not match its exact source state or Flow owner",
+                    ));
+                }
+
+                let (base, total) = if receiver_is_state {
+                    // `state.event(args)` supplies the exact source state as
+                    // the first runtime argument.
                     let total = args.len() + 1;
                     let base = fc.proto.alloc_reg();
                     for _ in 1..total {
@@ -3720,23 +4036,84 @@ impl BytecodeCompiler {
                     if r0 != base {
                         fc.emit(Op::Mov { rd: base, rs: r0 });
                     }
-                    for (i, a) in args.iter().enumerate() {
-                        let t = base + ((i + 1) as Reg);
-                        let r = self.compile_expr_into(fc, a, t)?;
-                        if r != t {
-                            fc.emit(Op::Mov { rd: t, rs: r });
+                    for (i, arg) in args.iter().enumerate() {
+                        let target = base + ((i + 1) as Reg);
+                        let value = self.compile_expr_into(fc, arg, target)?;
+                        if value != target {
+                            fc.emit(Op::Mov {
+                                rd: target,
+                                rs: value,
+                            });
                         }
                     }
-                    let flow_idx = fc.proto.add_const(ConstValue::Str(flow.clone()));
-                    let method_idx = fc.proto.add_const(ConstValue::Str(method.clone()));
-                    fc.emit(Op::FlowTransition {
-                        rd,
-                        flow: flow_idx,
-                        method: method_idx,
-                        args_base: base,
-                        argc: total as u16,
-                    });
-                    return Ok(rd);
+                    (base, total)
+                } else {
+                    // `Flow::event(state, args)` already has the source state
+                    // in the argument block compiled above.
+                    (args_base, args.len())
+                };
+                let flow_idx = fc
+                    .proto
+                    .add_const(ConstValue::Str(transition.flow.0.clone()));
+                let method_idx = fc
+                    .proto
+                    .add_const(ConstValue::Str(transition.event.clone()));
+                let source_state_idx = fc
+                    .proto
+                    .add_const(ConstValue::Str(transition.source.name.clone()));
+                fc.emit(Op::FlowTransition {
+                    rd,
+                    flow: flow_idx,
+                    method: method_idx,
+                    checked_source_state: Some(source_state_idx),
+                    args_base: base,
+                    argc: total as u16,
+                });
+                return Ok(rd);
+            }
+
+            // Raw-AST compatibility retains its historical receiver-type
+            // lookup. Checked programs never select a Flow by the first
+            // HashMap name match; they require the exact TransitionId above.
+            if !self.checked_program_installed {
+                if let VarType::User(state_name) = self.infer_expr_type(fc, obj) {
+                    if let Some(flow) = self
+                        .flow_transition_funcs
+                        .keys()
+                        .find(|(_, event, source)| event == method && source == &state_name)
+                        .map(|(flow, _, _)| flow.clone())
+                    {
+                        let total = args.len() + 1;
+                        let base = fc.proto.alloc_reg();
+                        for _ in 1..total {
+                            fc.proto.alloc_reg();
+                        }
+                        let r0 = self.compile_expr_into(fc, obj, base)?;
+                        if r0 != base {
+                            fc.emit(Op::Mov { rd: base, rs: r0 });
+                        }
+                        for (i, arg) in args.iter().enumerate() {
+                            let target = base + ((i + 1) as Reg);
+                            let value = self.compile_expr_into(fc, arg, target)?;
+                            if value != target {
+                                fc.emit(Op::Mov {
+                                    rd: target,
+                                    rs: value,
+                                });
+                            }
+                        }
+                        let flow_idx = fc.proto.add_const(ConstValue::Str(flow));
+                        let method_idx = fc.proto.add_const(ConstValue::Str(method.clone()));
+                        fc.emit(Op::FlowTransition {
+                            rd,
+                            flow: flow_idx,
+                            method: method_idx,
+                            checked_source_state: None,
+                            args_base: base,
+                            argc: total as u16,
+                        });
+                        return Ok(rd);
+                    }
                 }
             }
             // ── Actor spawn: ActorName.spawn() / ActorName.spawn_detached() ──
@@ -3762,7 +4139,7 @@ impl BytecodeCompiler {
                     return Ok(rd);
                 }
                 // ── Flow transition call: FlowName::method(state, args) ──
-                if self.flow_names.contains(flow_name.as_str()) {
+                if !self.checked_program_installed && self.flow_names.contains(flow_name.as_str()) {
                     // Compile all args (first arg is the from-state value).
                     let flow_idx = fc.proto.add_const(ConstValue::Str(flow_name.clone()));
                     let method_idx = fc.proto.add_const(ConstValue::Str(method.clone()));
@@ -3770,6 +4147,7 @@ impl BytecodeCompiler {
                         rd,
                         flow: flow_idx,
                         method: method_idx,
+                        checked_source_state: None,
                         args_base,
                         argc: args.len() as u16,
                     });
@@ -3836,20 +4214,123 @@ impl BytecodeCompiler {
 
             let total_args = args.len() + 1;
 
+            // A checked ProtocolMethod already names the exact impl callable.
+            // Use that owner before any builtin or display-name dispatch can
+            // alias two generic impls such as Marker<i32> for List<i32> and
+            // Marker<string> for List<string>.
+            if let Some(crate::core::ResolvedCallee::ProtocolMethod { method, .. }) =
+                checked_method_callee.as_ref()
+            {
+                let owner = method.as_str();
+                if !self.checked_impl_callable_owners.contains(owner)
+                    || self.checked_impl_callable_owner_counts.get(owner) != Some(&1)
+                {
+                    return Err(InterpError::new(format!(
+                        "checked protocol method owner '{}' is absent from ResolvedImpl.method_owners",
+                        owner
+                    )));
+                }
+                let Some(&fidx) = self.func_table.get(owner) else {
+                    return Err(InterpError::new(format!(
+                        "checked protocol method owner '{}' has no bytecode body",
+                        owner
+                    )));
+                };
+                if self
+                    .functions
+                    .get(fidx as usize)
+                    .is_none_or(|proto| proto.name != owner)
+                {
+                    return Err(InterpError::new(format!(
+                        "checked protocol method owner '{}' resolves to a different bytecode body",
+                        owner
+                    )));
+                }
+                self.emit_impl_method_mutate_setup(fc, fidx, args);
+                fc.emit(Op::Call {
+                    rd,
+                    func: fidx,
+                    args_base: new_args_base,
+                    argc: total_args as u16,
+                });
+                return Ok(rd);
+            }
+
+            // A checked inherent implementation method also has an exact
+            // callable owner. Resolve it before any Option/Result opcode that
+            // happens to share its source spelling.
+            if let Some(crate::core::ResolvedCallee::Function(owner)) =
+                checked_method_callee.as_ref()
+            {
+                if !self.checked_impl_callable_owners.contains(&owner.0)
+                    || self.checked_impl_callable_owner_counts.get(&owner.0) != Some(&1)
+                {
+                    return Err(InterpError::new(format!(
+                        "checked method owner '{}' is absent or ambiguous in ResolvedImpl.method_owners",
+                        owner.0
+                    )));
+                }
+                let Some(&fidx) = self.func_table.get(&owner.0) else {
+                    return Err(InterpError::new(format!(
+                        "checked method owner '{}' has no bytecode body",
+                        owner.0
+                    )));
+                };
+                if self
+                    .functions
+                    .get(fidx as usize)
+                    .is_none_or(|proto| proto.name != owner.0)
+                {
+                    return Err(InterpError::new(format!(
+                        "checked method owner '{}' resolves to a different bytecode body",
+                        owner.0
+                    )));
+                }
+                self.emit_impl_method_mutate_setup(fc, fidx, args);
+                fc.emit(Op::Call {
+                    rd,
+                    func: fidx,
+                    args_base: new_args_base,
+                    argc: total_args as u16,
+                });
+                return Ok(rd);
+            }
+
             // Actor methods shadow builtin opcode shortcuts (e.g. an actor's
             // own `unwrap` must not be compiled to Op::Unwrap).
-            let is_actor_method = self
-                .actor_defs
-                .values()
-                .any(|a| a.methods.iter().any(|m| m.name == *method));
+            let is_actor_method = if self.checked_program_installed {
+                matches!(
+                    checked_method_callee.as_ref(),
+                    Some(crate::core::ResolvedCallee::ActorMethod { .. })
+                )
+            } else {
+                self.actor_defs
+                    .values()
+                    .any(|a| a.methods.iter().any(|m| m.name == *method))
+            };
             if !is_actor_method {
                 // Option/Result built-in methods (handled via opcodes, not function calls).
-                match method.as_str() {
-                    "is_some" | "is_ok" => {
+                let option_result_method = if self.checked_program_installed {
+                    match checked_method_callee.as_ref() {
+                        Some(crate::core::ResolvedCallee::Builtin(builtin)) => {
+                            match checked_builtin_method_target(builtin) {
+                                Some(CheckedBuiltinMethodTarget::OptionResultOpcode(name)) => {
+                                    Some(name)
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    Some(method.as_str())
+                };
+                match option_result_method {
+                    Some("is_some" | "is_ok") => {
                         fc.emit(Op::IsSome { rd, ra: recv_reg });
                         return Ok(rd);
                     }
-                    "is_none" | "is_err" => {
+                    Some("is_none" | "is_err") => {
                         let r_tmp = fc.proto.alloc_reg();
                         fc.emit(Op::IsSome {
                             rd: r_tmp,
@@ -3858,11 +4339,11 @@ impl BytecodeCompiler {
                         fc.emit(Op::Not { rd, ra: r_tmp });
                         return Ok(rd);
                     }
-                    "unwrap" | "expect" => {
+                    Some("unwrap" | "expect") => {
                         fc.emit(Op::Unwrap { rd, ra: recv_reg });
                         return Ok(rd);
                     }
-                    "unwrap_or" => {
+                    Some("unwrap_or") => {
                         // if is_some(recv) { unwrap(recv) } else { default }
                         let r_test = fc.proto.alloc_reg();
                         fc.emit(Op::IsSome {
@@ -3894,25 +4375,30 @@ impl BytecodeCompiler {
             // JsonExt::has_key, not the 2-param map builtin `has_key(map, k)`
             // (which trapped E0800 on string receivers). Mirrors the call
             // resolution ruling local > global > builtin (d1f43c22).
-            let receiver_impl_types: Vec<String> = match obj.unlocated() {
-                Expr::Literal(Lit::String(_)) => vec!["string".to_string()],
-                Expr::Ident(var) => match fc.var_types.get(var) {
-                    Some(VarType::String) => vec!["string".to_string()],
-                    Some(VarType::User(t)) => vec![t.clone()],
-                    Some(VarType::Int) => vec!["i64".to_string(), "i32".to_string()],
-                    Some(VarType::Int32) => vec!["i32".to_string(), "i64".to_string()],
-                    Some(VarType::Float) => vec!["f64".to_string()],
-                    _ => vec![], // Dyn/Unknown: keep existing dispatch order
-                },
-                _ => vec![],
+            let receiver_impl_types: Vec<String> = if self.checked_program_installed {
+                Vec::new()
+            } else {
+                match obj.unlocated() {
+                    Expr::Literal(Lit::String(_)) => vec!["string".to_string()],
+                    Expr::Ident(var) => match fc.var_types.get(var) {
+                        Some(VarType::String) => vec!["string".to_string()],
+                        Some(VarType::User(t)) => vec![t.clone()],
+                        Some(VarType::Int) => vec!["i64".to_string(), "i32".to_string()],
+                        Some(VarType::Int32) => vec!["i32".to_string(), "i64".to_string()],
+                        Some(VarType::Float) => vec!["f64".to_string()],
+                        _ => vec![], // Dyn/Unknown: keep existing dispatch order
+                    },
+                    _ => vec![],
+                }
             };
             // 0.1.8 Phase E: SessionChan method surface lowers directly to the
             // existing session_* free-function builtins. This must happen before
             // generic builtin/method-table dispatch because the receiver's
             // runtime representation is just an i64 channel handle.
-            let session_builtin = if receiver_impl_types
-                .iter()
-                .any(|t| t.starts_with("SessionChan") || t.starts_with("session_chan"))
+            let session_builtin = if !self.checked_program_installed
+                && receiver_impl_types
+                    .iter()
+                    .any(|t| t.starts_with("SessionChan") || t.starts_with("session_chan"))
             {
                 match method.as_str() {
                     "send" => Some("session_send"),
@@ -3934,11 +4420,72 @@ impl BytecodeCompiler {
                     return Ok(rd);
                 }
             }
-            let impl_shadows_builtin = !receiver_impl_types.is_empty()
+            if let Some(checked_callee) = checked_method_callee.as_ref() {
+                match checked_callee {
+                    crate::core::ResolvedCallee::Builtin(builtin) => {
+                        let Some(target) = checked_builtin_method_target(builtin) else {
+                            return Err(InterpError::new(format!(
+                                "checked method builtin '{}' has no Bytecode VM identity mapping",
+                                builtin.as_str()
+                            )));
+                        };
+                        match target {
+                            CheckedBuiltinMethodTarget::Registry(registry_name) => {
+                                let Some(&bidx) = self.builtin_table.get(registry_name) else {
+                                    return Err(InterpError::new(format!(
+                                        "checked method builtin '{}' has no bytecode implementation",
+                                        builtin.as_str()
+                                    )));
+                                };
+                                fc.emit(Op::CallBuiltin {
+                                    rd,
+                                    builtin: bidx,
+                                    args_base: new_args_base,
+                                    argc: total_args as u16,
+                                });
+                            }
+                            CheckedBuiltinMethodTarget::Dynamic(_runtime_method) => {
+                                // Preserve the complete checker-owned BuiltinId
+                                // through VM execution. Runtime family selection
+                                // must not be reconstructed from surface spelling.
+                                let method_idx = fc
+                                    .proto
+                                    .add_const(ConstValue::Str(builtin.as_str().to_string()));
+                                fc.emit(Op::DynMethodCall {
+                                    rd,
+                                    method: method_idx,
+                                    args_base: new_args_base,
+                                    argc: total_args as u16,
+                                });
+                            }
+                            CheckedBuiltinMethodTarget::OptionResultOpcode(_) => {
+                                return Err(InterpError::new(format!(
+                                    "checked builtin '{}' missed its exact Option/Result opcode route",
+                                    builtin.as_str()
+                                )));
+                            }
+                            CheckedBuiltinMethodTarget::StringScalarLen => {
+                                fc.emit(Op::StringScalarLen { rd, ra: recv_reg });
+                            }
+                        }
+                        return Ok(rd);
+                    }
+                    crate::core::ResolvedCallee::ActorMethod { .. } if is_actor_method => {}
+                    _ => {
+                        return Err(InterpError::new(format!(
+                            "checked method call target {:?} is outside the bytecode method-dispatch contract",
+                            checked_callee
+                        )));
+                    }
+                }
+            }
+
+            let impl_shadows_builtin = !self.checked_program_installed
+                && !receiver_impl_types.is_empty()
                 && receiver_impl_types
                     .iter()
                     .any(|t| self.method_table.contains_key(&(t.clone(), method.clone())));
-            if !is_actor_method && !impl_shadows_builtin {
+            if !self.checked_program_installed && !is_actor_method && !impl_shadows_builtin {
                 // Try builtin methods (only if not an actor method and not
                 // shadowed by a receiver-typed trait impl).
                 if let Some(&bidx) = self.builtin_table.get(method.as_str()) {
@@ -3961,7 +4508,7 @@ impl BytecodeCompiler {
                 obj.unlocated(),
                 Expr::Ident(name) if fc.var_is_dyn(name)
             );
-            if !recv_is_dyn {
+            if !self.checked_program_installed && !recv_is_dyn {
                 // Receiver's own impl types first (0.34.24): the historic
                 // loop tried all impl types in insertion order, which could
                 // pick another type's same-named method.
@@ -7590,5 +8137,247 @@ mod peephole_tests {
         let before = code.clone();
         hoist_loop_invariant_loads(&mut code);
         assert_eq!(code, before, "live-out LoadConst must NOT be hoisted");
+    }
+}
+
+#[cfg(test)]
+mod checked_owner_dispatch_tests {
+    use super::*;
+
+    fn checked_meta() -> AstNodeMeta {
+        AstNodeMeta::new(
+            crate::span::Span::new(4, 8, 4, 22),
+            crate::ast::AstOrigin::User,
+        )
+    }
+
+    #[test]
+    fn checked_method_lookup_fails_closed_for_missing_unresolved_and_ambiguous_sites() {
+        let meta = checked_meta();
+        let span = CheckedSourceSpanKey::from_span(meta.span).expect("exact span");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.checked_program_installed = true;
+
+        assert!(compiler
+            .checked_callsite_callee(Some(meta))
+            .expect_err("missing call-site owner must fail closed")
+            .to_string()
+            .contains("no checker call-site receipt"));
+
+        compiler.checked_call_sites_by_span.insert(
+            span,
+            vec![CheckedCallSiteReceipt {
+                node_id: crate::core::NodeId("call:unresolved".into()),
+                callee: None,
+            }],
+        );
+        assert!(compiler
+            .checked_callsite_callee(Some(meta))
+            .expect_err("unresolved call-site owner must fail closed")
+            .to_string()
+            .contains("no checker-resolved callable owner"));
+
+        compiler.checked_call_sites_by_span.insert(
+            span,
+            vec![
+                CheckedCallSiteReceipt {
+                    node_id: crate::core::NodeId("call:first".into()),
+                    callee: None,
+                },
+                CheckedCallSiteReceipt {
+                    node_id: crate::core::NodeId("call:second".into()),
+                    callee: None,
+                },
+            ],
+        );
+        assert!(compiler
+            .checked_callsite_callee(Some(meta))
+            .expect_err("ambiguous call-site owners must fail closed")
+            .to_string()
+            .contains("ambiguous checker call-site receipts"));
+    }
+
+    #[test]
+    fn checked_impl_lookup_fails_closed_for_missing_or_ambiguous_owner_receipts() {
+        let meta = checked_meta();
+        let span = CheckedSourceSpanKey::from_span(meta.span).expect("exact span");
+        let impl_def = ImplDef {
+            meta,
+            generics: Vec::new(),
+            trait_name: "Marker".into(),
+            trait_args: Vec::new(),
+            type_name: "List".into(),
+            type_args: Vec::new(),
+            methods: Vec::new(),
+        };
+        let mut compiler = BytecodeCompiler::new();
+        compiler.checked_program_installed = true;
+
+        assert!(compiler
+            .checked_impl_method_owners(&impl_def)
+            .expect_err("missing impl owner must fail closed")
+            .to_string()
+            .contains("no ResolvedImpl owner receipt"));
+
+        compiler.checked_impl_owners_by_span.insert(
+            span,
+            vec![
+                CheckedImplOwnerReceipt {
+                    method_names: Vec::new(),
+                    method_owners: Vec::new(),
+                },
+                CheckedImplOwnerReceipt {
+                    method_names: Vec::new(),
+                    method_owners: Vec::new(),
+                },
+            ],
+        );
+        assert!(compiler
+            .checked_impl_method_owners(&impl_def)
+            .expect_err("ambiguous impl owner must fail closed")
+            .to_string()
+            .contains("ambiguous ResolvedImpl owner receipts"));
+    }
+
+    #[test]
+    fn checked_impl_lookup_fails_closed_for_owner_reused_by_two_impls() {
+        let meta = checked_meta();
+        let span = CheckedSourceSpanKey::from_span(meta.span).expect("exact span");
+        let owner = crate::core::NodeId("function:shared-owner".into());
+        let impl_def = ImplDef {
+            meta,
+            generics: Vec::new(),
+            trait_name: "Marker".into(),
+            trait_args: Vec::new(),
+            type_name: "List".into(),
+            type_args: Vec::new(),
+            methods: vec![FuncDef {
+                meta,
+                name: "read".into(),
+                pub_: false,
+                params: Vec::new(),
+                ret: None,
+                body: Vec::new(),
+                where_clause: Vec::new(),
+                generics: Vec::new(),
+                effects: Vec::new(),
+                is_comptime: false,
+                is_async: false,
+                extern_abi: None,
+                has_requires: false,
+                has_ensures: false,
+                has_mutate_params: false,
+            }],
+        };
+        let mut compiler = BytecodeCompiler::new();
+        compiler.checked_program_installed = true;
+        compiler.checked_impl_owners_by_span.insert(
+            span,
+            vec![CheckedImplOwnerReceipt {
+                method_names: vec!["read".into()],
+                method_owners: vec![owner.clone()],
+            }],
+        );
+        compiler
+            .checked_impl_callable_owners
+            .insert(owner.0.clone());
+        compiler
+            .checked_impl_callable_owner_counts
+            .insert(owner.0, 2);
+
+        assert!(compiler
+            .checked_impl_method_owners(&impl_def)
+            .expect_err("one callable owner cannot identify two impl declarations")
+            .to_string()
+            .contains("absent or ambiguous"));
+    }
+
+    #[test]
+    fn checked_builtin_method_mapping_uses_the_full_checker_identity() {
+        use CheckedBuiltinMethodTarget::{Dynamic, OptionResultOpcode, Registry, StringScalarLen};
+        let cases = [
+            ("builtin.method.option.unwrap", OptionResultOpcode("unwrap")),
+            ("builtin.method.option.expect", OptionResultOpcode("expect")),
+            (
+                "builtin.method.option.unwrap_or",
+                OptionResultOpcode("unwrap_or"),
+            ),
+            (
+                "builtin.method.option.is_some",
+                OptionResultOpcode("is_some"),
+            ),
+            (
+                "builtin.method.option.is_none",
+                OptionResultOpcode("is_none"),
+            ),
+            ("builtin.method.option.ok_or", Dynamic("ok_or")),
+            ("builtin.method.option.map", Dynamic("map")),
+            ("builtin.method.option.and_then", Dynamic("and_then")),
+            ("builtin.method.option.map_err", Dynamic("map_err")),
+            ("builtin.method.option.deref", Dynamic("deref")),
+            ("builtin.method.result.unwrap", OptionResultOpcode("unwrap")),
+            ("builtin.method.result.expect", OptionResultOpcode("expect")),
+            (
+                "builtin.method.result.unwrap_or",
+                OptionResultOpcode("unwrap_or"),
+            ),
+            ("builtin.method.result.is_ok", OptionResultOpcode("is_some")),
+            (
+                "builtin.method.result.is_err",
+                OptionResultOpcode("is_none"),
+            ),
+            ("builtin.method.result.ok_or", Dynamic("ok_or")),
+            ("builtin.method.result.map", Dynamic("map")),
+            ("builtin.method.result.and_then", Dynamic("and_then")),
+            ("builtin.method.result.map_err", Dynamic("map_err")),
+            ("builtin.method.shared.clone", Registry("clone")),
+            ("builtin.method.shared.deref", Registry("deref")),
+            ("builtin.method.shared.inner", Registry("deref")),
+            ("builtin.method.weak.upgrade", Dynamic("upgrade")),
+            ("builtin.method.string.len", StringScalarLen),
+            ("builtin.method.string.trim", Registry("trim")),
+            ("builtin.method.string.to_upper", Registry("to_upper")),
+            ("builtin.method.string.to_lower", Registry("to_lower")),
+            ("builtin.method.string.parse_int", Registry("parse_int")),
+            ("builtin.method.string.parse_float", Registry("parse_float")),
+            ("builtin.method.string.contains", Registry("contains")),
+            ("builtin.method.string.starts_with", Registry("starts_with")),
+            ("builtin.method.string.ends_with", Registry("ends_with")),
+            ("builtin.method.string.split", Registry("split")),
+            ("builtin.method.string.replace", Registry("replace")),
+            ("builtin.method.string.repeat", Registry("repeat")),
+            ("builtin.method.string.char_at", Registry("char_at")),
+            ("builtin.method.string.substring", Registry("substring")),
+            ("builtin.method.string.index_of", Registry("index_of")),
+            ("builtin.method.list.len", Registry("len")),
+            ("builtin.method.list.reverse", Registry("reverse")),
+            ("builtin.method.list.concat", Dynamic("concat")),
+            ("builtin.method.set.size", Registry("size")),
+            ("builtin.method.set.len", Registry("len")),
+            ("builtin.method.set.is_empty", Registry("is_empty")),
+            ("builtin.method.set.contains", Dynamic("contains")),
+            ("builtin.method.set.insert", Registry("insert")),
+            ("builtin.method.set.remove", Registry("remove")),
+            ("builtin.method.set.to_list", Registry("to_list")),
+            ("builtin.method.session.send", Registry("session_send")),
+            ("builtin.method.session.recv", Registry("session_recv")),
+            ("builtin.method.session.close", Registry("session_close")),
+        ];
+        assert_eq!(cases.len(), 51, "complete checker BuiltinId census");
+        for (identity, expected) in cases {
+            let builtin = crate::core::BuiltinId::new(identity).expect("non-empty builtin ID");
+            assert_eq!(
+                checked_builtin_method_target(&builtin),
+                Some(expected),
+                "exact VM target for {identity}"
+            );
+        }
+        let unknown = crate::core::BuiltinId::new("builtin.method.string.reverse")
+            .expect("non-empty builtin ID");
+        assert_eq!(
+            checked_builtin_method_target(&unknown),
+            None,
+            "same final spelling from an unchecked receiver family is not an alias"
+        );
     }
 }

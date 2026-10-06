@@ -158,6 +158,8 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "values"
             | "map_new"
             | "map_get"
+            | "map_get_i32"
+            | "map_get_string"
             | "map_set"
             | "map_remove"
             | "map_size"
@@ -433,6 +435,8 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "map" => Some(2),
         "map_from_list" => Some(1),
         "map_get" => Some(2),
+        "map_get_i32" => Some(2),
+        "map_get_string" => Some(2),
         "map_list" => Some(2),
         "map_new" => Some(0),
         "map_remove" => Some(2),

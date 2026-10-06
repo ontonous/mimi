@@ -23699,9 +23699,24 @@ fn ordinary_map_any_native_fixtures_fail_closed_with_vm_compatibility() {
     let root = project_root().join("tests").join("real_world");
     for fixture in ["std_maps.mimi", "std_maps_counter_generic.mimi"] {
         let source = root.join(fixture);
+        let run = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("run")
+            .arg(&source)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .expect("spawn ordinary Map/Any compatibility run");
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
         assert!(
-            run_mimi_run_out(&source).is_ok(),
-            "the VM compatibility route must keep {fixture} executable"
+            run.status.success(),
+            "the VM compatibility route must keep {fixture} executable:\nstdout:\n{}\nstderr:\n{run_stderr}",
+            String::from_utf8_lossy(&run.stdout)
+        );
+        assert!(
+            run_stderr.contains(
+                "canonical route disposition: legacy (ordinary-map-owner-lifecycle-compatibility)"
+            ),
+            "ordinary untyped Map/Any must remain on its named compatibility route for {fixture}: {run_stderr}"
         );
 
         let binary = std::env::temp_dir().join(format!(
@@ -25488,349 +25503,404 @@ fn canonical_mir_string_assign_keeps_compatibility_route() {
     );
 }
 
-// R6-1114 L2 negative pin: a nested callable that captures an outer local has
-// no canonical MIR environment ABI. Default run/verify stay on the explicit
-// compatibility disposition; inspection and every explicit execution/build/
-// verification entry must stop during MIR construction rather than
-// materializing an undefined capture slot or silently retrying through legacy.
-#[test]
-fn canonical_mir_capture_without_environment_abi_fails_closed_on_direct_cli() {
-    let source = project_root()
-        .join("tests")
-        .join("real_world")
-        .join("actor_nested_func_capture.mimi");
+// The two original Actor regressions now require the same checked state,
+// mailbox and lexical environment graph through default and explicit routes.
+fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8]) {
+    let source = project_root().join("tests/real_world").join(fixture);
     let dir = std::env::temp_dir().join(format!(
-        "mimi_nested_capture_mir_{}_{}",
+        "mimi-actor-route-{}-{}-{}",
+        fixture,
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock")
+            .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&dir).expect("create nested capture CLI directory");
-    let native = dir.join("default.out");
-
-    let compatibility_run = Command::new(mimi_bin())
-        .current_dir(project_root())
-        .arg("run")
+    fs::create_dir_all(&dir).unwrap();
+    let receipt = Command::new(mimi_bin())
+        .arg("mir")
         .arg(&source)
-        .env("MIMI_VERBOSE", "1")
+        .arg("--receipt")
         .output()
-        .expect("spawn default actor-capture compatibility run");
-    let run_stderr = String::from_utf8_lossy(&compatibility_run.stderr);
+        .unwrap();
     assert!(
-        compatibility_run.status.success(),
-        "default actor-capture compatibility run must succeed: {run_stderr}"
+        receipt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&receipt.stderr)
     );
-    assert_eq!(compatibility_run.stdout, b"15\n");
+    let manifest = String::from_utf8_lossy(&receipt.stdout);
+    let digest = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("mir_digest="))
+        .expect("Actor inspection digest")
+        .to_owned();
     assert!(
-        run_stderr.contains(
-            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
-        ),
-        "the known actor capture fallback must remain an explicit route: {run_stderr}"
+        !String::from_utf8_lossy(&receipt.stderr).contains("canonical route disposition: legacy")
     );
-
-    let compatibility_verify = Command::new(mimi_bin())
-        .current_dir(project_root())
-        .arg("verify")
-        .arg(&source)
-        .env("MIMI_VERBOSE", "1")
-        .output()
-        .expect("spawn default actor-capture compatibility verifier");
-    let verify_transcript = format!(
-        "{}{}",
-        String::from_utf8_lossy(&compatibility_verify.stdout),
-        String::from_utf8_lossy(&compatibility_verify.stderr)
-    );
-    assert!(
-        compatibility_verify.status.success(),
-        "default actor-capture verification without contracts must succeed: {verify_transcript}"
-    );
-    assert!(
-        verify_transcript.contains(
-            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
-        ),
-        "the compatibility verifier must disclose its route: {verify_transcript}"
-    );
-    assert!(
-        verify_transcript.contains("no contracts to verify"),
-        "the no-contract verification result must remain neutral: {verify_transcript}"
-    );
-
-    let compatibility_build = Command::new(mimi_bin())
-        .current_dir(project_root())
-        .arg("build")
-        .arg(&source)
-        .arg("-o")
-        .arg(&native)
-        .env("MIMI_VERBOSE", "1")
-        .output()
-        .expect("spawn default actor-capture compatibility build");
-    let build_stderr = String::from_utf8_lossy(&compatibility_build.stderr);
-    assert!(
-        compatibility_build.status.success(),
-        "default actor-capture compatibility build must succeed: {build_stderr}"
-    );
-    assert!(
-        build_stderr.contains(
-            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
-        ),
-        "the default build must disclose its Actor compatibility route: {build_stderr}"
-    );
-    assert!(
-        native.exists(),
-        "default compatibility build must produce its executable"
-    );
-    let execution = Command::new(&native)
-        .output()
-        .expect("run default actor-capture compatibility executable");
-    assert!(
-        execution.status.success(),
-        "default actor-capture executable must succeed: {}",
-        String::from_utf8_lossy(&execution.stderr)
-    );
-    assert_eq!(execution.stdout, b"15\n");
-
-    let explicit_native = dir.join("explicit-mir.out");
-    let mut mir = Command::new(mimi_bin());
-    mir.current_dir(project_root()).arg("mir").arg(&source);
-    let mut run = Command::new(mimi_bin());
-    run.current_dir(project_root())
-        .arg("run")
-        .arg(&source)
-        .arg("--mir");
-    let mut build = Command::new(mimi_bin());
-    build
-        .current_dir(project_root())
-        .arg("build")
-        .arg(&source)
-        .arg("--mir")
-        .arg("-o")
-        .arg(&explicit_native);
-
-    for (surface, output) in [
-        ("mimi mir", mir.output().expect("spawn MIR inspection")),
-        ("mimi run --mir", run.output().expect("spawn MIR run")),
-        ("mimi build --mir", build.output().expect("spawn MIR build")),
-        (
-            "mimi verify --mir",
-            Command::new(mimi_bin())
+    for explicit in [false, true] {
+        let binary = dir.join(if explicit { "explicit" } else { "default" });
+        for command in ["run", "build", "verify"] {
+            let mut child = Command::new(mimi_bin());
+            child
                 .current_dir(project_root())
-                .arg("verify")
-                .arg(&source)
-                .arg("--mir")
-                .output()
-                .expect("spawn MIR verifier"),
-        ),
-    ] {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .arg(command)
+                .arg(&source);
+            if explicit {
+                child.arg("--mir");
+            }
+            if command == "build" {
+                child.arg("--output").arg(&binary);
+            }
+            let observed = child.output().expect("original Actor CLI route");
+            let stderr = String::from_utf8_lossy(&observed.stderr);
+            assert!(
+                observed.status.success(),
+                "{fixture} {command} explicit={explicit}: {stderr}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "{fixture} must have no Actor fallback: {stderr}"
+            );
+            if !explicit {
+                assert!(stderr.contains(&format!("canonical route disposition: canonical (scalar-actor-domain-v1) mir_digest={digest}")), "{fixture} {command} must use the shared graph digest: {stderr}");
+            }
+            if command == "run" {
+                assert_eq!(observed.stdout, expected);
+            }
+            if command == "verify" {
+                let stdout = String::from_utf8_lossy(&observed.stdout);
+                assert!(
+                    stdout.contains("No contracts to verify"),
+                    "neutral Actor verifier: {stdout}"
+                );
+                assert!(
+                    !stdout.contains("Proven"),
+                    "Actor NoContracts must not masquerade as a proof"
+                );
+            }
+        }
+        let native = Command::new(&binary)
+            .output()
+            .expect("original Actor native executable");
         assert!(
-            !output.status.success(),
-            "{surface} must reject the unmodeled captured callable: {stderr}"
+            native.status.success(),
+            "{}",
+            String::from_utf8_lossy(&native.stderr)
         );
-        assert!(
-            stderr.contains("no canonical closure-environment ABI is available"),
-            "{surface} must identify the missing capture ABI: {stderr}"
-        );
-        assert!(
-            !stderr.contains("canonical route disposition: legacy"),
-            "{surface} must not silently fall back after explicit MIR was requested: {stderr}"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "{surface} must reject before executing the actor program: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        assert_eq!(native.stdout, expected);
     }
+    let disasm = Command::new(mimi_bin())
+        .env("MIMI_ROUTE_CENSUS", "1")
+        .arg("disasm")
+        .arg(&source)
+        .output()
+        .unwrap();
     assert!(
-        !explicit_native.exists(),
-        "failed MIR construction must not leave a native output artifact"
+        disasm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disasm.stderr)
     );
-    fs::remove_dir_all(&dir).ok();
+    let opcodes = String::from_utf8_lossy(&disasm.stdout);
+    assert!(
+        opcodes.contains("MIR_ACTOR_SPAWN")
+            && opcodes.contains("MIR_ACTOR_CALL")
+            && opcodes.contains("MIR_ACTOR_FIELD_STORE")
+    );
+    assert!(
+        !String::from_utf8_lossy(&disasm.stderr).contains("canonical route disposition: legacy")
+    );
+    assert!(String::from_utf8_lossy(&disasm.stderr).contains(&format!("mir_digest={digest}")));
+    fs::remove_dir_all(&dir).unwrap();
 }
 
-// R6-1137 L1/L2 tail pin: a capture-free nested callable can still be outside
-// MIR when its actor method needs an unsupported nested declaration and
-// projected actor-field assignment. The default native build remains correct
-// through its explicit compatibility route; direct MIR entries reject the
-// whole shape without retrying legacy.
 #[test]
-fn canonical_mir_nested_shadow_callable_keeps_legacy_and_direct_cli_fails_closed() {
-    let source = project_root()
-        .join("tests")
-        .join("real_world")
-        .join("actor_nested_func_shadow.mimi");
+fn canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback() {
+    assert_original_actor_cli_routes("actor_nested_func_capture.mimi", b"15\n");
+}
+
+#[test]
+fn canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback() {
+    assert_original_actor_cli_routes("actor_nested_func_shadow.mimi", b"42\n101\n");
+}
+
+#[test]
+fn canonical_actor_default_verify_retains_dormant_true_false_and_embedded_contracts() {
+    let original =
+        fs::read_to_string(project_root().join("tests/real_world/actor_nested_func_capture.mimi"))
+            .unwrap();
     let dir = std::env::temp_dir().join(format!(
-        "mimi_nested_shadow_mir_{}_{}",
+        "mimi-actor-whole-proof-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock")
+            .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&dir).expect("create nested shadow CLI directory");
-    let native = dir.join("default.out");
+    fs::create_dir_all(&dir).unwrap();
+    for (index, (suffix, guarded_proven)) in [
+        ("func guarded(x: i32) -> i32 {\nrequires: x > 0\nensures: result == x\nx\n}", true),
+        ("func guarded(x: i32) -> i32 {\nrequires: x > 0\nensures: result != x\nx\n}", false),
+        ("func identity_i32(x: i32) -> i32 { x }\nfunc guarded(x: i32) -> i32 { identity_i32({\nensures: false\nx\n}) }", false),
+        ("func guarded(x: i32) -> i32 { x + {\nensures: false\n0\n} }", false),
+    ].into_iter().enumerate() {
+        let path = dir.join(format!("dormant-{index}.mimi"));
+        fs::write(&path, format!("{original}\n{suffix}")).unwrap();
+        let observed = Command::new(mimi_bin()).env("MIMI_ROUTE_CENSUS", "1").arg("verify").arg(&path).output().unwrap();
+        let stdout = String::from_utf8_lossy(&observed.stdout);
+        let stderr = String::from_utf8_lossy(&observed.stderr);
+        assert!(stdout.contains("guarded"), "the dormant owner must have a real default verifier obligation: {stdout} {stderr}");
+        assert!(!stdout.contains("No contracts to verify"));
+        // The dormant user contract is still checked by the explicit Actor
+        // compatibility verifier, while the unsupported Actor method body
+        // remains an honest unknown.  The CLI therefore stays fail-closed;
+        // inspect the named guarded owner below for its actual verdict.
+        assert!(!observed.status.success(), "{stdout} {stderr}");
+        let guarded_line = stdout
+            .lines()
+            .find(|line| line.contains("guarded"))
+            .unwrap_or_else(|| panic!("missing guarded verdict: {stdout} {stderr}"));
+        if guarded_proven {
+            assert!(guarded_line.contains("Proven"), "{guarded_line}");
+        } else {
+            assert!(!guarded_line.contains("Proven"), "{guarded_line}");
+        }
+        assert!(stderr.contains("actor-proof-obligations-compatibility"));
+        let explicit = Command::new(mimi_bin()).arg("verify").arg(&path).arg("--mir").output().unwrap();
+        assert!(!explicit.status.success());
+        assert!(String::from_utf8_lossy(&explicit.stderr).contains("cannot discard proof obligations"));
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
 
-    let compatibility_run = Command::new(mimi_bin())
-        .current_dir(project_root())
-        .arg("run")
-        .arg(&source)
-        .env("MIMI_VERBOSE", "1")
-        .output()
-        .expect("spawn default nested shadow run");
-    let run_stderr = String::from_utf8_lossy(&compatibility_run.stderr);
-    assert!(
-        compatibility_run.status.success(),
-        "default nested shadow run must succeed: {run_stderr}"
-    );
-    assert_eq!(compatibility_run.stdout, b"42\n101\n");
-    assert!(
-        run_stderr.contains(
-            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+#[test]
+fn canonical_actor_default_verify_keeps_mixed_ffi_callsite_verdicts() {
+    let original =
+        fs::read_to_string(project_root().join("tests/real_world/actor_nested_func_capture.mimi"))
+            .unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-actor-mixed-ffi-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("actor-mixed-ffi.mimi");
+    fs::write(
+        &path,
+        format!(
+            r#"{original}
+extern "C" {{
+    func actor_ffi_probe(value: i64) -> i64
+        requires: value > 0
+        ensures: result == value;
+    func actor_ffi_unused(value: i64) -> i64
+        ensures: result == value;
+}}
+func actor_ffi_positive(value: i64) -> i64 {{
+    requires: value > 0
+    actor_ffi_probe(value)
+}}
+func actor_ffi_negative() -> i64 {{
+    actor_ffi_probe(0 as i64)
+}}
+"#
         ),
-        "default run must disclose its Actor compatibility route: {run_stderr}"
-    );
+    )
+    .unwrap();
 
-    let compatibility_verify = Command::new(mimi_bin())
+    let observed = Command::new(mimi_bin())
         .current_dir(project_root())
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("verify")
-        .arg(&source)
-        .env("MIMI_VERBOSE", "1")
+        .arg(&path)
+        .arg("--stats")
         .output()
-        .expect("spawn default nested shadow verifier");
-    let verify_transcript = format!(
-        "{}{}",
-        String::from_utf8_lossy(&compatibility_verify.stdout),
-        String::from_utf8_lossy(&compatibility_verify.stderr)
+        .expect("default mixed Actor/FFI verification");
+    let stdout = String::from_utf8_lossy(&observed.stdout);
+    let stderr = String::from_utf8_lossy(&observed.stderr);
+    let transcript = format!("{stdout}{stderr}");
+    assert!(
+        stderr.contains("actor-proof-obligations-compatibility"),
+        "mixed Actor/FFI source must use the named complete-proof compatibility route: {stderr}"
     );
     assert!(
-        compatibility_verify.status.success(),
-        "default nested shadow verification without contracts must succeed: {verify_transcript}"
+        !observed.status.success(),
+        "a disproven FFI Requires and deferred foreign Ensures must keep CLI verification fail-closed"
     );
     assert!(
-        verify_transcript.contains(
-            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
+        stdout.contains("actor_ffi_positive calls actor_ffi_probe"),
+        "positive FFI call-site result must be retained: {stdout}"
+    );
+    assert!(
+        stdout.lines().any(
+            |line| line.contains("actor_ffi_positive calls actor_ffi_probe")
+                && line.contains("pass")
         ),
-        "default verifier must disclose its Actor compatibility route: {verify_transcript}"
+        "positive FFI call-site must remain proven in the default CLI: {stdout}"
     );
     assert!(
-        verify_transcript.contains("no contracts to verify"),
-        "the no-contract verification result must remain neutral: {verify_transcript}"
+        stdout.contains("actor_ffi_negative calls actor_ffi_probe"),
+        "negative FFI call-site result must be retained: {stdout}"
     );
+    assert!(
+        stdout.lines().any(
+            |line| line.contains("actor_ffi_negative calls actor_ffi_probe")
+                && line.contains("fail")
+        ),
+        "negative FFI call-site must remain disproven in the default CLI: {stdout}"
+    );
+    assert!(
+        stdout.contains("actor_ffi_positive -> extern actor_ffi_probe Ensures")
+            && stdout.contains("actor_ffi_negative -> extern actor_ffi_probe Ensures"),
+        "each called foreign Ensures needs a named deferred result: {stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .filter(|line| line.contains("-> extern actor_ffi_probe Ensures"))
+            .all(|line| line.contains("unknown")),
+        "each foreign Ensures must remain inconclusive in the default CLI: {stdout}"
+    );
+    assert!(
+        transcript.contains("outside canonical proof coverage")
+            && !transcript.contains("extern actor_ffi_probe: postconditions verified"),
+        "foreign Ensures must not be reported as declaration-level proofs: {transcript}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line.contains("actor_ffi_unused")),
+        "an uncalled extern declaration must not manufacture a proof result: {transcript}"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
 
-    let build = Command::new(mimi_bin())
-        .current_dir(project_root())
-        .arg("build")
-        .arg(&source)
-        .arg("-o")
-        .arg(&native)
-        .env("MIMI_VERBOSE", "1")
-        .output()
-        .expect("spawn default nested shadow build");
-    let build_stderr = String::from_utf8_lossy(&build.stderr);
-    assert!(
-        build.status.success(),
-        "default compatibility build must remain usable: {build_stderr}"
-    );
-    assert!(
-        build_stderr.contains(
-            "canonical route disposition: legacy (mixed-coverage-without-materialized-candidate)"
-        ),
-        "the remaining fallback must be explicit: {build_stderr}"
-    );
-    assert!(
-        build_stderr.contains(
-            "call to qualified function 'Shadower::touch::helper' is not in the resolved native slice"
-        ),
-        "the fallback reason must name the exact nested callable: {build_stderr}"
-    );
-    assert!(native.exists(), "default build must produce its executable");
-    let execution = Command::new(&native)
-        .output()
-        .expect("run default nested shadow executable");
-    assert!(execution.status.success());
-    assert_eq!(execution.stdout, b"42\n101\n");
+#[test]
+fn canonical_actor_contracts_cannot_bypass_default_map_ffi_execution_gate() {
+    let original =
+        fs::read_to_string(project_root().join("tests/real_world/actor_nested_func_capture.mimi"))
+            .unwrap();
+    let actor_prefix = original
+        .split("\nfunc main() -> i32 {")
+        .next()
+        .expect("original Actor fixture has its main entry");
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-actor-map-ffi-gate-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    const FFI: &str = r#"
+extern "C" {
+    func scalar_probe(value: i32) -> i32
+        requires: value >= 0
+        ensures: result == value + 1;
+    func scalar_probe_unused(value: i32) -> i32
+        ensures: result == value + 1;
+}
+"#;
+    const USED_ACTOR_MAIN: &str = r#"
+func main() -> i32 {
+    let counter = Counter.spawn()
+    let actor_value = counter.bump(5)
+    let root = map_new()
+    let updated = map_set(root, "answer", scalar_probe(actor_value))
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#;
+    const UNUSED_ACTOR_MAIN: &str = r#"
+func main() -> i32 {
+    let root = map_new()
+    let updated = map_set(root, "answer", scalar_probe(41 as i32))
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#;
 
-    let explicit_native = dir.join("explicit-mir.out");
-    let direct = [
-        (
-            "mimi mir",
-            Command::new(mimi_bin())
-                .current_dir(project_root())
-                .arg("mir")
-                .arg(&source)
-                .output()
-                .expect("spawn nested shadow MIR inspection"),
-        ),
-        (
-            "mimi run --mir",
-            Command::new(mimi_bin())
-                .current_dir(project_root())
-                .arg("run")
-                .arg(&source)
-                .arg("--mir")
-                .output()
-                .expect("spawn nested shadow explicit MIR run"),
-        ),
-        (
-            "mimi build --mir",
-            Command::new(mimi_bin())
-                .current_dir(project_root())
-                .arg("build")
-                .arg(&source)
-                .arg("--mir")
-                .arg("-o")
-                .arg(&explicit_native)
-                .output()
-                .expect("spawn nested shadow explicit MIR build"),
-        ),
-        (
-            "mimi verify --mir",
-            Command::new(mimi_bin())
-                .current_dir(project_root())
-                .arg("verify")
-                .arg(&source)
-                .arg("--mir")
-                .output()
-                .expect("spawn nested shadow explicit MIR verify"),
-        ),
-    ];
-    for (surface, output) in direct {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success(),
-            "{surface} must reject unsupported MIR nodes: {stderr}"
-        );
-        assert!(
-            stderr.contains("MIR lowering failed"),
-            "{surface}: {stderr}"
-        );
-        assert!(
-            stderr.contains(
-                "nested callable declaration is outside the canonical root-scope MIR slice"
+    for (label, main) in [
+        ("used-actor", USED_ACTOR_MAIN),
+        ("unused-actor", UNUSED_ACTOR_MAIN),
+    ] {
+        let source = dir.join(format!("{label}.mimi"));
+        fs::write(&source, format!("{actor_prefix}\n{FFI}\n{main}")).unwrap();
+        let binary = dir.join(format!("{label}-built"));
+        let commands: [(&str, Vec<std::ffi::OsString>); 2] = [
+            ("run", vec!["run".into(), source.as_os_str().to_os_string()]),
+            (
+                "build",
+                vec![
+                    "build".into(),
+                    source.as_os_str().to_os_string(),
+                    "--output".into(),
+                    binary.as_os_str().to_os_string(),
+                ],
             ),
-            "{surface} must identify the nested declaration boundary: {stderr}"
+        ];
+        for (command, args) in commands {
+            let observed = Command::new(mimi_bin())
+                .current_dir(project_root())
+                .args(args)
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .unwrap_or_else(|error| panic!("start {label} {command}: {error}"));
+            let stdout = String::from_utf8_lossy(&observed.stdout);
+            let stderr = String::from_utf8_lossy(&observed.stderr);
+            assert!(
+                !observed.status.success(),
+                "{label} default {command} must reject Map+FFI without a composed receipt: stdout={stdout:?} stderr={stderr:?}"
+            );
+            assert!(
+                stdout.is_empty(),
+                "{label} executed before rejection: {stdout:?}"
+            );
+            assert!(
+                stderr.contains("profile cannot be combined") && stderr.contains("scalar FFI"),
+                "{label} {command} must report the shared Map-owner composition boundary: {stderr}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "{label} {command} must not escape through Actor proof compatibility: {stderr}"
+            );
+        }
+
+        // Verification applies the same whole-program composition gate.  A
+        // mixed Actor+Map+FFI graph has no combined checker-owned receipt, so
+        // it must be rejected before the explicit Actor proof compatibility
+        // owner can hide the Map/Any ownership boundary.
+        let verify = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .arg("verify")
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("start {label} verify: {error}"));
+        let stdout = String::from_utf8_lossy(&verify.stdout);
+        let stderr = String::from_utf8_lossy(&verify.stderr);
+        let transcript = format!("{stdout}{stderr}");
+        assert!(
+            !verify.status.success(),
+            "{label} Map+FFI composition must fail closed"
         );
         assert!(
-            stderr.contains(
-                "projected assign target requires aggregate glue and is not lowered by MIR Phase 0"
-            ),
-            "{surface} must identify the actor-field assignment boundary: {stderr}"
+            transcript.contains("MIR-COVERAGE-001")
+                && transcript.contains("cannot be combined")
+                && transcript.contains("scalar FFI")
+                && transcript.contains("Map/Any owner"),
+            "{label} verification must report the shared composition boundary: {transcript}"
         );
         assert!(
-            !stderr.contains("canonical route disposition: legacy"),
-            "explicit MIR request must not retry through legacy: {stderr}"
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "{surface} must not execute the actor program"
+            stdout.is_empty() && !transcript.contains("canonical route disposition: legacy"),
+            "{label} must not execute or enter a legacy route before rejection: {transcript}"
         );
     }
-    assert!(
-        !explicit_native.exists(),
-        "failed direct MIR build must not leave a native artifact"
-    );
-    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 // R6-1051 face, restated by R6-1052: a scalar literal switch (bool match in a

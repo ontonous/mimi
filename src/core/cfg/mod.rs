@@ -21,6 +21,9 @@ use super::{NodeId, Origin, Place};
 pub use lower::lower_file;
 pub use resolved_lower::lower_resolved_bodies;
 pub use resource_lower::analyze_resolved_bodies;
+pub(crate) use resource_lower::{
+    collect_ordinary_map_owned_get_i32_string_cfg, OrdinaryMapOwnedGetI32StringCfgCollection,
+};
 pub use validate::validate_cfg;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

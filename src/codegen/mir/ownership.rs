@@ -77,6 +77,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             return Ok(value);
         }
         match glue {
+            MirGlueKind::ManagedAnyI32StringV1 => {
+                self.emit_managed_any_clone_value(value, ty, subject)
+            }
             MirGlueKind::OwnedString => self.emit_owned_string_clone_value(value, subject),
             MirGlueKind::List => self.emit_list_clone_value(value, ty, subject),
             MirGlueKind::Set => self.emit_set_clone_value(value, ty, subject),
@@ -430,8 +433,83 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .builder
             .build_int_to_ptr(handle, pointer_type, "mir_string_data")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_domain_own_string(data, len, subject)?;
         self.generator
             .build_string_struct(data, len)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
+    /// The ordinary Map execution domain also owns fresh canonical Strings
+    /// across scalar call frames. Programs without either Map TypeDesc retain
+    /// their existing String allocation and destruction path.
+    pub(super) fn emit_ordinary_map_domain_own_string(
+        &mut self,
+        data: inkwell::values::PointerValue<'ctx>,
+        len: inkwell::values::IntValue<'ctx>,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let catalog = self.program.type_catalog();
+        if catalog
+            .get(&crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id())
+            .is_none()
+            && catalog
+                .get(&crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id())
+                .is_none()
+            && catalog
+                .get(&crate::core::mir::types::managed_any_i32_string_v1_type_id())
+                .is_none()
+        {
+            return Ok(());
+        }
+        let register_fn = self
+            .generator
+            .get_runtime_fn("mimi_mir_ordinary_map_domain_own_string")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let status = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    register_fn,
+                    &[data.into(), len.into()],
+                    "mir_ordinary_map_own_string",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| {
+            NativeMirError::new(subject, "ordinary Map String registration returned void")
+        })?
+        .into_int_value();
+        let registered = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                self.generator.context.i32_type().const_int(1, false),
+                "mir_ordinary_map_string_registered",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let valid = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_ordinary_map_string_domain_valid");
+        let failed = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_ordinary_map_string_domain_failed");
+        self.generator
+            .builder
+            .build_conditional_branch(registered, valid, failed)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(failed);
+        // Failed registration has already released this fresh allocation.
+        // Abort drains the remaining domain roots and String allocations.
+        self.emit_abort_with_message(
+            "[E0800] ordinary Map String execution-domain registration failed",
+            subject,
+        )?;
+        self.generator.builder.position_at_end(valid);
+        Ok(())
     }
 }

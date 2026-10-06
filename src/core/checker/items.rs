@@ -1015,6 +1015,9 @@ impl<'a> Checker<'a> {
                     } else {
                         self.funcs.insert(func.name.clone(), (params, ret));
                         self.extern_spans.insert(func.name.clone(), func.meta.span);
+                        if func.variadic {
+                            self.variadic_extern_funcs.insert(func.name.clone());
+                        }
                     }
                     // 追加 C: track extern functions for `?` rejection
                     self.extern_funcs.insert(func.name.clone());
@@ -1063,6 +1066,29 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
+                // Flow parameters scope over their state payloads and generated
+                // transition callables just like a record's generic binders.
+                // The checked transition directory stores these generated
+                // callables by name, so also retain the binders there below.
+                let flow_generic_names = f
+                    .generics
+                    .iter()
+                    .map(|generic| generic.name.clone())
+                    .collect::<Vec<_>>();
+                for generic in &f.generics {
+                    if Self::is_builtin_type(&generic.name) {
+                        self.set_span(generic.meta.span);
+                        self.emit_code(
+                            crate::diagnostic::codes::E0436,
+                            format!(
+                                "generic parameter '{}' shadows the builtin type '{}' — rename the type parameter",
+                                generic.name, generic.name
+                            ),
+                        );
+                    }
+                }
+                self.generic_scope
+                    .extend(flow_generic_names.iter().cloned());
                 // Register states and transitions for type checking
                 let qualified = format!("flow::{}", f.name);
                 // FLOW-IDENTITY-001: register the root (first-declared) state for
@@ -1293,6 +1319,9 @@ impl<'a> Checker<'a> {
                         self.funcs
                             .insert(t_key.clone(), (params.clone(), ret.clone()));
                     }
+                    if !f.generics.is_empty() {
+                        self.func_generics.insert(t_key.clone(), f.generics.clone());
+                    }
                     if transition_name_counts.get(t.name.as_str()).copied() == Some(1) {
                         let short_key = format!("{}::{}", qualified, t.name);
                         let short_ret = self
@@ -1300,9 +1329,14 @@ impl<'a> Checker<'a> {
                             .get(&t_key)
                             .map(|(_, r)| r.clone())
                             .unwrap_or(ret);
-                        self.funcs.insert(short_key, (params, short_ret));
+                        self.funcs.insert(short_key.clone(), (params, short_ret));
+                        if !f.generics.is_empty() {
+                            self.func_generics.insert(short_key, f.generics.clone());
+                        }
                     }
                 }
+                self.generic_scope
+                    .truncate(self.generic_scope.len() - flow_generic_names.len());
             }
             Item::Session(s) => {
                 // Register session type for order checking / dual resolution.
@@ -1401,6 +1435,77 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Optional declaration typing uses an isolated checker. Historically
+    /// extern predicates outside the verifier subset did not reject the file;
+    /// their absence from the typed root directory must remain an explicit
+    /// Deferred boundary rather than silently discarding the obligation.
+    /// The isolated unification/capture state cannot pollute executable bodies.
+    fn capture_extern_contract_types(&mut self, block: &ExternBlock) {
+        if !block
+            .funcs
+            .iter()
+            .any(|func| func.requires.is_some() || func.ensures.is_some())
+        {
+            return;
+        }
+        let mut capture = Checker::new(self.file);
+        capture.collect_decls();
+        let base_errors = capture.errors.len();
+        let block_owner = crate::core::NodeId(format!(
+            "extern:{}",
+            crate::core::resolved::extern_block_key(block)
+        ));
+        for func in &block.funcs {
+            if func.requires.is_none() && func.ensures.is_none() {
+                continue;
+            }
+            let owner = crate::core::resolved::extern_function_owner(&block_owner, func);
+            for (condition, ensures) in [
+                (func.requires.as_ref(), false),
+                (func.ensures.as_ref(), true),
+            ] {
+                let Some(condition) = condition else {
+                    continue;
+                };
+                // Requires and Ensures are independent optional roots. A
+                // failed Ensures must not erase the typed expression facts
+                // already captured for a valid Requires (or vice versa).
+                capture.unification.reset();
+                capture.begin_expression_type_capture(owner.clone());
+                let mut scope = HashMap::new();
+                for parameter in &func.params {
+                    scope.insert(parameter.name.clone(), capture.resolve_type(&parameter.ty));
+                }
+                let mut scopes = vec![scope];
+                if ensures {
+                    let result = func
+                        .ret
+                        .as_ref()
+                        .map(|ty| capture.resolve_type(ty))
+                        .unwrap_or_else(|| Type::Name("unit".into(), Vec::new()));
+                    scopes[0].insert("result".into(), result);
+                }
+                capture.check_expr(
+                    &Type::Name("bool".into(), Vec::new()),
+                    condition,
+                    &mut scopes,
+                );
+                capture.finish_expression_type_capture();
+                if capture.errors.len() == base_errors {
+                    if let Some(types) = capture.zonked_expr_types.remove(&owner) {
+                        self.zonked_expr_types
+                            .entry(owner.clone())
+                            .or_default()
+                            .extend(types);
+                    }
+                } else {
+                    capture.zonked_expr_types.remove(&owner);
+                    capture.errors.truncate(base_errors);
+                }
+            }
+        }
+    }
+
     pub(crate) fn check_item(&mut self, item: &Item) {
         self.set_span(Self::item_span(item));
         match item {
@@ -1410,6 +1515,12 @@ impl<'a> Checker<'a> {
             }
             Item::Actor(actor) => {
                 self.set_span(actor.meta.span);
+                // Field initializers own their expression identities independently
+                // from actor methods; do not capture them under the next method.
+                self.begin_expression_type_capture(crate::core::NodeId(format!(
+                    "actor:{}",
+                    actor.name
+                )));
                 // Check actor fields
                 for field in &actor.fields {
                     self.set_span(field.meta.span);
@@ -1436,6 +1547,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                self.finish_expression_type_capture();
                 // Check actor methods
                 for method in &actor.methods {
                     self.set_span(method.meta.span);
@@ -1878,6 +1990,7 @@ impl<'a> Checker<'a> {
                     .truncate(self.generic_scope.len() - impl_generic_names.len());
             }
             Item::ExternBlock(block) => {
+                self.capture_extern_contract_types(block);
                 self.set_span(block.meta.span);
                 // CK-H4: validate return types in the check pass (params already
                 // validated during collect). Skip body (extern has no body).
@@ -1931,6 +2044,7 @@ impl<'a> Checker<'a> {
                 ..
             } => {
                 self.set_span(meta.span);
+                self.begin_expression_type_capture(crate::core::NodeId(format!("constant:{name}")));
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
                 let const_ty = if let Some(declared_ty) = ty {
@@ -1951,12 +2065,23 @@ impl<'a> Checker<'a> {
                 } else {
                     value_ty
                 };
+                self.finish_expression_type_capture();
                 // Register const type so that later items can reference it.
                 // infer_item already does this; check_item must too.
                 self.const_types.insert(name.clone(), const_ty);
             }
             Item::Flow(f) => {
                 self.set_span(f.meta.span);
+                // State and transition checks below run in the Flow's generic
+                // environment. `collect_item_decls` registers the same binders
+                // on generated transition callables for call-site instantiation.
+                let flow_generic_names = f
+                    .generics
+                    .iter()
+                    .map(|generic| generic.name.clone())
+                    .collect::<Vec<_>>();
+                self.generic_scope
+                    .extend(flow_generic_names.iter().cloned());
                 // 0.36.4 Fault nominal: re-point the unqualified "Fault" sink to
                 // THIS flow's Fault before checking bodies. collect_item_decls
                 // registered all flows first (unqualified "Fault" → first flow),
@@ -2300,6 +2425,8 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
+                self.generic_scope
+                    .truncate(self.generic_scope.len() - flow_generic_names.len());
             }
             Item::Session(s) => {
                 self.set_span(s.meta.span);

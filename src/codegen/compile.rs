@@ -147,11 +147,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         // `compile_checked` callers too: an unrelated MapRoot/record candidate
         // must not make MIR materialization fail on the export body after the
         // caller has entered the compatibility API.
-        // Existing ordinary Map lifecycle gaps retain their compatibility
-        // route. The new typed owned-Get API has no legacy backend semantics,
-        // so its incomplete receipt must fail closed before the legacy
-        // remainder is considered.
+        // An ordinary Map operation attempt is a whole-program ownership
+        // candidate.  If the checker could not seal its operation ledger,
+        // do not let the resolved emitter (or the retired legacy remainder)
+        // reinterpret the same erased Map/Any payload.  In particular this
+        // covers record-valued `map_set`: the current canonical profile owns
+        // only i32/String entries, so this shape must be an explicit,
+        // checker-owned coverage result until a record descriptor/owner
+        // contract exists.
         let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+        if crate::core::mir::has_scalar_actor_nested_callable_candidate(program)
+            && !admission.scalar_actor
+        {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                "nested Actor callable candidate has no complete canonical lexical-environment receipt; legacy Actor fallback is disabled",
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
         if let Some(reason) =
             crate::core::mir::unsupported_nested_callable_boundary_reason(program, None)
         {
@@ -178,6 +191,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
             && !admission.map_any_owner.is_candidate()
             && !admission.ordinary_map_owned_get_i32_string_v1_complete();
+        if ordinary_map_compatibility {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                "MIR-COVERAGE-001/NITS: ordinary Map owner receipt is incomplete; record-valued map_set and other unsealed Map/Any operations have no canonical ownership consumer",
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
         if let Some(reason) = crate::core::mir::exported_abi_body_boundary_reason(program) {
             return Err(vec![crate::diagnostic::Diagnostic::error_code(
                 crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
@@ -647,8 +667,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         // CODEGEN Typed IR migration: body classes enter the resolved
         // emitter only after a pure eligibility scan. Once selected, errors
         // propagate directly; there is deliberately no typed-error → AST
-        // fallback. Unmigrated body classes remain on the explicit legacy arm
-        // until their slice is implemented and its oracle tests are green.
+        // fallback. A body class without a complete canonical slice is
+        // rejected below with MIR-COVERAGE-001; production never reopens the
+        // retained surface AST.
         // Generic checked ProtocolMethod calls currently have exact checker
         // receipts but no materialized concrete native instance ABI. The
         // resolved emitter parses the declaration symbol and uses erased Any
@@ -1908,7 +1929,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     // Test-only compatibility harness. Production code must enter through
-    // compile_checked, whose route gate owns the explicit legacy remainder.
+    // compile_checked, whose route gate is canonical-only and fail-closed.
     #[allow(dead_code)]
     #[cfg(test)]
     pub(crate) fn compile_file(&mut self, file: &File) -> MimiResult<()> {

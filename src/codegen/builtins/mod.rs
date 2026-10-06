@@ -133,6 +133,40 @@ fn register_mir_list_runtime<'ctx>(
         ),
         Some(inkwell::module::Linkage::External),
     );
+    // A Values snapshot is a move-owned List<ManagedAny>.  Its i64 payloads
+    // are generation-bearing owner tokens, so it has dedicated helpers rather
+    // than the copy-scalar ABI (which carries an explicit element-kind tag).
+    module.add_function(
+        "mimi_mir_list_new_managed_any",
+        ptr.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_len_managed_any",
+        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_push_managed_any",
+        i8.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_clone_managed_any",
+        ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_drop_managed_any",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     module.add_function(
         "mimi_mir_list_new_nested",
         ptr.fn_type(&[], false),

@@ -1,0 +1,8 @@
+// 2^63 must trap as E0802 before any i32 narrowing is relevant.
+func main() -> i32 {
+    let base: i64 = 2
+    let exponent: i64 = 63
+    let value = base ** exponent
+    println(value)
+    0
+}

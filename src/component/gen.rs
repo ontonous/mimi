@@ -461,6 +461,35 @@ pub fn register_core_runtime_abi(gen: &mut AbiGenerator) {
             .param("kind", prim(I8))
             .effect("dealloc")
     });
+    // `values()` returns a move-owned List<ManagedAny>.  The list stores
+    // generation-bearing i64 owner tokens, therefore construction, length,
+    // clone, push and drop use a dedicated ABI with no scalar kind argument.
+    gen.export("mimi_mir_list_new_managed_any", |f| {
+        f.returns(ptr(prim(U8))).effect("alloc")
+    });
+    gen.export("mimi_mir_list_len_managed_any", |f| {
+        f.param("list", ptr(prim(U8)))
+            .returns(prim(I32))
+            .effect("trap")
+    });
+    gen.export("mimi_mir_list_push_managed_any", |f| {
+        f.param("list", ptr(prim(U8)))
+            .param("owner", prim(I64))
+            .returns(prim(I8))
+            .effect("alloc")
+            .effect("trap")
+    });
+    gen.export("mimi_mir_list_clone_managed_any", |f| {
+        f.param("list", ptr(prim(U8)))
+            .returns(ptr(prim(U8)))
+            .effect("alloc")
+            .effect("trap")
+    });
+    gen.export("mimi_mir_list_drop_managed_any", |f| {
+        f.param("list", ptr(prim(U8)))
+            .effect("dealloc")
+            .effect("trap")
+    });
     gen.export("mimi_mir_set_to_list_scalar", |f| {
         f.param("set", prim(I64))
             .param("kind", prim(I8))

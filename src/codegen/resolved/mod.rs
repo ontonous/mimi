@@ -251,9 +251,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
-    /// Compile only the eligible subset of functions through the resolved
-    /// emitter. Ineligible functions are left for the legacy emitter.
-    /// Returns the number of functions compiled.
+    /// Test-only compatibility helper for compiling an explicitly selected
+    /// subset through the resolved emitter. The test harness may pair this
+    /// with its retained surface-AST fifth pass to exercise equivalence
+    /// cases; production `compile_checked` uses `compile_resolved_native`
+    /// and fails closed before any ineligible body can reach that pass.
+    #[cfg(test)]
     pub fn compile_resolved_subset(
         &mut self,
         program: &CheckedProgram,

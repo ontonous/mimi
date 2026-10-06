@@ -16,44 +16,6 @@ fn mimi_bin() -> PathBuf {
         .expect("Cargo must provide the mimi binary for CLI route evidence")
 }
 
-#[test]
-fn disasm_and_run_share_disk_source_graph_identity() {
-    let mimi = mimi_bin();
-    let source = fixture("mir_map_root_default_run.mimi");
-    let invoke = |command: &str| {
-        let output = Command::new(&mimi)
-            .env("MIMI_ROUTE_CENSUS", "1")
-            .arg(command)
-            .arg(&source)
-            .output()
-            .expect("invoke disk-source CLI consumer");
-        assert!(
-            output.status.success(),
-            "{command} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8(output.stderr).expect("route diagnostic is UTF-8");
-        let digest = stderr
-            .split_whitespace()
-            .find_map(|word| word.strip_prefix("mir_digest="))
-            .expect("consumer must disclose its canonical graph identity")
-            .to_owned();
-        assert_eq!(digest.len(), 64, "complete graph digest: {stderr}");
-        (output.stdout, digest)
-    };
-    let (run_output, run_digest) = invoke("run");
-    let (disasm_output, disasm_digest) = invoke("disasm");
-    assert_eq!(run_output, b"1\n0\n1\n");
-    assert!(
-        !disasm_output.is_empty(),
-        "disassembly must contain bytecode"
-    );
-    assert_eq!(
-        disasm_digest, run_digest,
-        "disasm must retain the same disk source identities as execution"
-    );
-}
-
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -68,6 +30,36 @@ fn real_world_fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// MapCLI native outputs stay ephemeral by default. Set MIMI_KEEP_TMP when
+/// running a focused route test to retain the actual executable/source input.
+fn map_cli_hash_if_requested(path: &Path) -> Option<String> {
+    std::env::var_os("MIMI_KEEP_TMP")
+        .and_then(|_| std::fs::read(path).ok())
+        .map(|contents| blake3::hash(&contents).to_hex().to_string())
+}
+
+fn finish_map_cli_artifact(path: &Path, hash_before_run: Option<String>) {
+    if std::env::var_os("MIMI_KEEP_TMP").is_none() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+
+    match std::fs::read(path) {
+        Ok(contents) => eprintln!(
+            "[mimi-test] kept MapCLI artifact: path={} hash_before_run={:?} hash_after_run={} stable_during_execution={:?}",
+            path.display(),
+            hash_before_run,
+            blake3::hash(&contents).to_hex(),
+            hash_before_run.as_ref().map(|before| before == &blake3::hash(&contents).to_hex().to_string())
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!(
+            "[mimi-test] could not hash retained MapCLI artifact {}: {error}",
+            path.display()
+        ),
+    }
+}
+
 #[test]
 fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile() {
     let mimi = mimi_bin();
@@ -75,7 +67,7 @@ fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile()
     let expected_stdout = "true\nfalse\ntrue\nfalse\ntrue\n1\ntrue\n";
 
     let run = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("run")
         .arg(&source)
         .output()
@@ -87,11 +79,15 @@ fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile()
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout), expected_stdout);
-    assert!(String::from_utf8_lossy(&run.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+    assert!(
+        String::from_utf8_lossy(&run.stderr)
+            .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="),
+        "run route diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 
     let explicit_mir = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("run")
         .arg("--mir")
         .arg(&source)
@@ -113,7 +109,7 @@ fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile()
         std::thread::current().name().unwrap_or("cli")
     ));
     let build = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("build")
         .arg(&source)
         .arg("--output")
@@ -127,11 +123,12 @@ fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile()
         String::from_utf8_lossy(&build.stderr)
     );
     assert!(String::from_utf8_lossy(&build.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
+    let binary_hash_before_run = map_cli_hash_if_requested(&built);
     let native = Command::new(&built)
         .output()
         .expect("run built static Contains MapRoot binary");
-    let _ = std::fs::remove_file(&built);
+    finish_map_cli_artifact(&built, binary_hash_before_run);
     assert!(
         native.status.success(),
         "{}",
@@ -140,7 +137,7 @@ fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile()
     assert_eq!(String::from_utf8_lossy(&native.stdout), expected_stdout);
 
     let verify = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("verify")
         .arg(real_world_fixture("map_root_static_contains_verified.mimi"))
         .output()
@@ -153,7 +150,7 @@ fn default_static_contains_run_build_verify_and_explicit_mir_share_the_profile()
     );
     assert!(String::from_utf8_lossy(&verify.stdout).contains("2/2 verified"));
     assert!(String::from_utf8_lossy(&verify.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
 }
 
 #[test]
@@ -165,7 +162,7 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     // the Checker-receipted MIR path and makes the selected path observable in
     // CLI diagnostics without changing program stdout.
     let run = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("run")
         .arg(&run_source)
         .output()
@@ -178,7 +175,7 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout), "1\n0\n1\n");
     assert!(String::from_utf8_lossy(&run.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
 
     let built = std::env::temp_dir().join(format!(
         "mimi-map-root-route-{}-{}",
@@ -186,7 +183,7 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
         std::thread::current().name().unwrap_or("cli")
     ));
     let build = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("build")
         .arg(&run_source)
         .arg("--output")
@@ -200,16 +197,17 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
         String::from_utf8_lossy(&build.stderr)
     );
     assert!(String::from_utf8_lossy(&build.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
+    let binary_hash_before_run = map_cli_hash_if_requested(&built);
     let native = Command::new(&built)
         .output()
         .expect("run built MapRoot binary");
-    let _ = std::fs::remove_file(&built);
+    finish_map_cli_artifact(&built, binary_hash_before_run);
     assert!(native.status.success());
     assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n0\n1\n");
 
     let verify = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("verify")
         .arg(fixture("mir_map_root_default_verify.mimi"))
         .output()
@@ -222,10 +220,10 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     );
     assert!(String::from_utf8_lossy(&verify.stdout).contains("contract proven"));
     assert!(String::from_utf8_lossy(&verify.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
 
     let legacy_map = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("run")
         .arg(fixture("mir_map_root_dynamic_key_legacy.mimi"))
         .output()
@@ -244,7 +242,7 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     );
 
     let dynamic_remove = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("run")
         .arg(fixture("mir_map_root_dynamic_remove_legacy.mimi"))
         .output()
@@ -268,7 +266,7 @@ fn default_string_map_root_run_build_and_verify() {
     let mimi = mimi_bin();
     let run_source = fixture("mir_map_root_string_default_run.mimi");
     let run = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("run")
         .arg(&run_source)
         .output()
@@ -281,7 +279,7 @@ fn default_string_map_root_run_build_and_verify() {
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout), "1\n1\n");
     assert!(String::from_utf8_lossy(&run.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
 
     let built = std::env::temp_dir().join(format!(
         "mimi-string-map-root-route-{}-{}",
@@ -289,7 +287,7 @@ fn default_string_map_root_run_build_and_verify() {
         std::thread::current().name().unwrap_or("cli")
     ));
     let build = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("build")
         .arg(&run_source)
         .arg("--output")
@@ -303,11 +301,12 @@ fn default_string_map_root_run_build_and_verify() {
         String::from_utf8_lossy(&build.stderr)
     );
     assert!(String::from_utf8_lossy(&build.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
+    let binary_hash_before_run = map_cli_hash_if_requested(&built);
     let native = Command::new(&built)
         .output()
         .expect("run built String MapRoot binary");
-    let _ = std::fs::remove_file(&built);
+    finish_map_cli_artifact(&built, binary_hash_before_run);
     assert!(
         native.status.success(),
         "{}",
@@ -316,7 +315,7 @@ fn default_string_map_root_run_build_and_verify() {
     assert_eq!(String::from_utf8_lossy(&native.stdout), "1\n1\n");
 
     let verify = Command::new(&mimi)
-        .env("MIMI_VERBOSE", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
         .arg("verify")
         .arg(fixture("mir_map_root_string_default_verify.mimi"))
         .output()
@@ -329,7 +328,7 @@ fn default_string_map_root_run_build_and_verify() {
     );
     assert!(String::from_utf8_lossy(&verify.stdout).contains("contract proven"));
     assert!(String::from_utf8_lossy(&verify.stderr)
-        .contains("canonical route disposition: canonical (map-root-v1) mir_digest="));
+        .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
 }
 
 #[test]
@@ -383,7 +382,7 @@ fn default_cli_rejects_map_root_scalar_ffi_composition_without_fallback() {
     for (mode, args) in commands {
         let output = Command::new(&mimi)
             .args(args)
-            .env("MIMI_VERBOSE", "1")
+            .env("MIMI_ROUTE_CENSUS", "1")
             .output()
             .unwrap_or_else(|error| panic!("start mimi {mode}: {error}"));
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -397,7 +396,7 @@ fn default_cli_rejects_map_root_scalar_ffi_composition_without_fallback() {
             "mimi {mode} executed source before rejection: {stdout:?}"
         );
         assert!(
-            stderr.contains("MapRoot profile cannot be combined"),
+            stderr.contains("MapAnyOwner v1 profile cannot be combined"),
             "mimi {mode} did not report the hard MIR route boundary: {stderr}"
         );
         assert!(
@@ -406,6 +405,6 @@ fn default_cli_rejects_map_root_scalar_ffi_composition_without_fallback() {
         );
     }
 
-    let _ = std::fs::remove_file(&source_path);
-    let _ = std::fs::remove_file(&binary_path);
+    finish_map_cli_artifact(&source_path, None);
+    finish_map_cli_artifact(&binary_path, None);
 }

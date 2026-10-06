@@ -8,12 +8,15 @@
 // from LLVM IR (invisible to rustc's reachability analysis).
 
 pub mod actor_domain;
+mod any_owner;
 mod epoch;
 mod handle;
 pub(crate) mod list_string;
 #[cfg(test)]
 mod map_any_owner_prototype;
+mod map_any_snapshot;
 mod mir_map_root;
+mod ordinary_map_domain;
 pub mod profiler;
 pub use epoch::{
     mimi_flow_bump_epoch, mimi_flow_check_epoch, mimi_flow_drop, mimi_flow_epoch,
@@ -33,11 +36,49 @@ pub use list_string::{
     mimi_str_split_ll, mimi_str_unbox, LIST_STRING_ABI_CSTR, LIST_STRING_ABI_FAT,
     LIST_STRING_ABI_VERSION, MIMI_ERR_OLD_STRING_ABI, MIMI_STR_MAGIC,
 };
-pub use mir_map_root::{
-    mimi_mir_map_root_contains, mimi_mir_map_root_drop, mimi_mir_map_root_new,
-    mimi_mir_map_root_remove, mimi_mir_map_root_set, mimi_mir_map_root_set_string,
-    mimi_mir_map_root_size,
+pub use map_any_snapshot::{
+    mimi_mir_managed_any_i32_string_v1_clone, mimi_mir_managed_any_i32_string_v1_copy_string,
+    mimi_mir_managed_any_i32_string_v1_drop, mimi_mir_managed_any_i32_string_v1_pack_i32,
+    mimi_mir_managed_any_i32_string_v1_read_i32,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_clone,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_contains,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_drop,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_get_any,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_get_i32,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_get_string,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_new,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_remove,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_set_i32,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_size,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_values,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_clone,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_contains,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_new,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_remove,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_i32,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_string,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size, ORDINARY_MAP_OWNED_GET_CAPACITY,
+    ORDINARY_MAP_OWNED_GET_MISSING, ORDINARY_MAP_OWNED_GET_OK,
+    ORDINARY_MAP_OWNED_GET_TYPE_MISMATCH,
 };
+#[cfg(test)]
+pub(crate) use map_any_snapshot::{
+    ordinary_map_owned_get_allocation_attempts_for_test,
+    ordinary_map_owned_get_allocation_checkpoint_for_test,
+    ordinary_map_owned_get_allocation_failure_triggered_for_test,
+    with_ordinary_map_owned_get_allocation_failure_for_test,
+};
+pub use mir_map_root::{
+    mimi_mir_map_any_owner_v1_contains, mimi_mir_map_any_owner_v1_drop,
+    mimi_mir_map_any_owner_v1_new, mimi_mir_map_any_owner_v1_remove,
+    mimi_mir_map_any_owner_v1_set_i32, mimi_mir_map_any_owner_v1_set_string,
+    mimi_mir_map_any_owner_v1_size, mimi_mir_map_root_contains, mimi_mir_map_root_drop,
+    mimi_mir_map_root_new, mimi_mir_map_root_remove, mimi_mir_map_root_set,
+    mimi_mir_map_root_set_string, mimi_mir_map_root_size,
+};
+pub use ordinary_map_domain::mimi_mir_ordinary_map_domain_own_string;
 //
 // Items 1/4/6/9 from the C runtime audit are eliminated:
 //   - Item 1: Thread pool TOCTOU — use Rust `Mutex` + `Condvar` (already fixed in ffi/runtime.rs)
@@ -200,6 +241,11 @@ pub enum ListElementKind {
     List = 7,
     /// Record pointers stored as *mut c_void
     Record = 8,
+    /// ManagedAny v1 owner tokens stored as i64 wire bits.  Each slot is an
+    /// independent, generation-checked owner and must be released through
+    /// the ManagedAny drop ABI; it is never a borrowed Map entry or a legacy
+    /// ValueHandle.
+    ManagedAny = 9,
 }
 
 impl ListElementKind {
@@ -215,6 +261,7 @@ impl ListElementKind {
             ListElementKind::Set => std::mem::size_of::<i64>(),
             ListElementKind::List => std::mem::size_of::<*mut MimiList>(),
             ListElementKind::Record => std::mem::size_of::<*mut std::ffi::c_void>(),
+            ListElementKind::ManagedAny => std::mem::size_of::<i64>(),
         }
     }
 
@@ -525,6 +572,10 @@ pub fn mimi_free(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
+    // Canonical ordinary-Map String receipts follow the original creator,
+    // including a normal free performed by another thread. Forget before
+    // releasing the allocation; no execution-domain lock spans the free.
+    ordinary_map_domain::forget_owned_string(ptr.cast());
     unregister_any_string_handle(ptr.cast_const());
     unregister_any_value_string(ptr.cast_const());
     #[cfg(miri)]
@@ -1440,8 +1491,31 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
         // I64/F64/Bool/Map/Set are stored directly and don't need freeing.
         let string_elements_match_abi = element_kind != ListElementKind::String
             || string_abi == list_string::LIST_STRING_ABI_FAT;
+        if element_kind == ListElementKind::ManagedAny && !free_elements {
+            // A ManagedAny slot is an owning generation-bearing token.  There
+            // is no valid shallow/free-data-only form of this list ABI: doing
+            // so would leak every element owner while preserving no receipt
+            // from which a later cleanup could recover.
+            mir_list_abort(b"[E0800] canonical ManagedAny List drop omitted owner release\0");
+        }
         let should_free_elements =
             free_elements && element_kind.is_pointer_kind() && string_elements_match_abi;
+        // ManagedAny slots are opaque generation-bearing i64 tokens rather
+        // than pointers, so they do not participate in the generic pointer
+        // cleanup below.  Release each token through its descriptor receipt;
+        // an invalid/stale token is a canonical ownership violation and must
+        // trap instead of being silently leaked.
+        if element_kind == ListElementKind::ManagedAny && !managed_any_list_is_valid(&*list) {
+            mir_list_abort(b"[E0800] canonical ManagedAny List ownership is invalid\0");
+        }
+        if free_elements && element_kind == ListElementKind::ManagedAny {
+            for i in 0..safe_count {
+                let owner = *data_ptr.cast::<i64>().add(i);
+                if !drop_managed_any_list_owner(owner) {
+                    mir_list_abort(b"[E0800] canonical ManagedAny List owner is stale\0");
+                }
+            }
+        }
         // Audit 2026-08-05 (N-1 family): String elements are allocated by
         // alloc_c_string (mimi_alloc) and must be freed through mimi_free —
         // under cfg(miri) mimi_alloc uses the Rust allocator + a size header,
@@ -1493,6 +1567,189 @@ fn mir_list_kind(raw: i8) -> Option<ListElementKind> {
         x if x == ListElementKind::Bool as i8 => Some(ListElementKind::Bool),
         _ => None,
     }
+}
+
+/// The ManagedAny list ABI is deliberately separate from scalar List glue.
+/// Its slots carry generation-bearing owner tokens, not user integers.  A
+/// token is accepted only when the creator-domain registry and the owner table
+/// both still authorize the exact v1 descriptor; a raw or stale ValueHandle
+/// can therefore never become a list element by shape alone.
+fn managed_any_list_owner_is_live(owner: i64) -> bool {
+    let Ok(token) = any_owner::AnyOwnerToken::from_wire_bits(owner as u64) else {
+        return false;
+    };
+    let Ok(Some(descriptor)) = ordinary_map_domain::managed_any_descriptor(token) else {
+        return false;
+    };
+    // The Values profile is closed to the two descriptor shapes admitted by
+    // `managed_any_i32_string_v1`; a future Any descriptor must not become a
+    // list element merely because it happens to reuse version 1.
+    matches!(
+        descriptor.kind,
+        any_owner::AnyOwnerKind::I32 | any_owner::AnyOwnerKind::OwnedString
+    ) && descriptor.version == 1
+        && any_owner::validate(token).is_ok()
+}
+
+fn drop_managed_any_list_owner(owner: i64) -> bool {
+    map_any_snapshot::mimi_mir_managed_any_i32_string_v1_drop(owner, 1) == 0
+}
+
+/// Validate the full ownership shape before mutating a ManagedAny list.
+/// Preflighting every slot (including uniqueness) makes a malformed list fail
+/// before the first token is consumed, avoiding partial owner release.
+fn managed_any_list_is_valid(list: &MimiList) -> bool {
+    if list.element_kind != ListElementKind::ManagedAny
+        || !list.owns_data
+        || list.len < 0
+        || list.len > 1_000_000_000
+    {
+        return false;
+    }
+    if list.data.is_null() {
+        return list.len == 0;
+    }
+    let cap = list_cap(list);
+    if !list.has_header || cap <= 0 || cap < list.len {
+        return false;
+    }
+    let count = list.len as usize;
+    for index in 0..count {
+        // SAFETY: a valid header and cap prove `count` i64 slots fit.
+        let owner = unsafe { *(list.data as *const i64).add(index) };
+        if !managed_any_list_owner_is_live(owner) {
+            return false;
+        }
+        // Keep cleanup allocation-free while still rejecting duplicate owner
+        // identities before any token is released.  Values lists are small;
+        // this O(n²) audit is a deliberate fail-closed boundary check.
+        for prior in 0..index {
+            let previous = unsafe { *(list.data as *const i64).add(prior) };
+            if previous == owner {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Allocate an empty canonical `List<ManagedAny>`.
+///
+/// The data slots are i64 wire bits, but the element kind is a distinct
+/// canonical tag so generic scalar List glue cannot reinterpret the owner
+/// tokens.  The list takes ownership only after a subsequent checked push.
+#[no_mangle]
+pub extern "C" fn mimi_mir_list_new_managed_any() -> *mut MimiList {
+    Box::into_raw(Box::new(MimiList::new_with_kind(
+        ListElementKind::ManagedAny,
+    )))
+}
+
+/// Append one already-published ManagedAny owner to a canonical list.
+///
+/// A successful push transfers the caller's domain obligation into the list;
+/// a failed push leaves the token live with the caller.  The owner is checked
+/// before touching list storage, and the bytecode/native consumers use the
+/// same v1 descriptor drop ABI when the list is destroyed.
+///
+/// # Safety
+/// `list` must be a live, exclusively owned canonical ManagedAny list.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_push_managed_any(list: *mut MimiList, owner: i64) -> i8 {
+    if list.is_null() || !managed_any_list_owner_is_live(owner) {
+        return 0;
+    }
+    // SAFETY: null was checked and the caller owns this list exclusively.
+    if !managed_any_list_is_valid(unsafe { &*list }) {
+        return 0;
+    }
+    let old_len = unsafe { (*list).len };
+    for index in 0..old_len as usize {
+        // SAFETY: the preflight above proves `old_len` slots fit.
+        if unsafe { *((*list).data as *const i64).add(index) } == owner {
+            return 0;
+        }
+    }
+    // The shared grow/write path stores an i64 slot and temporarily marks the
+    // list as I64.  Restore the canonical ManagedAny tag immediately after a
+    // successful append; on allocation failure the list remains untouched.
+    unsafe { mimi_list_push_i64(list, owner) };
+    let appended = unsafe { (*list).len == old_len.saturating_add(1) };
+    // `mimi_list_push_i64` sets the semantic tag before attempting growth,
+    // therefore restore ManagedAny even on an allocation failure where the
+    // length did not advance.  This keeps a partially staged list valid for
+    // the prefix cleanup path.
+    // SAFETY: list remains live and exclusive under the ABI precondition.
+    unsafe { (*list).element_kind = ListElementKind::ManagedAny };
+    appended as i8
+}
+
+/// Clone a canonical `List<ManagedAny>`, cloning every generation-bearing
+/// owner through the exact ManagedAny v1 receipt.  Any partial clone is
+/// released before returning null, so allocation or descriptor failures never
+/// leak a prefix or double-release a source owner.
+///
+/// # Safety
+/// `list` must be a live, immutable canonical ManagedAny list for the duration
+/// of this call.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_clone_managed_any(list: *const MimiList) -> *mut MimiList {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: caller guarantees a live list; null was checked above.
+    let source = unsafe { &*list };
+    if !managed_any_list_is_valid(source) {
+        return std::ptr::null_mut();
+    }
+    let clone = mimi_mir_list_new_managed_any();
+    if clone.is_null() {
+        return std::ptr::null_mut();
+    }
+    for index in 0..source.len as usize {
+        // SAFETY: the source contract supplies `len` initialized i64 slots.
+        let owner = unsafe { *(source.data as *const i64).add(index) };
+        let mut cloned_owner = 0i64;
+        let status = unsafe {
+            map_any_snapshot::mimi_mir_managed_any_i32_string_v1_clone(owner, 1, &mut cloned_owner)
+        };
+        let pushed = status == 0
+            && cloned_owner != 0
+            && unsafe { mimi_mir_list_push_managed_any(clone, cloned_owner) } != 0;
+        if !pushed {
+            // A failed append leaves a successfully cloned token outside the
+            // result list.  Release it only while the domain still authorizes
+            // it; a nonzero failure status normally leaves the output zero.
+            if cloned_owner != 0 && managed_any_list_owner_is_live(cloned_owner) {
+                let _ = drop_managed_any_list_owner(cloned_owner);
+            }
+            unsafe { mimi_mir_list_drop_managed_any(clone) };
+            return std::ptr::null_mut();
+        }
+    }
+    // SAFETY: clone remains live and exclusively owned by this function.
+    unsafe { (*clone).element_kind = ListElementKind::ManagedAny };
+    clone
+}
+
+/// Consume a canonical `List<ManagedAny>` and release each element owner via
+/// the v1 drop receipt before freeing the list storage.
+///
+/// # Safety
+/// `list` must be the unique live list produced by the canonical ManagedAny
+/// list ABI.  Invalid shape or stale owners trap rather than silently leaking.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_drop_managed_any(list: *mut MimiList) {
+    if list.is_null() {
+        return;
+    }
+    // SAFETY: caller owns the list; this function validates the shape before
+    // handing it to the common list deallocator.
+    let source = unsafe { &*list };
+    if !managed_any_list_is_valid(source) {
+        mir_list_abort(b"[E0800] canonical ManagedAny List shape is invalid\0");
+    }
+    unsafe { mimi_list_free(list, true) };
 }
 
 fn mir_list_abort(message: &'static [u8]) -> ! {
@@ -1683,6 +1940,29 @@ pub unsafe extern "C" fn mimi_mir_list_len_scalar(list: *const MimiList, kind: i
     }
     i32::try_from(source.len).unwrap_or_else(|_| {
         mir_list_abort(b"[E0802] canonical MIR List.len result overflows i32\0")
+    })
+}
+
+/// Read the length of a canonical `List<ManagedAny>` without transferring
+/// ownership.  Every slot is revalidated against the global creator-domain
+/// registry so a stale token cannot be hidden behind an otherwise plausible
+/// list length.  The returned surface type is i32, matching scalar List.len.
+///
+/// # Safety
+/// `list` must be a live, uniquely owned canonical ManagedAny list whose
+/// storage remains immutable for the duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_len_managed_any(list: *const MimiList) -> i32 {
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical ManagedAny List handle is null\0");
+    }
+    // SAFETY: caller guarantees a live list; null was checked above.
+    let source = unsafe { &*list };
+    if !managed_any_list_is_valid(source) {
+        mir_list_abort(b"[E0800] canonical ManagedAny List ownership is invalid\0");
+    }
+    i32::try_from(source.len).unwrap_or_else(|_| {
+        mir_list_abort(b"[E0802] canonical ManagedAny List.len result overflows i32\0")
     })
 }
 
@@ -2120,6 +2400,7 @@ unsafe fn mimi_mir_list_clone_any(list: *const MimiList) -> *mut MimiList {
     match kind {
         ListElementKind::I64 => unsafe { mimi_mir_list_clone_scalar(list, kind as i8) },
         ListElementKind::Bool => unsafe { mimi_mir_list_clone_scalar(list, kind as i8) },
+        ListElementKind::ManagedAny => unsafe { mimi_mir_list_clone_managed_any(list) },
         ListElementKind::List => unsafe { mimi_mir_list_clone_nested(list) },
         _ => std::ptr::null_mut(),
     }
@@ -2141,6 +2422,7 @@ unsafe fn mimi_mir_list_drop_any(list: *mut MimiList) {
         ListElementKind::I64 | ListElementKind::Bool => unsafe {
             mimi_mir_list_drop_scalar(list, kind as i8)
         },
+        ListElementKind::ManagedAny => unsafe { mimi_mir_list_drop_managed_any(list) },
         ListElementKind::List => unsafe { mimi_mir_list_drop_nested(list) },
         _ => {}
     }
@@ -2710,59 +2992,72 @@ pub extern "C" fn mimi_read_stdin_line() -> *mut std::ffi::c_char {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
+fn checked_pow_i64(base: i64, exp: i64) -> Result<i64, i32> {
+    // Preserve the VM's exact exponent conversion and checked_pow loop, but
+    // return the trap class to callers that must propagate it through an
+    // Actor's tagged status ABI instead of terminating the worker process.
+    let Ok(mut remaining) = u32::try_from(exp) else {
+        return Err(800);
+    };
+    let mut result = 1_i64;
+    let mut factor = base;
+    while remaining > 0 {
+        if (remaining & 1) != 0 {
+            result = result.checked_mul(factor).ok_or(802)?;
+        }
+        remaining >>= 1;
+        if remaining > 0 {
+            factor = factor.checked_mul(factor).ok_or(802)?;
+        }
+    }
+    Ok(result)
+}
+
+/// Status-returning integer Power ABI for MIR Actor-tagged functions.
+/// Returns 0 on success, E0800 for an invalid exponent, and E0802 for a
+/// checked i64 intermediate overflow. It never calls a process-exit trap.
+/// `out_value` is written only on success.
+///
+/// # Safety
+///
+/// `out_value` must be non-null, correctly aligned for `i64`, and valid for
+/// writes of one `i64` for the duration of this call. The MIR native emitter
+/// satisfies this contract with a live `i64` stack slot.
+#[no_mangle]
+pub unsafe extern "C" fn __mimi_pow_i64_status(base: i64, exp: i64, out_value: *mut i64) -> i32 {
+    if out_value.is_null() {
+        return 800;
+    }
+    match checked_pow_i64(base, exp) {
+        Ok(value) => {
+            // SAFETY: the internal native caller passes a live stack slot for
+            // one i64; null is rejected above.
+            unsafe { out_value.write(value) };
+            0
+        }
+        Err(status) => status,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn __mimi_pow_i64(base: i64, exp: i64) -> i64 {
-    // CG-H3: match interpreter — negative exponents and overflow are errors,
-    // not silent zero (which collides with legitimate 0**n results).
-    if exp < 0 {
-        unsafe {
-            mimi_runtime_abort(
-                c"negative exponent not supported for integers".as_ptr() as *const std::ffi::c_char
+    match checked_pow_i64(base, exp) {
+        Ok(value) => value,
+        Err(800) if exp < 0 => unsafe {
+            mimi_trap_power_error(
+                c"negative exponent in integer power".as_ptr() as *const std::ffi::c_char
             );
-        }
+        },
+        Err(800) => unsafe {
+            mimi_trap_power_error(
+                c"exponent exceeds u32::MAX in integer power".as_ptr() as *const std::ffi::c_char
+            );
+        },
+        Err(802) => unsafe {
+            mimi_trap_overflow(c"power".as_ptr() as *const std::ffi::c_char);
+        },
+        Err(_) => unreachable!("checked Power returned an unknown trap status"),
     }
-    // wave1-review §5.17 (audit 2026-08-05): mirror the VM's exact bound.
-    // Bytecode `Op::PowInt` (interp/bytecode/vm.rs) and `builtin_pow`
-    // (interp/bytecode/builtins/math.rs) reject exponents above u32::MAX via
-    // `u32::try_from`. Without this cap the runtime loop still terminates
-    // (O(log exp) squaring) but returns a value for bases in {-1, 0, 1} while
-    // the VM traps — an L1 backend divergence (pow(1, 4294967326): VM error,
-    // old runtime returned 1).
-    if exp > u32::MAX as i64 {
-        unsafe {
-            mimi_runtime_abort(c"pow: exponent exceeds u32::MAX (integer power)".as_ptr()
-                as *const std::ffi::c_char);
-        }
-    }
-    if exp == 0 {
-        return 1;
-    }
-    let mut result: i64 = 1;
-    let mut b: i64 = base;
-    let mut e: i64 = exp;
-    while e > 0 {
-        if (e & 1) != 0 {
-            match result.checked_mul(b) {
-                Some(v) => result = v,
-                None => unsafe {
-                    mimi_runtime_abort(
-                        c"integer overflow in power".as_ptr() as *const std::ffi::c_char
-                    );
-                },
-            }
-        }
-        e >>= 1;
-        if e > 0 {
-            match b.checked_mul(b) {
-                Some(v) => b = v,
-                None => unsafe {
-                    mimi_runtime_abort(
-                        c"integer overflow in power".as_ptr() as *const std::ffi::c_char
-                    );
-                },
-            }
-        }
-    }
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -3265,12 +3560,88 @@ fn transfer_map_owned_payload_to_list(payload: std::sync::Arc<MapOwnedPayload>) 
     handle
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MapStorageMode {
+    /// Existing ordinary Map ABI: values are opaque legacy ValueHandle bits.
+    LegacyRaw,
+    /// Closed, versioned MIR profile: entries own typed AnyOwner tokens.
+    CanonicalAnyOwnerV1,
+    /// Persistent ordinary-Map lifecycle profile with per-entry i32/String
+    /// owner tokens and a distinct MIR root identity.
+    OrdinaryMapOwnerLifecycleI32StringV1,
+    /// Persistent ordinary-Map snapshot with typed value getters that return
+    /// independent Mimi String allocations. Its dedicated root ABI is
+    /// `ordinary-map-owned-get-i32-string-v1`.
+    OrdinaryMapOwnedGetI32StringV1,
+}
+
 pub(super) struct MimiMap {
+    pub(super) mode: MapStorageMode,
     pub(super) inner: HashMap<String, ValueHandle>,
     /// Payload owners established by an explicit runtime ingress or builder.
     /// Cloned persistent maps share these ownership records. The payload is
     /// reclaimed only when the last map carrying the record is destroyed.
     pub(super) owned: HashMap<ValueHandle, std::sync::Arc<MapOwnedPayload>>,
+    /// Typed owners used only by the versioned MapAnyOwner profile. The token
+    /// remains an `AnyOwnerToken` throughout storage and is never represented
+    /// as a legacy `ValueHandle`.
+    pub(super) any_owner_entries: HashMap<String, any_owner::AnyOwnerToken>,
+    /// The first successful Set fixes the payload kind for this root's whole
+    /// lifetime, including while its entry table is temporarily empty.
+    pub(super) any_owner_kind: Option<any_owner::AnyOwnerKind>,
+    /// Persistent ordinary-Map roots keep their immutable snapshot in a
+    /// profile-specific representation, never in legacy ValueHandle slots.
+    pub(super) ordinary_map_snapshot: Option<map_any_snapshot::OrdinaryMapSnapshot>,
+}
+
+impl MimiMap {
+    fn legacy_raw() -> Self {
+        Self {
+            mode: MapStorageMode::LegacyRaw,
+            inner: HashMap::new(),
+            owned: HashMap::new(),
+            any_owner_entries: HashMap::new(),
+            any_owner_kind: None,
+            ordinary_map_snapshot: None,
+        }
+    }
+
+    pub(super) fn canonical_any_owner_v1() -> Self {
+        Self {
+            mode: MapStorageMode::CanonicalAnyOwnerV1,
+            inner: HashMap::new(),
+            owned: HashMap::new(),
+            any_owner_entries: HashMap::new(),
+            any_owner_kind: None,
+            ordinary_map_snapshot: None,
+        }
+    }
+
+    pub(super) fn ordinary_map_owner_lifecycle_i32_string_v1(
+        snapshot: map_any_snapshot::OrdinaryMapSnapshot,
+    ) -> Self {
+        Self {
+            mode: MapStorageMode::OrdinaryMapOwnerLifecycleI32StringV1,
+            inner: HashMap::new(),
+            owned: HashMap::new(),
+            any_owner_entries: HashMap::new(),
+            any_owner_kind: None,
+            ordinary_map_snapshot: Some(snapshot),
+        }
+    }
+
+    pub(super) fn ordinary_map_owned_get_i32_string_v1(
+        snapshot: map_any_snapshot::OrdinaryMapSnapshot,
+    ) -> Self {
+        Self {
+            mode: MapStorageMode::OrdinaryMapOwnedGetI32StringV1,
+            inner: HashMap::new(),
+            owned: HashMap::new(),
+            any_owner_entries: HashMap::new(),
+            any_owner_kind: None,
+            ordinary_map_snapshot: Some(snapshot),
+        }
+    }
 }
 
 /// Returns an exclusive operation lease; the per-handle gate prevents aliases.
@@ -3288,10 +3659,7 @@ fn map_from_handle(handle: MapHandle) -> handle::MapLease {
 
 #[no_mangle]
 pub extern "C" fn mimi_map_new() -> MapHandle {
-    handle::map_new_handle(MimiMap {
-        inner: HashMap::new(),
-        owned: HashMap::new(),
-    })
+    handle::map_new_handle(MimiMap::legacy_raw())
 }
 
 #[no_mangle]
@@ -3382,11 +3750,15 @@ pub unsafe extern "C" fn mimi_map_clone(handle: MapHandle) -> MapHandle {
     // SAFETY: handle validated by map_from_handle; deref is in a single scope.
     let src = map_from_handle(handle);
     handle::map_new_handle(MimiMap {
+        mode: MapStorageMode::LegacyRaw,
         inner: src.inner.clone(),
         // Payload allocations are shared by persistent map clones. Cloning
         // the Arc records keeps each raw payload alive until the final map
         // that references it is destroyed.
         owned: src.owned.clone(),
+        any_owner_entries: HashMap::new(),
+        any_owner_kind: None,
+        ordinary_map_snapshot: None,
     })
 }
 
@@ -24667,12 +25039,24 @@ pub extern "C" fn mimi_runtime_set_error_handler(handler: Option<ErrorHandler>) 
 /// with matching length arguments).
 #[no_mangle]
 pub unsafe extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
-    // P3-19 fix: write to stderr fd using raw syscall (async-signal-safe),
-    // instead of eprintln!() which acquires locks that may deadlock in signal context.
+    // SAFETY: this preserves the existing caller contract and just shares
+    // its implementation with explicitly typed runtime traps.
+    unsafe { runtime_abort_with_optional_code(msg, None) }
+}
+
+/// Shared orderly runtime-abort path. `typed_code` is reserved for runtime
+/// failures whose language error class is known at the point of detection.
+unsafe fn runtime_abort_with_optional_code(
+    msg: *const std::ffi::c_char,
+    typed_code: Option<&'static str>,
+) -> ! {
+    // Write the diagnostic before orderly cleanup, without taking stdio's
+    // locks. The cleanup below takes registry mutexes, so this entire entry
+    // point is not an asynchronous signal handler.
     extern "C" {
         fn write(fd: i32, buf: *const std::ffi::c_void, count: usize) -> isize;
     }
-    // Neutral prefix: this abort path serves contract violations, list
+    // Neutral prefix: the ordinary abort path serves contract violations, list
     // out-of-bounds, OOM, and string range checks alike. The category lives in
     // the caller-baked message (contract messages carry their own `[E0808]`
     // code, span, source line and disable-hint since 0.34.34). The old
@@ -24681,40 +25065,88 @@ pub unsafe extern "C" fn mimi_runtime_abort(msg: *const std::ffi::c_char) -> ! {
     // binaries — both removed.
     const PREFIX: &[u8] = b"[mimi] ";
     const DETAIL: &[u8] = b"(no details)\n";
-    // RT-C3: must stay async-signal-safe — no allocation (no to_string_lossy).
     // SAFETY: writing static / C-string byte buffers to stderr (fd 2) is
     // async-signal-safe; we only use write(2) and strlen-style scan.
     unsafe {
-        let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
-        if !msg.is_null() {
-            // SAFETY: `msg` non-null; scan for NUL without allocating.
-            let mut len = 0usize;
-            let base = msg as *const u8;
-            // Cap message length to avoid unbounded scan of non-NUL-terminated input.
-            const MAX_MSG: usize = 4096;
-            while len < MAX_MSG && *base.add(len) != 0 {
-                len += 1;
+        if let Some(code) = typed_code {
+            trap_write_code(code);
+            if msg.is_null() {
+                trap_write_static(DETAIL);
+            } else {
+                let mut len = 0usize;
+                let base = msg as *const u8;
+                const MAX_MSG: usize = 4096;
+                while len < MAX_MSG && *base.add(len) != 0 {
+                    len += 1;
+                }
+                trap_write_raw(msg as *const u8, len);
+                trap_write_static(b"\n");
             }
-            let _ = write(2, msg as *const std::ffi::c_void, len);
-            let _ = write(2, b"\n".as_ptr() as *const std::ffi::c_void, 1);
         } else {
-            let _ = write(2, DETAIL.as_ptr() as *const std::ffi::c_void, DETAIL.len());
+            let _ = write(2, PREFIX.as_ptr() as *const std::ffi::c_void, PREFIX.len());
+            if !msg.is_null() {
+                // SAFETY: `msg` non-null; scan for NUL without allocating.
+                let mut len = 0usize;
+                let base = msg as *const u8;
+                // Cap message length to avoid unbounded scan of non-NUL-terminated input.
+                const MAX_MSG: usize = 4096;
+                while len < MAX_MSG && *base.add(len) != 0 {
+                    len += 1;
+                }
+                let _ = write(2, msg as *const std::ffi::c_void, len);
+                let _ = write(2, b"\n".as_ptr() as *const std::ffi::c_void, 1);
+            } else {
+                let _ = write(2, DETAIL.as_ptr() as *const std::ffi::c_void, DETAIL.len());
+            }
         }
     }
 
-    let handler_ptr = ERROR_HANDLER.load(Ordering::Acquire);
+    // The public ABI accepts any live C string, including an interior view
+    // into a Map payload or a separately receipted String. Preserve its full
+    // bytes before retiring either owner. A fallible independent snapshot
+    // also lets the callback observe complete cleanup without retaining the
+    // diagnostic's original allocation. Null retains its existing meaning.
+    let handler_ptr = ERROR_HANDLER.swap(std::ptr::null_mut(), Ordering::AcqRel);
+    let callback_message = if !handler_ptr.is_null() && !msg.is_null() {
+        // SAFETY: the public ABI requires a live NUL-terminated message;
+        // cleanup has not started, so its complete bytes remain readable.
+        let bytes = unsafe { std::ffi::CStr::from_ptr(msg) }.to_bytes_with_nul();
+        let mut snapshot = Vec::new();
+        if snapshot.try_reserve_exact(bytes.len()).is_ok() {
+            snapshot.extend_from_slice(bytes);
+            Some(snapshot)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let callback_msg = if msg.is_null() {
+        msg
+    } else {
+        callback_message
+            .as_ref()
+            .map(|snapshot| snapshot.as_ptr().cast())
+            .unwrap_or(c"runtime abort: diagnostic snapshot unavailable".as_ptr())
+    };
+
+    // Settle profile roots before the host callback can exit or transfer
+    // control. The common trap boundary repeats this idempotent drain for
+    // arithmetic traps that have no error-handler callback.
+    ordinary_map_domain::drain_current_thread_roots();
     if !handler_ptr.is_null() {
-        ERROR_HANDLER.store(std::ptr::null_mut(), Ordering::Release);
         // R-1 (0.31.52): round-trip through usize to recover the fn pointer.
         // SAFETY: handler_ptr was stored from a valid ErrorHandler fn pointer
         // via `f as usize as *mut ()`. The usize→fn transmute is valid because
         // we only store values that originated from `Some(f)`.
         let handler: ErrorHandler = unsafe { std::mem::transmute(handler_ptr as usize) };
-        // SAFETY: calling the registered error handler with the validated message pointer.
-        unsafe { handler(msg) };
-        trap_exit();
+        // SAFETY: the independent snapshot (or static fallback) remains
+        // live throughout the callback; a null input still supplies null.
+        unsafe { handler(callback_msg) };
     }
-
+    // trap_exit terminates without unwinding, so release the snapshot before
+    // entering it when the host callback returns normally.
+    drop(callback_message);
     trap_exit();
 }
 
@@ -24773,8 +25205,9 @@ fn trap_write_code(code: &'static str) {
 /// status 1. Mirrors the bytecode VM's trap semantics (clean rc=1 +
 /// preserved stdout); replaces the old `std::process::abort()` which raised
 /// SIGABRT (rc=134) AND silently discarded buffered stdout.
-/// `fflush(NULL)` and `_exit` are async-signal-safe on POSIX, preserving the
-/// RT-C3 constraint for callers reached from signal-adjacent contexts.
+/// First retire the current thread's ordinary Map profile roots across all
+/// call frames. This orderly runtime-trap boundary uses registry mutexes;
+/// it is not suitable for invocation from an asynchronous signal handler.
 /// Allocation-failure paths keep plain `abort()` (no stream state to save,
 /// async-signal-safe by construction).
 fn trap_exit() -> ! {
@@ -24782,8 +25215,9 @@ fn trap_exit() -> ! {
         fn fflush(streams: *mut std::ffi::c_void) -> i32;
         fn _exit(status: i32) -> !;
     }
-    // SAFETY: flushing all streams (NULL) then immediate _exit are
-    // async-signal-safe POSIX operations; no allocation, no locks held.
+    ordinary_map_domain::drain_current_thread_roots();
+    // SAFETY: NULL requests flushing every output stream; all root cleanup
+    // and registry guards have completed before immediate process exit.
     unsafe {
         fflush(std::ptr::null_mut());
         _exit(1);
@@ -24824,6 +25258,19 @@ pub unsafe extern "C" fn mimi_trap_overflow(op: *const std::ffi::c_char) -> ! {
     }
     trap_write_static(SUFFIX);
     trap_exit();
+}
+
+/// Integer-power domain failure (negative exponent or exponent above the
+/// checked `u32` implementation domain). It is a generic runtime failure
+/// (E0800), reported through the same callback and ordered Map-root cleanup
+/// path as `mimi_runtime_abort`, with a typed prefix.
+///
+/// # Safety
+/// `message` must be null or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_trap_power_error(message: *const std::ffi::c_char) -> ! {
+    // SAFETY: forwarded from this function's public C-string contract.
+    unsafe { runtime_abort_with_optional_code(message, Some(E0800)) }
 }
 
 /// SD-8: Division by zero trap. Called when integer division or modulo
@@ -25573,10 +26020,7 @@ mod handle_registry_tests {
 
     #[test]
     fn recursive_map_json_reports_a_cycle_without_reentering_the_live_handle() {
-        let handle = handle::map_new_handle(MimiMap {
-            inner: Default::default(),
-            owned: Default::default(),
-        });
+        let handle = handle::map_new_handle(MimiMap::legacy_raw());
         {
             let mut map = map_from_handle(handle);
             map.inner.insert("self".into(), handle as ValueHandle);
@@ -25599,10 +26043,7 @@ mod handle_registry_tests {
 
     #[test]
     fn recursive_map_any_json_reports_a_cycle_without_reentering_the_live_handle() {
-        let handle = handle::map_new_handle(MimiMap {
-            inner: Default::default(),
-            owned: Default::default(),
-        });
+        let handle = handle::map_new_handle(MimiMap::legacy_raw());
         {
             let mut map = map_from_handle(handle);
             map.inner.insert("self".into(), handle as ValueHandle);
@@ -25625,14 +26066,8 @@ mod handle_registry_tests {
 
     #[test]
     fn recursive_map_json_reports_indirect_cycles_and_allows_repeated_children() {
-        let first = handle::map_new_handle(MimiMap {
-            inner: Default::default(),
-            owned: Default::default(),
-        });
-        let second = handle::map_new_handle(MimiMap {
-            inner: Default::default(),
-            owned: Default::default(),
-        });
+        let first = handle::map_new_handle(MimiMap::legacy_raw());
+        let second = handle::map_new_handle(MimiMap::legacy_raw());
         {
             let mut first_map = map_from_handle(first);
             first_map.inner.insert("next".into(), second as ValueHandle);
@@ -25659,14 +26094,8 @@ mod handle_registry_tests {
             mimi_map_destroy(second);
         }
 
-        let root = handle::map_new_handle(MimiMap {
-            inner: Default::default(),
-            owned: Default::default(),
-        });
-        let child = handle::map_new_handle(MimiMap {
-            inner: Default::default(),
-            owned: Default::default(),
-        });
+        let root = handle::map_new_handle(MimiMap::legacy_raw());
+        let child = handle::map_new_handle(MimiMap::legacy_raw());
         {
             let mut root_map = map_from_handle(root);
             root_map.inner.insert("left".into(), child as ValueHandle);

@@ -176,110 +176,190 @@ pub(in crate::codegen) fn classify_resolved(
 pub(in crate::codegen) fn classify_surface(
     ty: &crate::ast::Type,
     type_defs: &HashMap<String, crate::ast::TypeDef>,
+    checked_alias_primitives: &HashMap<String, PrimitiveType>,
 ) -> OwnershipClass {
-    classify_surface_inner(ty, type_defs, &mut BTreeSet::new())
+    classify_surface_inner(
+        ty,
+        type_defs,
+        checked_alias_primitives,
+        &mut BTreeSet::new(),
+    )
 }
 
 fn classify_surface_inner(
     ty: &crate::ast::Type,
     type_defs: &HashMap<String, crate::ast::TypeDef>,
+    checked_alias_primitives: &HashMap<String, PrimitiveType>,
     active: &mut BTreeSet<String>,
 ) -> OwnershipClass {
     use crate::ast::{Type, TypeDefKind};
 
     match ty.unlocated() {
-        Type::Name(name, arguments) => match name.as_str() {
-            "string" => OwnershipClass::StringBox,
-            "List" => OwnershipClass::List(Box::new(
-                arguments
-                    .first()
-                    .map(|arg| classify_surface_inner(arg, type_defs, active))
-                    .unwrap_or(OwnershipClass::Unknown),
-            )),
-            "Option" => OwnershipClass::Option(Box::new(
-                arguments
-                    .first()
-                    .map(|arg| classify_surface_inner(arg, type_defs, active))
-                    .unwrap_or(OwnershipClass::Unknown),
-            )),
-            "Result" => OwnershipClass::Result {
-                ok: Box::new(
+        Type::Name(name, arguments) => {
+            if arguments.is_empty() {
+                if let Some(primitive) = checked_alias_primitives.get(name) {
+                    return if *primitive == PrimitiveType::String {
+                        OwnershipClass::StringBox
+                    } else {
+                        OwnershipClass::Scalar
+                    };
+                }
+            }
+            match name.as_str() {
+                "string" => OwnershipClass::StringBox,
+                "List" => OwnershipClass::List(Box::new(
                     arguments
                         .first()
-                        .map(|arg| classify_surface_inner(arg, type_defs, active))
+                        .map(|arg| {
+                            classify_surface_inner(arg, type_defs, checked_alias_primitives, active)
+                        })
                         .unwrap_or(OwnershipClass::Unknown),
-                ),
-                error: Box::new(
+                )),
+                "Option" => OwnershipClass::Option(Box::new(
                     arguments
-                        .get(1)
-                        .map(|arg| classify_surface_inner(arg, type_defs, active))
+                        .first()
+                        .map(|arg| {
+                            classify_surface_inner(arg, type_defs, checked_alias_primitives, active)
+                        })
                         .unwrap_or(OwnershipClass::Unknown),
-                ),
-            },
-            "Map" | "Set" => OwnershipClass::OpaqueHandle(OpaqueHandleKind::ManagedCollection),
-            "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "f32" | "f64" | "bool" | "char" | "unit" | "nothing" => OwnershipClass::Scalar,
-            _ => {
-                let definition = type_defs.get(name).or_else(|| {
-                    type_defs.values().find(|definition| {
-                        definition.name == *name
-                            || definition.name.ends_with(&format!("::{name}"))
-                            || definition.name.ends_with(&format!(".{name}"))
-                    })
-                });
-                let Some(definition) = definition else {
-                    return OwnershipClass::Generic;
-                };
-                if !active.insert(definition.name.clone()) {
-                    return OwnershipClass::Unknown;
-                }
-                let class = match &definition.kind {
-                    TypeDefKind::Alias(inner) | TypeDefKind::Newtype(inner) => {
-                        classify_surface_inner(inner, type_defs, active)
+                )),
+                "Result" => OwnershipClass::Result {
+                    ok: Box::new(
+                        arguments
+                            .first()
+                            .map(|arg| {
+                                classify_surface_inner(
+                                    arg,
+                                    type_defs,
+                                    checked_alias_primitives,
+                                    active,
+                                )
+                            })
+                            .unwrap_or(OwnershipClass::Unknown),
+                    ),
+                    error: Box::new(
+                        arguments
+                            .get(1)
+                            .map(|arg| {
+                                classify_surface_inner(
+                                    arg,
+                                    type_defs,
+                                    checked_alias_primitives,
+                                    active,
+                                )
+                            })
+                            .unwrap_or(OwnershipClass::Unknown),
+                    ),
+                },
+                "Map" | "Set" => OwnershipClass::OpaqueHandle(OpaqueHandleKind::ManagedCollection),
+                "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128"
+                | "f32" | "f64" | "bool" | "char" | "unit" | "nothing" => OwnershipClass::Scalar,
+                _ => {
+                    let definition = type_defs.get(name).or_else(|| {
+                        type_defs.values().find(|definition| {
+                            definition.name == *name
+                                || definition.name.ends_with(&format!("::{name}"))
+                                || definition.name.ends_with(&format!(".{name}"))
+                        })
+                    });
+                    let Some(definition) = definition else {
+                        return OwnershipClass::Generic;
+                    };
+                    if !active.insert(definition.name.clone()) {
+                        return OwnershipClass::Unknown;
                     }
-                    TypeDefKind::Record(fields) => OwnershipClass::Record(
-                        fields
-                            .iter()
-                            .map(|field| classify_surface_inner(&field.ty, type_defs, active))
-                            .collect(),
-                    ),
-                    TypeDefKind::Union(fields) => OwnershipClass::Union(
-                        fields
-                            .iter()
-                            .map(|field| classify_surface_inner(&field.ty, type_defs, active))
-                            .collect(),
-                    ),
-                    TypeDefKind::Enum(_) => OwnershipClass::OpaqueHandle(OpaqueHandleKind::Runtime),
-                };
-                active.remove(&definition.name);
-                class
+                    let class = match &definition.kind {
+                        TypeDefKind::Alias(inner) | TypeDefKind::Newtype(inner) => {
+                            classify_surface_inner(
+                                inner,
+                                type_defs,
+                                checked_alias_primitives,
+                                active,
+                            )
+                        }
+                        TypeDefKind::Record(fields) => OwnershipClass::Record(
+                            fields
+                                .iter()
+                                .map(|field| {
+                                    classify_surface_inner(
+                                        &field.ty,
+                                        type_defs,
+                                        checked_alias_primitives,
+                                        active,
+                                    )
+                                })
+                                .collect(),
+                        ),
+                        TypeDefKind::Union(fields) => OwnershipClass::Union(
+                            fields
+                                .iter()
+                                .map(|field| {
+                                    classify_surface_inner(
+                                        &field.ty,
+                                        type_defs,
+                                        checked_alias_primitives,
+                                        active,
+                                    )
+                                })
+                                .collect(),
+                        ),
+                        TypeDefKind::Enum(_) => {
+                            OwnershipClass::OpaqueHandle(OpaqueHandleKind::Runtime)
+                        }
+                    };
+                    active.remove(&definition.name);
+                    class
+                }
             }
-        },
-        Type::Option(inner) => {
-            OwnershipClass::Option(Box::new(classify_surface_inner(inner, type_defs, active)))
         }
+        Type::Option(inner) => OwnershipClass::Option(Box::new(classify_surface_inner(
+            inner,
+            type_defs,
+            checked_alias_primitives,
+            active,
+        ))),
         Type::Result(ok, error) => OwnershipClass::Result {
-            ok: Box::new(classify_surface_inner(ok, type_defs, active)),
-            error: Box::new(classify_surface_inner(error, type_defs, active)),
+            ok: Box::new(classify_surface_inner(
+                ok,
+                type_defs,
+                checked_alias_primitives,
+                active,
+            )),
+            error: Box::new(classify_surface_inner(
+                error,
+                type_defs,
+                checked_alias_primitives,
+                active,
+            )),
         },
         Type::Tuple(fields) => OwnershipClass::Tuple(
             fields
                 .iter()
-                .map(|field| classify_surface_inner(field, type_defs, active))
+                .map(|field| {
+                    classify_surface_inner(field, type_defs, checked_alias_primitives, active)
+                })
                 .collect(),
         ),
         Type::Func(_, _) => OwnershipClass::Closure,
         Type::ExternFunc(_, _) => OwnershipClass::Scalar,
-        Type::Array(inner, _) => {
-            OwnershipClass::Array(Box::new(classify_surface_inner(inner, type_defs, active)))
+        Type::Array(inner, _) => OwnershipClass::Array(Box::new(classify_surface_inner(
+            inner,
+            type_defs,
+            checked_alias_primitives,
+            active,
+        ))),
+        Type::Slice(inner) => OwnershipClass::Slice(Box::new(classify_surface_inner(
+            inner,
+            type_defs,
+            checked_alias_primitives,
+            active,
+        ))),
+        Type::Shared(inner) | Type::Weak(inner) => OwnershipClass::Shared(Box::new(
+            classify_surface_inner(inner, type_defs, checked_alias_primitives, active),
+        )),
+        Type::Newtype(_, inner) => {
+            classify_surface_inner(inner, type_defs, checked_alias_primitives, active)
         }
-        Type::Slice(inner) => {
-            OwnershipClass::Slice(Box::new(classify_surface_inner(inner, type_defs, active)))
-        }
-        Type::Shared(inner) | Type::Weak(inner) => {
-            OwnershipClass::Shared(Box::new(classify_surface_inner(inner, type_defs, active)))
-        }
-        Type::Newtype(_, inner) => classify_surface_inner(inner, type_defs, active),
         Type::Ref(_, _)
         | Type::RefMut(_, _)
         | Type::CBuffer(_)
@@ -293,7 +373,9 @@ fn classify_surface_inner(
         Type::ImplTrait(_) | Type::Nothing => OwnershipClass::Scalar,
         Type::Infer | Type::TypeVar(_) | Type::ForAll(_, _) => OwnershipClass::Generic,
         Type::TyErr => OwnershipClass::Unknown,
-        Type::Located { ty, .. } => classify_surface_inner(ty, type_defs, active),
+        Type::Located { ty, .. } => {
+            classify_surface_inner(ty, type_defs, checked_alias_primitives, active)
+        }
     }
 }
 
@@ -588,6 +670,7 @@ mod tests {
             classify_surface(
                 &crate::ast::Type::Name("Cell".into(), Vec::new()),
                 &type_defs,
+                &HashMap::new(),
             ),
             OwnershipClass::Union(vec![OwnershipClass::Scalar, OwnershipClass::Scalar])
         );

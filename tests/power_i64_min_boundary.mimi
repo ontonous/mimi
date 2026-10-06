@@ -1,0 +1,10 @@
+// -2^63 is representable and must succeed under checked i64 exponentiation.
+func main() -> i32 {
+    let base: i64 = -2
+    let exponent: i64 = 63
+    let minimum = base ** exponent
+    let one: i64 = 1
+    println(minimum)
+    println(minimum ** one)
+    0
+}

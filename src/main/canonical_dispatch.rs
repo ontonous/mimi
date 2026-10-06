@@ -29,6 +29,9 @@ pub(crate) enum LegacyRouteReason {
     /// This is an early, explicit default compatibility disposition; explicit
     /// MIR requests still fail during construction.
     ExportedAbiBodyCompatibility,
+    /// Actor execution trims dormant bodies; user proof roots require the
+    /// complete checked-program verifier rather than the NoContracts island.
+    ActorProofObligationsCompatibility,
 }
 
 impl LegacyRouteReason {
@@ -42,6 +45,7 @@ impl LegacyRouteReason {
                 "plain-scalar-island-preflight-compatibility"
             }
             Self::ExportedAbiBodyCompatibility => "exported-abi-body-compatibility",
+            Self::ActorProofObligationsCompatibility => "actor-proof-obligations-compatibility",
         }
     }
 }
@@ -59,7 +63,7 @@ pub(crate) enum DefaultMirRoute {
     /// disposition so callers cannot mistake an unrecognized program for a
     /// canonical preflight failure that was silently downgraded.
     Legacy(LegacyRouteReason),
-    Canonical(MirProgram),
+    Canonical(Box<MirProgram>),
     /// A recognized migrated-island candidate failed canonical preflight.
     /// Once an island is recognized, its old production path is deleted and
     /// the CLI must fail closed instead of silently compiling it with legacy.
@@ -127,6 +131,53 @@ pub(crate) fn build_canonical_program_for_sources_with_diagnostics(
     merged_file: &File,
     included_sources: Option<&HashSet<mimi::span::SourceId>>,
 ) -> Result<MirProgram, MirProgramBuildError> {
+    let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    if !admission.scalar_export {
+        if let Some(reason) = mimi::core::mir::exported_abi_body_boundary_reason(checked) {
+            return Err(MirProgramBuildError::Validation(vec![
+                mimi::core::mir::MirValidationError {
+                    subject: "scalar export boundary".into(),
+                    message: format!(
+                        "{}: {reason}; aggregate/contract/unsupported export wrappers are outside the trusted canonical scalar subset",
+                        mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                    ),
+                },
+            ]));
+        }
+    }
+    if admission
+        .ordinary_map_owned_get_i32_string_v1
+        .has_profile_signal()
+        && !admission.ordinary_map_owned_get_i32_string_v1_complete()
+    {
+        return Err(MirProgramBuildError::Validation(vec![
+            mimi::core::mir::MirValidationError {
+                subject: "route coverage".into(),
+                message: format!(
+                    "{}: Checker recognized a typed owned-get Map candidate without complete operation-attempt coverage",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                ),
+            },
+        ]));
+    }
+    let ordinary_map_v1_exception = admission.map_any_owner_complete()
+        && mimi::core::mir::ordinary_map_attempts_fully_covered_by_map_any_owner_v1(checked);
+    if admission
+        .ordinary_map_owner_lifecycle_i32_string_v1
+        .has_profile_signal()
+        && !admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+        && !ordinary_map_v1_exception
+    {
+        return Err(MirProgramBuildError::Validation(vec![
+            mimi::core::mir::MirValidationError {
+                subject: "route coverage".into(),
+                message: format!(
+                    "{}: Checker recognized an ordinary Map owner lifecycle attempt without complete operation-attempt coverage",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                ),
+            },
+        ]));
+    }
     let excluded_sources = merged_file
         .sources
         .records()
@@ -208,16 +259,45 @@ fn select_default_route_for_purpose(
     let verbose = std::env::var_os("MIMI_VERBOSE").is_some();
     let census = std::env::var_os("MIMI_ROUTE_CENSUS").is_some();
     if let DefaultMirRoute::Canonical(program) = &route {
-        let is_map_root = mimi::core::mir::classify_canonical_mir_route_admission(checked)
-            .map_root
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+        let is_map_root = admission.map_root.is_candidate();
+        let is_map_any_owner = admission.map_any_owner.is_candidate();
+        let is_ordinary_map_owner = admission
+            .ordinary_map_owner_lifecycle_i32_string_v1
             .is_candidate();
+        let is_ordinary_map_owned_get = admission
+            .ordinary_map_owned_get_i32_string_v1
+            .is_candidate();
+        let is_scalar_export = admission.scalar_export;
+        let is_scalar_nested = admission.scalar_nested;
         // `MIMI_VERBOSE` is an established CLI diagnostic surface and must
-        // not add stderr to canonical programs. Keep the historical
-        // MapRoot-specific evidence there; the whole-program route census
-        // gets every canonical disposition through its dedicated opt-in.
-        if census || (verbose && is_map_root) {
-            let profile = if is_map_root {
+        // not add stderr to ordinary canonical programs. Keep the
+        // MapRoot/MapAnyOwner-specific evidence there; the whole-program
+        // route census gets every canonical disposition through its dedicated
+        // opt-in.
+        if census
+            || (verbose
+                && (is_map_root
+                    || is_map_any_owner
+                    || is_ordinary_map_owner
+                    || is_ordinary_map_owned_get
+                    || is_scalar_export
+                    || is_scalar_nested))
+        {
+            let profile = if is_map_any_owner {
+                mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND
+            } else if is_ordinary_map_owned_get {
+                mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+            } else if is_ordinary_map_owner {
+                mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
+            } else if is_map_root {
                 mimi::core::mir::MAP_ROOT_ISLAND
+            } else if admission.scalar_actor {
+                mimi::core::mir::SCALAR_ACTOR_ISLAND
+            } else if is_scalar_export {
+                mimi::core::mir::SCALAR_EXPORT_ISLAND
+            } else if is_scalar_nested {
+                mimi::core::mir::SCALAR_NESTED_ISLAND
             } else {
                 "default-route"
             };
@@ -242,13 +322,182 @@ fn select_default_route_inner(
     if let Some(reason) = scalar_ffi_declaration_boundary_diagnostic(checked) {
         return DefaultMirRoute::Rejected(reason);
     }
-    if mimi::core::mir::exported_abi_body_boundary_reason(checked).is_some() {
-        return DefaultMirRoute::Legacy(LegacyRouteReason::ExportedAbiBodyCompatibility);
+    // Admission is checker-owned and must happen before any compatibility
+    // disposition. Typed owned-get has no legacy bytecode or LLVM builtin,
+    // so an unrelated C-export body cannot route a program containing it to
+    // the AST-backed emitter.
+    let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    // Map owner receipts and scalar FFI currently have no combined route.
+    // Check the same shared composition contract as MIR materialization
+    // before Actor proof compatibility can route execution/build to legacy.
+    // Verification retains the complete compatibility verifier so its
+    // call-site FFI adapter can return named, untrusted results.
+    if purpose == RoutePurpose::Execution {
+        if let Some(error) = mimi::core::mir::scalar_ffi_map_owner_composition_failure(admission) {
+            return DefaultMirRoute::Rejected(error.to_diagnostic().message);
+        }
     }
-    // Admission is checker-owned and must happen before MIR construction.
+    if admission.scalar_export {
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) if route.materialized_scalar_export_candidate => {
+                select_scalar_export_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete scalar export admission did not materialize its wrapper receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
+    if let Some(reason) =
+        mimi::core::mir::unsupported_nested_callable_boundary_reason(checked, None)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: {reason}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if mimi::core::mir::exported_abi_body_boundary_reason(checked).is_some() {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: aggregate, generic, variadic, errno, parameter-mode, async, and contract-bearing exports are outside the trusted canonical scalar subset; no legacy export body is reachable",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if let Some(reason) = mimi::core::mir::scalar_actor_contract_boundary_reason(checked) {
+        // The bounded Actor NoContracts route cannot carry proof-bearing
+        // bodies.  A map owner in the same checked program is still a
+        // migrated ownership boundary, so returning the Actor compatibility
+        // route here would hide the map receipt behind the old AST backend.
+        // Keep the compatibility disposition only for a standalone
+        // contract-bearing Actor program; mixed Actor+Map candidates fail
+        // closed before any consumer can select legacy.
+        let map_owner_candidate = admission.map_root.is_candidate()
+            || admission.map_any_owner.is_candidate()
+            || admission
+                .ordinary_map_owner_lifecycle_i32_string_v1
+                .has_profile_signal()
+            || admission
+                .ordinary_map_owned_get_i32_string_v1
+                .has_profile_signal();
+        if map_owner_candidate {
+            return DefaultMirRoute::Rejected(format!(
+                "{}: {reason}; scalar FFI profile cannot be combined with Map/Any owner profiles; Actor contract boundary cannot hide a Map/Any owner candidate behind compatibility",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        return DefaultMirRoute::Legacy(LegacyRouteReason::ActorProofObligationsCompatibility);
+    }
+    // The two historical Actor fallbacks are direct nested-callable methods
+    // (capture/shadow).  Once such a candidate is visible in the checked
+    // graph, an incomplete lexical-environment receipt is a production route
+    // error, never permission to compile the method with the old AST emitter.
+    // Keep this after the proof boundary above so explicit Actor proof
+    // obligations retain their named compatibility verifier.
+    if mimi::core::mir::has_scalar_actor_nested_callable_candidate(checked)
+        && !admission.scalar_actor
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: nested Actor callable candidate has no complete canonical lexical-environment receipt; legacy Actor fallback is disabled",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if admission.scalar_actor {
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) if route.materialized_scalar_actor_candidate => {
+                select_scalar_actor_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete scalar Actor admission did not materialize its domain receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
     // The shared envelope also owns the materialization receipts, preventing
     // this selector from growing a second Set/record lowering walk.
-    let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    if admission
+        .ordinary_map_owned_get_i32_string_v1
+        .has_profile_signal()
+    {
+        if !admission.ordinary_map_owned_get_i32_string_v1_complete() {
+            // This is a new typed API with no legacy Bytecode/LLVM semantics.
+            // Preserve compatibility for existing untyped Map APIs, but never
+            // send an incomplete typed-Get attempt to a backend that cannot
+            // represent its Result or ownership contract.
+            return DefaultMirRoute::Rejected(format!(
+                "{}: Checker recognized an ordinary Map owned-get attempt without complete consumer coverage",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route)
+                if route.materialized_ordinary_map_owned_get_i32_string_v1_candidate =>
+            {
+                select_ordinary_map_owned_get_i32_string_v1_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete ordinary Map owned-get admission did not materialize its operation receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
+    let ordinary_profile_covers_incomplete_map_any = admission
+        .ordinary_map_owner_lifecycle_i32_string_v1_complete()
+        && mimi::core::mir::map_any_owner_v1_actions_are_within_ordinary_map_profile(checked);
+    if admission.map_any_owner.is_candidate()
+        && !admission.map_any_owner_complete()
+        && !ordinary_profile_covers_incomplete_map_any
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: Checker recognized a MapAnyOwner v1 candidate but withheld its complete independent lifecycle receipt",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if admission.map_any_owner.is_candidate() && admission.map_any_owner_complete() {
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) if route.materialized_map_any_owner_candidate => {
+                select_map_any_owner_v1_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete MapAnyOwner v1 admission did not materialize its operation receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
+    if admission
+        .ordinary_map_owner_lifecycle_i32_string_v1
+        .has_profile_signal()
+    {
+        if !admission
+            .ordinary_map_owner_lifecycle_i32_string_v1
+            .is_complete()
+        {
+            // Ordinary Map/Any is a production ownership boundary.  Its
+            // incomplete checker ledger must be rejected at the default
+            // route as well as by direct MIR construction; otherwise the
+            // AST compatibility emitter could silently retain an unreceipted
+            // borrow/escape/cleanup operation.
+            return DefaultMirRoute::Rejected(format!(
+                "{}: Checker recognized an ordinary Map owner lifecycle attempt without complete ownership coverage",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route)
+                if route
+                    .materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate =>
+            {
+                select_ordinary_map_owner_lifecycle_i32_string_v1_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete ordinary Map owner admission did not materialize its operation receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
     if admission.map_root.is_candidate() {
         if !admission.map_root_complete() {
             return DefaultMirRoute::Rejected(format!(
@@ -270,6 +519,18 @@ fn select_default_route_inner(
     if admission.scalar_ffi {
         return match materialize_canonical_route(checked, merged_file) {
             Ok(route) => select_scalar_ffi_route(route.program),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
+    if admission.scalar_nested {
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) if route.materialized_scalar_nested_candidate => {
+                select_scalar_nested_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete scalar nested admission did not materialize its nested-callable receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
             Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
         };
     }
@@ -472,6 +733,14 @@ fn select_default_route_inner(
         admission.flow,
         mimi::core::mir::S8FlowAdmission::CompleteCoverage
     );
+    // A complete checker Flow admission is a migrated route even when the
+    // narrow single-transition hint is false (for example, a multi-transition
+    // graph such as `flow_counter.mimi`).  If canonical materialization then
+    // fails, that graph must fail closed; passing only `flow_candidate` to the
+    // rejection helper would incorrectly turn the construction failure into
+    // an implicit legacy route.
+    let flow_rejection_candidate =
+        flow_candidate || complete_flow_candidate || flow_failure_retry_hint;
     // R6-1040: a checker-legal multi-target union (the compiler-owned Fault
     // absorption face) is its own migrated candidate, not an outside-profile
     // input.  Whether the graph actually routes canonical is decided by the
@@ -481,6 +750,7 @@ fn select_default_route_inner(
     if !collection_hint
         && !record_hint
         && !flow_candidate
+        && !complete_flow_candidate
         && !flow_failure_retry_hint
         && !union_candidate_hint
         && !option_string_hint
@@ -743,7 +1013,7 @@ fn select_default_route_inner(
                 }
             };
             return reject_migrated_candidates_with_copy(
-                flow_candidate,
+                flow_rejection_candidate,
                 matches!(
                     profile,
                     mimi::core::mir::CanonicalMirRouteProfile::ScalarCollection
@@ -795,6 +1065,20 @@ fn select_default_route_inner(
             // different: its unsupported shape must fail closed even when
             // canonical construction cannot produce a receipt, otherwise a
             // List<T> contract hole would silently enter legacy.
+            // The same rule applies to the broad complete Flow admission:
+            // cross-state nominal payloads are already a migrated boundary,
+            // even when a mixed collection scan classified the construction
+            // error as compatibility.  Do not let that combination re-enter
+            // the AST emitter.
+            if complete_flow_candidate {
+                return reject_migrated_candidates(
+                    true,
+                    false,
+                    false,
+                    false,
+                    "canonical Flow MIR construction failed",
+                );
+            }
             if managed_result_call_hint && !flow_failure_retry_hint {
                 return DefaultMirRoute::Rejected(
                     "managed Result direct-call candidate did not materialize a supported MIR shape"
@@ -1046,8 +1330,10 @@ fn select_default_route_inner(
     let materialized_copy_option_f64_candidate = route.materialized_copy_option_f64_candidate;
     let materialized_copy_result_i32_candidate = route.materialized_copy_result_i32_candidate;
     let materialized_session_candidate = route.materialized_session_candidate;
-    let flow_route_candidate =
-        flow_candidate || materialized_flow_candidate || flow_failure_retry_hint;
+    let flow_route_candidate = flow_candidate
+        || complete_flow_candidate
+        || materialized_flow_candidate
+        || flow_failure_retry_hint;
     let flow_failure_route_candidate =
         flow_failure_retry_hint || materialized_flow_failure_retry_candidate;
     let exact_f64_flow_failure_route_candidate =
@@ -1550,7 +1836,7 @@ fn select_default_route_inner(
             .functions()
             .contains_key(&mimi::core::NodeId("function:main".into()))
     {
-        return DefaultMirRoute::Canonical(route.program);
+        return DefaultMirRoute::Canonical(Box::new(route.program));
     }
 
     // Bytecode and native are both checked only after the verifier capability
@@ -1682,7 +1968,7 @@ fn select_default_route_inner(
         );
     }
 
-    DefaultMirRoute::Canonical(route.program)
+    DefaultMirRoute::Canonical(Box::new(route.program))
 }
 
 /// Consumer preflight for the closed Checker-owned MapRoot lifecycle. Every
@@ -1705,12 +1991,152 @@ fn select_map_root_route(program: MirProgram) -> DefaultMirRoute {
         Ok(results)
             if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
         {
-            DefaultMirRoute::Canonical(program)
+            DefaultMirRoute::Canonical(Box::new(program))
         }
         Ok(results) => DefaultMirRoute::Rejected(format!(
             "MapRoot MIR verifier returned an unsupported or inconclusive result: {results:?}"
         )),
         Err(error) => DefaultMirRoute::Rejected(format!("MapRoot MIR verifier pass: {error}")),
+    }
+}
+
+/// Consumer preflight for the versioned typed Any-owner Map lifecycle. Keep
+/// every consumer behind the independent v1 receipt so no legacy raw-value
+/// MapRoot path can claim its runtime tokens.
+fn select_map_any_owner_v1_route(program: MirProgram) -> DefaultMirRoute {
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "MapAnyOwner v1 MIR verifier capability: {errors:?}"
+        ));
+    }
+    let receipt = program.route_receipt(mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "MapAnyOwner v1 MIR bytecode capability: {errors:?}"
+        ));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "MapAnyOwner v1 MIR native capability: {errors:?}"
+        ));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(Box::new(program))
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "MapAnyOwner v1 MIR verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!(
+            "MapAnyOwner v1 MIR verifier pass: {error}"
+        )),
+    }
+}
+
+/// Consumer preflight for the source-preserving ordinary Map lifecycle.
+/// This profile has its own TypeDesc, operations, runtime storage mode, and
+/// receipt; a MapRoot or MapAnyOwner receipt cannot authorize it.
+fn select_ordinary_map_owner_lifecycle_i32_string_v1_route(program: MirProgram) -> DefaultMirRoute {
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map owner lifecycle MIR verifier capability: {errors:?}"
+        ));
+    }
+    let receipt =
+        program.route_receipt(mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map owner lifecycle MIR bytecode capability: {errors:?}"
+        ));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map owner lifecycle MIR native capability: {errors:?}"
+        ));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(Box::new(program))
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map owner lifecycle verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map owner lifecycle MIR verifier pass: {error}"
+        )),
+    }
+}
+
+/// Consumer preflight for the distinct typed owned-get profile. Its getter
+/// authority is not inherited from the old ordinary lifecycle receipt.
+fn select_ordinary_map_owned_get_i32_string_v1_route(program: MirProgram) -> DefaultMirRoute {
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map owned-get MIR verifier capability: {errors:?}"
+        ));
+    }
+    let receipt =
+        program.route_receipt(mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map owned-get MIR bytecode capability: {errors:?}"
+        ));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map owned-get MIR native capability: {errors:?}"
+        ));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(Box::new(program))
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map owned-get verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map owned-get MIR verifier pass: {error}"
+        )),
+    }
+}
+
+/// Revalidate every independent consumer against the same finite Actor graph.
+/// NoContracts is a neutral observation; any proof result would be a gate bug.
+fn select_scalar_actor_route(program: MirProgram) -> DefaultMirRoute {
+    let island = mimi::core::mir::SCALAR_ACTOR_ISLAND;
+    if let Err(errors) = mimi::core::mir::validate_scalar_actor_island(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} receipt capability: {errors:?}"));
+    }
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} verifier capability: {errors:?}"));
+    }
+    let receipt = program.route_receipt(island);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!("{island} bytecode capability: {errors:?}"));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} native capability: {errors:?}"));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results) if results.is_empty() => DefaultMirRoute::Canonical(Box::new(program)),
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "{island} expected neutral NoContracts, received {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!("{island} verifier pass: {error}")),
     }
 }
 
@@ -1737,12 +2163,82 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
         Ok(results)
             if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
         {
-            DefaultMirRoute::Canonical(program)
+            DefaultMirRoute::Canonical(Box::new(program))
         }
         Ok(results) => DefaultMirRoute::Rejected(format!(
             "scalar FFI MIR verifier returned an unsupported or inconclusive result: {results:?}"
         )),
         Err(error) => DefaultMirRoute::Rejected(format!("scalar FFI MIR verifier pass: {error}")),
+    }
+}
+
+/// Consumer preflight for direct-root, capture-free nested copy-scalar
+/// callables.  This route has no external FFI receipt; the nested-callable
+/// scope receipt itself is the canonical operation boundary.
+fn select_scalar_nested_route(program: MirProgram) -> DefaultMirRoute {
+    let island = mimi::core::mir::SCALAR_NESTED_ISLAND;
+    if program.nested_callable_scopes().is_empty() {
+        return DefaultMirRoute::Rejected(format!(
+            "{island} route has no checker-owned nested-callable scope receipt"
+        ));
+    }
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} MIR verifier capability: {errors:?}"));
+    }
+    let receipt = program.route_receipt(island);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!("{island} MIR bytecode capability: {errors:?}"));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} MIR native capability: {errors:?}"));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(Box::new(program))
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "{island} MIR verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!("{island} MIR verifier pass: {error}")),
+    }
+}
+
+/// Consumer preflight for the checker-owned scalar C-export wrapper receipt.
+/// The MIR body is executed by bytecode/reference/verifier; native emission is
+/// the only consumer that adds the public C adapter from the same receipt.
+fn select_scalar_export_route(program: MirProgram) -> DefaultMirRoute {
+    let island = mimi::core::mir::SCALAR_EXPORT_ISLAND;
+    if program.export_declarations().is_empty() {
+        return DefaultMirRoute::Rejected(format!(
+            "{island} route has no checker-owned export declaration"
+        ));
+    }
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} MIR verifier capability: {errors:?}"));
+    }
+    let receipt = program.route_receipt(island);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!("{island} MIR bytecode capability: {errors:?}"));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!("{island} MIR native capability: {errors:?}"));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(Box::new(program))
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "{island} MIR verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!("{island} MIR verifier pass: {error}")),
     }
 }
 
@@ -1774,7 +2270,7 @@ fn select_scalar_generic_identity_route(
         Ok(results)
             if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
         {
-            DefaultMirRoute::Canonical(program)
+            DefaultMirRoute::Canonical(Box::new(program))
         }
         Ok(results) => DefaultMirRoute::Rejected(format!(
             "{island} MIR verifier returned an unsupported or inconclusive result: {results:?}"
@@ -1933,6 +2429,271 @@ mod tests {
     }
 
     #[test]
+    fn canonical_actor_default_and_explicit_share_original_fixture_graphs() {
+        for source in [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/real_world/actor_nested_func_capture.mimi"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/real_world/actor_nested_func_shadow.mimi"
+            )),
+        ] {
+            let (program, mut file) = checked(source);
+            drop(program);
+            mimi::loader::merge_prelude_into(&mut file);
+            let program = mimi::core::check_program(&file).expect("same production prelude graph");
+            let DefaultMirRoute::Canonical(default) = select_default_route(&program, &file) else {
+                panic!("original Actor fixture must have a complete default route");
+            };
+            let DefaultMirRoute::Canonical(verification) =
+                select_default_verification_route(&program, &file)
+            else {
+                panic!("Actor NoContracts verify route must be canonical");
+            };
+            let direct = build_canonical_program(&program, &file).unwrap();
+            let shared = materialize_canonical_route(&program, &file).unwrap();
+            assert!(shared.admission.scalar_actor);
+            assert_eq!(default.canonical_digest(), direct.canonical_digest());
+            assert_eq!(default.canonical_digest(), verification.canonical_digest());
+            assert_eq!(
+                default.canonical_digest(),
+                shared.program.canonical_digest()
+            );
+            assert_eq!(
+                default.route_receipt(mimi::core::mir::SCALAR_ACTOR_ISLAND),
+                direct.route_receipt(mimi::core::mir::SCALAR_ACTOR_ISLAND)
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_nested_actor_candidate_rejects_before_legacy_route() {
+        let source = r#"
+actor Counter {
+    base: i32 = 0;
+
+    func bump(delta: i32) -> i32 {
+        // The nested helper is deliberately outside the finite i32
+        // environment ABI.  A checked Actor candidate must fail closed here;
+        // it must never be handed to the legacy actor emitter.
+        func unsupported(value: i64) -> i64 { value + 1 }
+        self.base = self.base + delta
+        self.base
+    }
+}
+
+func main() -> i32 {
+    let c = Counter.spawn()
+    c.bump(1)
+    0
+}
+"#;
+        let (program, file) = checked(source);
+        assert!(mimi::core::mir::has_scalar_actor_nested_callable_candidate(
+            &program
+        ));
+        assert!(!mimi::core::mir::classify_canonical_mir_route_admission(&program).scalar_actor);
+        let route = select_default_route(&program, &file);
+        let DefaultMirRoute::Rejected(reason) = route else {
+            panic!("unsupported nested Actor candidate must not retain a legacy route");
+        };
+        assert!(reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+        assert!(reason.contains("legacy Actor fallback is disabled"));
+    }
+
+    #[test]
+    fn canonical_actor_dormant_contracts_use_full_default_verification_route() {
+        for predicate in ["result == x", "result != x"] {
+            let source = format!(
+                "{}\nfunc guarded(x: i32) -> i32 {{\nrequires: x > 0\nensures: {predicate}\nx\n}}",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/real_world/actor_nested_func_capture.mimi"
+                ))
+            );
+            let (program, file) = checked(&source);
+            assert!(matches!(
+                select_default_route(&program, &file),
+                DefaultMirRoute::Legacy(LegacyRouteReason::ActorProofObligationsCompatibility)
+            ));
+            assert!(matches!(
+                select_default_verification_route(&program, &file),
+                DefaultMirRoute::Legacy(LegacyRouteReason::ActorProofObligationsCompatibility)
+            ));
+            assert!(build_canonical_program(&program, &file)
+                .unwrap_err()
+                .contains("cannot discard proof obligations"));
+            let results = mimi::verifier::verify_checked_dual(
+                &program,
+                "default-actor-whole-proof-census".into(),
+            )
+            .unwrap();
+            let guarded = results
+                .iter()
+                .find(|result| result.func_name == "guarded")
+                .expect("real default contract result");
+            if predicate == "result == x" {
+                assert_eq!(guarded.status, mimi::verifier::VerifStatus::Proven);
+            } else {
+                assert_ne!(guarded.status, mimi::verifier::VerifStatus::Proven);
+            }
+        }
+    }
+
+    #[test]
+    fn actor_contract_compatibility_cannot_bypass_map_ffi_execution_gate() {
+        const FFI: &str = r#"
+extern "C" {
+    func scalar_probe(value: i32) -> i32
+        requires: value >= 0
+        ensures: result == value + 1;
+}
+"#;
+        const USED_ACTOR_MAIN: &str = r#"
+func main() -> i32 {
+    let counter = Counter.spawn()
+    let actor_value = counter.bump(5)
+    let root = map_new()
+    let updated = map_set(root, "answer", scalar_probe(actor_value))
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#;
+        const UNUSED_ACTOR_MAIN: &str = r#"
+func main() -> i32 {
+    let root = map_new()
+    let updated = map_set(root, "answer", scalar_probe(41 as i32))
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#;
+        let actor_prefix = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/real_world/actor_nested_func_capture.mimi"
+        ))
+        .split("\nfunc main() -> i32 {")
+        .next()
+        .expect("original Actor fixture has its main entry");
+
+        for (label, main) in [
+            ("used-actor", USED_ACTOR_MAIN),
+            ("unused-actor", UNUSED_ACTOR_MAIN),
+        ] {
+            let source = format!("{actor_prefix}\n{FFI}\n{main}");
+            let (program, file) = checked(&source);
+            let admission = mimi::core::mir::classify_canonical_mir_route_admission(&program);
+            assert!(admission.scalar_ffi, "{label}: {admission:?}");
+            assert!(
+                admission.map_root_complete()
+                    || admission.map_any_owner_complete()
+                    || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+                    || admission.ordinary_map_owned_get_i32_string_v1_complete(),
+                "{label} must have a complete independent Map owner receipt: {admission:?}"
+            );
+            assert!(
+                mimi::core::mir::scalar_actor_contract_boundary_reason(&program).is_some(),
+                "{label} must exercise the Actor proof-compatibility boundary"
+            );
+
+            let DefaultMirRoute::Rejected(reason) = select_default_route(&program, &file) else {
+                panic!("{label} Map+FFI composition must not fall through Actor compatibility");
+            };
+            assert!(reason.contains("cannot be combined"), "{label}: {reason}");
+            assert!(reason.contains("scalar FFI"), "{label}: {reason}");
+
+            let DefaultMirRoute::Rejected(reason) =
+                select_default_verification_route(&program, &file)
+            else {
+                panic!("{label}: verification must not hide Map+FFI behind Actor compatibility");
+            };
+            assert!(reason.contains("Map/Any owner"), "{label}: {reason}");
+        }
+    }
+
+    #[test]
+    fn actor_contract_with_ordinary_map_cannot_hide_owner_behind_compatibility() {
+        let actor_prefix = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/real_world/actor_nested_func_capture.mimi"
+        ))
+        .split("\nfunc main() -> i32 {")
+        .next()
+        .expect("original Actor fixture has its main entry");
+        let source = format!(
+            "{actor_prefix}\n\
+                func guarded(value: i32) -> i32 {{\n\
+                    requires: value >= 0\n\
+                    ensures: result == value\n\
+                    value\n\
+                }}\n\
+                func main() -> i32 {{\n\
+                    let root = map_new()\n\
+                    let updated = map_set(root, \"answer\", guarded(1))\n\
+                    let size = map_size(updated)\n\
+                    drop(updated)\n\
+                    size\n\
+                }}"
+        );
+        let (program, file) = checked(&source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&program);
+        assert!(
+            admission.map_any_owner.is_candidate()
+                || admission.map_root.is_candidate()
+                || admission
+                    .ordinary_map_owner_lifecycle_i32_string_v1
+                    .has_profile_signal()
+                || admission
+                    .ordinary_map_owned_get_i32_string_v1
+                    .has_profile_signal(),
+            "fixture must expose a checker-owned Map/Any candidate: {admission:?}"
+        );
+        assert!(
+            mimi::core::mir::scalar_actor_contract_boundary_reason(&program).is_some(),
+            "fixture must exercise the Actor proof-compatibility boundary"
+        );
+        for route in [
+            select_default_route(&program, &file),
+            select_default_verification_route(&program, &file),
+        ] {
+            let DefaultMirRoute::Rejected(reason) = route else {
+                panic!("Actor contract + ordinary Map must fail closed: {route:?}");
+            };
+            assert!(reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+            assert!(reason.contains("Map/Any owner"));
+            assert!(!reason.contains("legacy"));
+        }
+    }
+
+    #[test]
+    fn unsupported_actor_export_wrapper_rejects_before_legacy_route() {
+        let source = format!(
+            "{}\nextern \"C\" func exported_probe(value: i32) -> i32 {{ value + 1 }}",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/real_world/actor_nested_func_capture.mimi"
+            ))
+        );
+        let (program, file) = checked(&source);
+        assert!(!mimi::core::mir::classify_canonical_mir_route_admission(&program).scalar_actor);
+        let route = select_default_route(&program, &file);
+        assert!(
+            matches!(route, DefaultMirRoute::Rejected(ref reason) if reason.contains("MIR-COVERAGE-001"))
+        );
+        let verification = select_default_verification_route(&program, &file);
+        assert!(
+            matches!(verification, DefaultMirRoute::Rejected(ref reason) if reason.contains("MIR-COVERAGE-001"))
+        );
+        assert!(
+            build_canonical_program(&program, &file).is_err(),
+            "explicit Actor MIR must not discard the unsupported exported wrapper"
+        );
+    }
+
+    #[test]
     fn migrated_route_candidate_rejection_priority_is_stable() {
         let all_copy_candidates = CopyCandidateFlags {
             option_i32: true,
@@ -2078,7 +2839,7 @@ mod tests {
     }
 
     #[test]
-    fn map_root_default_route_admits_no_contract_execution_with_stdout() {
+    fn map_any_owner_default_route_admits_no_contract_execution_with_stdout() {
         let source = r#"
             func main() -> i32 {
                 let root = map_new()
@@ -2092,8 +2853,8 @@ mod tests {
         let (checked, file) = checked(source);
         let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
         assert_eq!(
-            admission.map_root,
-            mimi::core::mir::MapRootAdmission::CompleteCoverage
+            admission.map_any_owner,
+            mimi::core::mir::MapAnyOwnerAdmission::CompleteCoverage
         );
         let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
             panic!("complete MapRoot receipt must enter the default canonical route");
@@ -2107,9 +2868,9 @@ mod tests {
         );
         assert_eq!(
             program
-                .route_receipt(mimi::core::mir::MAP_ROOT_ISLAND)
+                .route_receipt(mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND)
                 .profile,
-            mimi::core::mir::MAP_ROOT_ISLAND
+            mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND
         );
         let main = mimi::core::NodeId("function:main".into());
         let reference = mimi::core::mir::reference::MirReferenceInterpreter::new(&program)
@@ -2123,7 +2884,7 @@ mod tests {
     }
 
     #[test]
-    fn map_root_default_route_admits_static_contains_and_retains_the_root() {
+    fn map_any_owner_default_route_admits_static_contains_and_retains_the_root() {
         let source = r#"
             func main() -> i32 {
                 let root = map_new()
@@ -2140,15 +2901,15 @@ mod tests {
         let (checked, file) = checked(source);
         let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
         assert_eq!(
-            admission.map_root,
-            mimi::core::mir::MapRootAdmission::CompleteCoverage
+            admission.map_any_owner,
+            mimi::core::mir::MapAnyOwnerAdmission::CompleteCoverage
         );
         assert!(matches!(
             admission.collection,
             mimi::core::mir::ScalarCollectionAdmission::CompleteCoverage
         ));
         let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
-            panic!("static MapRoot contains must enter the default canonical route");
+            panic!("static contains over a typed owner must enter the default canonical route");
         };
         let main = mimi::core::NodeId("function:main".into());
         let reference = mimi::core::mir::reference::MirReferenceInterpreter::new(&program)
@@ -2162,8 +2923,40 @@ mod tests {
     }
 
     #[test]
-    fn map_root_default_route_preserves_legacy_compatibility_outside_profile() {
-        for source in [
+    fn ordinary_map_owned_get_export_body_cannot_escape_to_legacy_route() {
+        let source = r#"
+            extern "C" func exported_identity(value: i32) -> i32 { value }
+
+            func main() -> i32 {
+                let root = map_new()
+                let result = map_get_i32(root, "answer")
+                drop(root)
+                match result {
+                    Ok(value) => value,
+                    Err(status) => status,
+                }
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert!(
+            admission
+                .ordinary_map_owned_get_i32_string_v1
+                .has_profile_signal(),
+            "typed getter admission must remain visible alongside exported compatibility"
+        );
+
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("owned-get must not enter a legacy backend when an export body forces legacy");
+        };
+        assert!(reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+        assert!(reason.contains("owned-get"));
+        assert!(!reason.contains("not yet implemented"));
+    }
+
+    #[test]
+    fn ordinary_map_owner_route_rejects_incomplete_ownership_without_legacy_retry() {
+        for (index, source) in [
             r#"
                 func main() -> i32 {
                     let root = map_new()
@@ -2182,15 +2975,17 @@ mod tests {
                 }
             "#,
             r#"
-                func main() -> i32 {
+                func branch_size(flag: bool) -> i32 {
                     let root = map_new()
-                    if true {
+                    if flag {
                         let size = map_size(root)
                     } else {
+                        let size = map_size(root)
                     }
                     drop(root)
                     0
                 }
+                func main() -> i32 { branch_size(true) }
             "#,
             r#"
                 func main() -> i32 {
@@ -2208,25 +3003,208 @@ mod tests {
                     0
                 }
             "#,
-        ] {
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let values_snapshot = values(root)
+                    let count = values_snapshot.len()
+                    drop(values_snapshot)
+                    drop(root)
+                    count
+                }
+            "#,
+            r#"
+                type Point { x: i32 }
+                func main() -> i32 {
+                    let root = map_new()
+                    let updated = map_set(root, "point", Point { x: 7 })
+                    drop(updated)
+                    0
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let first = map_set(root, "answer", 42)
+                    let mixed = map_set(first, "label", "forty-two")
+                    drop(root)
+                    drop(first)
+                    drop(mixed)
+                    0
+                }
+            "#,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let (checked, file) = checked(source);
+            let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
             assert_eq!(
-                mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
+                admission.map_any_owner,
+                mimi::core::mir::MapAnyOwnerAdmission::OutsideProfile,
+                "ordinary Map/Any compatibility form must not become an incomplete typed-owner candidate: {source}"
+            );
+            assert_eq!(
+                admission.map_root,
                 mimi::core::mir::MapRootAdmission::OutsideProfile,
                 "ordinary Map/Any compatibility form must stay outside MapRoot: {source}"
             );
+            // The matrix keeps every independently receipted owner operation
+            // on canonical MIR: untyped get, dynamic-key set, branch-local
+            // read, loop cleanup, scope-drop root, Values snapshot, and the
+            // mixed i32/String chain.  Record payloads remain an explicit
+            // negative coverage probe until their operation receipt closes.
+            let expected_canonical = matches!(index, 0 | 1 | 2 | 3 | 4 | 5 | 7);
+            if expected_canonical {
+                let route = select_default_route(&checked, &file);
+                assert!(
+                    matches!(&route, DefaultMirRoute::Canonical(_)),
+                    "complete Map/Any owner slice must use its canonical route (case {index}): {source}; selected {route:?}"
+                );
+            } else {
+                assert!(
+                    admission
+                        .ordinary_map_owner_lifecycle_i32_string_v1
+                        .has_profile_signal()
+                        || admission
+                            .ordinary_map_owned_get_i32_string_v1
+                            .has_profile_signal(),
+                    "unhandled ordinary Map operation must remain visible to the route census: {source}; admission={admission:?}"
+                );
+                let route = select_default_route(&checked, &file);
+                assert!(
+                    matches!(&route, DefaultMirRoute::Rejected(reason) if reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)),
+                    "unsupported ordinary Map shape must fail closed without a legacy retry: {source}; selected {route:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owner_root_escape_rejects_before_any_legacy_owner() {
+        // Returning a Map root crosses the callable boundary.  The Checker
+        // deliberately records the New attempt but withholds its lifecycle
+        // receipt, so the default execution and verification selectors must
+        // expose one shared MIR coverage rejection instead of handing the
+        // escaped owner to the AST compatibility emitter.
+        let source = r#"
+            func escape_root() -> Record {
+                let root = map_new()
+                root
+            }
+            func main() -> i32 {
+                let escaped = escape_root()
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            mimi::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
+            "root escape must remain visible as an incomplete ownership candidate"
+        );
+        for (label, route) in [
+            ("execution", select_default_route(&checked, &file)),
+            (
+                "verification",
+                select_default_verification_route(&checked, &file),
+            ),
+        ] {
+            let DefaultMirRoute::Rejected(reason) = route else {
+                panic!("{label} route must reject an escaped ordinary Map root");
+            };
             assert!(
-                matches!(
-                    select_default_route(&checked, &file),
-                    DefaultMirRoute::Legacy(_)
-                ),
-                "ordinary Map/Any compatibility form must keep its legacy route: {source}"
+                reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+                "{label} route must report checker-owned MIR coverage: {reason}"
+            );
+            assert!(
+                !reason.contains("legacy"),
+                "{label} route must not expose a hidden legacy fallback: {reason}"
             );
         }
     }
 
     #[test]
-    fn map_root_default_route_rejects_extra_temporary_root_without_legacy_retry() {
+    fn ordinary_map_direct_mir_boundary_rejects_incomplete_operation_coverage() {
+        let source = r#"
+            func main() -> i32 {
+                let root = map_new()
+                let value = map_get(root, "answer")
+                drop(root)
+                0
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let error = build_canonical_program_for_sources_with_diagnostics(&checked, &file, None)
+            .expect_err("direct MIR inspection must reject ordinary Map without Get ownership");
+        assert!(error.diagnostic_codes().contains(&Some("MIR-COVERAGE-001")));
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_direct_mir_boundary_rejects_incomplete_coverage() {
+        let source = r#"
+            func main() -> i32 {
+                let root = map_new()
+                let result = map_get_i32(root, "answer")
+                drop(root)
+                match result {
+                    Ok(value) => value,
+                    Err(code) => code,
+                }
+            }
+        "#;
+        let (checked, file) = checked(source);
+        assert_eq!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_get_i32_string_v1,
+            mimi::core::mir::OrdinaryMapOwnedGetI32StringV1Admission::IncompleteCoverage
+        );
+        let error = build_canonical_program_for_sources_with_diagnostics(&checked, &file, None)
+            .expect_err("direct MIR construction must reject an unreceipted typed getter");
+        assert!(error.diagnostic_codes().contains(&Some("MIR-COVERAGE-001")));
+        assert!(error
+            .to_string()
+            .contains("typed owned-get Map candidate without complete operation-attempt coverage"));
+    }
+
+    #[test]
+    fn ordinary_map_complete_profile_materializes_its_own_mir_receipt() {
+        let source = r#"
+            func main() -> i32 {
+                let root = map_new()
+                let keyed = map_set(root, "answer", 0)
+                let updated = map_set(keyed, "label", "")
+                let size = map_size(updated)
+                drop(root)
+                drop(keyed)
+                drop(updated)
+                size
+            }
+        "#;
+        let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert!(admission.ordinary_map_owner_lifecycle_i32_string_v1_complete());
+        assert_eq!(
+            admission.map_root,
+            mimi::core::mir::MapRootAdmission::OutsideProfile
+        );
+        assert_eq!(
+            admission.map_any_owner,
+            mimi::core::mir::MapAnyOwnerAdmission::OutsideProfile
+        );
+        let program = build_canonical_program_for_sources_with_diagnostics(&checked, &file, None)
+            .expect("complete ordinary Map owner graph should materialize");
+        assert_eq!(
+            program
+                .route_receipt(mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND)
+                .profile,
+            mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
+        );
+    }
+
+    #[test]
+    fn map_any_owner_default_route_rejects_extra_temporary_root_without_legacy_retry() {
         let source = r#"
             func main() -> i32 {
                 let root = map_new()
@@ -2239,13 +3217,18 @@ mod tests {
             }
         "#;
         let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
         assert_eq!(
-            mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
-            mimi::core::mir::MapRootAdmission::IncompleteCoverage,
-            "an action-bearing lifecycle must not mask a Map root outside the admitted operations"
+            admission.map_any_owner,
+            mimi::core::mir::MapAnyOwnerAdmission::IncompleteCoverage,
+            "an action-bearing typed lifecycle must not mask extra Map construction attempts"
+        );
+        assert_eq!(
+            admission.map_root,
+            mimi::core::mir::MapRootAdmission::OutsideProfile
         );
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
-            panic!("partial MapRoot lifecycle must fail closed");
+            panic!("partial MapAnyOwner lifecycle must fail closed");
         };
         assert!(
             reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
@@ -2255,7 +3238,7 @@ mod tests {
     }
 
     #[test]
-    fn map_root_default_route_receipts_temporary_roots_across_callables() {
+    fn map_any_owner_default_route_receipts_temporary_roots_across_callables() {
         let source = r#"
             func temporary_size() -> i32 {
                 map_size(map_new())
@@ -2270,9 +3253,9 @@ mod tests {
         "#;
         let (checked, file) = checked(source);
         assert_eq!(
-            mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_root,
-            mimi::core::mir::MapRootAdmission::CompleteCoverage,
-            "each temporary MapRoot in the program has an exact New/Size/Drop receipt"
+            mimi::core::mir::classify_canonical_mir_route_admission(&checked).map_any_owner,
+            mimi::core::mir::MapAnyOwnerAdmission::CompleteCoverage,
+            "each temporary map owner in the program has an exact New/Size/Drop receipt"
         );
         assert!(
             matches!(
@@ -2426,6 +3409,84 @@ mod tests {
             route.canonical_digest(),
             route.route_receipt("scalar-ffi-v1").mir_digest
         );
+    }
+
+    #[test]
+    fn scalar_nested_copy_helpers_route_without_an_ffi_receipt() {
+        for source in [
+            r#"
+                func main() -> i32 {
+                    func helper(value: i32) -> i32 { value + 1 }
+                    helper(41)
+                }
+            "#,
+            r#"
+                func main() -> i64 {
+                    func helper(value: i64) -> i64 { value + 1 as i64 }
+                    helper(41 as i64)
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    func helper(value: bool) -> bool { value }
+                    if helper(true) { 1 } else { 0 }
+                }
+            "#,
+        ] {
+            let (checked, file) = checked(source);
+            let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+            assert!(
+                admission.scalar_nested,
+                "copy-scalar nested admission: {admission:?}"
+            );
+            assert!(
+                !admission.scalar_ffi,
+                "pure nested source must not claim FFI: {admission:?}"
+            );
+            let DefaultMirRoute::Canonical(route) = select_default_route(&checked, &file) else {
+                panic!("direct-root copy-scalar helper must route canonical: {source}");
+            };
+            assert_eq!(route.ffi_calls().len(), 0);
+            assert!(!route.nested_callable_scopes().is_empty());
+            assert_eq!(
+                route
+                    .route_receipt(mimi::core::mir::SCALAR_NESTED_ISLAND)
+                    .profile,
+                mimi::core::mir::SCALAR_NESTED_ISLAND
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_nested_shapes_reject_before_legacy_compatibility() {
+        for source in [
+            r#"
+                func main() -> i32 {
+                    let offset = 1
+                    func helper(value: i32) -> i32 { value + offset }
+                    helper(41)
+                }
+            "#,
+            r#"
+                func main() -> i32 {
+                    if true {
+                        func helper(value: i32) -> i32 { value + 1 }
+                        helper(41)
+                    } else { 0 }
+                }
+            "#,
+        ] {
+            let (checked, file) = checked(source);
+            let reason =
+                mimi::core::mir::unsupported_nested_callable_boundary_reason(&checked, None)
+                    .expect("unsupported nested shape must carry a coverage boundary");
+            assert!(reason.contains("outside the canonical scalar nested-callable slice"));
+            let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+                panic!("unsupported nested shape must not re-enter legacy: {source}");
+            };
+            assert!(reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+            assert!(!reason.contains("legacy"));
+        }
     }
 
     #[test]
@@ -4141,6 +5202,33 @@ mod tests {
         assert!(mimi::core::mir::contains_s8_flow_transition_candidate(
             &program
         ));
+    }
+
+    #[test]
+    fn cross_state_flow_counter_rejects_nominal_glue_gap_before_legacy_route() {
+        // The broad scalar Flow admission recognizes this real-world graph,
+        // but its cross-state nominal payloads still lack the canonical
+        // MoveOut/Clone/Drop receipt required by native MIR validation.  The
+        // default dispatcher must surface that gap instead of turning the
+        // materialization failure into a hidden legacy build.
+        let source = include_str!("../../tests/real_world/flow_counter.mimi");
+        let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.flow,
+            mimi::core::mir::S8FlowAdmission::CompleteCoverage,
+            "the checker must classify the graph before the canonical glue gate"
+        );
+        let route = select_default_route(&checked, &file);
+        let DefaultMirRoute::Rejected(reason) = route else {
+            panic!("cross-state Flow with missing nominal glue must fail closed: {route:?}");
+        };
+        assert!(
+            reason.contains("S8 Flow transition candidate")
+                || reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                || reason.contains(mimi::core::mir::MIR_ROUTE_MATERIALIZATION_ERROR_CODE),
+            "unexpected Flow rejection: {reason}"
+        );
     }
 
     #[test]

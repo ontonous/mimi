@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+use crate::core::cfg::{EdgeKind, Terminator};
 use crate::core::ir::{
     MatchArm, Permission, ResolvedBlock, ResolvedCall, ResolvedCallee, ResolvedExpr,
     ResolvedExprKind, ResolvedFStringPart, ResolvedIndex, ResolvedLiteral, ResolvedLocal,
@@ -8,9 +9,14 @@ use crate::core::ir::{
 };
 use crate::core::{
     CanonicalActionKind, CanonicalResourceAction, CfgLocation, IndexProjection, Loan, LoanId,
-    LoanKind, LocalId, MapRootAction, MapRootActionKind, NodeId, Place, PlaceProjection,
-    ResolvedBody, ResolvedLocalId, ResolvedType, ResolvedTypeId, ResolvedTypeTable,
-    ResourceAnalysis, ResourceId,
+    LoanKind, LocalId, MapAnyOwnerAction, MapAnyOwnerActionKind, MapAnyOwnerProfileVersion,
+    MapRootAction, MapRootActionKind, NodeId, OrdinaryMapOwnedGetI32StringV1Action,
+    OrdinaryMapOwnedGetI32StringV1ActionKind, OrdinaryMapOwnedGetI32StringV1Attempt,
+    OrdinaryMapOwnedGetI32StringV1AttemptKind, OrdinaryMapOwnedGetI32StringV1ProfileVersion,
+    OrdinaryMapOwnerLifecycleAction, OrdinaryMapOwnerLifecycleActionKind,
+    OrdinaryMapOwnerLifecycleAttempt, OrdinaryMapOwnerLifecycleAttemptKind,
+    OrdinaryMapOwnerLifecycleProfileVersion, Place, PlaceProjection, ResolvedBody, ResolvedLocalId,
+    ResolvedType, ResolvedTypeId, ResolvedTypeTable, ResourceAnalysis, ResourceId,
 };
 use crate::diagnostic::Diagnostic;
 
@@ -22,6 +28,3694 @@ struct ActionDraft {
     source: Option<Place>,
     target: Option<Place>,
     loan: Option<LoanId>,
+}
+
+/// A separate, deliberately small Checker recognizer for ordinary Map owner
+/// roots. It reads only the typed ResolvedBody and never imports or converts
+/// MapRoot/MapAnyOwner actions.
+struct OrdinaryMapOwnerLifecycleChecker<'a> {
+    body: &'a ResolvedBody,
+    types: &'a ResolvedTypeTable,
+    actions: Vec<OrdinaryMapOwnerLifecycleAction>,
+    new_attempts: BTreeSet<NodeId>,
+    operation_attempts: BTreeSet<OrdinaryMapOwnerLifecycleAttempt>,
+    all_root_loads: Vec<(NodeId, ResolvedLocalId)>,
+    roots: BTreeMap<ResolvedLocalId, bool>,
+    allowed_root_loads: BTreeSet<NodeId>,
+    invalid: bool,
+}
+
+impl<'a> OrdinaryMapOwnerLifecycleChecker<'a> {
+    fn collect(
+        cfg: &'a CallableCfg,
+        body: &'a ResolvedBody,
+        types: &'a ResolvedTypeTable,
+    ) -> (
+        Vec<OrdinaryMapOwnerLifecycleAction>,
+        BTreeSet<NodeId>,
+        BTreeSet<OrdinaryMapOwnerLifecycleAttempt>,
+    ) {
+        let mut checker = Self {
+            body,
+            types,
+            actions: Vec::new(),
+            new_attempts: BTreeSet::new(),
+            operation_attempts: BTreeSet::new(),
+            all_root_loads: Vec::new(),
+            roots: BTreeMap::new(),
+            allowed_root_loads: BTreeSet::new(),
+            invalid: false,
+        };
+        checker.invalid = body
+            .parameters
+            .iter()
+            .chain(body.captures.iter())
+            .any(|local| {
+                body.locals
+                    .get(local)
+                    .is_some_and(|binding| checker.is_record(&binding.ty))
+            })
+            || checker.is_record(&body.root.ty);
+        checker.collect_block_evidence(&body.root);
+        for expression in body.place_inputs.values() {
+            checker.collect_expr_evidence(expression);
+        }
+        for expression in body.default_values.values() {
+            checker.collect_expr_evidence(expression);
+        }
+
+        // Ordinary Map lifecycles are straight-line by default. A bounded
+        // acyclic branch is also safe when every operation in an arm is a
+        // read-only Size/HasKey borrow of a root introduced before the split;
+        // the root remains live through the join and is settled exactly once
+        // in the common continuation. Mutating or introducing a root inside
+        // an arm remains fail-closed until path-local ownership facts exist.
+        //
+        // A loop has one narrowly closed shape: each iteration may create
+        // and drop a fresh local Map root entirely inside the loop body. No
+        // root is allowed to enter the loop or survive its back-edge. This
+        // lets the canonical MIR body reuse one stable value identity for
+        // every iteration without pretending that an owner is loop-carried.
+        let straight_line = cfg.blocks.len() == 1 && cfg.edges.is_empty();
+        let closed_loop = checker.supports_closed_loop_cfg(cfg);
+        let closed_break_loop = checker.supports_closed_break_loop_cfg(cfg)
+            && checker.closed_break_loop_body_is_map_only(&body.root);
+        if !straight_line
+            && !checker.supports_acyclic_read_only_cfg(cfg)
+            && !closed_loop
+            && !closed_break_loop
+        {
+            return (Vec::new(), checker.new_attempts, checker.operation_attempts);
+        }
+
+        checker.visit_block(&body.root);
+        if !straight_line
+            && checker.actions.iter().any(|action| {
+                checker
+                    .cfg_block_for_point(cfg, &action.point)
+                    .is_some_and(|block| {
+                        checker.is_branch_arm_block(block)
+                            && !matches!(
+                                action.kind,
+                                OrdinaryMapOwnerLifecycleActionKind::Size
+                                    | OrdinaryMapOwnerLifecycleActionKind::HasKey
+                            )
+                    })
+            })
+        {
+            return (Vec::new(), checker.new_attempts, checker.operation_attempts);
+        }
+        if (closed_loop || closed_break_loop)
+            && checker.actions.iter().any(|action| {
+                !matches!(
+                    action.kind,
+                    OrdinaryMapOwnerLifecycleActionKind::New
+                        | OrdinaryMapOwnerLifecycleActionKind::Drop
+                ) || checker
+                    .cfg_block_for_point(cfg, &action.point)
+                    .is_none_or(|block| {
+                        if closed_loop {
+                            !checker.is_closed_loop_body_block(cfg, block)
+                        } else {
+                            !checker.is_closed_break_loop_body_block(cfg, block)
+                        }
+                    })
+            })
+        {
+            // The loop receipt is intentionally iteration-local. A query,
+            // persistent successor, branch arm, or operation outside the
+            // loop body needs path/iteration ownership facts that this v1
+            // profile does not carry.
+            return (Vec::new(), checker.new_attempts, checker.operation_attempts);
+        }
+        checker.schedule_scope_drops(cfg);
+        for (node, local) in &checker.all_root_loads {
+            if checker.roots.contains_key(local) && !checker.allowed_root_loads.contains(node) {
+                // Aliases, captures, aggregate/return escapes, and every
+                // unrecognized use of an admitted root poison the whole
+                // callable receipt.
+                checker.invalid = true;
+            }
+        }
+        if checker.roots.values().any(|dropped| !dropped) {
+            checker.invalid = true;
+        }
+
+        let mut point_order = BTreeMap::new();
+        for (block_rank, block) in cfg.blocks.values().enumerate() {
+            for (point_rank, point) in block.points.iter().enumerate() {
+                if point_order
+                    .insert(point.source.node.clone(), (block_rank, point_rank))
+                    .is_some()
+                {
+                    checker.invalid = true;
+                }
+            }
+        }
+        if checker
+            .actions
+            .iter()
+            .any(|action| !point_order.contains_key(&action.point))
+        {
+            checker.invalid = true;
+        }
+        // Mutually exclusive arms have no single execution order. Preserve
+        // source traversal order when an arm contains a read-only query so
+        // New remains before the query in the receipt; straight-line and
+        // post-join actions retain deterministic CFG ordering.
+        let branch_read_actions = checker.actions.iter().any(|action| {
+            checker
+                .cfg_block_for_point(cfg, &action.point)
+                .is_some_and(|block| checker.is_branch_arm_block(block))
+        });
+        if !branch_read_actions {
+            checker.actions.sort_by_key(|action| {
+                point_order
+                    .get(&action.point)
+                    .copied()
+                    .unwrap_or((usize::MAX, usize::MAX))
+            });
+        }
+
+        // Every ordinary Map call in the callable must be represented by one
+        // supported action at the same typed body node. Get/Keys/Values and
+        // other future Map operations remain visible as attempts, but cannot
+        // be hidden behind an otherwise valid root lifecycle.
+        let action_points = checker
+            .actions
+            .iter()
+            .map(|action| action.point.clone())
+            .collect::<BTreeSet<_>>();
+        for attempt in &checker.operation_attempts {
+            if !action_points.contains(&attempt.point) {
+                checker.invalid = true;
+            }
+        }
+        let receipt_new_points = checker
+            .actions
+            .iter()
+            .filter(|action| action.kind == OrdinaryMapOwnerLifecycleActionKind::New)
+            .map(|action| action.point.clone())
+            .collect::<BTreeSet<_>>();
+        if receipt_new_points != checker.new_attempts || receipt_new_points.is_empty() {
+            checker.invalid = true;
+        }
+        if !checker.sealed_lifecycle_is_closed() {
+            checker.invalid = true;
+        }
+
+        if checker.invalid {
+            checker.actions.clear();
+        }
+        (
+            checker.actions,
+            checker.new_attempts,
+            checker.operation_attempts,
+        )
+    }
+
+    /// Checker-owned scope cleanup is an operation at the callable's final
+    /// CFG point. Each surviving local contributes one separate Drop attempt
+    /// and receipt; explicit drops have already removed their obligations.
+    fn schedule_scope_drops(&mut self, cfg: &CallableCfg) {
+        let remaining = self
+            .roots
+            .iter()
+            .rev()
+            .filter(|(_, dropped)| !**dropped)
+            .map(|(local, _)| local.clone())
+            .collect::<Vec<_>>();
+        if remaining.is_empty() {
+            return;
+        }
+        let Some(point) = cfg
+            .blocks
+            .get(&cfg.entry)
+            .and_then(|block| block.points.last())
+            .map(|point| point.source.node.clone())
+        else {
+            self.invalid = true;
+            return;
+        };
+        for local in remaining {
+            self.operation_attempts
+                .insert(OrdinaryMapOwnerLifecycleAttempt {
+                    kind: OrdinaryMapOwnerLifecycleAttemptKind::ScopeDrop,
+                    point: point.clone(),
+                    arguments: vec![local.0.clone()],
+                });
+            self.roots.insert(local.clone(), true);
+            self.actions.push(self.action(
+                OrdinaryMapOwnerLifecycleActionKind::Drop,
+                point.clone(),
+                local,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
+        }
+    }
+
+    /// Resolve the CFG block containing one typed source operation point.
+    fn cfg_block_for_point<'cfg>(
+        &self,
+        cfg: &'cfg CallableCfg,
+        point: &NodeId,
+    ) -> Option<&'cfg crate::core::cfg::BasicBlockId> {
+        cfg.blocks.iter().find_map(|(block_id, block)| {
+            block
+                .points
+                .iter()
+                .any(|cfg_point| cfg_point.source.node == *point)
+                .then_some(block_id)
+        })
+    }
+
+    fn is_branch_arm_block(&self, block: &crate::core::cfg::BasicBlockId) -> bool {
+        block.0 .0.ends_with("/cfg:block:if-then") || block.0 .0.ends_with("/cfg:block:if-else")
+    }
+
+    /// Admit only acyclic CFGs whose branch-arm operations are read-only
+    /// observations. New/Set/Remove/Clone/Drop inside an arm need path-local
+    /// ownership facts and remain fail-closed; a common post-join Drop is
+    /// allowed because the root is still live on both incoming edges.
+    fn supports_acyclic_read_only_cfg(&self, cfg: &CallableCfg) -> bool {
+        if cfg.blocks.len() <= 1 || cfg.reachable.len() != cfg.blocks.len() {
+            return false;
+        }
+        if cfg.edges.values().any(|edge| {
+            !cfg.reachable.contains(&edge.from)
+                || !cfg.reachable.contains(&edge.to)
+                || !matches!(
+                    edge.kind,
+                    EdgeKind::Then | EdgeKind::Else | EdgeKind::Fallthrough
+                )
+        }) {
+            return false;
+        }
+        let mut indegree = cfg
+            .reachable
+            .iter()
+            .cloned()
+            .map(|block| (block, 0usize))
+            .collect::<BTreeMap<_, _>>();
+        for edge in cfg
+            .edges
+            .values()
+            .filter(|edge| cfg.reachable.contains(&edge.from) && cfg.reachable.contains(&edge.to))
+        {
+            let Some(degree) = indegree.get_mut(&edge.to) else {
+                return false;
+            };
+            *degree += 1;
+        }
+        let mut ready = indegree
+            .iter()
+            .filter_map(|(block, degree)| (*degree == 0).then_some(block.clone()))
+            .collect::<Vec<_>>();
+        let mut visited = 0usize;
+        while let Some(block) = ready.pop() {
+            visited += 1;
+            for edge in cfg.successors(&block) {
+                if !cfg.reachable.contains(&edge.to) {
+                    continue;
+                }
+                let Some(degree) = indegree.get_mut(&edge.to) else {
+                    return false;
+                };
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    ready.push(edge.to.clone());
+                }
+            }
+        }
+        if visited != cfg.reachable.len() {
+            return false;
+        }
+        self.operation_attempts.iter().all(|attempt| {
+            let Some(block) = self.cfg_block_for_point(cfg, &attempt.point) else {
+                return false;
+            };
+            !self.is_branch_arm_block(block)
+                || matches!(
+                    attempt.kind,
+                    OrdinaryMapOwnerLifecycleAttemptKind::Size
+                        | OrdinaryMapOwnerLifecycleAttemptKind::HasKey
+                )
+        })
+    }
+
+    /// Recognize the only loop shape admitted by the ordinary owner v1
+    /// receipt: one canonical while header/body/exit cycle with all Map
+    /// attempts in the body, and only New/Drop attempts there. The source
+    /// CFG may contain the fallthrough edge into the header and the body's
+    /// back-edge; no break/continue/nested branch is admitted. Ownership is
+    /// therefore reset at the next iteration instead of being carried across
+    /// an edge.
+    fn supports_closed_loop_cfg(&self, cfg: &CallableCfg) -> bool {
+        if cfg.blocks.len() < 3 || cfg.reachable.len() != cfg.blocks.len() {
+            return false;
+        }
+        let body_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| edge.kind == EdgeKind::LoopBody)
+            .collect::<Vec<_>>();
+        let exit_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| edge.kind == EdgeKind::LoopExit)
+            .collect::<Vec<_>>();
+        let back_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| edge.kind == EdgeKind::Backedge)
+            .collect::<Vec<_>>();
+        if body_edges.len() != 1 || exit_edges.len() != 1 || back_edges.len() != 1 {
+            return false;
+        }
+        let body_edge = body_edges[0];
+        let exit_edge = exit_edges[0];
+        let back_edge = back_edges[0];
+        if body_edge.from != exit_edge.from
+            || back_edge.to != body_edge.from
+            || back_edge.from != body_edge.to
+        {
+            return false;
+        }
+        let header = body_edge.from.clone();
+        let body = body_edge.to.clone();
+        let exit = exit_edge.to.clone();
+        if header == body || header == exit || body == exit {
+            return false;
+        }
+        // The loop body must be a single source block. This excludes nested
+        // branches and nested loops until their path-local receipts exist.
+        if cfg.reachable.iter().any(|block| {
+            block != &cfg.entry && block != &header && block != &body && block != &exit
+        }) {
+            return false;
+        }
+        let allowed_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| cfg.reachable.contains(&edge.from) && cfg.reachable.contains(&edge.to))
+            .all(|edge| {
+                matches!(
+                    edge.kind,
+                    EdgeKind::Fallthrough
+                        | EdgeKind::LoopBody
+                        | EdgeKind::LoopExit
+                        | EdgeKind::Backedge
+                )
+            });
+        if !allowed_edges {
+            return false;
+        }
+        // A loop entered from the callable entry must have a single
+        // fallthrough edge into its header. Any preceding Map operation would
+        // need a separate receipt for the loop boundary and is rejected here.
+        let entry_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| edge.to == header && edge.kind == EdgeKind::Fallthrough)
+            .collect::<Vec<_>>();
+        if entry_edges.len() != 1
+            || !entry_edges.iter().any(|edge| edge.from == cfg.entry)
+            || self.operation_attempts.iter().any(|attempt| {
+                !matches!(
+                    attempt.kind,
+                    OrdinaryMapOwnerLifecycleAttemptKind::New
+                        | OrdinaryMapOwnerLifecycleAttemptKind::Drop
+                ) || self
+                    .cfg_block_for_point(cfg, &attempt.point)
+                    .is_none_or(|block| block != &body)
+            })
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Recognize the finite form of an infinite `loop` whose body reaches a
+    /// single `break` after settling every Map root introduced by that
+    /// iteration. The resolved CFG has no condition/header split for this
+    /// form: the callable entry falls through into one loop-header block and
+    /// that block terminates with one `Break` edge to the loop exit. There is
+    /// consequently no loop-carried owner value and no back-edge to replay.
+    /// Any operation outside the reachable header, a second break, a
+    /// continue/back-edge, or a root crossing the boundary remains rejected
+    /// by this narrow receipt.
+    fn supports_closed_break_loop_cfg(&self, cfg: &CallableCfg) -> bool {
+        if cfg.blocks.len() < 2 || cfg.reachable.len() != cfg.blocks.len() {
+            return false;
+        }
+        let break_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| edge.kind == EdgeKind::Break)
+            .collect::<Vec<_>>();
+        if break_edges.len() != 1 {
+            return false;
+        }
+        let break_edge = break_edges[0];
+        let header = break_edge.from.clone();
+        let exit = break_edge.to.clone();
+        if header == exit || !cfg.reachable.contains(&header) || !cfg.reachable.contains(&exit) {
+            return false;
+        }
+        let entry_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| edge.kind == EdgeKind::Fallthrough && edge.to == header)
+            .collect::<Vec<_>>();
+        let fallthrough_edges = cfg
+            .edges
+            .values()
+            .filter(|edge| edge.kind == EdgeKind::Fallthrough)
+            .collect::<Vec<_>>();
+        if entry_edges.len() != 1
+            || fallthrough_edges.len() != 1
+            || entry_edges[0].from != cfg.entry
+        {
+            return false;
+        }
+        // A finite `loop` must not silently contain another reachable block:
+        // nested branches/loops need their own path-local owner receipt.
+        if cfg
+            .reachable
+            .iter()
+            .any(|block| block != &cfg.entry && block != &header && block != &exit)
+        {
+            return false;
+        }
+        if cfg.edges.values().any(|edge| {
+            !cfg.reachable.contains(&edge.from)
+                || !cfg.reachable.contains(&edge.to)
+                || !matches!(edge.kind, EdgeKind::Fallthrough | EdgeKind::Break)
+        }) {
+            return false;
+        }
+        self.operation_attempts.iter().all(|attempt| {
+            let Some(block) = self.cfg_block_for_point(cfg, &attempt.point) else {
+                return false;
+            };
+            cfg.reachable.contains(block)
+                && block == &header
+                && matches!(
+                    attempt.kind,
+                    OrdinaryMapOwnerLifecycleAttemptKind::New
+                        | OrdinaryMapOwnerLifecycleAttemptKind::Drop
+                )
+        })
+    }
+
+    /// The finite loop lowerer deliberately carries no outer locals through
+    /// its exit block. Keep this receipt limited to the owner-only source
+    /// body for which that is semantically exact: direct `map_new` bindings,
+    /// direct root drops, and a value-less `break`. Scalar assignment, calls,
+    /// nested control flow, and other effects stay fail-closed until a proper
+    /// loop-carried locals contract is added.
+    fn closed_break_loop_body_is_map_only(&self, body: &ResolvedBlock) -> bool {
+        let mut loops = body
+            .statements
+            .iter()
+            .filter_map(|statement| match &statement.kind {
+                ResolvedStmtKind::Loop(loop_body) => Some(loop_body),
+                _ => None,
+            });
+        let Some(loop_body) = loops.next() else {
+            return false;
+        };
+        // A single owner-only finite loop may be surrounded by scalar
+        // statements or a scalar tail result. Any second/nested loop needs a
+        // separate receipt and stays outside this narrow profile.
+        if loops.next().is_some() {
+            return false;
+        }
+        loop_body.result.is_none()
+            && loop_body
+                .statements
+                .iter()
+                .all(|statement| match &statement.kind {
+                    ResolvedStmtKind::Bind {
+                        pattern,
+                        initializer: Some(initializer),
+                    } => {
+                        matches!(
+                            (&pattern.kind, &initializer.kind),
+                            (
+                                ResolvedPatternKind::Binding { .. },
+                                ResolvedExprKind::Call(ResolvedCall {
+                                    callee: ResolvedCallee::Builtin(name),
+                                    arguments,
+                                    ..
+                                })
+                            ) if name.as_str() == "map_new" && arguments.is_empty()
+                        )
+                    }
+                    ResolvedStmtKind::Drop(places) => {
+                        places.iter().all(|place| place.projections.is_empty())
+                    }
+                    ResolvedStmtKind::Break(None) => true,
+                    _ => false,
+                })
+    }
+
+    fn is_closed_loop_body_block(
+        &self,
+        cfg: &CallableCfg,
+        block: &crate::core::cfg::BasicBlockId,
+    ) -> bool {
+        cfg.edges
+            .values()
+            .any(|edge| edge.kind == EdgeKind::LoopBody && edge.to == *block && edge.from != *block)
+    }
+
+    fn is_closed_break_loop_body_block(
+        &self,
+        cfg: &CallableCfg,
+        block: &crate::core::cfg::BasicBlockId,
+    ) -> bool {
+        cfg.edges
+            .values()
+            .any(|edge| edge.kind == EdgeKind::Break && edge.from == *block)
+    }
+
+    /// An ordinary free-value binding creates an independent persistent root.
+    /// It never copies the raw root handle or steals the source obligation.
+    fn visit_clone(&mut self, expression: &ResolvedExpr, target: &ResolvedLocalId) {
+        let Some(source) = self.live_root_load(expression) else {
+            self.invalid = true;
+            return;
+        };
+        if self.roots.contains_key(target)
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(target)
+                .is_some_and(|local| local.ty == expression.ty)
+        {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(expression);
+        self.operation_attempts
+            .insert(OrdinaryMapOwnerLifecycleAttempt {
+                kind: OrdinaryMapOwnerLifecycleAttemptKind::Clone,
+                point: expression.node_id.clone(),
+                arguments: vec![source.0.clone(), target.0.clone()],
+            });
+        self.roots.insert(target.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnerLifecycleActionKind::Clone,
+            expression.node_id.clone(),
+            target.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(source),
+        ));
+    }
+
+    fn sealed_lifecycle_is_closed(&self) -> bool {
+        use OrdinaryMapOwnerLifecycleActionKind as Kind;
+
+        if self.actions.is_empty() {
+            return false;
+        }
+        let mut ever_created = BTreeSet::<ResolvedLocalId>::new();
+        let mut live = BTreeSet::<ResolvedLocalId>::new();
+        for action in &self.actions {
+            if action.profile_version != OrdinaryMapOwnerLifecycleProfileVersion::V1
+                || action.root != Self::resource_identity(&action.local)
+            {
+                return false;
+            }
+            match action.kind {
+                Kind::New => {
+                    if action.key.is_some()
+                        || action.key_type.is_some()
+                        || action.key_local.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                }
+                Kind::Clone => {
+                    let (Some(source_local), Some(source)) = (&action.source_local, &action.source)
+                    else {
+                        return false;
+                    };
+                    if action.key.is_some()
+                        || action.key_type.is_some()
+                        || action.key_local.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || source != &Self::resource_identity(source_local)
+                        || !live.contains(source_local)
+                        || source_local == &action.local
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                }
+                Kind::Set => {
+                    let (
+                        Some(key),
+                        Some(key_type),
+                        key_local,
+                        Some(_value),
+                        Some(value_type),
+                        Some(source_local),
+                        Some(source),
+                    ) = (
+                        &action.key,
+                        &action.key_type,
+                        &action.key_local,
+                        &action.value,
+                        &action.value_type,
+                        &action.source_local,
+                        &action.source,
+                    )
+                    else {
+                        return false;
+                    };
+                    if key.0.is_empty()
+                        || !self.is_string(key_type)
+                        || !key_local.as_ref().is_none_or(|local| {
+                            self.body
+                                .locals
+                                .get(local)
+                                .is_some_and(|binding| self.is_string(&binding.ty))
+                        })
+                        || !matches!(
+                            self.types.get(value_type),
+                            Some(ResolvedType::Primitive(
+                                crate::core::PrimitiveType::I32
+                                    | crate::core::PrimitiveType::String
+                            ))
+                        )
+                        || source != &Self::resource_identity(source_local)
+                        || !live.contains(source_local)
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                }
+                Kind::Remove => {
+                    let (Some(key), Some(key_type), Some(source_local), Some(source)) = (
+                        &action.key,
+                        &action.key_type,
+                        &action.source_local,
+                        &action.source,
+                    ) else {
+                        return false;
+                    };
+                    if key.0.is_empty()
+                        || !self.is_string(key_type)
+                        || !action.key_local.as_ref().is_none_or(|local| {
+                            self.body
+                                .locals
+                                .get(local)
+                                .is_some_and(|binding| self.is_string(&binding.ty))
+                        })
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || source != &Self::resource_identity(source_local)
+                        || !live.contains(source_local)
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                }
+                Kind::Size => {
+                    if action.key.is_some()
+                        || action.key_type.is_some()
+                        || action.key_local.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !live.contains(&action.local)
+                    {
+                        return false;
+                    }
+                }
+                Kind::HasKey => {
+                    if action.key.as_ref().is_none_or(|key| key.0.is_empty())
+                        || action
+                            .key_type
+                            .as_ref()
+                            .is_none_or(|key_type| !self.is_string(key_type))
+                        || !action.key_local.as_ref().is_none_or(|local| {
+                            self.body
+                                .locals
+                                .get(local)
+                                .is_some_and(|binding| self.is_string(&binding.ty))
+                        })
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !live.contains(&action.local)
+                    {
+                        return false;
+                    }
+                }
+                Kind::Drop => {
+                    if action.key.is_some()
+                        || action.key_type.is_some()
+                        || action.key_local.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !live.remove(&action.local)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        live.is_empty() && ever_created == self.roots.keys().cloned().collect()
+    }
+
+    fn resource_identity(local: &ResolvedLocalId) -> ResourceId {
+        ResourceId(NodeId(format!(
+            "ordinary-map-owner-lifecycle-i32-string-v1:{}",
+            local.0 .0
+        )))
+    }
+
+    fn map_attempt_kind(name: &str) -> Option<OrdinaryMapOwnerLifecycleAttemptKind> {
+        use OrdinaryMapOwnerLifecycleAttemptKind as Kind;
+        match name {
+            "map_new" => Some(Kind::New),
+            "map_get" => Some(Kind::Get),
+            "map_set" => Some(Kind::Set),
+            "map_remove" => Some(Kind::Remove),
+            "map_size" => Some(Kind::Size),
+            "has_key" => Some(Kind::HasKey),
+            "keys" => Some(Kind::Keys),
+            "values" => Some(Kind::Values),
+            "map_from_list" => Some(Kind::FromList),
+            // `map` is a language intrinsic for list mapping
+            // (`core::builtins::is_language_intrinsic_callable`), not an
+            // ordinary Map owner operation. Ordinary Maps use `map_new` and
+            // the `map_*` operations above.
+            _ => None,
+        }
+    }
+
+    fn record_call_attempt(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        let ResolvedCallee::Builtin(name) = &call.callee else {
+            return;
+        };
+        let Some(kind) = Self::map_attempt_kind(name.as_str()) else {
+            return;
+        };
+        let arguments = call
+            .arguments
+            .iter()
+            .map(|argument| argument.value.node_id.clone())
+            .collect::<Vec<_>>();
+        self.operation_attempts
+            .insert(OrdinaryMapOwnerLifecycleAttempt {
+                kind,
+                point: expression.node_id.clone(),
+                arguments,
+            });
+        if kind == OrdinaryMapOwnerLifecycleAttemptKind::New {
+            self.new_attempts.insert(expression.node_id.clone());
+        }
+    }
+
+    fn collect_block_evidence(&mut self, block: &ResolvedBlock) {
+        for statement in &block.statements {
+            match &statement.kind {
+                ResolvedStmtKind::Bind { initializer, .. } => {
+                    if let Some(value) = initializer {
+                        self.collect_expr_evidence(value);
+                    }
+                }
+                ResolvedStmtKind::Assign { value, .. }
+                | ResolvedStmtKind::Expr(value)
+                | ResolvedStmtKind::Contract {
+                    condition: value, ..
+                } => {
+                    self.collect_expr_evidence(value);
+                }
+                ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                    if let Some(value) = value {
+                        self.collect_expr_evidence(value);
+                    }
+                }
+                ResolvedStmtKind::While { condition, body } => {
+                    self.collect_expr_evidence(condition);
+                    self.collect_block_evidence(body);
+                }
+                ResolvedStmtKind::WhileLet {
+                    initializer, body, ..
+                }
+                | ResolvedStmtKind::For {
+                    iterable: initializer,
+                    body,
+                    ..
+                } => {
+                    self.collect_expr_evidence(initializer);
+                    self.collect_block_evidence(body);
+                }
+                ResolvedStmtKind::IfLet {
+                    initializer,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    self.collect_expr_evidence(initializer);
+                    self.collect_block_evidence(then_block);
+                    if let Some(block) = else_block {
+                        self.collect_block_evidence(block);
+                    }
+                }
+                ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                    self.collect_block_evidence(body);
+                }
+                ResolvedStmtKind::Drop(_) | ResolvedStmtKind::Continue => {}
+                ResolvedStmtKind::Math(expressions) => {
+                    for expression in expressions {
+                        self.collect_expr_evidence(expression);
+                    }
+                }
+                ResolvedStmtKind::Pinned { value, body, .. } => {
+                    self.collect_expr_evidence(value);
+                    self.collect_block_evidence(body);
+                }
+                ResolvedStmtKind::NestedCallable(_) => {}
+            }
+        }
+        if let Some(result) = &block.result {
+            self.collect_expr_evidence(result);
+        }
+    }
+
+    fn collect_expr_evidence(&mut self, expression: &ResolvedExpr) {
+        match &expression.kind {
+            ResolvedExprKind::Load(place) => {
+                self.all_root_loads
+                    .push((expression.node_id.clone(), place.base.clone()));
+            }
+            ResolvedExprKind::FString(parts) => {
+                for part in parts {
+                    if let ResolvedFStringPart::Interpolation(value) = part {
+                        self.collect_expr_evidence(value);
+                    }
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                self.collect_expr_evidence(value);
+                if let ResolvedValueProjection::Index(index) = projection {
+                    self.collect_expr_evidence(index);
+                }
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                self.collect_expr_evidence(left);
+                self.collect_expr_evidence(right);
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::Try { value: operand, .. }
+            | ResolvedExprKind::Cast { value: operand, .. }
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => self.collect_expr_evidence(operand),
+            ResolvedExprKind::Call(call) => {
+                self.record_call_attempt(expression, call);
+                for argument in &call.arguments {
+                    self.collect_expr_evidence(&argument.value);
+                }
+            }
+            ResolvedExprKind::Tuple(values)
+            | ResolvedExprKind::List(values)
+            | ResolvedExprKind::Set(values) => {
+                for value in values {
+                    self.collect_expr_evidence(value);
+                }
+            }
+            ResolvedExprKind::Map(values) => {
+                self.operation_attempts
+                    .insert(OrdinaryMapOwnerLifecycleAttempt {
+                        kind: OrdinaryMapOwnerLifecycleAttemptKind::MapLiteral,
+                        point: expression.node_id.clone(),
+                        arguments: values
+                            .iter()
+                            .flat_map(|(key, value)| [key.node_id.clone(), value.node_id.clone()])
+                            .collect(),
+                    });
+                for (key, value) in values {
+                    self.collect_expr_evidence(key);
+                    self.collect_expr_evidence(value);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                self.collect_expr_evidence(value);
+                self.collect_expr_evidence(iterable);
+                if let Some(guard) = guard {
+                    self.collect_expr_evidence(guard);
+                }
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => {
+                self.collect_expr_evidence(receiver)
+            }
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                for field in fields {
+                    self.collect_expr_evidence(&field.value);
+                }
+                if let Some(rest) = rest {
+                    self.collect_expr_evidence(rest);
+                }
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => self.collect_block_evidence(block),
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.collect_expr_evidence(condition);
+                self.collect_block_evidence(then_block);
+                self.collect_block_evidence(else_block);
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                self.collect_expr_evidence(scrutinee);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_expr_evidence(guard);
+                    }
+                    self.collect_expr_evidence(&arm.body);
+                }
+            }
+            ResolvedExprKind::Range { start, end } => {
+                self.collect_expr_evidence(start);
+                self.collect_expr_evidence(end);
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                self.collect_expr_evidence(target);
+                if let Some(start) = start {
+                    self.collect_expr_evidence(start);
+                }
+                if let Some(end) = end {
+                    self.collect_expr_evidence(end);
+                }
+            }
+            ResolvedExprKind::Lambda(_) => {
+                // A lambda is a distinct callable owner. Its body is scanned
+                // only after it has a canonical ResolvedBody/CallableCfg of
+                // its own; inheriting its attempts here would let a closure
+                // manufacture authority under its enclosing owner.
+            }
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => {}
+        }
+    }
+
+    fn visit_block(&mut self, block: &ResolvedBlock) {
+        for statement in &block.statements {
+            self.visit_stmt(statement);
+        }
+        if let Some(result) = &block.result {
+            self.visit_expr(result, None);
+        }
+    }
+
+    fn visit_stmt(&mut self, statement: &ResolvedStmt) {
+        match &statement.kind {
+            ResolvedStmtKind::Bind {
+                pattern,
+                initializer,
+            } => {
+                if let Some(initializer) = initializer {
+                    let target = match &pattern.kind {
+                        ResolvedPatternKind::Binding { local, .. } => Some(local.clone()),
+                        _ => None,
+                    };
+                    self.visit_expr(initializer, target.as_ref());
+                }
+            }
+            ResolvedStmtKind::Assign { target, value, .. } => {
+                if self.roots.contains_key(&target.base) {
+                    self.invalid = true;
+                }
+                self.visit_expr(value, None);
+            }
+            ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                if let Some(value) = value {
+                    self.visit_expr(value, None);
+                }
+            }
+            ResolvedStmtKind::Continue | ResolvedStmtKind::Drop(_) => {
+                if let ResolvedStmtKind::Drop(places) = &statement.kind {
+                    self.visit_drop(statement, places);
+                }
+            }
+            ResolvedStmtKind::Expr(value)
+            | ResolvedStmtKind::Contract {
+                condition: value, ..
+            } => self.visit_expr(value, None),
+            ResolvedStmtKind::While { condition, body } => {
+                // A closed loop may own fresh ordinary Map roots for one
+                // iteration at a time. Preserve the live-root boundary at
+                // the header, then analyze the body once; the CFG shape check
+                // below proves that every body operation is New/Drop and no
+                // root crosses the back-edge.
+                let live_before = self
+                    .roots
+                    .iter()
+                    .filter_map(|(local, dropped)| (!*dropped).then_some(local.clone()))
+                    .collect::<BTreeSet<_>>();
+                self.visit_expr(condition, None);
+                self.visit_block(body);
+                let live_after = self
+                    .roots
+                    .iter()
+                    .filter_map(|(local, dropped)| (!*dropped).then_some(local.clone()))
+                    .collect::<BTreeSet<_>>();
+                if live_before != live_after {
+                    self.invalid = true;
+                }
+            }
+            ResolvedStmtKind::WhileLet { initializer, .. }
+            | ResolvedStmtKind::For {
+                iterable: initializer,
+                ..
+            }
+            | ResolvedStmtKind::IfLet { initializer, .. } => {
+                self.visit_expr(initializer, None);
+            }
+            ResolvedStmtKind::Loop(body) => {
+                // A finite `loop { ... break }` has no loop-carried owner
+                // state. Analyze the body once and require the live-root set
+                // at the break boundary to equal the set at loop entry; the
+                // dedicated CFG recognizer below further restricts all
+                // reachable operations to New/Drop in the single header.
+                let live_before = self
+                    .roots
+                    .iter()
+                    .filter_map(|(local, dropped)| (!*dropped).then_some(local.clone()))
+                    .collect::<BTreeSet<_>>();
+                self.visit_block(body);
+                let live_after = self
+                    .roots
+                    .iter()
+                    .filter_map(|(local, dropped)| (!*dropped).then_some(local.clone()))
+                    .collect::<BTreeSet<_>>();
+                if live_before != live_after {
+                    self.invalid = true;
+                }
+            }
+            ResolvedStmtKind::Scope { .. } | ResolvedStmtKind::NestedCallable(_) => {
+                self.invalid = true
+            }
+            ResolvedStmtKind::Math(expressions) => {
+                for expression in expressions {
+                    self.visit_expr(expression, None);
+                }
+            }
+            ResolvedStmtKind::Pinned { value, .. } => self.visit_expr(value, None),
+        }
+    }
+
+    fn visit_drop(&mut self, statement: &ResolvedStmt, places: &[ResolvedPlace]) {
+        for place in places {
+            let Some(was_dropped) = self.roots.get(&place.base).copied() else {
+                continue;
+            };
+            let local = place.base.clone();
+            let point = statement.node_id.clone();
+            self.operation_attempts
+                .insert(OrdinaryMapOwnerLifecycleAttempt {
+                    kind: OrdinaryMapOwnerLifecycleAttemptKind::Drop,
+                    point: point.clone(),
+                    arguments: vec![local.0.clone()],
+                });
+            if !place.projections.is_empty() || was_dropped {
+                self.invalid = true;
+                continue;
+            }
+            self.roots.insert(local.clone(), true);
+            self.actions.push(self.action(
+                OrdinaryMapOwnerLifecycleActionKind::Drop,
+                point,
+                local.clone(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
+        }
+    }
+
+    fn visit_expr(&mut self, expression: &ResolvedExpr, direct_bind: Option<&ResolvedLocalId>) {
+        match &expression.kind {
+            ResolvedExprKind::Call(call) => {
+                let builtin = match &call.callee {
+                    ResolvedCallee::Builtin(name) => name.as_str(),
+                    _ => "",
+                };
+                match builtin {
+                    "map_new" => self.visit_new(expression, call, direct_bind),
+                    "map_set" => self.visit_set(expression, call, direct_bind),
+                    "map_remove" => self.visit_remove(expression, call, direct_bind),
+                    "map_size" => self.visit_size(expression, call),
+                    "has_key" => self.visit_has_key(expression, call),
+                    "map_get" | "keys" | "values" | "map_from_list" => {
+                        self.invalid = true;
+                    }
+                    _ => {}
+                }
+                for (index, argument) in call.arguments.iter().enumerate() {
+                    let list_map_callback = builtin == "map"
+                        && index == 1
+                        && matches!(&argument.value.kind, ResolvedExprKind::Lambda(_));
+                    if list_map_callback {
+                        // This exact inline callback is a nested callable, not
+                        // part of the caller's ordinary Map lifecycle.  Scan
+                        // its body only for *attempt evidence* so a captured
+                        // root or nested Map operation poisons the enclosing
+                        // receipt; the callback never contributes authority
+                        // to the caller's action ledger.
+                        if let ResolvedExprKind::Lambda(lambda) = &argument.value.kind {
+                            self.collect_block_evidence(&lambda.body);
+                            if lambda.captures.iter().any(|local| {
+                                self.body.locals.get(local).is_some_and(|binding| {
+                                    checker_is_record(self.types, &binding.ty)
+                                })
+                            }) {
+                                self.invalid = true;
+                            }
+                        }
+                        continue;
+                    }
+                    self.visit_expr(&argument.value, None);
+                }
+            }
+            ResolvedExprKind::FString(parts) => {
+                for part in parts {
+                    if let ResolvedFStringPart::Interpolation(value) = part {
+                        self.visit_expr(value, None);
+                    }
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                self.visit_expr(value, None);
+                if let ResolvedValueProjection::Index(index) = projection {
+                    self.visit_expr(index, None);
+                }
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                self.visit_expr(left, None);
+                self.visit_expr(right, None);
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::Try { value: operand, .. }
+            | ResolvedExprKind::Cast { value: operand, .. }
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => self.visit_expr(operand, None),
+            ResolvedExprKind::Tuple(values)
+            | ResolvedExprKind::List(values)
+            | ResolvedExprKind::Set(values) => {
+                for value in values {
+                    self.visit_expr(value, None);
+                }
+            }
+            ResolvedExprKind::Map(values) => {
+                for (key, value) in values {
+                    self.visit_expr(key, None);
+                    self.visit_expr(value, None);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                self.visit_expr(value, None);
+                self.visit_expr(iterable, None);
+                if let Some(guard) = guard {
+                    self.visit_expr(guard, None);
+                }
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => self.visit_expr(receiver, None),
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                for field in fields {
+                    self.visit_expr(&field.value, None);
+                }
+                if let Some(rest) = rest {
+                    self.visit_expr(rest, None);
+                }
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => self.visit_block(block),
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.visit_expr(condition, None);
+                self.visit_block(then_block);
+                self.visit_block(else_block);
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                self.visit_expr(scrutinee, None);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expr(guard, None);
+                    }
+                    self.visit_expr(&arm.body, None);
+                }
+            }
+            ResolvedExprKind::Range { start, end } => {
+                self.visit_expr(start, None);
+                self.visit_expr(end, None);
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                self.visit_expr(target, None);
+                if let Some(start) = start {
+                    self.visit_expr(start, None);
+                }
+                if let Some(end) = end {
+                    self.visit_expr(end, None);
+                }
+            }
+            ResolvedExprKind::Lambda(lambda) => {
+                // A no-capture closure has its own independent Map collector
+                // invocation and is not a caller-local Map operation. A Map
+                // root captured from this body remains unsupported and must
+                // not bypass the caller's ownership ledger.
+                if lambda.captures.iter().any(|local| {
+                    self.body
+                        .locals
+                        .get(local)
+                        .is_some_and(|binding| checker_is_record(self.types, &binding.ty))
+                }) {
+                    self.invalid = true;
+                }
+            }
+            ResolvedExprKind::Load(place) => {
+                if let Some(target) = direct_bind {
+                    if self.roots.contains_key(&place.base) {
+                        self.visit_clone(expression, target);
+                    }
+                }
+            }
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => {}
+        }
+    }
+
+    fn visit_new(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        direct_bind: Option<&ResolvedLocalId>,
+    ) {
+        let Some(local) = direct_bind else {
+            return;
+        };
+        if !call.arguments.is_empty()
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(local)
+                .is_some_and(|binding| binding.ty == expression.ty)
+            || self.roots.contains_key(local)
+        {
+            self.invalid = true;
+            return;
+        }
+        self.roots.insert(local.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnerLifecycleActionKind::New,
+            expression.node_id.clone(),
+            local.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    fn visit_set(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        direct_bind: Option<&ResolvedLocalId>,
+    ) {
+        let Some(target) = direct_bind else {
+            return;
+        };
+        if call.arguments.len() != 3 || self.roots.contains_key(target) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let value = &call.arguments[2].value;
+        let Some(source_local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty)
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(target)
+                .is_some_and(|binding| binding.ty == expression.ty)
+            || !self.valid_key(key)
+            || !self.valid_payload(value)
+        {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.roots.insert(target.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnerLifecycleActionKind::Set,
+            expression.node_id.clone(),
+            target.clone(),
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            Some(value.node_id.clone()),
+            Some(value.ty.clone()),
+            Some(source_local),
+        ));
+    }
+
+    fn visit_remove(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        direct_bind: Option<&ResolvedLocalId>,
+    ) {
+        let Some(target) = direct_bind else {
+            return;
+        };
+        if call.arguments.len() != 2 || self.roots.contains_key(target) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let Some(source_local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty)
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(target)
+                .is_some_and(|binding| binding.ty == expression.ty)
+            || !self.valid_key(key)
+        {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.roots.insert(target.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnerLifecycleActionKind::Remove,
+            expression.node_id.clone(),
+            target.clone(),
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            None,
+            None,
+            Some(source_local),
+        ));
+    }
+
+    fn visit_size(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        if call.arguments.len() != 1 || !self.is_i32(&expression.ty) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let Some(local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty) {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.actions.push(self.action(
+            OrdinaryMapOwnerLifecycleActionKind::Size,
+            expression.node_id.clone(),
+            local,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    fn visit_has_key(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        if call.arguments.len() != 2 || !self.is_bool(&expression.ty) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let Some(local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty) || !self.valid_key(key) {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.actions.push(self.action(
+            OrdinaryMapOwnerLifecycleActionKind::HasKey,
+            expression.node_id.clone(),
+            local,
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            None,
+            None,
+            None,
+        ));
+    }
+
+    fn valid_payload(&self, expression: &ResolvedExpr) -> bool {
+        let supported_type = self.is_i32(&expression.ty) || self.is_string(&expression.ty);
+        supported_type
+            && match &expression.kind {
+                ResolvedExprKind::Literal(ResolvedLiteral::Int(_) | ResolvedLiteral::String(_)) => {
+                    true
+                }
+                ResolvedExprKind::Load(place) => place.projections.is_empty(),
+                _ => false,
+            }
+    }
+
+    fn valid_key(&self, expression: &ResolvedExpr) -> bool {
+        self.is_string(&expression.ty)
+            && match &expression.kind {
+                ResolvedExprKind::Literal(ResolvedLiteral::String(_)) => true,
+                ResolvedExprKind::Load(place) => place.projections.is_empty(),
+                _ => false,
+            }
+    }
+
+    fn direct_key_local(expression: &ResolvedExpr) -> Option<ResolvedLocalId> {
+        match &expression.kind {
+            ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                Some(place.base.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn live_root_load(&self, expression: &ResolvedExpr) -> Option<ResolvedLocalId> {
+        let ResolvedExprKind::Load(place) = &expression.kind else {
+            return None;
+        };
+        if !place.projections.is_empty() || self.roots.get(&place.base) != Some(&false) {
+            return None;
+        }
+        Some(place.base.clone())
+    }
+
+    fn allow_root_load(&mut self, expression: &ResolvedExpr) {
+        self.allowed_root_loads.insert(expression.node_id.clone());
+    }
+
+    fn action(
+        &self,
+        kind: OrdinaryMapOwnerLifecycleActionKind,
+        point: NodeId,
+        local: ResolvedLocalId,
+        key: Option<NodeId>,
+        key_type: Option<ResolvedTypeId>,
+        key_local: Option<ResolvedLocalId>,
+        value: Option<NodeId>,
+        value_type: Option<ResolvedTypeId>,
+        source_local: Option<ResolvedLocalId>,
+    ) -> OrdinaryMapOwnerLifecycleAction {
+        let root = Self::resource_identity(&local);
+        let source = source_local.as_ref().map(Self::resource_identity);
+        OrdinaryMapOwnerLifecycleAction {
+            profile_version: OrdinaryMapOwnerLifecycleProfileVersion::V1,
+            kind,
+            point,
+            local,
+            root,
+            key,
+            key_type,
+            key_local,
+            value,
+            value_type,
+            source_local,
+            source,
+        }
+    }
+
+    fn is_record(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+        )
+    }
+
+    fn is_i32(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+        )
+    }
+
+    fn is_string(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        )
+    }
+
+    fn is_bool(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::Bool))
+        )
+    }
+}
+
+/// Independent Checker recognizer for the owned-result typed getter profile.
+/// It deliberately re-scans the ResolvedBody and keeps its own root identity,
+/// action ledger, and operation attempts; no older Map profile can authorize
+/// or complete this receipt.
+#[derive(Clone)]
+struct OrdinaryMapOwnedGetI32StringV1Checker<'a> {
+    body: &'a ResolvedBody,
+    types: &'a ResolvedTypeTable,
+    actions: Vec<OrdinaryMapOwnedGetI32StringV1Action>,
+    new_attempts: BTreeSet<NodeId>,
+    operation_attempts: BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+    all_root_loads: Vec<(NodeId, ResolvedLocalId)>,
+    roots: BTreeMap<ResolvedLocalId, bool>,
+    allowed_root_loads: BTreeSet<NodeId>,
+    invalid: bool,
+}
+
+/// Result of the standalone, checker-derived owned-Map collector. This is
+/// intentionally callable on one independently materialized callable body
+/// (including a closure body) so its Map actions and receipt keep that
+/// callable's owner identity instead of being folded into an enclosing body.
+#[derive(Debug, Clone)]
+pub(crate) struct OrdinaryMapOwnedGetI32StringCfgCollection {
+    pub(crate) owner: NodeId,
+    pub(crate) actions: Vec<OrdinaryMapOwnedGetI32StringV1Action>,
+    pub(crate) new_attempts: BTreeSet<NodeId>,
+    pub(crate) operation_attempts: BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+    pub(crate) cfg_receipt: crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+}
+
+/// Collect exact ordinary Map owned-get evidence for one checker-derived
+/// `(owner, ResolvedBody, CallableCfg, ResolvedTypeTable)` tuple. A mismatched
+/// owner or any unsupported source operation/CFG shape returns `None` rather
+/// than authorizing the supported-looking subset.
+pub(crate) fn collect_ordinary_map_owned_get_i32_string_cfg(
+    owner: &NodeId,
+    body: &ResolvedBody,
+    cfg: &CallableCfg,
+    types: &ResolvedTypeTable,
+) -> Option<OrdinaryMapOwnedGetI32StringCfgCollection> {
+    if &cfg.owner != owner || &body.owner != owner {
+        return None;
+    }
+    let (actions, new_attempts, operation_attempts, cfg_receipt) =
+        OrdinaryMapOwnedGetI32StringV1Checker::collect(cfg, body, types);
+    let cfg_receipt = cfg_receipt?;
+    if &cfg_receipt.owner != owner {
+        return None;
+    }
+    Some(OrdinaryMapOwnedGetI32StringCfgCollection {
+        owner: owner.to_owned(),
+        actions,
+        new_attempts,
+        operation_attempts,
+        cfg_receipt,
+    })
+}
+
+impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
+    fn collect(
+        cfg: &'a CallableCfg,
+        body: &'a ResolvedBody,
+        types: &'a ResolvedTypeTable,
+    ) -> (
+        Vec<OrdinaryMapOwnedGetI32StringV1Action>,
+        BTreeSet<NodeId>,
+        BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+        Option<crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt>,
+    ) {
+        let mut checker = Self {
+            body,
+            types,
+            actions: Vec::new(),
+            new_attempts: BTreeSet::new(),
+            operation_attempts: BTreeSet::new(),
+            all_root_loads: Vec::new(),
+            roots: BTreeMap::new(),
+            allowed_root_loads: BTreeSet::new(),
+            invalid: body
+                .parameters
+                .iter()
+                .chain(body.captures.iter())
+                .any(|local| {
+                    body.locals
+                        .get(local)
+                        .is_some_and(|binding| checker_is_record(types, &binding.ty))
+                })
+                || checker_is_record(types, &body.root.ty),
+        };
+        checker.collect_block_evidence(&body.root);
+        for expression in body.place_inputs.values() {
+            checker.collect_expr_evidence(expression);
+        }
+        for expression in body.default_values.values() {
+            checker.collect_expr_evidence(expression);
+        }
+
+        // The acyclic profile binds every source Map attempt to a reachable
+        // block and carries owner-root facts along every edge. Cycles and
+        // unsupported control-flow shapes remain fail-closed.
+        if !Self::supports_acyclic_cfg(cfg, &checker.operation_attempts) {
+            return (
+                Vec::new(),
+                checker.new_attempts,
+                checker.operation_attempts,
+                None,
+            );
+        }
+
+        checker.visit_block(&body.root);
+        checker.schedule_scope_drops(cfg);
+        for (node, local) in &checker.all_root_loads {
+            if checker.roots.contains_key(local) && !checker.allowed_root_loads.contains(node) {
+                // Aliases, captures, aggregate escapes, and unrecognized root
+                // observations withhold the complete receipt.
+                checker.invalid = true;
+            }
+        }
+        if checker.roots.values().any(|dropped| !dropped) {
+            checker.invalid = true;
+        }
+
+        let mut point_order = BTreeMap::new();
+        if let Some(block_order) = Self::acyclic_cfg_order(cfg) {
+            for (block_rank, block_id) in block_order.into_iter().enumerate() {
+                let Some(block) = cfg.blocks.get(&block_id) else {
+                    checker.invalid = true;
+                    continue;
+                };
+                for (point_rank, point) in block.points.iter().enumerate() {
+                    if point_order
+                        .insert(point.source.node.clone(), (block_rank, point_rank))
+                        .is_some()
+                    {
+                        checker.invalid = true;
+                    }
+                }
+            }
+            if checker
+                .actions
+                .iter()
+                .any(|action| !point_order.contains_key(&action.point))
+            {
+                checker.invalid = true;
+            }
+            checker.actions.sort_by_key(|action| {
+                point_order
+                    .get(&action.point)
+                    .copied()
+                    .unwrap_or((usize::MAX, usize::MAX))
+            });
+        } else {
+            checker.invalid = true;
+        }
+
+        // Coverage is independent of the older lifecycle attempt ledger.
+        // Untyped tuple map_get, Map literals, and future Map operations stay
+        // visible here and cannot be hidden by supported actions elsewhere.
+        let action_points = checker
+            .actions
+            .iter()
+            .map(|action| action.point.clone())
+            .collect::<BTreeSet<_>>();
+        if checker
+            .operation_attempts
+            .iter()
+            .any(|attempt| !action_points.contains(&attempt.point))
+        {
+            checker.invalid = true;
+        }
+        if cfg.reachable.len() > 1
+            && checker
+                .operation_attempts
+                .iter()
+                .any(|attempt| attempt.kind == OrdinaryMapOwnedGetI32StringV1AttemptKind::ScopeDrop)
+        {
+            // Scope drops are not path-local yet. Requiring explicit Drops in
+            // the owner entry block prevents one synthetic cleanup point from
+            // being misinterpreted as cleanup on every tail exit.
+            checker.invalid = true;
+        }
+        let receipt_new_points = checker
+            .actions
+            .iter()
+            .filter(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::New)
+            .map(|action| action.point.clone())
+            .collect::<BTreeSet<_>>();
+        let has_typed_getter = checker.actions.iter().any(|action| {
+            matches!(
+                action.kind,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::GetI32
+                    | OrdinaryMapOwnedGetI32StringV1ActionKind::GetString
+                    | OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny
+                    | OrdinaryMapOwnedGetI32StringV1ActionKind::Values
+            )
+        });
+        let entry_closed_profile =
+            Self::supports_entry_closed_tail_cfg(cfg, &checker.operation_attempts)
+                && checker.actions.iter().all(|action| {
+                    cfg.blocks.get(&cfg.entry).is_some_and(|block| {
+                        block
+                            .points
+                            .iter()
+                            .any(|point| point.source.node == action.point)
+                    })
+                });
+        // A Map operation created inside a branch would need path-local
+        // introduction and cleanup at the join. The acyclic receipt can
+        // safely carry operations in a post-join block, so reject only action
+        // points strictly inside a branch arm. Compute each split's arm
+        // region up to its first merge; the merge block itself is a valid
+        // common continuation and is intentionally retained.
+        if cfg.reachable.len() > 1 {
+            let mut predecessors = BTreeMap::<crate::core::cfg::BasicBlockId, Vec<_>>::new();
+            let mut successors = BTreeMap::<crate::core::cfg::BasicBlockId, Vec<_>>::new();
+            for block in &cfg.reachable {
+                predecessors.entry(block.clone()).or_default();
+                successors.entry(block.clone()).or_default();
+            }
+            for edge in cfg.edges.values().filter(|edge| {
+                cfg.reachable.contains(&edge.from) && cfg.reachable.contains(&edge.to)
+            }) {
+                predecessors
+                    .entry(edge.to.clone())
+                    .or_default()
+                    .push(edge.from.clone());
+                successors
+                    .entry(edge.from.clone())
+                    .or_default()
+                    .push(edge.to.clone());
+            }
+            let mut action_blocks = BTreeMap::<NodeId, crate::core::cfg::BasicBlockId>::new();
+            for (block_id, block) in &cfg.blocks {
+                for point in &block.points {
+                    action_blocks.insert(point.source.node.clone(), block_id.clone());
+                }
+            }
+            let mut branch_arm_blocks = BTreeSet::new();
+            for split in &cfg.reachable {
+                let Some(arms) = successors.get(split) else {
+                    continue;
+                };
+                if arms.len() < 2 {
+                    continue;
+                }
+                for first in arms {
+                    let mut work = vec![first.clone()];
+                    let mut seen = BTreeSet::new();
+                    while let Some(block_id) = work.pop() {
+                        if !seen.insert(block_id.clone()) {
+                            continue;
+                        }
+                        // A block reached by multiple incoming edges is the
+                        // first merge for this arm. It is a safe continuation.
+                        if predecessors
+                            .get(&block_id)
+                            .is_some_and(|preds| preds.len() > 1)
+                        {
+                            continue;
+                        }
+                        branch_arm_blocks.insert(block_id.clone());
+                        if let Some(next) = successors.get(&block_id) {
+                            work.extend(next.iter().cloned());
+                        }
+                    }
+                }
+            }
+            if checker.actions.iter().any(|action| {
+                action_blocks
+                    .get(&action.point)
+                    .is_some_and(|block| branch_arm_blocks.contains(block))
+            }) {
+                checker.invalid = true;
+            }
+        }
+        if receipt_new_points != checker.new_attempts
+            || receipt_new_points.is_empty()
+            || !has_typed_getter
+            || (entry_closed_profile && !checker.sealed_lifecycle_is_closed())
+        {
+            checker.invalid = true;
+        }
+        let cfg_receipt = if checker.invalid {
+            None
+        } else if entry_closed_profile {
+            Self::build_entry_closed_tail_cfg_receipt(
+                cfg,
+                &checker.operation_attempts,
+                &checker.actions,
+            )
+        } else {
+            Self::build_acyclic_per_edge_cfg_receipt(
+                cfg,
+                &checker.operation_attempts,
+                &checker.actions,
+            )
+        };
+        if checker.invalid || cfg_receipt.is_none() {
+            checker.actions.clear();
+        }
+        (
+            checker.actions,
+            checker.new_attempts,
+            checker.operation_attempts,
+            cfg_receipt.filter(|_| !checker.invalid),
+        )
+    }
+
+    fn supports_entry_closed_tail_cfg(
+        cfg: &CallableCfg,
+        attempts: &BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+    ) -> bool {
+        Self::supports_acyclic_cfg(cfg, attempts)
+            && attempts.iter().all(|attempt| {
+                cfg.blocks.get(&cfg.entry).is_some_and(|block| {
+                    block
+                        .points
+                        .iter()
+                        .any(|point| point.source.node == attempt.point)
+                })
+            })
+    }
+
+    fn acyclic_cfg_order(cfg: &CallableCfg) -> Option<Vec<crate::core::cfg::BasicBlockId>> {
+        let reachable = &cfg.reachable;
+        let mut indegree = reachable
+            .iter()
+            .cloned()
+            .map(|block| (block, 0usize))
+            .collect::<BTreeMap<_, _>>();
+        for edge in cfg
+            .edges
+            .values()
+            .filter(|edge| reachable.contains(&edge.from))
+        {
+            *indegree.get_mut(&edge.to)? += 1;
+        }
+        let mut ready = indegree
+            .iter()
+            .filter_map(|(block, degree)| (*degree == 0).then_some(block.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut order = Vec::with_capacity(reachable.len());
+        while let Some(block) = ready.pop_first() {
+            order.push(block.clone());
+            for edge in cfg.successors(&block) {
+                if !reachable.contains(&edge.to) {
+                    continue;
+                }
+                let degree = indegree.get_mut(&edge.to)?;
+                *degree = degree.checked_sub(1)?;
+                if *degree == 0 {
+                    ready.insert(edge.to.clone());
+                }
+            }
+        }
+        (order.len() == reachable.len()).then_some(order)
+    }
+
+    fn supports_acyclic_cfg(
+        cfg: &CallableCfg,
+        attempts: &BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+    ) -> bool {
+        if attempts.is_empty() || !cfg.reachable.contains(&cfg.entry) {
+            return false;
+        }
+        let reachable = &cfg.reachable;
+        if reachable.iter().any(|block_id| {
+            let Some(block) = cfg.blocks.get(block_id) else {
+                return true;
+            };
+            let Some((_, role)) = block_id.0 .0.rsplit_once("/cfg:block:") else {
+                return true;
+            };
+            !matches!(role, "entry" | "if-then" | "if-else" | "if-join")
+                || match &block.terminator {
+                    Terminator::Goto { .. }
+                    | Terminator::Branch { .. }
+                    | Terminator::Return { .. } => false,
+                    Terminator::Break { .. }
+                    | Terminator::Continue { .. }
+                    | Terminator::Diverge
+                    | Terminator::Unreachable
+                    | Terminator::Match { .. } => true,
+                }
+        }) {
+            return false;
+        }
+        if cfg.edges.values().any(|edge| {
+            reachable.contains(&edge.from)
+                && (!reachable.contains(&edge.to)
+                    || !matches!(
+                        edge.kind,
+                        EdgeKind::Then | EdgeKind::Else | EdgeKind::Fallthrough
+                    ))
+        }) {
+            return false;
+        }
+        // The MIR projection for this receipt version understands only the
+        // branch-arm-to-join shape emitted for one source `if`. Reject
+        // continuation edges between joins (including nested/serial `if`s)
+        // here rather than issuing a receipt that the MIR validator cannot
+        // project.
+        if cfg
+            .edges
+            .values()
+            .filter(|edge| reachable.contains(&edge.from))
+            .any(|edge| {
+                let to_role = edge
+                    .to
+                    .0
+                     .0
+                    .rsplit_once("/cfg:block:")
+                    .map(|(_, role)| role);
+                match edge.kind {
+                    EdgeKind::Then => to_role != Some("if-then"),
+                    EdgeKind::Else => to_role != Some("if-else"),
+                    EdgeKind::Fallthrough => Self::fallthrough_if_arm(cfg, edge).is_none(),
+                    _ => true,
+                }
+            })
+        {
+            return false;
+        }
+        // Cycles, including any backedge that might re-enter the Map owner
+        // entry block, are not admitted by this first CFG receipt.
+        let mut indegree = reachable
+            .iter()
+            .cloned()
+            .map(|block| (block, 0usize))
+            .collect::<BTreeMap<_, _>>();
+        for edge in cfg
+            .edges
+            .values()
+            .filter(|edge| reachable.contains(&edge.from))
+        {
+            *indegree.entry(edge.to.clone()).or_default() += 1;
+        }
+        let mut ready = indegree
+            .iter()
+            .filter_map(|(block, degree)| (*degree == 0).then_some(block.clone()))
+            .collect::<Vec<_>>();
+        let mut visited = 0usize;
+        while let Some(block) = ready.pop() {
+            visited += 1;
+            for edge in cfg.successors(&block) {
+                if !reachable.contains(&edge.to) {
+                    continue;
+                }
+                let Some(degree) = indegree.get_mut(&edge.to) else {
+                    return false;
+                };
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.push(edge.to.clone());
+                }
+            }
+        }
+        if visited != reachable.len() {
+            return false;
+        }
+        attempts.iter().all(|attempt| {
+            let containing = cfg
+                .blocks
+                .iter()
+                .filter(|(_, block)| {
+                    block
+                        .points
+                        .iter()
+                        .any(|point| point.source.node == attempt.point)
+                })
+                .map(|(block, _)| block)
+                .collect::<Vec<_>>();
+            containing.len() == 1 && reachable.contains(containing[0])
+        })
+    }
+
+    /// Resolve a source CFG fallthrough to the enclosing `if` arm that owns
+    /// it. The edge's `from` block may itself be a nested if-join, while the
+    /// edge source is the stable identity of the outer then/else body. The
+    /// branch edge into that body supplies the actual enclosing if identity.
+    /// Comparing `from` and `to` block-name prefixes is incorrect: the then
+    /// body and the if expression have distinct source node identities.
+    fn fallthrough_if_arm(
+        cfg: &CallableCfg,
+        edge: &crate::core::cfg::CfgEdge,
+    ) -> Option<(NodeId, EdgeKind)> {
+        if edge.kind != EdgeKind::Fallthrough {
+            return None;
+        }
+        for (role, branch_kind) in [("if-then", EdgeKind::Then), ("if-else", EdgeKind::Else)] {
+            let arm = crate::core::cfg::BasicBlockId(NodeId(format!(
+                "{}/cfg:block:{role}",
+                edge.source.node.0
+            )));
+            if !cfg.reachable.contains(&arm) {
+                continue;
+            }
+            let mut incoming = cfg
+                .predecessors(&arm)
+                .into_iter()
+                .filter(|candidate| candidate.kind == branch_kind);
+            let branch = incoming.next()?;
+            if incoming.next().is_some() {
+                return None;
+            }
+            let join = crate::core::cfg::BasicBlockId(NodeId(format!(
+                "{}/cfg:block:if-join",
+                branch.source.node.0
+            )));
+            if edge.to != join {
+                return None;
+            }
+            return Some((branch.source.node.clone(), branch_kind));
+        }
+        None
+    }
+
+    fn build_entry_closed_tail_cfg_receipt(
+        cfg: &CallableCfg,
+        attempts: &BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+        actions: &[OrdinaryMapOwnedGetI32StringV1Action],
+    ) -> Option<crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt> {
+        use crate::core::{
+            OrdinaryMapOwnedGetI32StringV1CfgBlock,
+            OrdinaryMapOwnedGetI32StringV1CfgProfileVersion as Profile,
+            OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+        };
+
+        if !Self::supports_entry_closed_tail_cfg(cfg, attempts) || actions.is_empty() {
+            return None;
+        }
+        let reachable_blocks = cfg
+            .reachable
+            .iter()
+            .map(|id| {
+                let block = cfg.blocks.get(id)?;
+                Some((
+                    id.clone(),
+                    OrdinaryMapOwnedGetI32StringV1CfgBlock {
+                        points: block
+                            .points
+                            .iter()
+                            .map(|point| (point.source.node.clone(), point.kind))
+                            .collect(),
+                        terminator: block.terminator.clone(),
+                    },
+                ))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        let reachable_edges = cfg
+            .edges
+            .iter()
+            .filter(|(_, edge)| cfg.reachable.contains(&edge.from))
+            .map(|(id, edge)| (id.clone(), edge.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let action_points = actions
+            .iter()
+            .map(|action| action.point.clone())
+            .collect::<BTreeSet<_>>();
+        let attempt_points = attempts
+            .iter()
+            .map(|attempt| attempt.point.clone())
+            .collect::<BTreeSet<_>>();
+        if action_points != attempt_points {
+            return None;
+        }
+        Some(OrdinaryMapOwnedGetI32StringV1CfgReceipt {
+            owner: cfg.owner.clone(),
+            profile_version: Profile::EntryClosedTailV1,
+            entry: cfg.entry.clone(),
+            map_operation_block: cfg.entry.clone(),
+            reachable_blocks,
+            reachable_edges,
+            attempts: attempts.clone(),
+            action_points,
+            live_roots_in: BTreeMap::new(),
+            live_roots_out: BTreeMap::new(),
+            live_roots_on_edge: BTreeMap::new(),
+        })
+    }
+
+    fn build_acyclic_per_edge_cfg_receipt(
+        cfg: &CallableCfg,
+        attempts: &BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
+        actions: &[OrdinaryMapOwnedGetI32StringV1Action],
+    ) -> Option<crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt> {
+        use crate::core::{
+            OrdinaryMapOwnedGetI32StringV1ActionKind as Action,
+            OrdinaryMapOwnedGetI32StringV1AttemptKind as Attempt,
+            OrdinaryMapOwnedGetI32StringV1CfgBlock,
+            OrdinaryMapOwnedGetI32StringV1CfgProfileVersion as Profile,
+            OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+        };
+
+        if !Self::supports_acyclic_cfg(cfg, attempts) || actions.is_empty() {
+            return None;
+        }
+        let order = Self::acyclic_cfg_order(cfg)?;
+        let reachable_blocks = cfg
+            .reachable
+            .iter()
+            .map(|id| {
+                let block = cfg.blocks.get(id)?;
+                Some((
+                    id.clone(),
+                    OrdinaryMapOwnedGetI32StringV1CfgBlock {
+                        points: block
+                            .points
+                            .iter()
+                            .map(|point| (point.source.node.clone(), point.kind))
+                            .collect(),
+                        terminator: block.terminator.clone(),
+                    },
+                ))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        let reachable_edges = cfg
+            .edges
+            .iter()
+            .filter(|(_, edge)| cfg.reachable.contains(&edge.from))
+            .map(|(id, edge)| (id.clone(), edge.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let action_points = actions
+            .iter()
+            .map(|action| action.point.clone())
+            .collect::<BTreeSet<_>>();
+        let attempt_points = attempts
+            .iter()
+            .map(|attempt| attempt.point.clone())
+            .collect::<BTreeSet<_>>();
+        if action_points != attempt_points {
+            return None;
+        }
+
+        let mut point_location = BTreeMap::new();
+        for block_id in &order {
+            let block = cfg.blocks.get(block_id)?;
+            for (point_index, point) in block.points.iter().enumerate() {
+                if point_location
+                    .insert(point.source.node.clone(), (block_id.clone(), point_index))
+                    .is_some()
+                {
+                    return None;
+                }
+            }
+        }
+        if attempts
+            .iter()
+            .any(|attempt| !point_location.contains_key(&attempt.point))
+            || actions
+                .iter()
+                .any(|action| !point_location.contains_key(&action.point))
+        {
+            return None;
+        }
+
+        let mut expected_events = BTreeMap::new();
+        for attempt in attempts {
+            let action_kind = match attempt.kind {
+                Attempt::New => Action::New,
+                Attempt::UntypedGet => Action::GetAny,
+                Attempt::GetI32 => Action::GetI32,
+                Attempt::GetString => Action::GetString,
+                Attempt::Set => Action::Set,
+                Attempt::Remove => Action::Remove,
+                Attempt::Size => Action::Size,
+                Attempt::HasKey => Action::HasKey,
+                Attempt::Drop | Attempt::ScopeDrop => Action::Drop,
+                Attempt::Clone => Action::Clone,
+                Attempt::Values => Action::Values,
+                Attempt::Keys | Attempt::FromList | Attempt::MapLiteral => return None,
+            };
+            *expected_events
+                .entry((attempt.point.clone(), action_kind))
+                .or_insert(0usize) += 1;
+        }
+        let mut actual_events = BTreeMap::new();
+        for action in actions {
+            *actual_events
+                .entry((action.point.clone(), action.kind))
+                .or_insert(0usize) += 1;
+        }
+        if expected_events != actual_events {
+            return None;
+        }
+
+        let mut live_roots_in = BTreeMap::new();
+        let mut live_roots_out = BTreeMap::new();
+        let mut live_roots_on_edge_sources =
+            BTreeMap::<crate::core::cfg::EdgeId, BTreeSet<ResolvedLocalId>>::new();
+        let mut ever_created = BTreeSet::new();
+        let canonical_roots = |roots: &BTreeSet<ResolvedLocalId>| {
+            roots
+                .iter()
+                .map(|local| Self::resource_identity(local).0 .0)
+                .collect::<BTreeSet<_>>()
+        };
+        for block_id in &order {
+            let block = cfg.blocks.get(block_id)?;
+            let incoming = reachable_edges
+                .iter()
+                .filter(|(_, edge)| &edge.to == block_id)
+                .map(|(edge_id, _)| edge_id)
+                .collect::<Vec<_>>();
+            let mut incoming_facts = incoming
+                .iter()
+                .map(|edge_id| live_roots_on_edge_sources.get(*edge_id).cloned())
+                .collect::<Option<Vec<_>>>()?;
+            let live_in = if block_id == &cfg.entry {
+                if !incoming_facts.is_empty() {
+                    return None;
+                }
+                BTreeSet::new()
+            } else {
+                if incoming_facts.is_empty() {
+                    return None;
+                }
+                let first = incoming_facts.pop()?;
+                if incoming_facts.iter().any(|fact| fact != &first) {
+                    return None;
+                }
+                first
+            };
+            live_roots_in.insert(block_id.clone(), canonical_roots(&live_in));
+            let mut live = live_in;
+            let mut block_actions = actions
+                .iter()
+                .filter_map(|action| {
+                    let (owner_block, point_index) = point_location.get(&action.point)?;
+                    (owner_block == block_id).then_some((*point_index, action))
+                })
+                .collect::<Vec<_>>();
+            block_actions.sort_by_key(|(point_index, _)| *point_index);
+            for (_, action) in block_actions {
+                let creates = matches!(
+                    action.kind,
+                    Action::New | Action::Clone | Action::Set | Action::Remove
+                );
+                if creates {
+                    if !ever_created.insert(action.local.clone()) || live.contains(&action.local) {
+                        return None;
+                    }
+                    if matches!(action.kind, Action::Clone | Action::Set | Action::Remove) {
+                        let source = action.source_local.as_ref()?;
+                        if source == &action.local || !live.contains(source) {
+                            return None;
+                        }
+                    } else if action.source_local.is_some() {
+                        return None;
+                    }
+                    live.insert(action.local.clone());
+                } else if action.kind == Action::Drop {
+                    if !live.remove(&action.local) {
+                        return None;
+                    }
+                } else if !live.contains(&action.local) {
+                    return None;
+                }
+            }
+            if matches!(&block.terminator, Terminator::Return { .. }) && !live.is_empty() {
+                return None;
+            }
+            live_roots_out.insert(block_id.clone(), canonical_roots(&live));
+            for edge in reachable_edges
+                .values()
+                .filter(|edge| &edge.from == block_id)
+            {
+                live_roots_on_edge_sources.insert(edge.id.clone(), live.clone());
+            }
+        }
+        let live_roots_on_edge = live_roots_on_edge_sources
+            .into_iter()
+            .map(|(edge, roots)| (edge, canonical_roots(&roots)))
+            .collect::<BTreeMap<_, _>>();
+        if live_roots_in.len() != reachable_blocks.len()
+            || live_roots_out.len() != reachable_blocks.len()
+            || live_roots_on_edge.len() != reachable_edges.len()
+        {
+            return None;
+        }
+
+        Some(OrdinaryMapOwnedGetI32StringV1CfgReceipt {
+            owner: cfg.owner.clone(),
+            profile_version: Profile::AcyclicPerEdgeRootsV2,
+            entry: cfg.entry.clone(),
+            map_operation_block: cfg.entry.clone(),
+            reachable_blocks,
+            reachable_edges,
+            attempts: attempts.clone(),
+            action_points,
+            live_roots_in,
+            live_roots_out,
+            live_roots_on_edge,
+        })
+    }
+
+    /// Checker-owned scope cleanup is an operation at the callable's final
+    /// CFG point. Each surviving local contributes one separate Drop attempt
+    /// and receipt; explicit drops have already removed their obligations.
+    fn schedule_scope_drops(&mut self, cfg: &CallableCfg) {
+        let remaining = self
+            .roots
+            .iter()
+            .rev()
+            .filter(|(_, dropped)| !**dropped)
+            .map(|(local, _)| local.clone())
+            .collect::<Vec<_>>();
+        if remaining.is_empty() {
+            return;
+        }
+        let Some(point) = cfg
+            .blocks
+            .values()
+            .next()
+            .and_then(|block| block.points.last())
+            .map(|point| point.source.node.clone())
+        else {
+            self.invalid = true;
+            return;
+        };
+        for local in remaining {
+            self.operation_attempts
+                .insert(OrdinaryMapOwnedGetI32StringV1Attempt {
+                    kind: OrdinaryMapOwnedGetI32StringV1AttemptKind::ScopeDrop,
+                    point: point.clone(),
+                    arguments: vec![local.0.clone()],
+                });
+            self.roots.insert(local.clone(), true);
+            self.actions.push(self.action(
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                point.clone(),
+                local,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
+        }
+    }
+
+    /// An ordinary free-value binding creates an independent persistent root.
+    /// It never copies the raw root handle or steals the source obligation.
+    fn visit_clone(&mut self, expression: &ResolvedExpr, target: &ResolvedLocalId) {
+        let Some(source) = self.live_root_load(expression) else {
+            self.invalid = true;
+            return;
+        };
+        if self.roots.contains_key(target)
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(target)
+                .is_some_and(|local| local.ty == expression.ty)
+        {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(expression);
+        self.operation_attempts
+            .insert(OrdinaryMapOwnedGetI32StringV1Attempt {
+                kind: OrdinaryMapOwnedGetI32StringV1AttemptKind::Clone,
+                point: expression.node_id.clone(),
+                arguments: vec![source.0.clone(), target.0.clone()],
+            });
+        self.roots.insert(target.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::Clone,
+            expression.node_id.clone(),
+            target.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(source),
+        ));
+    }
+
+    fn sealed_lifecycle_is_closed(&self) -> bool {
+        use OrdinaryMapOwnedGetI32StringV1ActionKind as Kind;
+
+        if self.actions.is_empty() {
+            return false;
+        }
+        let mut ever_created = BTreeSet::<ResolvedLocalId>::new();
+        let mut live = BTreeSet::<ResolvedLocalId>::new();
+        for action in &self.actions {
+            if action.profile_version != OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1
+                || action.root != Self::resource_identity(&action.local)
+            {
+                return false;
+            }
+            match action.kind {
+                Kind::New => {
+                    if Self::action_has_key(action)
+                        || action.key_local.is_some()
+                        || Self::action_has_value(action)
+                        || action.result_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                }
+                Kind::Clone => {
+                    let (Some(source_local), Some(source)) = (&action.source_local, &action.source)
+                    else {
+                        return false;
+                    };
+                    if action.key.is_some()
+                        || action.key_type.is_some()
+                        || action.key_local.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.result_type.is_some()
+                        || source != &Self::resource_identity(source_local)
+                        || !live.contains(source_local)
+                        || source_local == &action.local
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                }
+                Kind::Set => {
+                    let (
+                        Some(key),
+                        Some(key_type),
+                        key_local,
+                        Some(_value),
+                        Some(value_type),
+                        Some(source_local),
+                        Some(source),
+                    ) = (
+                        &action.key,
+                        &action.key_type,
+                        &action.key_local,
+                        &action.value,
+                        &action.value_type,
+                        &action.source_local,
+                        &action.source,
+                    )
+                    else {
+                        return false;
+                    };
+                    if !self.is_string(key_type)
+                        || !key_local.as_ref().is_none_or(|local| {
+                            self.body
+                                .locals
+                                .get(local)
+                                .is_some_and(|binding| self.is_string(&binding.ty))
+                        })
+                        || !(self.is_i32(value_type) || self.is_string(value_type))
+                        || action.result_type.is_some()
+                        || source != &Self::resource_identity(source_local)
+                        || !live.contains(source_local)
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                    let _ = key;
+                }
+                Kind::Remove => {
+                    let (Some(key), Some(key_type), Some(source_local), Some(source)) = (
+                        &action.key,
+                        &action.key_type,
+                        &action.source_local,
+                        &action.source,
+                    ) else {
+                        return false;
+                    };
+                    if !self.is_string(key_type)
+                        || !action.key_local.as_ref().is_none_or(|local| {
+                            self.body
+                                .locals
+                                .get(local)
+                                .is_some_and(|binding| self.is_string(&binding.ty))
+                        })
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.result_type.is_some()
+                        || source != &Self::resource_identity(source_local)
+                        || !live.contains(source_local)
+                        || !ever_created.insert(action.local.clone())
+                        || !live.insert(action.local.clone())
+                    {
+                        return false;
+                    }
+                    let _ = key;
+                }
+                Kind::Size => {
+                    if Self::action_has_key(action)
+                        || action.key_local.is_some()
+                        || Self::action_has_value(action)
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || action
+                            .result_type
+                            .as_ref()
+                            .is_none_or(|ty| !self.is_i32(ty))
+                        || !live.contains(&action.local)
+                    {
+                        return false;
+                    }
+                }
+                Kind::HasKey => {
+                    if action.key.is_none()
+                        || action
+                            .key_type
+                            .as_ref()
+                            .is_none_or(|ty| !self.is_string(ty))
+                        || !action.key_local.as_ref().is_none_or(|local| {
+                            self.body
+                                .locals
+                                .get(local)
+                                .is_some_and(|binding| self.is_string(&binding.ty))
+                        })
+                        || Self::action_has_value(action)
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || action
+                            .result_type
+                            .as_ref()
+                            .is_none_or(|ty| !self.is_bool(ty))
+                        || !live.contains(&action.local)
+                    {
+                        return false;
+                    }
+                }
+                Kind::GetI32 | Kind::GetString | Kind::GetAny => {
+                    let Some(result_type) = &action.result_type else {
+                        return false;
+                    };
+                    let ok_type = if action.kind == Kind::GetI32 {
+                        crate::core::PrimitiveType::I32
+                    } else {
+                        crate::core::PrimitiveType::String
+                    };
+                    if action.key.is_none()
+                        || action
+                            .key_type
+                            .as_ref()
+                            .is_none_or(|ty| !self.is_string(ty))
+                        || !action.key_local.as_ref().is_none_or(|local| {
+                            self.body
+                                .locals
+                                .get(local)
+                                .is_some_and(|binding| self.is_string(&binding.ty))
+                        })
+                        || Self::action_has_value(action)
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !(if action.kind == Kind::GetAny {
+                            self.is_get_any_tuple(result_type)
+                        } else {
+                            self.is_result(result_type, ok_type, crate::core::PrimitiveType::I32)
+                        })
+                        || !live.contains(&action.local)
+                    {
+                        return false;
+                    }
+                }
+                Kind::Values => {
+                    let Some(result_type) = &action.result_type else {
+                        return false;
+                    };
+                    if Self::action_has_key(action)
+                        || Self::action_has_value(action)
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !self.is_values_list(result_type)
+                        || !live.contains(&action.local)
+                    {
+                        return false;
+                    }
+                }
+                Kind::Drop => {
+                    if Self::action_has_key(action)
+                        || action.key_local.is_some()
+                        || Self::action_has_value(action)
+                        || action.result_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !live.remove(&action.local)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        live.is_empty() && ever_created == self.roots.keys().cloned().collect()
+    }
+
+    fn map_attempt_kind(name: &str) -> Option<OrdinaryMapOwnedGetI32StringV1AttemptKind> {
+        use OrdinaryMapOwnedGetI32StringV1AttemptKind as Kind;
+        match name {
+            "map_new" => Some(Kind::New),
+            "map_get" => Some(Kind::UntypedGet),
+            "map_get_i32" => Some(Kind::GetI32),
+            "map_get_string" => Some(Kind::GetString),
+            "map_set" => Some(Kind::Set),
+            "map_remove" => Some(Kind::Remove),
+            "map_size" => Some(Kind::Size),
+            "has_key" => Some(Kind::HasKey),
+            "keys" => Some(Kind::Keys),
+            "values" => Some(Kind::Values),
+            "map_from_list" => Some(Kind::FromList),
+            _ => None,
+        }
+    }
+
+    fn record_call_attempt(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        let ResolvedCallee::Builtin(name) = &call.callee else {
+            return;
+        };
+        let Some(kind) = Self::map_attempt_kind(name.as_str()) else {
+            return;
+        };
+        let arguments = call
+            .arguments
+            .iter()
+            .map(|argument| argument.value.node_id.clone())
+            .collect::<Vec<_>>();
+        self.operation_attempts
+            .insert(OrdinaryMapOwnedGetI32StringV1Attempt {
+                kind,
+                point: expression.node_id.clone(),
+                arguments,
+            });
+        if kind == OrdinaryMapOwnedGetI32StringV1AttemptKind::New {
+            self.new_attempts.insert(expression.node_id.clone());
+        }
+    }
+
+    fn collect_block_evidence(&mut self, block: &ResolvedBlock) {
+        for statement in &block.statements {
+            match &statement.kind {
+                ResolvedStmtKind::Bind { initializer, .. } => {
+                    if let Some(value) = initializer {
+                        self.collect_expr_evidence(value);
+                    }
+                }
+                ResolvedStmtKind::Assign { value, .. }
+                | ResolvedStmtKind::Expr(value)
+                | ResolvedStmtKind::Contract {
+                    condition: value, ..
+                } => self.collect_expr_evidence(value),
+                ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                    if let Some(value) = value {
+                        self.collect_expr_evidence(value);
+                    }
+                }
+                ResolvedStmtKind::While { condition, body } => {
+                    self.collect_expr_evidence(condition);
+                    self.collect_block_evidence(body);
+                }
+                ResolvedStmtKind::WhileLet {
+                    initializer, body, ..
+                }
+                | ResolvedStmtKind::For {
+                    iterable: initializer,
+                    body,
+                    ..
+                } => {
+                    self.collect_expr_evidence(initializer);
+                    self.collect_block_evidence(body);
+                }
+                ResolvedStmtKind::IfLet {
+                    initializer,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    self.collect_expr_evidence(initializer);
+                    self.collect_block_evidence(then_block);
+                    if let Some(block) = else_block {
+                        self.collect_block_evidence(block);
+                    }
+                }
+                ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                    self.collect_block_evidence(body);
+                }
+                ResolvedStmtKind::Drop(_) => {}
+                ResolvedStmtKind::Continue | ResolvedStmtKind::NestedCallable(_) => {}
+                ResolvedStmtKind::Math(expressions) => {
+                    for expression in expressions {
+                        self.collect_expr_evidence(expression);
+                    }
+                }
+                ResolvedStmtKind::Pinned { value, body, .. } => {
+                    self.collect_expr_evidence(value);
+                    self.collect_block_evidence(body);
+                }
+            }
+        }
+        if let Some(result) = &block.result {
+            self.collect_expr_evidence(result);
+        }
+    }
+
+    fn collect_expr_evidence(&mut self, expression: &ResolvedExpr) {
+        match &expression.kind {
+            ResolvedExprKind::Load(place) => self
+                .all_root_loads
+                .push((expression.node_id.clone(), place.base.clone())),
+            ResolvedExprKind::FString(parts) => {
+                for part in parts {
+                    if let ResolvedFStringPart::Interpolation(value) = part {
+                        self.collect_expr_evidence(value);
+                    }
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                self.collect_expr_evidence(value);
+                if let ResolvedValueProjection::Index(index) = projection {
+                    self.collect_expr_evidence(index);
+                }
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                self.collect_expr_evidence(left);
+                self.collect_expr_evidence(right);
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::Try { value: operand, .. }
+            | ResolvedExprKind::Cast { value: operand, .. }
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => self.collect_expr_evidence(operand),
+            ResolvedExprKind::Call(call) => {
+                self.record_call_attempt(expression, call);
+                for argument in &call.arguments {
+                    self.collect_expr_evidence(&argument.value);
+                }
+            }
+            ResolvedExprKind::Tuple(values)
+            | ResolvedExprKind::List(values)
+            | ResolvedExprKind::Set(values) => {
+                for value in values {
+                    self.collect_expr_evidence(value);
+                }
+            }
+            ResolvedExprKind::Map(values) => {
+                self.operation_attempts
+                    .insert(OrdinaryMapOwnedGetI32StringV1Attempt {
+                        kind: OrdinaryMapOwnedGetI32StringV1AttemptKind::MapLiteral,
+                        point: expression.node_id.clone(),
+                        arguments: values
+                            .iter()
+                            .flat_map(|(key, value)| [key.node_id.clone(), value.node_id.clone()])
+                            .collect(),
+                    });
+                for (key, value) in values {
+                    self.collect_expr_evidence(key);
+                    self.collect_expr_evidence(value);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                self.collect_expr_evidence(value);
+                self.collect_expr_evidence(iterable);
+                if let Some(guard) = guard {
+                    self.collect_expr_evidence(guard);
+                }
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => {
+                self.collect_expr_evidence(receiver)
+            }
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                for field in fields {
+                    self.collect_expr_evidence(&field.value);
+                }
+                if let Some(rest) = rest {
+                    self.collect_expr_evidence(rest);
+                }
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => self.collect_block_evidence(block),
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.collect_expr_evidence(condition);
+                self.collect_block_evidence(then_block);
+                self.collect_block_evidence(else_block);
+            }
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                self.collect_expr_evidence(scrutinee);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_expr_evidence(guard);
+                    }
+                    self.collect_expr_evidence(&arm.body);
+                }
+            }
+            ResolvedExprKind::Range { start, end } => {
+                self.collect_expr_evidence(start);
+                self.collect_expr_evidence(end);
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                self.collect_expr_evidence(target);
+                if let Some(start) = start {
+                    self.collect_expr_evidence(start);
+                }
+                if let Some(end) = end {
+                    self.collect_expr_evidence(end);
+                }
+            }
+            ResolvedExprKind::Lambda(_) => {
+                // Lambda bodies have their own canonical callable identity.
+                // This callable's attempt inventory must not absorb them.
+            }
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => {}
+        }
+    }
+
+    fn visit_block(&mut self, block: &ResolvedBlock) {
+        for statement in &block.statements {
+            match &statement.kind {
+                ResolvedStmtKind::Bind {
+                    pattern,
+                    initializer,
+                } => {
+                    if let Some(initializer) = initializer {
+                        let target = match &pattern.kind {
+                            ResolvedPatternKind::Binding { local, .. } => Some(local.clone()),
+                            _ => None,
+                        };
+                        self.visit_expr(initializer, target.as_ref());
+                    }
+                }
+                ResolvedStmtKind::Assign { target, value, .. } => {
+                    if self.roots.contains_key(&target.base) {
+                        self.invalid = true;
+                    }
+                    self.visit_expr(value, None);
+                }
+                ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                    if let Some(value) = value {
+                        self.visit_expr(value, None);
+                    }
+                    if matches!(&statement.kind, ResolvedStmtKind::Break(_)) {
+                        self.invalid = true;
+                    }
+                }
+                ResolvedStmtKind::Expr(value)
+                | ResolvedStmtKind::Contract {
+                    condition: value, ..
+                } => self.visit_expr(value, None),
+                ResolvedStmtKind::Drop(places) => self.visit_drop(statement, places),
+                ResolvedStmtKind::Math(expressions) => {
+                    for expression in expressions {
+                        self.visit_expr(expression, None);
+                    }
+                }
+                ResolvedStmtKind::While { .. }
+                | ResolvedStmtKind::WhileLet { .. }
+                | ResolvedStmtKind::IfLet { .. }
+                | ResolvedStmtKind::Loop(_)
+                | ResolvedStmtKind::For { .. }
+                | ResolvedStmtKind::Scope { .. }
+                | ResolvedStmtKind::Pinned { .. }
+                | ResolvedStmtKind::NestedCallable(_)
+                | ResolvedStmtKind::Continue => self.invalid = true,
+            }
+        }
+        if let Some(result) = &block.result {
+            self.visit_expr(result, None);
+        }
+    }
+
+    fn visit_drop(&mut self, statement: &ResolvedStmt, places: &[ResolvedPlace]) {
+        for place in places {
+            let Some(was_dropped) = self.roots.get(&place.base).copied() else {
+                continue;
+            };
+            self.operation_attempts
+                .insert(OrdinaryMapOwnedGetI32StringV1Attempt {
+                    kind: OrdinaryMapOwnedGetI32StringV1AttemptKind::Drop,
+                    point: statement.node_id.clone(),
+                    arguments: vec![place.base.0.clone()],
+                });
+            if !place.projections.is_empty() || was_dropped {
+                self.invalid = true;
+                continue;
+            }
+            self.roots.insert(place.base.clone(), true);
+            self.actions.push(self.action(
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                statement.node_id.clone(),
+                place.base.clone(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
+        }
+    }
+
+    fn visit_expr(&mut self, expression: &ResolvedExpr, direct_bind: Option<&ResolvedLocalId>) {
+        match &expression.kind {
+            ResolvedExprKind::Call(call) => {
+                let builtin = match &call.callee {
+                    ResolvedCallee::Builtin(name) => name.as_str(),
+                    _ => "",
+                };
+                match builtin {
+                    "map_new" => self.visit_new(expression, call, direct_bind),
+                    "map_set" => self.visit_set(expression, call, direct_bind),
+                    "map_remove" => self.visit_remove(expression, call, direct_bind),
+                    "map_size" => self.visit_size(expression, call),
+                    "has_key" => self.visit_has_key(expression, call),
+                    "map_get_i32" => self.visit_get(expression, call, false),
+                    "map_get_string" => self.visit_get(expression, call, true),
+                    "map_get" => self.visit_get_any(expression, call),
+                    "values" => self.visit_values(expression, call),
+                    "keys" | "map_from_list" => {
+                        self.invalid = true;
+                    }
+                    _ => {}
+                }
+                for argument in &call.arguments {
+                    self.visit_expr(&argument.value, None);
+                }
+            }
+            ResolvedExprKind::FString(parts) => {
+                for part in parts {
+                    if let ResolvedFStringPart::Interpolation(value) = part {
+                        self.visit_expr(value, None);
+                    }
+                }
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                self.visit_expr(value, None);
+                if let ResolvedValueProjection::Index(index) = projection {
+                    self.visit_expr(index, None);
+                }
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                self.visit_expr(left, None);
+                self.visit_expr(right, None);
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::Try { value: operand, .. }
+            | ResolvedExprKind::Cast { value: operand, .. }
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => self.visit_expr(operand, None),
+            ResolvedExprKind::Tuple(values)
+            | ResolvedExprKind::List(values)
+            | ResolvedExprKind::Set(values) => {
+                for value in values {
+                    self.visit_expr(value, None);
+                }
+            }
+            ResolvedExprKind::Map(values) => {
+                self.invalid = true;
+                for (key, value) in values {
+                    self.visit_expr(key, None);
+                    self.visit_expr(value, None);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                self.invalid = true;
+                self.visit_expr(value, None);
+                self.visit_expr(iterable, None);
+                if let Some(guard) = guard {
+                    self.visit_expr(guard, None);
+                }
+            }
+            ResolvedExprKind::OptionalChain { receiver, .. } => self.visit_expr(receiver, None),
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                self.invalid = true;
+                for field in fields {
+                    self.visit_expr(&field.value, None);
+                }
+                if let Some(rest) = rest {
+                    self.visit_expr(rest, None);
+                }
+            }
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                // Analyze both arms from the same ownership state. The CFG
+                // receipt later checks the exact edge facts and replays each
+                // arm's Map actions independently; a root may not escape one
+                // arm unless the other arm carries the identical obligation
+                // to the join.
+                let action_prefix_len = self.actions.len();
+                let mut branch_base = self.clone();
+                branch_base.visit_expr(condition, None);
+                let branch_action_prefix_len = branch_base.actions.len();
+
+                let mut then_checker = branch_base.clone();
+                then_checker.visit_block(then_block);
+                let mut else_checker = branch_base.clone();
+                else_checker.visit_block(else_block);
+
+                let live_roots = |checker: &Self| {
+                    checker
+                        .roots
+                        .iter()
+                        .filter_map(|(local, dropped)| (!*dropped).then_some(local.clone()))
+                        .collect::<BTreeSet<_>>()
+                };
+                let then_live = live_roots(&then_checker);
+                let else_live = live_roots(&else_checker);
+                if then_live != else_live {
+                    self.invalid = true;
+                }
+
+                let mut roots = then_checker.roots.clone();
+                for local in else_checker.roots.keys() {
+                    roots.entry(local.clone()).or_insert(true);
+                }
+                for (local, dropped) in &mut roots {
+                    *dropped = !then_live.contains(local);
+                }
+                let mut allowed_root_loads = then_checker.allowed_root_loads.clone();
+                allowed_root_loads.extend(else_checker.allowed_root_loads.iter().cloned());
+
+                let mut operation_attempts = then_checker.operation_attempts.clone();
+                operation_attempts.extend(else_checker.operation_attempts.iter().cloned());
+                let mut actions = branch_base.actions;
+                actions.extend(
+                    then_checker
+                        .actions
+                        .into_iter()
+                        .skip(branch_action_prefix_len),
+                );
+                actions.extend(
+                    else_checker
+                        .actions
+                        .into_iter()
+                        .skip(branch_action_prefix_len),
+                );
+
+                self.invalid = branch_base.invalid
+                    || then_checker.invalid
+                    || else_checker.invalid
+                    || then_live != else_live;
+                self.roots = roots;
+                self.allowed_root_loads = allowed_root_loads;
+                self.operation_attempts = operation_attempts;
+                self.actions = actions;
+                debug_assert!(self.actions.len() >= action_prefix_len);
+            }
+            ResolvedExprKind::Lambda(lambda) => {
+                // No-capture closures are checked through their own CFG and
+                // receipt. Capturing an ordinary Map root remains outside
+                // this profile because it would alias caller ownership.
+                if lambda.captures.iter().any(|local| {
+                    self.body
+                        .locals
+                        .get(local)
+                        .is_some_and(|binding| checker_is_record(self.types, &binding.ty))
+                }) {
+                    self.invalid = true;
+                }
+            }
+            ResolvedExprKind::Block(_)
+            | ResolvedExprKind::Scope { .. }
+            | ResolvedExprKind::Comptime(_)
+            | ResolvedExprKind::Quote(_)
+            | ResolvedExprKind::Match { .. }
+            | ResolvedExprKind::Range { .. }
+            | ResolvedExprKind::Slice { .. } => self.invalid = true,
+            ResolvedExprKind::Load(place) => {
+                if let Some(target) = direct_bind {
+                    if self.roots.contains_key(&place.base) {
+                        self.visit_clone(expression, target);
+                    }
+                }
+            }
+            ResolvedExprKind::Literal(_)
+            | ResolvedExprKind::Constant(_)
+            | ResolvedExprKind::Callable(_)
+            | ResolvedExprKind::DefaultArgument { .. }
+            | ResolvedExprKind::ComptimeValue(_)
+            | ResolvedExprKind::TypeValue(_) => {}
+        }
+    }
+
+    fn is_get_any_tuple(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(self.types.get(ty), Some(ResolvedType::Tuple(elements))
+            if elements.len() == 2 && self.is_bool(&elements[0])
+                && matches!(self.types.get(&elements[1]), Some(ResolvedType::DynamicAny { .. })))
+    }
+
+    fn is_values_list(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Nominal { item, arguments, .. })
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && matches!(self.types.get(&arguments[0]), Some(ResolvedType::DynamicAny { .. }))
+        )
+    }
+
+    fn visit_get_any(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        if call.arguments.len() != 2 || !self.is_get_any_tuple(&expression.ty) {
+            self.invalid = true;
+            return;
+        }
+        let root = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let Some(local) = self.live_root_load(root) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_string(&key.ty) {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(root);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny,
+            expression.node_id.clone(),
+            local,
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            None,
+            None,
+            Some(expression.ty.clone()),
+            None,
+        ));
+    }
+
+    fn visit_values(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        if call.arguments.len() != 1 || !self.is_values_list(&expression.ty) {
+            self.invalid = true;
+            return;
+        }
+        let root = &call.arguments[0].value;
+        let Some(local) = self.live_root_load(root) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&root.ty) {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(root);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::Values,
+            expression.node_id.clone(),
+            local,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(expression.ty.clone()),
+            None,
+        ));
+    }
+
+    fn visit_new(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        direct_bind: Option<&ResolvedLocalId>,
+    ) {
+        let Some(local) = direct_bind else {
+            self.invalid = true;
+            return;
+        };
+        if !call.arguments.is_empty()
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(local)
+                .is_some_and(|binding| binding.ty == expression.ty)
+            || self.roots.contains_key(local)
+        {
+            self.invalid = true;
+            return;
+        }
+        self.roots.insert(local.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::New,
+            expression.node_id.clone(),
+            local.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+    }
+
+    fn visit_set(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        direct_bind: Option<&ResolvedLocalId>,
+    ) {
+        let Some(target) = direct_bind else {
+            self.invalid = true;
+            return;
+        };
+        if call.arguments.len() != 3 || self.roots.contains_key(target) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let value = &call.arguments[2].value;
+        let Some(source_local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty)
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(target)
+                .is_some_and(|binding| binding.ty == expression.ty)
+            || !self.valid_key(key)
+            || !(self.is_i32(&value.ty) || self.is_string(&value.ty))
+        {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.roots.insert(target.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::Set,
+            expression.node_id.clone(),
+            target.clone(),
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            Some(value.node_id.clone()),
+            Some(value.ty.clone()),
+            None,
+            Some(source_local),
+        ));
+    }
+
+    fn visit_remove(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        direct_bind: Option<&ResolvedLocalId>,
+    ) {
+        let Some(target) = direct_bind else {
+            self.invalid = true;
+            return;
+        };
+        if call.arguments.len() != 2 || self.roots.contains_key(target) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let Some(source_local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty)
+            || !self.is_record(&expression.ty)
+            || !self
+                .body
+                .locals
+                .get(target)
+                .is_some_and(|binding| binding.ty == expression.ty)
+            || !self.valid_key(key)
+        {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.roots.insert(target.clone(), false);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::Remove,
+            expression.node_id.clone(),
+            target.clone(),
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            None,
+            None,
+            None,
+            Some(source_local),
+        ));
+    }
+
+    fn visit_size(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        if call.arguments.len() != 1 || !self.is_i32(&expression.ty) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let Some(local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty) {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::Size,
+            expression.node_id.clone(),
+            local,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(expression.ty.clone()),
+            None,
+        ));
+    }
+
+    fn visit_has_key(&mut self, expression: &ResolvedExpr, call: &ResolvedCall) {
+        if call.arguments.len() != 2 || !self.is_bool(&expression.ty) {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let Some(local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty) || !self.valid_key(key) {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.actions.push(self.action(
+            OrdinaryMapOwnedGetI32StringV1ActionKind::HasKey,
+            expression.node_id.clone(),
+            local,
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            None,
+            None,
+            Some(expression.ty.clone()),
+            None,
+        ));
+    }
+
+    fn visit_get(&mut self, expression: &ResolvedExpr, call: &ResolvedCall, string: bool) {
+        if call.arguments.len() != 2 {
+            self.invalid = true;
+            return;
+        }
+        let source = &call.arguments[0].value;
+        let key = &call.arguments[1].value;
+        let Some(local) = self.live_root_load(source) else {
+            self.invalid = true;
+            return;
+        };
+        if !self.is_record(&source.ty)
+            || !self.valid_key(key)
+            || !self.is_result(
+                &expression.ty,
+                if string {
+                    crate::core::PrimitiveType::String
+                } else {
+                    crate::core::PrimitiveType::I32
+                },
+                crate::core::PrimitiveType::I32,
+            )
+        {
+            self.invalid = true;
+            return;
+        }
+        self.allow_root_load(source);
+        self.actions.push(self.action(
+            if string {
+                OrdinaryMapOwnedGetI32StringV1ActionKind::GetString
+            } else {
+                OrdinaryMapOwnedGetI32StringV1ActionKind::GetI32
+            },
+            expression.node_id.clone(),
+            local,
+            Some(key.node_id.clone()),
+            Some(key.ty.clone()),
+            Self::direct_key_local(key),
+            None,
+            None,
+            Some(expression.ty.clone()),
+            None,
+        ));
+    }
+
+    fn valid_key(&self, expression: &ResolvedExpr) -> bool {
+        // Retain the complete resolved String expression. This accepts
+        // dynamic values and embedded NUL bytes without C-string truncation
+        // or a static-key policy leaking in from older profiles.
+        self.is_string(&expression.ty)
+    }
+
+    fn direct_key_local(expression: &ResolvedExpr) -> Option<ResolvedLocalId> {
+        match &expression.kind {
+            ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                Some(place.base.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn live_root_load(&self, expression: &ResolvedExpr) -> Option<ResolvedLocalId> {
+        let ResolvedExprKind::Load(place) = &expression.kind else {
+            return None;
+        };
+        if !place.projections.is_empty() || self.roots.get(&place.base) != Some(&false) {
+            return None;
+        }
+        Some(place.base.clone())
+    }
+
+    fn allow_root_load(&mut self, expression: &ResolvedExpr) {
+        self.allowed_root_loads.insert(expression.node_id.clone());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn action(
+        &self,
+        kind: OrdinaryMapOwnedGetI32StringV1ActionKind,
+        point: NodeId,
+        local: ResolvedLocalId,
+        key: Option<NodeId>,
+        key_type: Option<ResolvedTypeId>,
+        key_local: Option<ResolvedLocalId>,
+        value: Option<NodeId>,
+        value_type: Option<ResolvedTypeId>,
+        result_type: Option<ResolvedTypeId>,
+        source_local: Option<ResolvedLocalId>,
+    ) -> OrdinaryMapOwnedGetI32StringV1Action {
+        let root = Self::resource_identity(&local);
+        let source = source_local.as_ref().map(Self::resource_identity);
+        OrdinaryMapOwnedGetI32StringV1Action {
+            profile_version: OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1,
+            kind,
+            point,
+            local,
+            root,
+            key,
+            key_type,
+            key_local,
+            value,
+            value_type,
+            result_type,
+            source_local,
+            source,
+        }
+    }
+
+    fn resource_identity(local: &ResolvedLocalId) -> ResourceId {
+        ResourceId(NodeId(format!(
+            "ordinary-map-owned-get-i32-string-v1:{}",
+            local.0 .0
+        )))
+    }
+
+    fn is_result(
+        &self,
+        ty: &ResolvedTypeId,
+        ok: crate::core::PrimitiveType,
+        error: crate::core::PrimitiveType,
+    ) -> bool {
+        let result_parts = match self.types.get(ty) {
+            Some(ResolvedType::Result { ok, error }) => Some((ok, error)),
+            Some(ResolvedType::Nominal {
+                item, arguments, ..
+            }) if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
+                Some((&arguments[0], &arguments[1]))
+            }
+            _ => None,
+        };
+        result_parts.is_some_and(|(ok_type, error_type)| {
+            matches!(self.types.get(ok_type), Some(ResolvedType::Primitive(value)) if *value == ok)
+                && matches!(self.types.get(error_type), Some(ResolvedType::Primitive(value)) if *value == error)
+        })
+    }
+
+    fn is_record(&self, ty: &ResolvedTypeId) -> bool {
+        checker_is_record(self.types, ty)
+    }
+
+    fn is_i32(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+        )
+    }
+
+    fn is_string(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        )
+    }
+
+    fn is_bool(&self, ty: &ResolvedTypeId) -> bool {
+        matches!(
+            self.types.get(ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::Bool))
+        )
+    }
+
+    fn action_has_key(action: &OrdinaryMapOwnedGetI32StringV1Action) -> bool {
+        action.key.is_some() || action.key_type.is_some() || action.key_local.is_some()
+    }
+
+    fn action_has_value(action: &OrdinaryMapOwnedGetI32StringV1Action) -> bool {
+        action.value.is_some() || action.value_type.is_some()
+    }
+}
+
+fn checker_is_record(types: &ResolvedTypeTable, ty: &ResolvedTypeId) -> bool {
+    matches!(
+        types.get(ty),
+        Some(ResolvedType::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+    )
 }
 
 struct ActionEmitter<'a> {
@@ -166,6 +3860,28 @@ impl<'a> ActionEmitter<'a> {
         self.introduce_parameters();
         self.visit_block(&self.body.root, true);
         if self.errors.is_empty() {
+            // Re-run the closed local-root recognizer from the Checker-owned
+            // ResolvedBody. This yields an independent MapAnyOwner ledger and
+            // construction-attempt set; no MapRoot receipt is used as input.
+            let (map_any_owner_actions, map_any_owner_new_attempts) =
+                Self::collect_map_any_owner_v1(
+                    self.cfg,
+                    self.body,
+                    self.signature,
+                    self.types,
+                    self.linear_record_names,
+                );
+            let (
+                ordinary_map_owner_lifecycle_v1_actions,
+                ordinary_map_owner_lifecycle_v1_new_attempts,
+                ordinary_map_owner_lifecycle_v1_operation_attempts,
+            ) = OrdinaryMapOwnerLifecycleChecker::collect(self.cfg, self.body, self.types);
+            let (
+                ordinary_map_owned_get_i32_string_v1_actions,
+                ordinary_map_owned_get_i32_string_v1_new_attempts,
+                ordinary_map_owned_get_i32_string_v1_operation_attempts,
+                ordinary_map_owned_get_i32_string_v1_cfg_receipt,
+            ) = OrdinaryMapOwnedGetI32StringV1Checker::collect(self.cfg, self.body, self.types);
             let map_root_new_attempts = self.map_root_new_attempts.clone();
             // 0.31.16: collect flow state resources as auto-droppable.
             // Flow states represent data that can be safely discarded at
@@ -241,10 +3957,275 @@ impl<'a> ActionEmitter<'a> {
             )?;
             analysis.map_root_actions = map_root_actions;
             analysis.map_root_new_attempts = map_root_new_attempts;
+            analysis.map_any_owner_actions = map_any_owner_actions;
+            analysis.map_any_owner_new_attempts = map_any_owner_new_attempts;
+            analysis.ordinary_map_owner_lifecycle_v1_actions =
+                ordinary_map_owner_lifecycle_v1_actions;
+            analysis.ordinary_map_owner_lifecycle_v1_new_attempts =
+                ordinary_map_owner_lifecycle_v1_new_attempts;
+            analysis.ordinary_map_owner_lifecycle_v1_operation_attempts =
+                ordinary_map_owner_lifecycle_v1_operation_attempts;
+            analysis.ordinary_map_owned_get_i32_string_v1_actions =
+                ordinary_map_owned_get_i32_string_v1_actions;
+            analysis.ordinary_map_owned_get_i32_string_v1_new_attempts =
+                ordinary_map_owned_get_i32_string_v1_new_attempts;
+            analysis.ordinary_map_owned_get_i32_string_v1_operation_attempts =
+                ordinary_map_owned_get_i32_string_v1_operation_attempts;
+            analysis.ordinary_map_owned_get_i32_string_v1_cfg_receipt =
+                ordinary_map_owned_get_i32_string_v1_cfg_receipt;
+            analysis.managed_any_cfg_receipt = Some(crate::core::ManagedAnyCfgReceipt::from_cfg(
+                self.cfg, self.body,
+            ));
             Ok(analysis)
         } else {
             Err(self.errors)
         }
+    }
+
+    fn collect_map_any_owner_v1(
+        cfg: &'a CallableCfg,
+        body: &'a ResolvedBody,
+        signature: &'a ResolvedSignature,
+        types: &'a ResolvedTypeTable,
+        linear_record_names: &'a BTreeSet<String>,
+    ) -> (Vec<MapAnyOwnerAction>, BTreeSet<NodeId>) {
+        let mut checker = Self::new(cfg, body, signature, types, linear_record_names);
+        checker.build_resource_catalog();
+        checker.reject_linear_callable_captures();
+        checker.introduce_parameters();
+        checker.visit_block(&body.root, true);
+
+        let attempts = checker.map_root_new_attempts.clone();
+        if cfg.blocks.len() == 1 {
+            if let Some(block) = cfg.blocks.values().next() {
+                let point_order = block
+                    .points
+                    .iter()
+                    .enumerate()
+                    .map(|(index, point)| (point.source.node.clone(), index))
+                    .collect::<BTreeMap<_, _>>();
+                checker.map_root_actions.sort_by_key(|action| {
+                    point_order
+                        .get(&action.point)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+                if checker
+                    .map_root_actions
+                    .iter()
+                    .any(|action| !point_order.contains_key(&action.point))
+                {
+                    checker.map_root_profile_invalid = true;
+                }
+            } else {
+                checker.map_root_profile_invalid = true;
+            }
+        }
+        if cfg.blocks.len() != 1
+            || !cfg.edges.is_empty()
+            || checker.map_root_profile_invalid
+            || !checker.live_map_root_locals.is_empty()
+            || !checker.permitted_map_root_loads.is_empty()
+        {
+            checker.map_root_actions.clear();
+        }
+
+        let mut actions = checker
+            .map_root_actions
+            .into_iter()
+            .map(|action| MapAnyOwnerAction {
+                profile_version: MapAnyOwnerProfileVersion::V1,
+                kind: match action.kind {
+                    MapRootActionKind::New => MapAnyOwnerActionKind::New,
+                    MapRootActionKind::Set => MapAnyOwnerActionKind::Set,
+                    MapRootActionKind::Remove => MapAnyOwnerActionKind::Remove,
+                    MapRootActionKind::Size => MapAnyOwnerActionKind::Size,
+                    MapRootActionKind::Contains => MapAnyOwnerActionKind::Contains,
+                    MapRootActionKind::Drop => MapAnyOwnerActionKind::Drop,
+                },
+                point: action.point,
+                local: action.local.clone(),
+                root: Self::map_any_owner_resource_identity(&action.local),
+                key: action.key,
+                value: action.value,
+                value_type: action.value_type,
+                source_local: action.source_local.clone(),
+                source: action
+                    .source_local
+                    .as_ref()
+                    .map(Self::map_any_owner_resource_identity),
+            })
+            .collect::<Vec<_>>();
+
+        if !Self::map_any_owner_v1_ledger_is_closed(cfg, types, &actions, &attempts) {
+            actions.clear();
+        }
+        (actions, attempts)
+    }
+
+    fn map_any_owner_v1_ledger_is_closed(
+        cfg: &CallableCfg,
+        types: &ResolvedTypeTable,
+        actions: &[MapAnyOwnerAction],
+        attempts: &BTreeSet<NodeId>,
+    ) -> bool {
+        if actions.is_empty() || cfg.blocks.len() != 1 || !cfg.edges.is_empty() {
+            return false;
+        }
+        let Some(block) = cfg.blocks.values().next() else {
+            return false;
+        };
+        let point_order = block
+            .points
+            .iter()
+            .enumerate()
+            .map(|(index, point)| (point.source.node.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        if actions
+            .iter()
+            .any(|action| !point_order.contains_key(&action.point))
+        {
+            return false;
+        }
+        let new_points = actions
+            .iter()
+            .filter(|action| action.kind == MapAnyOwnerActionKind::New)
+            .map(|action| action.point.clone())
+            .collect::<BTreeSet<_>>();
+        if new_points.is_empty() || &new_points != attempts {
+            return false;
+        }
+
+        let mut payload_by_root = BTreeMap::<ResourceId, Option<ResolvedTypeId>>::new();
+        let mut live_roots = BTreeSet::<ResourceId>::new();
+        let mut previous_position = None;
+        for action in actions {
+            if action.profile_version != MapAnyOwnerProfileVersion::V1
+                || action.root != Self::map_any_owner_resource_identity(&action.local)
+            {
+                return false;
+            }
+            let position = point_order[&action.point];
+            if previous_position.is_some_and(|previous| position < previous) {
+                return false;
+            }
+            previous_position = Some(position);
+            match action.kind {
+                MapAnyOwnerActionKind::New => {
+                    if action.key.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || payload_by_root.contains_key(&action.root)
+                        || !live_roots.insert(action.root.clone())
+                    {
+                        return false;
+                    }
+                    payload_by_root.insert(action.root.clone(), None);
+                }
+                MapAnyOwnerActionKind::Set => {
+                    let (
+                        Some(key),
+                        Some(_value),
+                        Some(value_type),
+                        Some(source_local),
+                        Some(source),
+                    ) = (
+                        &action.key,
+                        &action.value,
+                        &action.value_type,
+                        &action.source_local,
+                        &action.source,
+                    )
+                    else {
+                        return false;
+                    };
+                    if key.contains('\0')
+                        || source != &Self::map_any_owner_resource_identity(source_local)
+                        || !matches!(
+                            types.get(value_type),
+                            Some(ResolvedType::Primitive(
+                                crate::core::PrimitiveType::I32
+                                    | crate::core::PrimitiveType::String
+                            ))
+                        )
+                        || payload_by_root.contains_key(&action.root)
+                    {
+                        return false;
+                    }
+                    let Some(inherited) = payload_by_root.remove(source) else {
+                        return false;
+                    };
+                    if !live_roots.remove(source)
+                        || inherited
+                            .as_ref()
+                            .is_some_and(|previous| previous != value_type)
+                        || !live_roots.insert(action.root.clone())
+                    {
+                        return false;
+                    }
+                    payload_by_root.insert(action.root.clone(), Some(value_type.clone()));
+                }
+                MapAnyOwnerActionKind::Remove => {
+                    let (Some(key), Some(source_local), Some(source)) =
+                        (&action.key, &action.source_local, &action.source)
+                    else {
+                        return false;
+                    };
+                    if key.contains('\0')
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || source != &Self::map_any_owner_resource_identity(source_local)
+                        || payload_by_root.contains_key(&action.root)
+                    {
+                        return false;
+                    }
+                    let Some(inherited) = payload_by_root.remove(source) else {
+                        return false;
+                    };
+                    if !live_roots.remove(source) || !live_roots.insert(action.root.clone()) {
+                        return false;
+                    }
+                    payload_by_root.insert(action.root.clone(), inherited);
+                }
+                MapAnyOwnerActionKind::Size => {
+                    if action.key.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !live_roots.contains(&action.root)
+                    {
+                        return false;
+                    }
+                }
+                MapAnyOwnerActionKind::Contains => {
+                    if action.key.as_ref().is_none_or(|key| key.contains('\0'))
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !live_roots.contains(&action.root)
+                    {
+                        return false;
+                    }
+                }
+                MapAnyOwnerActionKind::Drop => {
+                    if action.key.is_some()
+                        || action.value.is_some()
+                        || action.value_type.is_some()
+                        || action.source_local.is_some()
+                        || action.source.is_some()
+                        || !live_roots.remove(&action.root)
+                        || payload_by_root.remove(&action.root).is_none()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        live_roots.is_empty() && payload_by_root.is_empty()
     }
 
     fn record_map_new_binding(
@@ -3346,6 +7327,13 @@ impl<'a> ActionEmitter<'a> {
         ResourceId(local.0.clone())
     }
 
+    /// Give MapAnyOwner v1 a disjoint identity namespace. Matching local ids
+    /// in the MapRoot and MapAnyOwner ledgers therefore cannot be confused by
+    /// a downstream adapter.
+    fn map_any_owner_resource_identity(local: &ResolvedLocalId) -> ResourceId {
+        ResourceId(NodeId(format!("map-any-owner-v1:{}", local.0 .0)))
+    }
+
     fn resource_for_place(&self, place: &Place) -> ResourceId {
         self.resources
             .get(&ResolvedLocalId(place.base.0.clone()))
@@ -3759,6 +7747,122 @@ func main() -> i32 {
     }
 
     #[test]
+    fn map_any_owner_v1_has_an_independent_receipt_for_the_same_closed_source() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let first = map_new()
+    let updated = map_set(first, "answer", 42)
+    let size = map_size(updated)
+    drop(updated)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("closed local Map lifecycle");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert_eq!(
+            analysis
+                .map_root_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapRootActionKind::New,
+                MapRootActionKind::Set,
+                MapRootActionKind::Size,
+                MapRootActionKind::Drop,
+            ]
+        );
+        assert_eq!(
+            analysis
+                .map_any_owner_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                MapAnyOwnerActionKind::New,
+                MapAnyOwnerActionKind::Set,
+                MapAnyOwnerActionKind::Size,
+                MapAnyOwnerActionKind::Drop,
+            ]
+        );
+        assert!(analysis
+            .map_any_owner_actions
+            .iter()
+            .all(|action| { action.profile_version == MapAnyOwnerProfileVersion::V1 }));
+        assert_eq!(analysis.map_root_new_attempts.len(), 1);
+        assert_eq!(analysis.map_any_owner_new_attempts.len(), 1);
+        assert_eq!(
+            analysis.map_any_owner_new_attempts, analysis.map_root_new_attempts,
+            "both independent passes must cover the same source construction"
+        );
+
+        let old_set = &analysis.map_root_actions[1];
+        let new_set = &analysis.map_any_owner_actions[1];
+        assert_eq!(old_set.point, new_set.point);
+        assert_eq!(old_set.value_type, new_set.value_type);
+        let payload_type = new_set.value_type.as_ref().expect("Set payload type");
+        assert!(matches!(
+            program.resolved_types().get(payload_type),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+        ));
+        assert_ne!(old_set.root, new_set.root);
+        assert!(new_set.root.0 .0.starts_with("map-any-owner-v1:"));
+        assert_eq!(
+            new_set.source.as_ref().unwrap().0 .0,
+            format!(
+                "map-any-owner-v1:{}",
+                new_set.source_local.as_ref().unwrap().0 .0
+            )
+        );
+    }
+
+    #[test]
+    fn map_any_owner_v1_withholds_dynamic_any_aggregate_and_mixed_payloads() {
+        let aggregate = parse(
+            r#"
+type Point { x: i32 }
+func main() -> i32 {
+    let root = map_new()
+    let updated = map_set(root, "point", Point { x: 7 })
+    drop(updated)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&aggregate)
+            .expect("legacy DynamicAny aggregate Map remains checkable");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+        assert_eq!(analysis.map_any_owner_new_attempts.len(), 1);
+        assert!(analysis.map_any_owner_actions.is_empty());
+
+        let mixed = parse(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let integer_value = map_set(root, "answer", 42)
+    let mixed_value = map_set(integer_value, "label", "forty-two")
+    drop(mixed_value)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&mixed)
+            .expect("legacy mixed DynamicAny Map remains checkable");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+        assert_eq!(analysis.map_any_owner_new_attempts.len(), 1);
+        assert!(analysis.map_any_owner_actions.is_empty());
+    }
+
+    #[test]
     fn map_root_checker_contains_receipts_are_static_borrowing_and_fail_closed() {
         let accepted = parse(
             r#"
@@ -4046,6 +8150,10 @@ func main() -> i32 {
             assert!(
                 analysis.map_root_actions.is_empty(),
                 "a root chain that changes payload TypeDesc must not receive partial MapRoot authority"
+            );
+            assert!(
+                analysis.map_any_owner_actions.is_empty(),
+                "a root chain that changes payload TypeDesc must not receive partial MapAnyOwner v1 authority"
             );
         }
     }
@@ -4426,5 +8534,1088 @@ func main() -> i32 { 0 }
                 .any(|action| action.kind == CanonicalActionKind::Return),
             "capability parameter must be returned"
         );
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_keeps_mixed_source_roots_live_for_borrow_and_drop() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let source = map_new()
+    let number = 42
+    let first = map_set(source, "number", number)
+    let text = "forty-two"
+    let second = map_set(first, "text", text)
+    let size = map_size(source)
+    let contains = has_key(second, "text")
+    drop(source)
+    drop(first)
+    drop(second)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("mixed ordinary Map lifecycle");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert!(analysis.has_ordinary_map_owner_lifecycle_v1_receipt());
+        assert_eq!(
+            analysis.ordinary_map_owner_lifecycle_v1_new_attempts.len(),
+            1
+        );
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                OrdinaryMapOwnerLifecycleActionKind::New,
+                OrdinaryMapOwnerLifecycleActionKind::Set,
+                OrdinaryMapOwnerLifecycleActionKind::Set,
+                OrdinaryMapOwnerLifecycleActionKind::Size,
+                OrdinaryMapOwnerLifecycleActionKind::HasKey,
+                OrdinaryMapOwnerLifecycleActionKind::Drop,
+                OrdinaryMapOwnerLifecycleActionKind::Drop,
+                OrdinaryMapOwnerLifecycleActionKind::Drop,
+            ]
+        );
+
+        let actions = &analysis.ordinary_map_owner_lifecycle_v1_actions;
+        assert!(actions.iter().all(|action| {
+            action.profile_version == OrdinaryMapOwnerLifecycleProfileVersion::V1
+                && action
+                    .root
+                    .0
+                     .0
+                    .starts_with("ordinary-map-owner-lifecycle-i32-string-v1:")
+        }));
+        assert_eq!(actions[1].source_local.as_ref(), Some(&actions[0].local));
+        assert_eq!(actions[1].source.as_ref(), Some(&actions[0].root));
+        assert_eq!(actions[2].source_local.as_ref(), Some(&actions[1].local));
+        assert_eq!(actions[3].local, actions[0].local);
+        assert_eq!(
+            actions[1]
+                .key_type
+                .as_ref()
+                .and_then(|ty| program.resolved_types().get(ty)),
+            Some(&ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        );
+        assert!(matches!(
+            actions[1]
+                .value_type
+                .as_ref()
+                .and_then(|ty| program.resolved_types().get(ty)),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+        ));
+        assert!(matches!(
+            actions[2]
+                .value_type
+                .as_ref()
+                .and_then(|ty| program.resolved_types().get(ty)),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        ));
+        assert!(actions[1].key.is_some() && actions[2].key.is_some());
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_does_not_record_list_map_as_map_attempt() {
+        let list_only = parse(
+            r#"
+func main() -> i32 {
+    let mapped = map([1, 2], fn(x: i32) -> i32 { x + 1 })
+    mapped[0]
+}
+"#,
+        );
+        let list_program = crate::core::check_program(&list_only)
+            .expect("list map intrinsic without ordinary Map must check");
+        let list_analysis = list_program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("list-only resource analysis");
+        assert!(
+            list_analysis
+                .ordinary_map_owner_lifecycle_v1_operation_attempts
+                .is_empty(),
+            "the list `map([..], f)` intrinsic alone must not create ordinary Map attempts"
+        );
+        assert!(list_analysis
+            .ordinary_map_owned_get_i32_string_v1_operation_attempts
+            .is_empty());
+        assert_eq!(
+            crate::core::mir::classify_canonical_mir_route_admission(&list_program)
+                .ordinary_map_owner_lifecycle_i32_string_v1,
+            crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
+            "the list `map([..], f)` intrinsic must not select an ordinary Map route"
+        );
+        assert!(
+            !crate::core::mir::classify_canonical_mir_route_admission(&list_program)
+                .ordinary_map_owner_lifecycle_i32_string_v1
+                .has_profile_signal(),
+            "a list-only `map([..], f)` intrinsic must not create an ordinary Map profile signal"
+        );
+
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let mapped = map([1, 2], fn(x: i32) -> i32 { x + 1 })
+    let root = map_new()
+    let updated = map_set(root, "mapped", 42)
+    drop(root)
+    drop(updated)
+    mapped[0]
+}
+"#,
+        );
+        let program = crate::core::check_program(&file)
+            .expect("list map intrinsic and ordinary Map lifecycle both check");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+        let attempts = &analysis.ordinary_map_owner_lifecycle_v1_operation_attempts;
+
+        assert_eq!(
+            attempts.len(),
+            4,
+            "only map_new, map_set, and their two drops are ordinary Map attempts; the list `map([..], f)` intrinsic must not be recorded: {attempts:?}"
+        );
+        assert_eq!(
+            list_analysis
+                .ordinary_map_owned_get_i32_string_v1_operation_attempts
+                .len(),
+            0,
+            "the owned-get scanner must also exclude the bare List.map builtin"
+        );
+        assert!(
+            attempts
+                .iter()
+                .any(|attempt| { attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::New }),
+            "ordinary map_new must remain visible in the attempt ledger"
+        );
+        assert!(
+            attempts
+                .iter()
+                .any(|attempt| { attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::Set }),
+            "ordinary map_set must remain visible in the attempt ledger"
+        );
+        assert!(
+            attempts
+                .iter()
+                .any(|attempt| { attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::Drop }),
+            "ordinary Map drops must remain visible in the attempt ledger"
+        );
+        assert!(
+            analysis.has_ordinary_map_owner_lifecycle_v1_receipt(),
+            "an unrelated list `map([..], f)` intrinsic must not invalidate a complete ordinary Map receipt"
+        );
+        assert!(
+            crate::core::mir::classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owner_lifecycle_i32_string_v1_complete(),
+            "the mixed list/ordinary Map callable must retain complete ordinary Map admission"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_rejects_list_map_callback_capturing_map_root() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let mapped = map([1, 2], fn(x: i32) -> i32 { map_size(root) + x })
+    drop(root)
+    mapped[0]
+}
+"#,
+        );
+        let program = crate::core::check_program(&file)
+            .expect("list-map callback capturing a Map root must remain type-correct");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+        assert!(
+            analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty(),
+            "a list-map callback that captures and queries an ordinary Map root must withhold the receipt"
+        );
+        assert!(analysis
+            .ordinary_map_owner_lifecycle_v1_operation_attempts
+            .iter()
+            .any(|attempt| attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::Size));
+        assert!(
+            !crate::core::mir::classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owner_lifecycle_i32_string_v1_complete(),
+            "a captured Map operation inside a list-map callback must not receive complete ordinary Map admission"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_withholds_same_source_branch_forks() {
+        let file = parse(
+            r#"
+func forked(flag: bool) -> i32 {
+    let source = map_new()
+    if flag {
+        let left = map_set(source, "left", 1)
+        drop(left)
+    } else {
+        let right = map_set(source, "right", 2)
+        drop(right)
+    }
+    drop(source)
+    0
+}
+func main() -> i32 { forked(true) }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("branch Map program checks");
+        let analysis = program
+            .resource_analysis(&NodeId("function:forked".into()))
+            .expect("resource analysis");
+        assert!(analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty());
+        assert_eq!(
+            analysis.ordinary_map_owner_lifecycle_v1_new_attempts.len(),
+            1
+        );
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_operation_attempts
+                .iter()
+                .filter(|attempt| { attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::Set })
+                .count(),
+            2,
+            "the independent attempt ledger must preserve both branch updates"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_accepts_branch_read_only_size_with_join_drop() {
+        let file = parse(
+            r#"
+func branch_size(flag: bool) -> i32 {
+    let root = map_new()
+    if flag {
+        let size = map_size(root)
+    } else {
+        let size = map_size(root)
+    }
+    drop(root)
+    0
+}
+func main() -> i32 { branch_size(true) }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("branch Map size program checks");
+        let analysis = program
+            .resource_analysis(&NodeId("function:branch_size".into()))
+            .expect("resource analysis");
+        assert!(
+            analysis.has_ordinary_map_owner_lifecycle_v1_receipt(),
+            "read-only branch observations keep one shared root receipt"
+        );
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_actions
+                .iter()
+                .filter(|action| action.kind == OrdinaryMapOwnerLifecycleActionKind::Size)
+                .count(),
+            2,
+            "both mutually exclusive branch sizes must be receipted"
+        );
+        assert!(
+            crate::core::mir::classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owner_lifecycle_i32_string_v1_complete(),
+            "branch read-only Map size must be complete canonical admission"
+        );
+        let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+            .expect("branch read-only Map size lowers to canonical MIR");
+        mir.functions()
+            .values()
+            .find(|function| function.owner == NodeId("function:branch_size".into()))
+            .expect("branch_size MIR")
+            .validate()
+            .expect("branch read-only Map lifecycle validates path-independent receipts");
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_accepts_iteration_local_new_drop_loop() {
+        let file = parse(
+            r#"
+func loop_local(flag: bool) -> i32 {
+    while flag {
+        let root = map_new()
+        drop(root)
+    }
+    0
+}
+func main() -> i32 { loop_local(false) }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("loop-local Map program checks");
+        let owner = NodeId("function:loop_local".into());
+        let analysis = program
+            .resource_analysis(&owner)
+            .expect("loop-local resource analysis");
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                OrdinaryMapOwnerLifecycleActionKind::New,
+                OrdinaryMapOwnerLifecycleActionKind::Drop,
+            ]
+        );
+        assert!(
+            crate::core::mir::classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owner_lifecycle_i32_string_v1_complete(),
+            "an iteration-local New/Drop loop must retain complete ordinary Map admission"
+        );
+        let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+            .expect("loop-local ordinary Map lowers to canonical MIR");
+        mir.functions()
+            .values()
+            .find(|function| function.owner == owner)
+            .expect("loop_local MIR")
+            .validate()
+            .expect("loop-local ordinary Map lifecycle validates its back-edge");
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_accepts_iteration_local_new_drop_break_loop() {
+        let file = parse(
+            r#"
+func loop_local_break() -> i32 {
+    loop {
+        let root = map_new()
+        drop(root)
+        break
+    }
+    0
+}
+func main() -> i32 { loop_local_break() }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("finite loop Map program checks");
+        let owner = NodeId("function:loop_local_break".into());
+        let analysis = program
+            .resource_analysis(&owner)
+            .expect("finite loop resource analysis");
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                OrdinaryMapOwnerLifecycleActionKind::New,
+                OrdinaryMapOwnerLifecycleActionKind::Drop,
+            ]
+        );
+        assert!(
+            crate::core::mir::classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owner_lifecycle_i32_string_v1_complete(),
+            "finite loop New/Drop must retain complete ordinary Map admission"
+        );
+        let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+            .expect("finite loop ordinary Map lowers to canonical MIR");
+        mir.functions()
+            .values()
+            .find(|function| function.owner == owner)
+            .expect("loop_local_break MIR")
+            .validate()
+            .expect("finite loop ordinary Map lifecycle validates its break edge");
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_rejects_roots_crossing_loop_boundaries() {
+        let file = parse(
+            r#"
+func loop_escape(flag: bool) -> i32 {
+    let root = map_new()
+    while flag {
+        let size = map_size(root)
+    }
+    drop(root)
+    0
+}
+func main() -> i32 { loop_escape(false) }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("loop escape remains type-correct");
+        let owner = NodeId("function:loop_escape".into());
+        let analysis = program
+            .resource_analysis(&owner)
+            .expect("loop escape resource analysis");
+        assert!(analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty());
+        assert!(analysis
+            .ordinary_map_owner_lifecycle_v1_operation_attempts
+            .iter()
+            .any(|attempt| attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::Size));
+        assert!(
+            !crate::core::mir::classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owner_lifecycle_i32_string_v1_complete()
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_accepts_dynamic_typed_string_keys() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let key = "pre" + "fix"
+    let source = map_new()
+    let updated = map_set(source, key, 7)
+    let removed = map_remove(updated, key)
+    let present = has_key(source, key)
+    drop(source)
+    drop(updated)
+    drop(removed)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("dynamic key Map lifecycle");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+        assert!(analysis.has_ordinary_map_owner_lifecycle_v1_receipt());
+        let actions = &analysis.ordinary_map_owner_lifecycle_v1_actions;
+        let set = actions
+            .iter()
+            .find(|action| action.kind == OrdinaryMapOwnerLifecycleActionKind::Set)
+            .expect("Set action");
+        let remove = actions
+            .iter()
+            .find(|action| action.kind == OrdinaryMapOwnerLifecycleActionKind::Remove)
+            .expect("Remove action");
+        assert_eq!(set.key_type, remove.key_type);
+        assert_ne!(
+            set.key.as_ref(),
+            None,
+            "the key expression identity must be retained"
+        );
+        assert!(matches!(
+            set.key_type
+                .as_ref()
+                .and_then(|ty| program.resolved_types().get(ty)),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        ));
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_get_and_values_use_the_owned_get_profile() {
+        for (operation, body, expected_kind, owned_kind) in [
+            (
+                "get",
+                r#"let result = map_get(root, "missing"); drop(result)"#,
+                OrdinaryMapOwnerLifecycleAttemptKind::Get,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny,
+            ),
+            (
+                "values",
+                r#"let result = values(root); drop(result)"#,
+                OrdinaryMapOwnerLifecycleAttemptKind::Values,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Values,
+            ),
+        ] {
+            let source =
+                format!("func main() -> i32 {{ let root = map_new(); {body}; drop(root); 0 }}");
+            let file = parse(&source);
+            let program = crate::core::check_program(&file)
+                .unwrap_or_else(|errors| panic!("{operation} Map example must check: {errors:?}"));
+            let analysis = program
+                .resource_analysis(&NodeId("function:main".into()))
+                .expect("resource analysis");
+            assert!(
+                analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty(),
+                "{operation} belongs to the independent owned-get profile"
+            );
+            assert!(analysis
+                .ordinary_map_owner_lifecycle_v1_operation_attempts
+                .iter()
+                .any(|attempt| attempt.kind == expected_kind));
+            assert!(analysis
+                .ordinary_map_owned_get_i32_string_v1_actions
+                .iter()
+                .any(|action| action.kind == owned_kind));
+            assert!(
+                analysis.has_ordinary_map_owned_get_i32_string_v1_receipt(),
+                "{operation} must retain an owned-get receipt"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_requires_each_root_to_be_dropped_exactly_once() {
+        let file = parse("func main() -> i32 { let root = map_new(); 0 }");
+        let checked =
+            crate::core::check_program(&file).expect("unused ordinary root is scope-owned");
+        let analysis = checked
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("analysis");
+        assert!(analysis.has_ordinary_map_owner_lifecycle_v1_receipt());
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_actions
+                .iter()
+                .filter(|action| action.kind == OrdinaryMapOwnerLifecycleActionKind::Drop)
+                .count(),
+            1
+        );
+        assert!(analysis
+            .ordinary_map_owner_lifecycle_v1_operation_attempts
+            .iter()
+            .any(|attempt| attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::ScopeDrop));
+        {
+            let (name, body) = (
+                "duplicate",
+                "let root = map_new(); drop(root); drop(root); 0",
+            );
+            let source = format!("func main() -> i32 {{ {body} }}");
+            let file = parse(&source);
+            let program = crate::core::check_program(&file).unwrap_or_else(|errors| {
+                panic!("{name} Drop example must remain type-correct: {errors:?}")
+            });
+            let analysis = program
+                .resource_analysis(&NodeId("function:main".into()))
+                .expect("resource analysis");
+            assert!(analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty());
+            assert_eq!(
+                analysis.ordinary_map_owner_lifecycle_v1_new_attempts.len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owner_v1_keeps_all_map_new_attempts_visible() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let size = map_size(root)
+    let temporary_size = map_size(map_new())
+    drop(root)
+    size + temporary_size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("temporary Map program checks");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+        assert_eq!(
+            analysis.ordinary_map_owner_lifecycle_v1_new_attempts.len(),
+            2
+        );
+        assert_eq!(
+            analysis
+                .ordinary_map_owner_lifecycle_v1_operation_attempts
+                .iter()
+                .filter(|attempt| attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::New)
+                .count(),
+            2
+        );
+        assert!(analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty());
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_i32_string_v1_records_typed_getters_and_dynamic_nul_key() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let key = "prefix" + "\0suffix"
+    let source = map_new()
+    let inserted = map_set(source, key, 17)
+    let string_key = key + ":text"
+    let inserted_string = map_set(inserted, string_key, "owned")
+    let removed = map_remove(inserted_string, key)
+    let size = map_size(source)
+    let present = has_key(inserted_string, string_key)
+    let integer = map_get_i32(source, key)
+    let text = map_get_string(removed, string_key)
+    drop(source)
+    drop(inserted)
+    drop(inserted_string)
+    drop(removed)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file)
+            .expect("typed owned-get Map lifecycle with a dynamic NUL key");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert!(analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+        assert!(!analysis
+            .ordinary_map_owned_get_i32_string_v1_operation_attempts
+            .is_empty());
+        assert_eq!(
+            analysis
+                .ordinary_map_owned_get_i32_string_v1_actions
+                .iter()
+                .map(|action| action.kind)
+                .collect::<Vec<_>>(),
+            [
+                OrdinaryMapOwnedGetI32StringV1ActionKind::New,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Set,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Set,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Remove,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Size,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::HasKey,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::GetI32,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::GetString,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+            ]
+        );
+        let actions = &analysis.ordinary_map_owned_get_i32_string_v1_actions;
+        assert!(actions.iter().all(|action| {
+            action.profile_version == OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1
+                && action
+                    .root
+                    .0
+                     .0
+                    .starts_with("ordinary-map-owned-get-i32-string-v1:")
+        }));
+        assert_eq!(actions[1].source_local.as_ref(), Some(&actions[0].local));
+        assert_eq!(actions[2].source_local.as_ref(), Some(&actions[1].local));
+        assert_eq!(actions[3].source_local.as_ref(), Some(&actions[2].local));
+        assert_eq!(actions[4].local, actions[0].local);
+        assert_eq!(actions[5].local, actions[2].local);
+        for action in [
+            &actions[1],
+            &actions[2],
+            &actions[3],
+            &actions[5],
+            &actions[6],
+            &actions[7],
+        ] {
+            assert!(
+                action.key.is_some(),
+                "the complete key expression id is retained"
+            );
+            assert!(matches!(
+                action
+                    .key_type
+                    .as_ref()
+                    .and_then(|ty| program.resolved_types().get(ty)),
+                Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+            ));
+        }
+        let get_i32 = actions
+            .iter()
+            .find(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::GetI32)
+            .expect("typed i32 getter action");
+        let get_string = actions
+            .iter()
+            .find(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::GetString)
+            .expect("typed String getter action");
+        assert!(matches!(
+            actions[1]
+                .value_type
+                .as_ref()
+                .and_then(|ty| program.resolved_types().get(ty)),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+        ));
+        assert!(matches!(
+            actions[2]
+                .value_type
+                .as_ref()
+                .and_then(|ty| program.resolved_types().get(ty)),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+        ));
+        let result_has_shape = |type_id: &ResolvedTypeId, ok: crate::core::PrimitiveType| {
+            let types = program.resolved_types();
+            let parts = match types.get(type_id) {
+                Some(ResolvedType::Result { ok, error }) => Some((ok, error)),
+                Some(ResolvedType::Nominal {
+                    item, arguments, ..
+                }) if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
+                    Some((&arguments[0], &arguments[1]))
+                }
+                _ => None,
+            };
+            parts.is_some_and(|(ok_type, error_type)| {
+                matches!(types.get(ok_type), Some(ResolvedType::Primitive(value)) if *value == ok)
+                    && matches!(
+                        types.get(error_type),
+                        Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+                    )
+            })
+        };
+        assert!(result_has_shape(
+            get_i32.result_type.as_ref().expect("getter result type"),
+            crate::core::PrimitiveType::I32
+        ));
+        assert!(result_has_shape(
+            get_string.result_type.as_ref().expect("getter result type"),
+            crate::core::PrimitiveType::String
+        ));
+
+        // This is a separately scanned profile. Existing lifecycle evidence
+        // alone does not authorize the owned-get storage mode.
+        assert!(analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty());
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_seals_original_tuple_map_get_with_independent_any_owner() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let result = map_get(root, "missing")
+    drop(root)
+    0
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("old tuple map_get remains valid");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_actions
+            .iter()
+            .any(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny));
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_operation_attempts
+            .iter()
+            .any(|attempt| attempt.kind == OrdinaryMapOwnedGetI32StringV1AttemptKind::UntypedGet));
+        assert!(analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_requires_its_own_typed_getter_attempt() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let size = map_size(root)
+    drop(root)
+    size
+}
+"#,
+        );
+        let program = crate::core::check_program(&file)
+            .expect("ordinary lifecycle remains valid without typed getters");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert!(analysis.has_ordinary_map_owner_lifecycle_v1_receipt());
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_actions
+            .is_empty());
+        assert!(!analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_withholds_receipt_across_result_control_flow() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let key = "answer"
+    let root = map_new()
+    let result = map_get_i32(root, key)
+    drop(root)
+    match result {
+        Ok(value) => value,
+        Err(code) => code,
+    }
+}
+"#,
+        );
+        let program =
+            crate::core::check_program(&file).expect("Result status handling remains well typed");
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_actions
+            .is_empty());
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_operation_attempts
+            .iter()
+            .any(|attempt| attempt.kind == OrdinaryMapOwnedGetI32StringV1AttemptKind::GetI32));
+        assert!(!analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_rejects_temporary_and_dropped_alias_sources() {
+        for (name, body) in [
+            (
+                "temporary",
+                r#"
+    let key = "answer"
+    let result = map_get_i32(map_new(), key)
+    0
+"#,
+            ),
+            (
+                "alias after source drop",
+                r#"
+    let key = "answer"
+    let root = map_new()
+    drop(root)
+    let alias = root
+    let result = map_get_i32(alias, key)
+    drop(alias)
+    0
+"#,
+            ),
+        ] {
+            let source = format!("func main() -> i32 {{ {body} }}");
+            let file = parse(&source);
+            let program = crate::core::check_program(&file)
+                .unwrap_or_else(|errors| panic!("{name} root remains well typed: {errors:?}"));
+            let analysis = program
+                .resource_analysis(&NodeId("function:main".into()))
+                .expect("resource analysis");
+
+            assert_eq!(
+                analysis
+                    .ordinary_map_owned_get_i32_string_v1_new_attempts
+                    .len(),
+                1
+            );
+            assert!(analysis
+                .ordinary_map_owned_get_i32_string_v1_actions
+                .is_empty());
+            assert!(!analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+        }
+    }
+    #[test]
+    fn ordinary_map_aliases_have_distinct_clone_receipts_and_scope_cleanup() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let source = map_new()
+    let numbers = map_set(source, "number", 42)
+    let mixed = map_set(numbers, "text", "owned")
+    let alias = mixed
+    drop(mixed)
+    map_size(alias) - 2
+}
+"#,
+        );
+        let checked =
+            crate::core::check_program(&file).expect("ordinary alias remains a free value");
+        let analysis = checked
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("analysis");
+        let actions = &analysis.ordinary_map_owner_lifecycle_v1_actions;
+        let alias = actions
+            .iter()
+            .find(|action| action.kind == OrdinaryMapOwnerLifecycleActionKind::Clone)
+            .expect("alias clone receipt");
+        assert_ne!(alias.source_local.as_ref(), Some(&alias.local));
+        assert_ne!(alias.source.as_ref(), Some(&alias.root));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.kind == OrdinaryMapOwnerLifecycleActionKind::Drop)
+                .count(),
+            4
+        );
+        assert!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owner_lifecycle_i32_string_v1_complete()
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_alias_scoped_drops_preserve_snapshot_receipt() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let source = map_new()
+    let full = map_set(source, "text", "kept")
+    let alias = full
+    let result = map_get_string(alias, "text")
+    drop(full)
+    drop(result)
+    map_size(alias) - 1
+}
+"#,
+        );
+        let checked = crate::core::check_program(&file).expect("typed owned snapshot and alias");
+        let analysis = checked
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("analysis");
+        let actions = &analysis.ordinary_map_owned_get_i32_string_v1_actions;
+        assert!(actions
+            .iter()
+            .any(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::Clone));
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::Drop)
+                .count(),
+            3
+        );
+        assert!(analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+        assert!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_get_i32_string_v1_complete()
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_receipts_entry_closed_map_free_if_tail() {
+        let file = parse(
+            r#"
+func carry<T>(value: T) -> T { value }
+
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "key", "owned")
+    let pair = map_get(root, "key")
+    drop(empty)
+    drop(root)
+
+    let found = pair.0
+    let payload = pair.1
+    let carried = carry(payload)
+    let equal = if found { carried == "owned" } else { false }
+    drop(pair)
+    drop(payload)
+    drop(carried)
+    println(equal)
+    0
+}
+"#,
+        );
+        let checked = crate::core::check_program(&file)
+            .expect("the ordinary Any identity helper and Map-free if tail are well typed");
+        let analysis = checked
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+        let receipt = analysis
+            .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .as_ref()
+            .expect("closed Map entry must carry its exact Map-free tail CFG");
+
+        assert!(analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+        assert!(receipt.reachable_blocks.len() > 1);
+        assert_eq!(receipt.entry, receipt.map_operation_block);
+        assert!(receipt
+            .reachable_blocks
+            .keys()
+            .any(|block| { block.0 .0.ends_with("/cfg:block:if-then") }));
+        assert!(receipt
+            .reachable_blocks
+            .keys()
+            .any(|block| { block.0 .0.ends_with("/cfg:block:if-else") }));
+        assert!(receipt
+            .reachable_blocks
+            .keys()
+            .any(|block| { block.0 .0.ends_with("/cfg:block:if-join") }));
+        assert!(receipt
+            .reachable_edges
+            .values()
+            .any(|edge| { edge.kind == crate::core::cfg::EdgeKind::Then }));
+        assert!(receipt
+            .reachable_edges
+            .values()
+            .any(|edge| { edge.kind == crate::core::cfg::EdgeKind::Else }));
+        assert!(receipt
+            .reachable_edges
+            .values()
+            .any(|edge| { edge.kind == crate::core::cfg::EdgeKind::Fallthrough }));
+        let entry_points = &receipt
+            .reachable_blocks
+            .get(&receipt.entry)
+            .expect("entry fact")
+            .points;
+        assert!(receipt.action_points.iter().all(|point| {
+            entry_points
+                .iter()
+                .any(|(entry_point, _)| entry_point == point)
+        }));
+        assert!(receipt.attempts.iter().all(|attempt| {
+            entry_points
+                .iter()
+                .any(|(entry_point, _)| entry_point == &attempt.point)
+        }));
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_keeps_branch_local_map_attempts_fail_closed() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let size = if true {
+        let root = map_new()
+        let value = map_get_i32(root, "key")
+        drop(root)
+        1
+    } else {
+        0
+    }
+    size
+}
+"#,
+        );
+        let checked = crate::core::check_program(&file)
+            .expect("branch-local ordinary Map operations remain valid source");
+        let analysis = checked
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert!(!analysis
+            .ordinary_map_owned_get_i32_string_v1_operation_attempts
+            .is_empty());
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_actions
+            .is_empty());
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .is_none());
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_v1_keeps_loop_attempts_fail_closed() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let mut i = 0
+    while i < 1 {
+        let root = map_new()
+        let value = map_get_i32(root, "key")
+        drop(root)
+        i = i + 1
+    }
+    0
+}
+"#,
+        );
+        let checked = crate::core::check_program(&file)
+            .expect("loop-local ordinary Map operations are valid source");
+        let analysis = checked
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("resource analysis");
+
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_operation_attempts
+            .iter()
+            .any(
+                |attempt| attempt.kind == OrdinaryMapOwnedGetI32StringV1AttemptKind::UntypedGet
+                    || attempt.kind == OrdinaryMapOwnedGetI32StringV1AttemptKind::GetI32
+            ));
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_actions
+            .is_empty());
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .is_none());
     }
 }

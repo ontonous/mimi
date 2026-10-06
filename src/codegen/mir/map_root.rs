@@ -8,18 +8,20 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         &self,
         value: &MirValueId,
         subject: &str,
-    ) -> Result<(), NativeMirError> {
+    ) -> Result<bool, NativeMirError> {
         let ty = self.value_type(value, subject)?;
-        if ty != crate::core::mir::types::map_root_type_id() {
+        let map_any_owner_v1 = ty == crate::core::mir::types::map_any_owner_v1_type_id();
+        if ty != crate::core::mir::types::map_root_type_id() && !map_any_owner_v1 {
             return Err(NativeMirError::new(
                 subject,
-                "MapRoot operand does not use the canonical MapRoot TypeDesc",
+                "Map owner operand does not use a canonical Checker-owned TypeDesc",
             ));
         }
         self.program
             .type_catalog()
             .validate_glue(&ty, MirGlueOperation::MoveOut)
-            .map_err(|message| NativeMirError::new(subject, message))
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        Ok(map_any_owner_v1)
     }
 
     fn emit_root_guard(
@@ -76,10 +78,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         result: &MirValueId,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
-        self.validate_map_root_value(result, subject)?;
+        let map_any_owner_v1 = self.validate_map_root_value(result, subject)?;
         let new_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_map_root_new")
+            .get_runtime_fn(if map_any_owner_v1 {
+                "mimi_mir_map_any_owner_v1_new"
+            } else {
+                "mimi_mir_map_root_new"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let handle = call_try_basic_value(
             &self
@@ -116,7 +122,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         value: &MirValueId,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
-        self.validate_map_root_value(result, subject)?;
+        let map_any_owner_v1 = self.validate_map_root_value(result, subject)?;
+        if self.validate_map_root_value(source, subject)? != map_any_owner_v1 {
+            return Err(NativeMirError::new(
+                subject,
+                "Map Set cannot cross between raw MapRoot and MapAnyOwner v1 identities",
+            ));
+        }
         let handle = self.emit_live_root_handle(source, subject)?;
         if key.contains('\0') {
             return Err(NativeMirError::new(subject, "MapRoot key contains NUL"));
@@ -150,7 +162,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .validate_copy_scalar(&value_ty)
                     .map_err(|message| NativeMirError::new(subject, message))?;
                 (
-                    "mimi_mir_map_root_set",
+                    if map_any_owner_v1 {
+                        "mimi_mir_map_any_owner_v1_set_i32"
+                    } else {
+                        "mimi_mir_map_root_set"
+                    },
                     vec![
                         BasicMetadataValueEnum::from(handle),
                         BasicMetadataValueEnum::from(key_ptr.as_pointer_value()),
@@ -184,7 +200,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     BasicMetadataValueEnum::from(data),
                     BasicMetadataValueEnum::from(len),
                 ];
-                ("mimi_mir_map_root_set_string", args)
+                (
+                    if map_any_owner_v1 {
+                        "mimi_mir_map_any_owner_v1_set_string"
+                    } else {
+                        "mimi_mir_map_root_set_string"
+                    },
+                    args,
+                )
             }
             _ => {
                 return Err(NativeMirError::new(
@@ -230,6 +253,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         root: &MirValueId,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let map_any_owner_v1 = self.validate_map_root_value(root, subject)?;
         self.emit_live_root_handle(root, subject)?;
         let result_ty = self.value_type(result, subject)?;
         let i32_ty = self
@@ -253,7 +277,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|message| NativeMirError::new(subject, message))?;
         let size_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_map_root_size")
+            .get_runtime_fn(if map_any_owner_v1 {
+                "mimi_mir_map_any_owner_v1_size"
+            } else {
+                "mimi_mir_map_root_size"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let size = call_try_basic_value(
             &self
@@ -279,6 +307,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         key: &str,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let map_any_owner_v1 = self.validate_map_root_value(root, subject)?;
         self.emit_live_root_handle(root, subject)?;
         let bool_ty = self.value_type(result, subject)?;
         let canonical_bool = self
@@ -321,7 +350,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(key_len as u64, true);
         let contains_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_map_root_contains")
+            .get_runtime_fn(if map_any_owner_v1 {
+                "mimi_mir_map_any_owner_v1_contains"
+            } else {
+                "mimi_mir_map_root_contains"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let contains = call_try_basic_value(
             &self
@@ -361,7 +394,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         key: &str,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
-        self.validate_map_root_value(result, subject)?;
+        let map_any_owner_v1 = self.validate_map_root_value(result, subject)?;
+        if self.validate_map_root_value(source, subject)? != map_any_owner_v1 {
+            return Err(NativeMirError::new(
+                subject,
+                "Map Remove cannot cross between raw MapRoot and MapAnyOwner v1 identities",
+            ));
+        }
         let handle = self.emit_live_root_handle(source, subject)?;
         if key.contains('\0') {
             return Err(NativeMirError::new(subject, "MapRoot key contains NUL"));
@@ -384,7 +423,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(key_len as u64, true);
         let remove_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_map_root_remove")
+            .get_runtime_fn(if map_any_owner_v1 {
+                "mimi_mir_map_any_owner_v1_remove"
+            } else {
+                "mimi_mir_map_root_remove"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let updated = call_try_basic_value(
             &self
@@ -426,6 +469,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         root: &MirValueId,
         subject: &str,
     ) -> Result<(), NativeMirError> {
+        let map_any_owner_v1 = self.validate_map_root_value(root, subject)?;
         let handle = self.emit_live_root_handle(root, subject)?;
         let ty = self.value_type(root, subject)?;
         self.program
@@ -434,7 +478,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|message| NativeMirError::new(subject, message))?;
         let drop_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_map_root_drop")
+            .get_runtime_fn(if map_any_owner_v1 {
+                "mimi_mir_map_any_owner_v1_drop"
+            } else {
+                "mimi_mir_map_root_drop"
+            })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.generator
             .builder

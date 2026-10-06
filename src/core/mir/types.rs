@@ -16,13 +16,43 @@ use crate::core::ir::{
 use crate::core::mir::MirSetOperation;
 use crate::core::{CheckedProgram, NodeId, NominalTypeId, ResolvedTypeKind};
 
-pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-15";
+pub const MIR_TYPE_DESC_SCHEMA_VERSION: &str = "mimi-mir-type-desc-19";
 
 /// Synthetic TypeDesc identity for the opaque persistent Map root. It is
 /// materialized only when Checker resource analysis contains a Map-root New
 /// receipt; the source-level `Record` identity remains unchanged.
 pub(crate) fn map_root_type_id() -> ResolvedTypeId {
     ResolvedTypeId::synthetic("mimi-mir:MapRoot:v1")
+}
+
+/// Synthetic TypeDesc identity for the separately receipted MapAnyOwner v1
+/// root. It deliberately has no identity alias with the raw MapRoot slice.
+pub(crate) fn map_any_owner_v1_type_id() -> ResolvedTypeId {
+    ResolvedTypeId::synthetic("mimi-mir:MapAnyOwner:v1")
+}
+
+/// Synthetic opaque identity for ordinary source Maps whose entry owners and
+/// persistent lifecycle are admitted by the independent i32/String profile.
+/// This identity must not alias MapRoot or MapAnyOwner v1: the source root is
+/// preserved by updates and entries may carry mixed payload descriptors.
+pub(crate) fn ordinary_map_owner_lifecycle_i32_string_v1_type_id() -> ResolvedTypeId {
+    ResolvedTypeId::synthetic("mimi-mir:OrdinaryMapOwnerLifecycleI32String:v1")
+}
+
+/// Synthetic opaque identity for the independent ordinary Map profile whose
+/// typed getters return owned `Result<i32, i32>` and `Result<string, i32>`
+/// values. This identity is disjoint from every older Map owner profile.
+pub(crate) fn ordinary_map_owned_get_i32_string_v1_type_id() -> ResolvedTypeId {
+    ResolvedTypeId::synthetic("mimi-mir:OrdinaryMapOwnedGetI32String:v1")
+}
+
+/// Generation-bearing snapshot owner, independent from every Map root.
+pub(crate) fn managed_any_i32_string_v1_type_id() -> ResolvedTypeId {
+    ResolvedTypeId::synthetic("mimi-mir:ManagedAnyI32String:v1")
+}
+
+pub(crate) fn ordinary_map_get_any_tuple_i32_string_v1_type_id() -> ResolvedTypeId {
+    ResolvedTypeId::synthetic("mimi-mir:OrdinaryMapGetAnyTupleI32String:v1")
 }
 
 pub(crate) const MAP_ROOT_SIZE_OVERFLOW_MESSAGE: &str =
@@ -59,10 +89,12 @@ pub const MIR_FLOAT_NOT_FINITE_TRAP_CODE: &str = "E0813";
 /// f64 contracts remain outside the trusted symbolic domain.
 pub const MIR_VERIFIER_FLOAT_BOUNDARY_CODE: &str = "MIR-VERIFIER-FLOAT-001";
 
-/// Proof-artifact model label for the intentionally rejected MIR float domain.
-/// Keep this separate from the runtime `E0813` trap identity: one describes
-/// verifier capability, the other describes execution definedness.
-pub const MIR_VERIFIER_FLOAT_MODEL: &str = "f64_rejected";
+/// Proof-artifact model label for the MIR verifier's finite IEEE-754 binary64
+/// domain with round-to-nearest, ties-to-even operations and E0813 finiteness
+/// obligations. Keep this separate from the runtime `E0813` trap identity:
+/// one describes the symbolic model, the other describes execution
+/// definedness.
+pub const MIR_VERIFIER_FLOAT_MODEL: &str = "ieee754_binary64_finite_rne";
 
 /// Stable verifier admission identity for multi-target Flow state unions.
 /// Execution and ABI consumers accept the checker-owned Enum union receipt,
@@ -701,6 +733,16 @@ pub enum MirGlueKind {
     /// Move/drop ownership glue for a checker-authorized persistent Map root.
     /// Generic Clone intentionally remains unsupported.
     MapRoot,
+    /// Move/drop glue for the distinct Checker-receipted MapAnyOwner v1
+    /// identity. It is not an alias for raw MapRoot glue.
+    MapAnyOwnerV1,
+    /// Move/drop glue for the persistent, source-compatible ordinary Map
+    /// owner lifecycle profile. Generic Clone is not implicitly authorized.
+    OrdinaryMapOwnerLifecycleI32StringV1,
+    /// Move/drop glue for the distinct ordinary Map profile that admits
+    /// owned typed getter results. Generic Clone remains unsupported.
+    OrdinaryMapOwnedGetI32StringV1,
+    ManagedAnyI32StringV1,
     Aggregate,
     /// Transfer-only SessionChan endpoint glue. A session endpoint has no
     /// generic Clone/Drop operation; its only legal ownership boundary is an
@@ -718,6 +760,12 @@ impl MirGlueKind {
             Self::List => "list",
             Self::Set => "set",
             Self::MapRoot => "map_root",
+            Self::MapAnyOwnerV1 => "map_any_owner_v1",
+            Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
+                "ordinary_map_owner_lifecycle_i32_string_v1"
+            }
+            Self::OrdinaryMapOwnedGetI32StringV1 => "ordinary_map_owned_get_i32_string_v1",
+            Self::ManagedAnyI32StringV1 => "managed_any_i32_string_v1",
             Self::Aggregate => "aggregate",
             Self::Session => "session",
             Self::Unsupported => "unsupported",
@@ -852,6 +900,38 @@ impl MirGlueContract {
                 drop: MirGlueKind::MapRoot,
             };
         }
+        if matches!(kind, MirTypeKind::MapAnyOwnerV1) && ownership == MirOwnership::Move {
+            return Self {
+                move_out: MirGlueKind::MapAnyOwnerV1,
+                clone: MirGlueKind::Unsupported,
+                drop: MirGlueKind::MapAnyOwnerV1,
+            };
+        }
+        if matches!(kind, MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1)
+            && ownership == MirOwnership::Move
+        {
+            return Self {
+                move_out: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+                clone: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+                drop: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+            };
+        }
+        if matches!(kind, MirTypeKind::ManagedAnyI32StringV1) && ownership == MirOwnership::Move {
+            return Self {
+                move_out: MirGlueKind::ManagedAnyI32StringV1,
+                clone: MirGlueKind::ManagedAnyI32StringV1,
+                drop: MirGlueKind::ManagedAnyI32StringV1,
+            };
+        }
+        if matches!(kind, MirTypeKind::OrdinaryMapOwnedGetI32StringV1)
+            && ownership == MirOwnership::Move
+        {
+            return Self {
+                move_out: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+                clone: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+                drop: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+            };
+        }
         Self {
             move_out: MirGlueKind::Unsupported,
             clone: MirGlueKind::Unsupported,
@@ -958,6 +1038,12 @@ pub struct MirCallEffectContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirTypeKind {
+    ActorHandle {
+        actor: NodeId,
+    },
+    ActorState {
+        actor: NodeId,
+    },
     Primitive(PrimitiveType),
     GenericParameter,
     Nominal,
@@ -968,6 +1054,16 @@ pub enum MirTypeKind {
     /// Synthetic opaque root identity admitted only by Checker Map-root
     /// lifecycle receipts. It is distinct from source `Record` and `Set`.
     MapRoot,
+    /// Distinct synthetic opaque identity admitted only by Checker
+    /// MapAnyOwner v1 lifecycle receipts.
+    MapAnyOwnerV1,
+    /// Distinct synthetic opaque identity admitted only by the ordinary
+    /// persistent Map owner lifecycle receipts.
+    OrdinaryMapOwnerLifecycleI32StringV1,
+    /// Distinct synthetic opaque identity admitted only by the independent
+    /// ordinary Map typed owned-get receipts.
+    OrdinaryMapOwnedGetI32StringV1,
+    ManagedAnyI32StringV1,
     FlowStateSet,
     Reference {
         mutable: bool,
@@ -1005,11 +1101,19 @@ impl MirTypeKind {
             Self::Primitive(primitive) => {
                 format!("primitive({})", primitive_canonical_text(*primitive))
             }
+            Self::ActorHandle { actor } => format!("actor_handle actor={}", actor.0),
+            Self::ActorState { actor } => format!("actor_state actor={}", actor.0),
             Self::GenericParameter => "generic_parameter".into(),
             Self::Nominal => "nominal".into(),
             Self::List => "list".into(),
             Self::Set => "set".into(),
             Self::MapRoot => "map_root".into(),
+            Self::MapAnyOwnerV1 => "map_any_owner_v1".into(),
+            Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
+                "ordinary_map_owner_lifecycle_i32_string_v1".into()
+            }
+            Self::OrdinaryMapOwnedGetI32StringV1 => "ordinary_map_owned_get_i32_string_v1".into(),
+            Self::ManagedAnyI32StringV1 => "managed_any_i32_string_v1".into(),
             Self::FlowStateSet => "flow_state_set".into(),
             Self::Reference { mutable } => format!("reference mutable={mutable}"),
             Self::Option => "option".into(),
@@ -1079,6 +1183,10 @@ fn ownership_type_canonical_text(kind: OwnershipTypeKind) -> &'static str {
 /// field identities first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirLayout {
+    ActorState {
+        actor: NodeId,
+        fields: Vec<MirFieldDesc>,
+    },
     Unit,
     Scalar,
     Handle,
@@ -1134,6 +1242,14 @@ pub enum MirLayout {
     },
     /// Opaque persistent Map root admitted by Checker lifecycle receipts.
     MapRoot,
+    /// Opaque MapAnyOwner v1 root, with a separate canonical layout spelling.
+    MapAnyOwnerV1,
+    /// Opaque ordinary source Map owner with persistent update semantics.
+    OrdinaryMapOwnerLifecycleI32StringV1,
+    /// Opaque ordinary source Map owner whose typed getters return owned
+    /// Result values under the independently receipted v1 profile.
+    OrdinaryMapOwnedGetI32StringV1,
+    ManagedAnyI32StringV1,
     Opaque,
 }
 
@@ -1212,6 +1328,21 @@ impl MirLayout {
             Self::List { element } => format!("list element={}", element.as_str()),
             Self::Set { element } => format!("set element={}", element.as_str()),
             Self::MapRoot => "map_root".into(),
+            Self::MapAnyOwnerV1 => "map_any_owner_v1".into(),
+            Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
+                "ordinary_map_owner_lifecycle_i32_string_v1".into()
+            }
+            Self::OrdinaryMapOwnedGetI32StringV1 => "ordinary_map_owned_get_i32_string_v1".into(),
+            Self::ManagedAnyI32StringV1 => "managed_any_i32_string_v1".into(),
+            Self::ActorState { actor, fields } => format!(
+                "actor_state actor={} fields=[{}]",
+                actor.0,
+                fields
+                    .iter()
+                    .map(MirFieldDesc::canonical_text)
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
             Self::Opaque => "opaque".into(),
         }
     }
@@ -1677,6 +1808,36 @@ fn canonical_type_ids(types: &[ResolvedTypeId]) -> String {
 
 fn canonical_optional_type_id(ty: Option<&ResolvedTypeId>) -> &str {
     ty.map(ResolvedTypeId::as_str).unwrap_or("-")
+}
+
+fn resolved_type_children(ty: &ResolvedType) -> Vec<ResolvedTypeId> {
+    match ty {
+        ResolvedType::Nominal { arguments, .. } | ResolvedType::Tuple(arguments) => {
+            arguments.clone()
+        }
+        ResolvedType::Reference { target, .. }
+        | ResolvedType::CBuffer(target)
+        | ResolvedType::Ownership { target, .. }
+        | ResolvedType::Newtype { inner: target, .. }
+        | ResolvedType::Slice(target)
+        | ResolvedType::RawPointer { target, .. }
+        | ResolvedType::Option(target) => vec![target.clone()],
+        ResolvedType::Result { ok, error } => vec![ok.clone(), error.clone()],
+        ResolvedType::Function {
+            parameters, result, ..
+        } => parameters
+            .iter()
+            .cloned()
+            .chain(std::iter::once(result.clone()))
+            .collect(),
+        ResolvedType::Array { element, .. } => vec![element.clone()],
+        ResolvedType::Primitive(_)
+        | ResolvedType::GenericParameter(_)
+        | ResolvedType::FlowStateSet { .. }
+        | ResolvedType::Capability(_)
+        | ResolvedType::Trait { .. }
+        | ResolvedType::DynamicAny { .. } => Vec::new(),
+    }
 }
 
 impl MirSessionCallContract {
@@ -2453,9 +2614,63 @@ fn result_variants(ok: &ResolvedTypeId, error: &ResolvedTypeId) -> Vec<MirVarian
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MirTypeCatalog {
     entries: BTreeMap<ResolvedTypeId, MirTypeDesc>,
+    /// Checker-derived recursive edges that are not represented by the
+    /// storage layout, including function signatures, Ownership targets,
+    /// and arguments of opaque nominal types.
+    pub(super) resolved_children: BTreeMap<ResolvedTypeId, Vec<ResolvedTypeId>>,
 }
 
 impl MirTypeCatalog {
+    /// Install only descriptors derived from private checker Actor receipts.
+    /// Language handle/state roles remain distinct and cannot be constructed
+    /// from a source raw pointer, ordinary nominal record or numeric handle.
+    pub(crate) fn materialize_actor_catalog(
+        &mut self,
+        actors: &super::actor::MirActorCatalog,
+    ) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        for (_, contract) in actors.iter() {
+            if let Err(message) = contract.validate_snapshot() {
+                errors.push(message);
+                continue;
+            }
+            if self.get(&contract.handle_type).is_none() {
+                errors.push(format!(
+                    "Actor '{}' checker handle type is absent from MIR",
+                    contract.actor.0
+                ));
+            }
+            for field in &contract.fields {
+                if let Err(message) = self.validate_copy_scalar(&field.ty) {
+                    errors.push(message);
+                }
+            }
+            if let Some(existing) = self.get(&contract.state_type) {
+                if existing != &contract.state_descriptor() {
+                    errors.push(format!(
+                        "Actor '{}' state type collides with another descriptor",
+                        contract.actor.0
+                    ));
+                }
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        let mut candidate = self.clone();
+        for (_, contract) in actors.iter() {
+            candidate
+                .entries
+                .insert(contract.handle_type.clone(), contract.handle_descriptor());
+            candidate
+                .entries
+                .insert(contract.state_type.clone(), contract.state_descriptor());
+        }
+        actors.validate(&candidate)?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Whether this catalog entry is a complete scalar FFI endpoint.  Unit is
     /// admitted only for a result/declaration that lowers to `void`; every
     /// non-unit endpoint must satisfy the closed Copy scalar contract.  Keep
@@ -2481,12 +2696,17 @@ impl MirTypeCatalog {
             return Err(errors);
         }
         let mut entries = BTreeMap::new();
+        let mut resolved_children = BTreeMap::new();
         for (id, ty) in table.iter() {
             let ownership = ownership_for(id, table, &mut Vec::new());
             let descriptor = MirTypeDesc::from_resolved(id, ty, ownership);
             entries.insert(id.clone(), descriptor);
+            resolved_children.insert(id.clone(), resolved_type_children(ty));
         }
-        let mut catalog = Self { entries };
+        let mut catalog = Self {
+            entries,
+            resolved_children,
+        };
         catalog.materialize_product_glue();
         Ok(catalog)
     }
@@ -2907,16 +3127,81 @@ impl MirTypeCatalog {
                 descriptor.glue = MirGlueContract::for_type(&descriptor.kind, descriptor.ownership);
             }
         }
-        // Materialize this private root only when Checker has actually
-        // authorized a Map-root lifecycle. The synthetic type is never
-        // inferred from an ordinary `Record` or from source type syntax.
-        let has_map_root_candidate = program.resource_analyses().values().any(|analysis| {
+        // A Checker MapRoot New receipt establishes this private type identity.
+        // Whole-program New coverage remains a separate route-admission gate,
+        // so materializing the descriptor cannot promote a partial ledger.
+        // Closure-owned Checker Map receipts are callable-local and do not
+        // appear in the parent resource analysis. Derive that source-only
+        // plan once and share it with Map admission; it supplies descriptive
+        // type identity facts without granting route authority. The source
+        // plan is terminal with respect to TypeCatalog construction.
+        let closure_source_plan =
+            super::closure_callable::CheckedClosureCallablePlanV1::derive_source(program, None)
+                .ok();
+        let has_closure_map_new_receipt = closure_source_plan.as_ref().is_some_and(|plan| {
+            plan.has_ordinary_map_action(crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New)
+        });
+        let has_closure_map_get_any_receipt = closure_source_plan.as_ref().is_some_and(|plan| {
+            plan.has_ordinary_map_action(
+                crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny,
+            )
+        });
+        let has_map_root_new_receipt = program.resource_analyses().values().any(|analysis| {
             analysis
                 .map_root_actions
                 .iter()
                 .any(|action| action.kind == crate::core::MapRootActionKind::New)
         });
-        if has_map_root_candidate {
+        let has_map_any_owner_v1_candidate = program
+            .resource_analyses()
+            .values()
+            .any(|analysis| analysis.has_map_any_owner_v1_receipt());
+        let has_ordinary_map_owner_lifecycle_i32_string_v1_candidate = program
+            .resource_analyses()
+            .values()
+            .any(|analysis| analysis.has_ordinary_map_owner_lifecycle_v1_receipt());
+        // This identity follows its own Checker-owned New receipt. Its
+        // presence is descriptive TypeDesc materialization only; route
+        // admission separately proves complete attempt coverage.
+        let has_ordinary_map_owned_get_i32_string_v1_new_receipt = program
+            .resource_analyses()
+            .values()
+            .any(|analysis| analysis.has_ordinary_map_owned_get_i32_string_v1_receipt())
+            || has_closure_map_new_receipt;
+        // The two Checker passes intentionally observe some of the same
+        // source operations. Select one semantic identity from their closed
+        // admissions before materializing any synthetic owner descriptor;
+        // descriptor presence must never turn a partial receipt into route
+        // authority.
+        let map_owner_admission =
+            super::route::classify_map_owner_profile_admission_with_closure_source(
+                program,
+                closure_source_plan.as_ref(),
+            );
+        let ordinary_attempts_fully_covered_by_map_any_owner_v1 =
+            crate::core::mir::ordinary_map_attempts_fully_covered_by_map_any_owner_v1(program);
+        let map_any_owner_v1_selected = map_owner_admission.map_any_owner_complete()
+            && (!map_owner_admission
+                .ordinary_map_owner_lifecycle_i32_string_v1
+                .has_profile_signal()
+                || ordinary_attempts_fully_covered_by_map_any_owner_v1);
+        // An incomplete MapAnyOwner source ledger remains a blocking signal;
+        // a complete ordinary profile cannot erase missing MapAny receipts.
+        let map_any_owner_incomplete = map_owner_admission.map_any_owner.is_candidate()
+            && !map_owner_admission.map_any_owner_complete();
+        let incompatible_complete_map_owner_profiles = map_owner_admission.map_any_owner_complete()
+            && map_owner_admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+            && !ordinary_attempts_fully_covered_by_map_any_owner_v1;
+        let ordinary_map_owner_lifecycle_i32_string_v1_selected = map_owner_admission
+            .ordinary_map_owner_lifecycle_i32_string_v1_complete()
+            && !map_any_owner_v1_selected
+            && !map_any_owner_incomplete
+            && !map_owner_admission.map_any_owner.is_candidate()
+            && !incompatible_complete_map_owner_profiles;
+        if has_map_root_new_receipt
+            && !map_any_owner_v1_selected
+            && !ordinary_map_owner_lifecycle_i32_string_v1_selected
+        {
             let id = map_root_type_id();
             catalog.entries.insert(
                 id.clone(),
@@ -2939,6 +3224,168 @@ impl MirTypeCatalog {
                 },
             );
         }
+        // MapAnyOwner v1 has its own receipt and synthetic identity. Never
+        // infer this descriptor from a MapRoot receipt or from source Record
+        // / DynamicAny shape.
+        if has_map_any_owner_v1_candidate && map_any_owner_v1_selected {
+            let id = map_any_owner_v1_type_id();
+            catalog.entries.insert(
+                id.clone(),
+                MirTypeDesc {
+                    id,
+                    kind: MirTypeKind::MapAnyOwnerV1,
+                    layout: MirLayout::MapAnyOwnerV1,
+                    session_protocol: None,
+                    ownership: MirOwnership::Move,
+                    abi: MirAbiClass::OpaqueHandle,
+                    needs_drop_glue: true,
+                    needs_clone_glue: false,
+                    glue: MirGlueContract {
+                        move_out: MirGlueKind::MapAnyOwnerV1,
+                        clone: MirGlueKind::Unsupported,
+                        drop: MirGlueKind::MapAnyOwnerV1,
+                    },
+                    drop_plan: None,
+                    variant_drop_plan: None,
+                },
+            );
+        }
+        // The source-compatible ordinary Map profile owns a third identity:
+        // its persistent updates retain the old root, and a root may contain
+        // mixed i32/String entries. When it is present, it supersedes the
+        // overlapping narrow MapRoot/V1 descriptor candidates for this
+        // checked program without borrowing either profile's glue contract.
+        if has_ordinary_map_owner_lifecycle_i32_string_v1_candidate
+            && ordinary_map_owner_lifecycle_i32_string_v1_selected
+        {
+            let id = ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+            catalog.entries.insert(
+                id.clone(),
+                MirTypeDesc {
+                    id,
+                    kind: MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1,
+                    layout: MirLayout::OrdinaryMapOwnerLifecycleI32StringV1,
+                    session_protocol: None,
+                    ownership: MirOwnership::Move,
+                    abi: MirAbiClass::OpaqueHandle,
+                    needs_drop_glue: true,
+                    needs_clone_glue: true,
+                    glue: MirGlueContract {
+                        move_out: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+                        clone: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+                        drop: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+                    },
+                    drop_plan: None,
+                    variant_drop_plan: None,
+                },
+            );
+        }
+        if has_ordinary_map_owned_get_i32_string_v1_new_receipt {
+            let id = ordinary_map_owned_get_i32_string_v1_type_id();
+            catalog.entries.insert(
+                id.clone(),
+                MirTypeDesc {
+                    id,
+                    kind: MirTypeKind::OrdinaryMapOwnedGetI32StringV1,
+                    layout: MirLayout::OrdinaryMapOwnedGetI32StringV1,
+                    session_protocol: None,
+                    ownership: MirOwnership::Move,
+                    abi: MirAbiClass::OpaqueHandle,
+                    needs_drop_glue: true,
+                    needs_clone_glue: true,
+                    glue: MirGlueContract {
+                        move_out: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+                        clone: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+                        drop: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+                    },
+                    drop_plan: None,
+                    variant_drop_plan: None,
+                },
+            );
+        }
+        let has_program_map_get_any_receipt =
+            program.resource_analyses().values().any(|analysis| {
+                analysis
+                    .ordinary_map_owned_get_i32_string_v1_actions
+                    .iter()
+                    .any(|action| {
+                        matches!(
+                            action.kind,
+                            crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny
+                                | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Values
+                        )
+                    })
+            });
+        if has_closure_map_get_any_receipt || has_program_map_get_any_receipt {
+            let id = managed_any_i32_string_v1_type_id();
+            catalog.entries.insert(
+                id.clone(),
+                MirTypeDesc {
+                    id,
+                    kind: MirTypeKind::ManagedAnyI32StringV1,
+                    layout: MirLayout::ManagedAnyI32StringV1,
+                    session_protocol: None,
+                    ownership: MirOwnership::Move,
+                    abi: MirAbiClass::OpaqueHandle,
+                    needs_drop_glue: true,
+                    needs_clone_glue: true,
+                    glue: MirGlueContract {
+                        move_out: MirGlueKind::ManagedAnyI32StringV1,
+                        clone: MirGlueKind::ManagedAnyI32StringV1,
+                        drop: MirGlueKind::ManagedAnyI32StringV1,
+                    },
+                    drop_plan: None,
+                    variant_drop_plan: None,
+                },
+            );
+            // Retarget only concrete tuple products. Other aggregate families keep
+            // their old DynamicAny boundary until they have independent receipts.
+            let source_entries = catalog.entries.clone();
+            for (source_id, descriptor) in &source_entries {
+                if let MirLayout::Tuple(elements) = &descriptor.layout {
+                    let mapped = elements
+                        .iter()
+                        .map(|ty| catalog.canonical_managed_any_type(ty))
+                        .collect::<Vec<_>>();
+                    if mapped != *elements {
+                        let mut product = descriptor.clone();
+                        product.id = catalog.canonical_managed_any_type(source_id);
+                        product.layout = MirLayout::Tuple(mapped);
+                        product.ownership = MirOwnership::Move;
+                        product.needs_drop_glue = true;
+                        product.needs_clone_glue = true;
+                        product.glue = MirGlueContract::for_type(&product.kind, product.ownership);
+                        catalog.entries.insert(product.id.clone(), product);
+                    }
+                }
+            }
+            // `values()` is typed by Checker as `List<DynamicAny>`.  Install
+            // the executable List descriptor alongside the ManagedAny leaf
+            // so every consumer sees the same element identity and recursive
+            // List glue.  Keep this one-level mapping narrow; List products
+            // containing tuples/records remain outside the profile until they
+            // receive their own aggregate ownership receipt.
+            let source_entries = catalog.entries.clone();
+            for (source_id, descriptor) in &source_entries {
+                let MirLayout::List { element } = &descriptor.layout else {
+                    continue;
+                };
+                let mapped = catalog.canonical_managed_any_type(element);
+                if mapped == *element || mapped != managed_any_i32_string_v1_type_id() {
+                    continue;
+                }
+                let canonical_id =
+                    super::managed_any::managed_any_list_i32_string_v1_type_id(source_id);
+                let mut list = descriptor.clone();
+                list.id = canonical_id.clone();
+                list.layout = MirLayout::List { element: mapped };
+                list.ownership = MirOwnership::Move;
+                list.needs_drop_glue = true;
+                list.needs_clone_glue = true;
+                list.glue = MirGlueContract::for_type(&list.kind, list.ownership);
+                catalog.entries.insert(canonical_id, list);
+            }
+        }
         // Record ownership/layout facts are attached above from the checker.
         // Re-run product materialization now so a tuple or record containing a
         // checker-described product sees the final child descriptor rather
@@ -2954,6 +3401,16 @@ impl MirTypeCatalog {
 
     pub fn get(&self, id: &ResolvedTypeId) -> Option<&MirTypeDesc> {
         self.entries.get(id)
+    }
+
+    /// Return the canonical Checker TypeTable child identities captured for
+    /// this type during MIR catalog materialization. These edges preserve
+    /// type arguments that a backend layout can erase (for example a
+    /// function signature or ownership target represented as a handle).
+    /// `None` means the catalog has no source-child record for this identity;
+    /// callers making safety decisions must treat that as incomplete metadata.
+    pub fn resolved_type_children(&self, id: &ResolvedTypeId) -> Option<&[ResolvedTypeId]> {
+        self.resolved_children.get(id).map(Vec::as_slice)
     }
 
     /// Validate the closed Copy scalar leaf contract shared by the production
@@ -5100,6 +5557,24 @@ impl MirTypeCatalog {
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if ty == &ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+            || descriptor.kind == MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+        {
+            return self.validate_ordinary_map_owner_lifecycle_i32_string_v1_glue(ty, operation);
+        }
+        if ty == &managed_any_i32_string_v1_type_id()
+            || descriptor.kind == MirTypeKind::ManagedAnyI32StringV1
+        {
+            return self.validate_managed_any_glue(ty);
+        }
+        if ty == &ordinary_map_owned_get_i32_string_v1_type_id()
+            || descriptor.kind == MirTypeKind::OrdinaryMapOwnedGetI32StringV1
+        {
+            return self.validate_ordinary_map_owned_get_i32_string_v1_glue(ty, operation);
+        }
+        if ty == &map_any_owner_v1_type_id() || descriptor.kind == MirTypeKind::MapAnyOwnerV1 {
+            return self.validate_map_any_owner_v1_glue(ty, operation);
+        }
         if descriptor.kind == MirTypeKind::MapRoot {
             return self.validate_map_root_glue(ty, operation);
         }
@@ -5186,6 +5661,149 @@ impl MirTypeCatalog {
                 "type '{}' MapRoot has no generic Clone glue",
                 ty.as_str()
             )),
+        }
+    }
+
+    /// Validate the exact synthetic MapAnyOwner v1 descriptor. This checks
+    /// both identity and every ABI/ownership/glue field before accepting
+    /// MoveOut or Drop; generic Clone stays unsupported.
+    fn validate_map_any_owner_v1_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        if ty != &map_any_owner_v1_type_id() {
+            return Err(format!(
+                "type '{}' is not the canonical MapAnyOwner v1 TypeDesc identity",
+                ty.as_str()
+            ));
+        }
+        let descriptor = self.get(ty).ok_or_else(|| {
+            format!(
+                "MapAnyOwner v1 type '{}' is absent from MIR type catalog",
+                ty.as_str()
+            )
+        })?;
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::MapAnyOwnerV1,
+            clone: MirGlueKind::Unsupported,
+            drop: MirGlueKind::MapAnyOwnerV1,
+        };
+        if descriptor.kind != MirTypeKind::MapAnyOwnerV1
+            || descriptor.layout != MirLayout::MapAnyOwnerV1
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Move
+            || !descriptor.needs_drop_glue
+            || descriptor.needs_clone_glue
+            || descriptor.glue != expected
+            || descriptor.session_protocol.is_some()
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
+        {
+            return Err(format!(
+                "type '{}' MapAnyOwner v1 TypeDesc has an inconsistent ABI/ownership/glue contract",
+                ty.as_str()
+            ));
+        }
+        match operation {
+            MirGlueOperation::MoveOut | MirGlueOperation::Drop => Ok(()),
+            MirGlueOperation::Clone => Err(format!(
+                "type '{}' MapAnyOwner v1 has no generic Clone glue",
+                ty.as_str()
+            )),
+        }
+    }
+
+    /// Validate the third, independent ordinary Map owner identity. Persistent
+    /// Set/Remove operations implement source-preserving copies internally;
+    /// local aliases use Clone only with their independent Checker receipt.
+    fn validate_ordinary_map_owner_lifecycle_i32_string_v1_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        if ty != &ordinary_map_owner_lifecycle_i32_string_v1_type_id() {
+            return Err(format!(
+                "type '{}' is not the canonical ordinary Map owner lifecycle v1 identity",
+                ty.as_str()
+            ));
+        }
+        let descriptor = self.get(ty).ok_or_else(|| {
+            format!(
+                "ordinary Map owner lifecycle type '{}' is absent from MIR type catalog",
+                ty.as_str()
+            )
+        })?;
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+            clone: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+            drop: MirGlueKind::OrdinaryMapOwnerLifecycleI32StringV1,
+        };
+        if descriptor.kind != MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+            || descriptor.layout != MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Move
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.glue != expected
+            || descriptor.session_protocol.is_some()
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
+        {
+            return Err(format!(
+                "type '{}' ordinary Map owner lifecycle v1 TypeDesc has an inconsistent ABI/ownership/glue contract",
+                ty.as_str()
+            ));
+        }
+        match operation {
+            MirGlueOperation::MoveOut | MirGlueOperation::Drop | MirGlueOperation::Clone => Ok(()),
+        }
+    }
+
+    /// Validate the exact synthetic ordinary Map typed owned-get descriptor.
+    /// This profile has an independent identity and move/drop contract; it
+    /// cannot borrow the older lifecycle, MapAnyOwner, or MapRoot glue.
+    fn validate_ordinary_map_owned_get_i32_string_v1_glue(
+        &self,
+        ty: &ResolvedTypeId,
+        operation: MirGlueOperation,
+    ) -> Result<(), String> {
+        if ty != &ordinary_map_owned_get_i32_string_v1_type_id() {
+            return Err(format!(
+                "type '{}' is not the canonical ordinary Map owned-get v1 identity",
+                ty.as_str()
+            ));
+        }
+        let descriptor = self.get(ty).ok_or_else(|| {
+            format!(
+                "ordinary Map owned-get v1 type '{}' is absent from MIR type catalog",
+                ty.as_str()
+            )
+        })?;
+        let expected = MirGlueContract {
+            move_out: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+            clone: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+            drop: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+        };
+        if descriptor.id != *ty
+            || descriptor.kind != MirTypeKind::OrdinaryMapOwnedGetI32StringV1
+            || descriptor.layout != MirLayout::OrdinaryMapOwnedGetI32StringV1
+            || descriptor.abi != MirAbiClass::OpaqueHandle
+            || descriptor.ownership != MirOwnership::Move
+            || !descriptor.needs_drop_glue
+            || !descriptor.needs_clone_glue
+            || descriptor.glue != expected
+            || descriptor.session_protocol.is_some()
+            || descriptor.drop_plan.is_some()
+            || descriptor.variant_drop_plan.is_some()
+        {
+            return Err(format!(
+                "type '{}' ordinary Map owned-get v1 TypeDesc has an inconsistent ABI/ownership/glue contract",
+                ty.as_str()
+            ));
+        }
+        match operation {
+            MirGlueOperation::MoveOut | MirGlueOperation::Drop | MirGlueOperation::Clone => Ok(()),
         }
     }
 
@@ -5654,6 +6272,12 @@ impl MirTypeCatalog {
                 ty.as_str()
             ));
         };
+        if *element == managed_any_i32_string_v1_type_id() {
+            return Err(format!(
+                "move-owned List payload '{}' contains ManagedAny elements; use the dedicated ordinary Map Values receipt",
+                ty.as_str()
+            ));
+        }
         if self
             .get(element)
             .is_some_and(|element| matches!(element.layout, MirLayout::List { .. }))
@@ -5707,9 +6331,11 @@ impl MirTypeCatalog {
 
     /// Validate the first variable-length container contract. A List is a
     /// move-owned runtime handle, but its element identity and glue are still
-    /// canonical MIR facts. The bounded nested form is deliberately only one
-    /// level deep: `List<List<Copy scalar>>`. Deeper recursion, managed
-    /// leaves and linear elements remain fail-closed before every backend.
+    /// canonical MIR facts. The bounded forms are one-level
+    /// `List<List<Copy scalar>>` and the independently receipted
+    /// `List<ManagedAnyI32StringV1>` snapshot returned by ordinary Map
+    /// `values()`. Deeper recursion and other linear elements remain
+    /// fail-closed before every backend.
     pub fn validate_list_glue(
         &self,
         ty: &ResolvedTypeId,
@@ -5792,9 +6418,11 @@ impl MirTypeCatalog {
             };
             nested_desc.is_canonical_copy_scalar(false)
         };
-        if !copy_scalar() && !nested_copy_scalar() {
+        let managed_any = *element == managed_any_i32_string_v1_type_id()
+            && self.validate_managed_any_glue(element).is_ok();
+        if !copy_scalar() && !nested_copy_scalar() && !managed_any {
             return Err(format!(
-                "List '{}' element type '{}' is outside the canonical Copy scalar or one-level nested List contract",
+                "List '{}' element type '{}' is outside the canonical Copy scalar, one-level nested List, or ManagedAny snapshot contract",
                 ty.as_str(),
                 element.as_str()
             ));
@@ -5838,6 +6466,19 @@ impl MirTypeCatalog {
         operation: crate::core::mir::MirListOperation,
     ) -> Result<(), String> {
         self.validate_list_glue(list_ty, MirGlueOperation::MoveOut)?;
+        let managed_any_receiver = self
+            .get(list_ty)
+            .and_then(|descriptor| match &descriptor.layout {
+                MirLayout::List { element } => Some(element),
+                _ => None,
+            })
+            .is_some_and(|element| *element == managed_any_i32_string_v1_type_id());
+        if managed_any_receiver && operation != crate::core::mir::MirListOperation::Len {
+            return Err(format!(
+                "List operation {:?} is outside the owned ManagedAny snapshot list contract; only Len is admitted",
+                operation
+            ));
+        }
         let nested_receiver = self.get(list_ty).is_some_and(|descriptor| {
             matches!(
                 descriptor.layout,
@@ -6414,7 +7055,7 @@ impl MirTypeCatalog {
                 return Err(format!(
                     "variant glue type '{}' has no canonical tagged-variant layout",
                     ty.as_str()
-                ))
+                ));
             }
         };
         let expected_contract = MirGlueContract {
@@ -6754,6 +7395,10 @@ impl MirTypeCatalog {
                 ty.as_str()
             ));
         }
+        if self.is_managed_any_i32_string_v1(ty) {
+            visiting.remove(ty);
+            return self.validate_glue(ty, MirGlueOperation::Clone);
+        }
         let descriptor = self
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
@@ -6851,7 +7496,8 @@ impl MirTypeCatalog {
                     .validate_glue(element, MirGlueOperation::MoveOut)
                     .is_ok()
                 && self.validate_glue(element, MirGlueOperation::Drop).is_ok();
-            let supported = self.validate_copy_scalar(element).is_ok()
+            let supported = self.is_managed_any_i32_string_v1(element)
+                || self.validate_copy_scalar(element).is_ok()
                 || self.validate_owned_string(element).is_ok()
                 || matches!(child.layout, MirLayout::Tuple(_))
                 || record_supported;
@@ -7378,6 +8024,11 @@ impl MirTypeCatalog {
                 result_ty.as_str()
             ));
         };
+        if *element == managed_any_i32_string_v1_type_id() {
+            return Err(
+                "List<ManagedAny> construction requires an ordinary Map Values receipt".into(),
+            );
+        }
         for (index, actual) in element_types.iter().enumerate() {
             if actual != element {
                 return Err(format!(
@@ -7511,6 +8162,11 @@ impl MirTypeCatalog {
                 base_ty.as_str()
             ));
         };
+        if *element == managed_any_i32_string_v1_type_id() {
+            return Err(
+                "List<ManagedAny> index projection has no canonical ownership receipt".into(),
+            );
+        }
         self.validate_list_glue(base_ty, MirGlueOperation::MoveOut)?;
         if element != result_ty {
             return Err(format!(
@@ -8334,7 +8990,7 @@ impl MirTypeCatalog {
             (MirLayout::Tuple(_), crate::core::mir::MirProjection::Tuple(index)) => {
                 let _ =
                     self.validated_tuple_field_projection_contract(base_ty, *index, result_ty)?;
-                if result.ownership != MirOwnership::Copy {
+                if result.ownership != MirOwnership::Copy && !self.contains_managed_any(result_ty) {
                     return Err(format!(
                         "tuple projection result type '{}' is non-Copy and has no explicit move projection contract",
                         result_ty.as_str()
@@ -8431,6 +9087,27 @@ impl MirTypeCatalog {
                 ));
             }
             self.validate_glue(result_ty, MirGlueOperation::MoveOut)?;
+            for (sibling_index, sibling_ty) in elements.iter().enumerate() {
+                if sibling_index == *index {
+                    continue;
+                }
+                let sibling = self.get(sibling_ty).ok_or_else(|| {
+                    format!(
+                        "move projection tuple sibling {} type '{}' is absent",
+                        sibling_index,
+                        sibling_ty.as_str()
+                    )
+                })?;
+                if sibling.ownership != MirOwnership::Copy
+                    || self.contains_dynamic_or_managed_any(sibling_ty)
+                {
+                    return Err(format!(
+                        "move projection tuple leaves non-Copy sibling {} of type '{}' without a residual-drop contract",
+                        sibling_index,
+                        sibling_ty.as_str()
+                    ));
+                }
+            }
             return Ok(());
         }
         let MirLayout::Record { fields, .. } = &base.layout else {
@@ -8479,7 +9156,9 @@ impl MirTypeCatalog {
                     sibling.ty.as_str()
                 )
             })?;
-            if sibling_desc.ownership != MirOwnership::Copy {
+            if sibling_desc.ownership != MirOwnership::Copy
+                || self.contains_dynamic_or_managed_any(&sibling.ty)
+            {
                 return Err(format!(
                     "move projection of '{}' leaves non-Copy sibling field '{}' without a residual contract",
                     field.0, sibling.name
@@ -8644,7 +9323,7 @@ impl MirTypeCatalog {
                 ResolvedProjection::Index { .. } => {
                     return Err(
                         "indexed place projection has no canonical MIR layout contract".into(),
-                    )
+                    );
                 }
                 ResolvedProjection::Deref { .. } => crate::core::mir::MirProjection::Dereference,
             };
@@ -8688,7 +9367,7 @@ impl MirTypeCatalog {
                 return Err(format!(
                     "record update result layout {:?} is not a record",
                     layout
-                ))
+                ));
             }
         };
         let (base_nominal, base_fields) = match self
@@ -8702,7 +9381,7 @@ impl MirTypeCatalog {
                 return Err(format!(
                     "record update base layout {:?} is not a record",
                     layout
-                ))
+                ));
             }
         };
         if result_nominal != base_nominal {
@@ -9283,7 +9962,8 @@ impl MirTypeCatalog {
         if variants.len() != 2 {
             return Err(format!(
                 "generic variant predicate source '{}' has {} variants; exactly two canonical variants are required",
-                variant_ty.as_str(), variants.len()
+                variant_ty.as_str(),
+                variants.len()
             ));
         }
         let variant = variants
@@ -11910,6 +12590,7 @@ mod tests {
                 let updated = map_set(root, "point", point.x)
                 let size = map_size(updated)
                 drop(updated)
+                let ignored = map_get(map_new(), "unreceipted")
                 size
             }
         "#;
@@ -11919,9 +12600,29 @@ mod tests {
             .expect("parse");
         let checked = crate::core::check_program(&file).expect("check Map-root fixture");
         let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        let analysis = checked
+            .resource_analysis(&crate::core::NodeId("function:main".into()))
+            .expect("Checker resource analysis");
+        assert!(!analysis.map_root_actions.is_empty());
+        assert!(analysis.map_any_owner_actions.is_empty());
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.map_any_owner,
+            crate::core::mir::MapAnyOwnerAdmission::IncompleteCoverage,
+            "the unreceipted MapAnyOwner candidate remains incomplete"
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
+            "unsupported ordinary operations remain incomplete"
+        );
         let root = catalog
             .get(&super::map_root_type_id())
-            .expect("checker-authorized MapRoot descriptor");
+            .expect("complete MapRoot New receipt independently authorizes its descriptor");
+        assert!(catalog.get(&super::map_any_owner_v1_type_id()).is_none());
+        assert!(catalog
+            .get(&super::ordinary_map_owned_get_i32_string_v1_type_id())
+            .is_none());
         assert_eq!(root.kind, MirTypeKind::MapRoot);
         assert_eq!(root.abi, MirAbiClass::OpaqueHandle);
         assert_eq!(root.layout, MirLayout::MapRoot);
@@ -11960,6 +12661,67 @@ mod tests {
     }
 
     #[test]
+    fn complete_ordinary_map_profile_owns_nul_key_when_map_any_receipt_is_incomplete() {
+        let source = r#"
+func main() -> i32 {
+    let root = map_new()
+    let inserted = map_set(root, "bad\0key", 1)
+    let size = map_size(inserted)
+    drop(root)
+    drop(inserted)
+    size
+}
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check NUL-key Map fixture");
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.map_any_owner,
+            crate::core::mir::MapAnyOwnerAdmission::OutsideProfile,
+            "ordinary coverage at the same source points selects its own identity"
+        );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage
+        );
+
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        assert!(catalog
+            .get(&super::ordinary_map_owner_lifecycle_i32_string_v1_type_id())
+            .is_some_and(|descriptor| {
+                descriptor.kind == MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+            }));
+        assert!(catalog.get(&super::map_any_owner_v1_type_id()).is_none());
+        assert!(catalog.get(&super::map_root_type_id()).is_none());
+        assert!(catalog
+            .get(&super::ordinary_map_owned_get_i32_string_v1_type_id())
+            .is_none());
+    }
+
+    #[test]
+    fn checked_actor_catalog_does_not_reenter_whole_route_admission() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/real_world/actor_nested_func_capture.mimi"
+        ));
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex Actor fixture");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse Actor fixture");
+        let checked = crate::core::check_program(&file).expect("check Actor fixture");
+
+        let catalog = MirTypeCatalog::from_checked_program(&checked)
+            .expect("Actor TypeDesc construction must not invoke the full route selector");
+        assert!(catalog.iter().next().is_some());
+        assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_actor);
+    }
+
+    #[test]
     fn checked_catalog_without_map_root_receipt_has_no_synthetic_type() {
         let source = "func main() -> i32 { 42 }";
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -11969,6 +12731,220 @@ mod tests {
         let checked = crate::core::check_program(&file).expect("check");
         let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
         assert!(catalog.get(&super::map_root_type_id()).is_none());
+        assert!(catalog.get(&super::map_any_owner_v1_type_id()).is_none());
+        assert!(catalog
+            .get(&super::ordinary_map_owned_get_i32_string_v1_type_id())
+            .is_none());
+    }
+
+    #[test]
+    fn checked_ordinary_map_owned_get_type_has_its_own_strict_identity_and_glue() {
+        let source = r#"
+func main() -> i32 {
+    let root = map_new()
+    let result = map_get_i32(root, "missing")
+    drop(root)
+    0
+}
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check typed owned-get fixture");
+        let analysis = checked
+            .resource_analysis(&crate::core::NodeId("function:main".into()))
+            .expect("Checker resource analysis");
+        assert!(analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
+
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        let owned_get_id = super::ordinary_map_owned_get_i32_string_v1_type_id();
+        let owner = catalog
+            .get(&owned_get_id)
+            .expect("Checker New receipt materializes the owned-get root identity");
+        assert_eq!(owner.kind, MirTypeKind::OrdinaryMapOwnedGetI32StringV1);
+        assert_eq!(owner.layout, MirLayout::OrdinaryMapOwnedGetI32StringV1);
+        assert_eq!(owner.abi, MirAbiClass::OpaqueHandle);
+        assert_eq!(owner.ownership, MirOwnership::Move);
+        assert!(owner.needs_drop_glue);
+        assert!(owner.needs_clone_glue);
+        assert_eq!(
+            owner.glue,
+            super::MirGlueContract {
+                move_out: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+                clone: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+                drop: MirGlueKind::OrdinaryMapOwnedGetI32StringV1,
+            }
+        );
+        assert_ne!(owned_get_id, super::map_root_type_id());
+        assert_ne!(owned_get_id, super::map_any_owner_v1_type_id());
+        assert_ne!(
+            owned_get_id,
+            super::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+        );
+        assert!(catalog
+            .validate_glue(&owned_get_id, MirGlueOperation::MoveOut)
+            .is_ok());
+        assert!(catalog
+            .validate_glue(&owned_get_id, MirGlueOperation::Drop)
+            .is_ok());
+        assert!(catalog
+            .validate_glue(&owned_get_id, MirGlueOperation::Clone)
+            .is_ok());
+        assert!(catalog.canonical_text().contains(
+            "kind=ordinary_map_owned_get_i32_string_v1 layout=ordinary_map_owned_get_i32_string_v1"
+        ));
+
+        let mut forged = catalog.clone();
+        forged
+            .entries
+            .get_mut(&owned_get_id)
+            .expect("owned-get descriptor")
+            .layout = MirLayout::MapRoot;
+        assert!(forged
+            .validate_glue(&owned_get_id, MirGlueOperation::MoveOut)
+            .is_err());
+
+        let mut aliased = catalog.clone();
+        let mut wrong_identity = owner.clone();
+        let old_lifecycle_id = super::ordinary_map_owner_lifecycle_i32_string_v1_type_id();
+        wrong_identity.id = old_lifecycle_id.clone();
+        aliased
+            .entries
+            .insert(old_lifecycle_id.clone(), wrong_identity);
+        assert!(aliased
+            .validate_glue(&old_lifecycle_id, MirGlueOperation::MoveOut)
+            .is_err());
+    }
+
+    #[test]
+    fn checked_map_any_owner_v1_descriptor_is_distinct_and_covers_i32_string_payloads() {
+        let source = r#"
+func main() -> i32 {
+    let integer_root = map_new()
+    let integers = map_set(integer_root, "answer", 42)
+    let string_root = map_new()
+    let strings = map_set(string_root, "label", "forty-two")
+    drop(integers)
+    drop(strings)
+    0
+}
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check MapAnyOwner v1 fixture");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        let owner_id = super::map_any_owner_v1_type_id();
+        let owner = catalog
+            .get(&owner_id)
+            .expect("Checker-authorized MapAnyOwner v1 descriptor");
+        assert_eq!(owner.kind, MirTypeKind::MapAnyOwnerV1);
+        assert_eq!(owner.abi, MirAbiClass::OpaqueHandle);
+        assert_eq!(owner.layout, MirLayout::MapAnyOwnerV1);
+        assert_eq!(owner.ownership, MirOwnership::Move);
+        assert_eq!(owner.glue.move_out, MirGlueKind::MapAnyOwnerV1);
+        assert_eq!(owner.glue.clone, MirGlueKind::Unsupported);
+        assert_eq!(owner.glue.drop, MirGlueKind::MapAnyOwnerV1);
+        assert!(owner.needs_drop_glue);
+        assert!(!owner.needs_clone_glue);
+        assert_ne!(owner_id, super::map_root_type_id());
+        assert!(catalog.get(&super::map_root_type_id()).is_none());
+        assert!(catalog
+            .validate_glue(&owner_id, MirGlueOperation::MoveOut)
+            .is_ok());
+        assert!(catalog
+            .validate_glue(&owner_id, MirGlueOperation::Drop)
+            .is_ok());
+        assert!(catalog
+            .validate_glue(&owner_id, MirGlueOperation::Clone)
+            .is_err());
+        assert!(catalog
+            .canonical_text()
+            .contains("kind=map_any_owner_v1 layout=map_any_owner_v1"));
+        assert!(catalog.abi_canonical_text().contains(
+            "abi=opaque_handle glue=move_out=map_any_owner_v1 clone=unsupported drop=map_any_owner_v1"
+        ));
+
+        let analysis = checked
+            .resource_analysis(&crate::core::NodeId("function:main".into()))
+            .expect("Checker resource analysis");
+        let set_payloads = analysis
+            .map_any_owner_v1_set_payload_types()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(set_payloads.len(), 2);
+        let mut saw_i32 = false;
+        let mut saw_string = false;
+        for payload_id in set_payloads {
+            let resolved = checked
+                .resolved_types()
+                .get(&payload_id)
+                .expect("resolved MapAnyOwner Set payload");
+            let descriptor = catalog
+                .get(&payload_id)
+                .expect("payload TypeDesc for MapAnyOwner Set");
+            match resolved {
+                ResolvedType::Primitive(PrimitiveType::I32) => {
+                    saw_i32 = true;
+                    assert_eq!(descriptor.kind, MirTypeKind::Primitive(PrimitiveType::I32));
+                }
+                ResolvedType::Primitive(PrimitiveType::String) => {
+                    saw_string = true;
+                    assert_eq!(
+                        descriptor.kind,
+                        MirTypeKind::Primitive(PrimitiveType::String)
+                    );
+                }
+                other => panic!("unsupported MapAnyOwner v1 payload TypeDesc: {other:?}"),
+            }
+        }
+        assert!(saw_i32 && saw_string);
+    }
+
+    #[test]
+    fn map_any_owner_v1_rejects_clone_and_forged_descriptor_fields() {
+        let source = r#"
+func main() -> i32 {
+    let root = map_new()
+    let updated = map_set(root, "answer", 42)
+    drop(updated)
+    0
+}
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check MapAnyOwner v1 fixture");
+        let mut catalog = MirTypeCatalog::from_checked_program(&checked).expect("catalog");
+        let owner_id = super::map_any_owner_v1_type_id();
+        let valid = catalog
+            .get(&owner_id)
+            .expect("MapAnyOwner TypeDesc")
+            .clone();
+        let mut forged = valid;
+        forged.layout = MirLayout::MapRoot;
+        catalog.replace_for_test_only(owner_id.clone(), forged);
+        assert!(catalog
+            .validate_glue(&owner_id, MirGlueOperation::MoveOut)
+            .is_err());
+        assert!(catalog
+            .validate_glue(&owner_id, MirGlueOperation::Drop)
+            .is_err());
+
+        let mut forged = catalog
+            .get(&owner_id)
+            .expect("forged MapAnyOwner TypeDesc")
+            .clone();
+        forged.layout = MirLayout::MapAnyOwnerV1;
+        forged.glue.clone = MirGlueKind::MapAnyOwnerV1;
+        forged.needs_clone_glue = true;
+        catalog.replace_for_test_only(owner_id.clone(), forged);
+        assert!(catalog
+            .validate_glue(&owner_id, MirGlueOperation::Clone)
+            .is_err());
     }
 
     #[test]
@@ -13187,6 +14163,46 @@ mod tests {
     }
 
     #[test]
+    fn move_project_allows_only_copy_tuple_residuals() {
+        let mut table = ResolvedTypeTable::new();
+        let string_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::String))
+            .expect("string type");
+        let i32_id = table
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("i32 type");
+        let copy_residual = table
+            .intern_resolved(ResolvedType::Tuple(vec![string_id.clone(), i32_id.clone()]))
+            .expect("tuple with Copy residual");
+        let owned_residual = table
+            .intern_resolved(ResolvedType::Tuple(vec![
+                string_id.clone(),
+                string_id.clone(),
+            ]))
+            .expect("tuple with owned residual");
+        let catalog = MirTypeCatalog::from_resolved_types(&table).expect("catalog");
+
+        catalog
+            .validate_move_projection(
+                &copy_residual,
+                &string_id,
+                &crate::core::mir::MirProjection::Tuple(0),
+            )
+            .expect("moving String may discard the Copy sibling");
+        for (index, result) in [(0, &string_id), (1, &string_id)] {
+            let error = catalog
+                .validate_move_projection(
+                    &owned_residual,
+                    result,
+                    &crate::core::mir::MirProjection::Tuple(index),
+                )
+                .expect_err("MoveProject must not implicitly dispose of an owned sibling");
+            assert!(error.contains("tuple leaves non-Copy sibling"), "{error}");
+            assert!(error.contains("residual-drop contract"), "{error}");
+        }
+    }
+
+    #[test]
     fn nested_tuple_variant_move_receipt_covers_every_element() {
         let mut table = ResolvedTypeTable::new();
         let string_id = table
@@ -13568,8 +14584,7 @@ mod tests {
 
     #[test]
     fn flat_copy_record_contract_rejects_forged_protocol_metadata() {
-        let source =
-            "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 1, y: true }; if p.y { 0 } else { 1 } }";
+        let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 1, y: true }; if p.y { 0 } else { 1 } }";
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
         let file = crate::parser::Parser::new(tokens)
             .parse_file()
@@ -13662,8 +14677,7 @@ mod tests {
 
     #[test]
     fn materializes_checker_record_field_contract() {
-        let source =
-            "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 1, y: true }; if p.y { 0 } else { 1 } }";
+        let source = "type Point { x: i32, y: bool }\nfunc main() -> i32 { let p = Point { x: 1, y: true }; if p.y { 0 } else { 1 } }";
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
         let file = crate::parser::Parser::new(tokens)
             .parse_file()
@@ -13812,8 +14826,7 @@ mod tests {
 
     #[test]
     fn record_move_projection_requires_owned_string_and_copy_siblings() {
-        let source =
-            "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
+        let source = "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
         let file = crate::parser::Parser::new(tokens)
             .parse_file()
@@ -13838,8 +14851,7 @@ mod tests {
             )
             .expect("owned string field with Copy sibling is movable");
 
-        let source =
-            "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
+        let source = "type Pair { left: string, right: string }\nfunc main() -> string { let p = Pair { left: \"left\", right: \"right\" }; p.left }";
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
         let file = crate::parser::Parser::new(tokens)
             .parse_file()

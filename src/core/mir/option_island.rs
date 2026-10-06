@@ -667,6 +667,11 @@ impl<'a> OptionStringVariantValidator<'a> {
         subject: &str,
     ) {
         match instruction {
+            MirInstructionKind::Actor { .. } => self.error(format!("{subject} Actor operation is outside the Option island")),
+            MirInstructionKind::ClosureBind { .. }
+            | MirInstructionKind::ClosureInvoke { .. } => self.error(format!(
+                "{subject} Closure operation is outside the Option island"
+            )),
             MirInstructionKind::MapRootNew { .. }
             | MirInstructionKind::MapRootSet { .. }
             | MirInstructionKind::MapRootRemove { .. }
@@ -675,6 +680,29 @@ impl<'a> OptionStringVariantValidator<'a> {
             | MirInstructionKind::MapRootDrop { .. } => {
                 self.error(format!("{subject} MapRoot operation is outside the Option island"));
             }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSet { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. } => {
+                self.error(format!(
+                    "{subject} OrdinaryMapOwnerLifecycle operation is outside the Option island"
+                ));
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+            | MirInstructionKind::ManagedAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. } => self.error(format!(
+                "{subject} OrdinaryMapOwnedGet operation is outside the Option island"
+            )),
             MirInstructionKind::Const { result, literal } => {
                 let Some(ty) = self.validate_value(function, result, "constant result") else {
                     return;

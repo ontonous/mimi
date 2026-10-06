@@ -10,6 +10,17 @@ impl<'a> Checker<'a> {
         match ty {
             Type::Located { meta, ty } => self.resolve_type(ty).with_meta(*meta),
             Type::Name(name, args) => {
+                // Generic binders shadow nominal names and aliases in their
+                // lexical scope. Resolve this before consulting the alias
+                // catalog so `impl<T> Trait<T> for Holder` retains the
+                // checker binder even when a user type happens to be named
+                // `T` elsewhere in the module.
+                if self.generic_scope.contains(name) {
+                    return Type::Name(
+                        name.clone(),
+                        args.iter().map(|arg| self.resolve_type(arg)).collect(),
+                    );
+                }
                 if let Some(aliased) = self.aliases.get(name) {
                     if let Some(generics) = self.type_generics.get(name) {
                         if args.len() == generics.len() {

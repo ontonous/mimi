@@ -844,10 +844,10 @@ func f(x: i32) -> bool {
     );
 }
 
-/// batch4-08 P0-1: the AST fallback must not return Proven for a function
-/// whose body contains checked arithmetic in a non-tail statement. The old
-/// flow_ast path only proved definedness for the extracted tail expression,
-/// so a crashing `x / y` inside an `if` branch could be verified as safe.
+/// batch4-08 P0-1: reachable checked arithmetic in a non-tail branch must
+/// produce a concrete MIR trap counterexample, even when the tail value is a
+/// harmless constant. This prevents an obsolete tail-only extraction from
+/// silently omitting the division-by-zero path.
 #[test]
 fn audit2_vera_p01_non_tail_arith_fails_closed() {
     if !z3_or_skip() {
@@ -862,10 +862,27 @@ func f(x: i32, y: i32) -> i32 {
 func main() -> i32 { 0 }
 "#;
     let results = crate::verifier::verify_source(src).expect("verify_source");
+    let result = results
+        .iter()
+        .find(|result| result.func_name == "f")
+        .expect("verification result for f");
     assert_eq!(
-        status_of(&results, "f"),
-        Some(crate::verifier::VerifStatus::NotInTrustedSubset),
-        "non-tail checked arithmetic must fail closed: {:?}",
-        results
+        result.status,
+        crate::verifier::VerifStatus::Disproven,
+        "reachable division-by-zero must be disproven: {:?}",
+        result
     );
+    assert!(
+        result.message.contains("E0801")
+            && result.message.contains("integer operation is undefined"),
+        "the counterexample must identify checked integer division: {}",
+        result.message
+    );
+    let artifact = result.artifact.as_ref().expect("canonical proof artifact");
+    assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+    let receipt = artifact
+        .mir_route_receipt
+        .as_ref()
+        .expect("canonical MIR route receipt");
+    assert_eq!(artifact.mir_hash, receipt.mir_digest);
 }

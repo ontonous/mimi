@@ -80,6 +80,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::ListGet { .. } => "LIST_GET",
         Op::ListSet { .. } => "LIST_SET",
         Op::Len { .. } => "LEN",
+        Op::StringScalarLen { .. } => "STRING_SCALAR_LEN",
         Op::NewTuple { .. } => "NEW_TUPLE",
         Op::NewTupleMove { .. } => "NEW_TUPLE_MOVE",
         Op::TupleGet { .. } => "TUPLE_GET",
@@ -115,6 +116,60 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirMapRootSize { .. } => "MIR_MAP_ROOT_SIZE",
         Op::MirMapRootContains { .. } => "MIR_MAP_ROOT_CONTAINS",
         Op::MirMapRootDrop { .. } => "MIR_MAP_ROOT_DROP",
+        Op::MirMapAnyOwnerV1New { .. } => "MIR_MAP_ANY_OWNER_V1_NEW",
+        Op::MirMapAnyOwnerV1Set { .. } => "MIR_MAP_ANY_OWNER_V1_SET",
+        Op::MirMapAnyOwnerV1Remove { .. } => "MIR_MAP_ANY_OWNER_V1_REMOVE",
+        Op::MirMapAnyOwnerV1Size { .. } => "MIR_MAP_ANY_OWNER_V1_SIZE",
+        Op::MirMapAnyOwnerV1Contains { .. } => "MIR_MAP_ANY_OWNER_V1_CONTAINS",
+        Op::MirMapAnyOwnerV1Drop { .. } => "MIR_MAP_ANY_OWNER_V1_DROP",
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1New { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_NEW"
+        }
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Clone { .. } => "MIR_OMAP_OWNER_CLONE",
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Set { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_SET"
+        }
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Remove { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_REMOVE"
+        }
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Size { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_SIZE"
+        }
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Contains { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_CONTAINS"
+        }
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Drop { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_DROP"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1New { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_NEW"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1Clone { .. } => "MIR_OMAP_GET_CLONE",
+        Op::MirOrdinaryMapOwnedGetI32StringV1Set { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_SET"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1Remove { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_REMOVE"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1Size { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_SIZE"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1Contains { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_CONTAINS"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_GET_I32"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1GetString { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_GET_STRING"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1GetAny { .. } => "MIR_OMAP_GET_ANY",
+        Op::MirOrdinaryMapOwnedGetI32StringV1Values { .. } => "MIR_OMAP_VALUES",
+        Op::MirManagedAnyOp { .. } => "MIR_MANAGED_ANY",
+        Op::MirManagedAnyStringCompare { .. } => "MIR_MANAGED_ANY_STRING_COMPARE",
+        Op::MirOrdinaryMapOwnedGetI32StringV1Drop { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_DROP"
+        }
         Op::MirVariantPredicate { .. } => "MIR_VARIANT_PREDICATE",
         Op::MirVariantProjectOr { .. } => "MIR_VARIANT_PROJECT_OR",
         Op::NewVariant { .. } => "NEW_VARIANT",
@@ -148,6 +203,10 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::SetFaultPc { .. } => "SET_FAULT_PC",
         Op::ClearFaultPc => "CLEAR_FAULT_PC",
         Op::FaultRetEarly => "FAULT_RET_EARLY",
+        Op::MirActorSpawn { .. } => "MIR_ACTOR_SPAWN",
+        Op::MirActorCall { .. } => "MIR_ACTOR_CALL",
+        Op::MirActorFieldLoad { .. } => "MIR_ACTOR_FIELD_LOAD",
+        Op::MirActorFieldStore { .. } => "MIR_ACTOR_FIELD_STORE",
         Op::ActorSpawn { .. } => "ACTOR_SPAWN",
         Op::ActorSpawnDetached { .. } => "ACTOR_SPAWN_DETACHED",
         Op::FlowTransition { .. } => "FLOW_TRANSITION",
@@ -207,6 +266,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
+                ConstValue::ManagedAnyContract(v) => format!("managed_any_contract {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
                 ConstValue::RecordMoveDropProjection(v) => {
                     format!("record_move_drop_projection {:?}", v)
@@ -411,6 +471,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                 ConstValue::Pattern(p) => format!("pattern {:?}", p),
                 ConstValue::StrVec(v) => format!("strvec {:?}", v),
                 ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
+                ConstValue::ManagedAnyContract(v) => format!("managed_any_contract {:?}", v),
                 ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
                 ConstValue::RecordMoveDropProjection(v) => {
                     format!("record_move_drop_projection {:?}", v)
@@ -529,6 +590,10 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         ),
         Op::ListSet { ra, rb, rc } => format!("{:04}  {:<16} r{}[r{}] = r{}", pc, name, ra, rb, rc),
         Op::Len { rd, ra } => format!("{:04}  {:<16} r{} = len(r{})", pc, name, rd, ra),
+        Op::StringScalarLen { rd, ra } => format!(
+            "{:04}  {:<16} r{} = string_scalar_len(r{})",
+            pc, name, rd, ra
+        ),
         Op::NewTuple { rd, base, arity } => format!(
             "{:04}  {:<16} r{} = tuple(r{}..r{})",
             pc,
@@ -892,6 +957,155 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::MirMapRootDrop { ra } => {
             format!("{:04}  {:<16} drop mir_map_root(r{})", pc, name, ra)
         }
+        Op::MirMapAnyOwnerV1New { rd } => {
+            format!("{:04}  {:<16} r{} = mir_map_any_owner_v1()", pc, name, rd)
+        }
+        Op::MirMapAnyOwnerV1Set { rd, ra, key, value } => {
+            let key = proto
+                .constants
+                .get(*key as usize)
+                .map(|value| match value {
+                    ConstValue::Str(value) => format!("{:?}", value),
+                    _ => format!("const[{}]", key),
+                })
+                .unwrap_or_else(|| format!("const[{}]", key));
+            format!(
+                "{:04}  {:<16} r{} = mir_map_any_owner_v1_set_move(r{}, {}, r{})",
+                pc, name, rd, ra, key, value
+            )
+        }
+        Op::MirMapAnyOwnerV1Remove { rd, ra, key } => {
+            let key = proto
+                .constants
+                .get(*key as usize)
+                .map(|value| match value {
+                    ConstValue::Str(value) => format!("{:?}", value),
+                    _ => format!("const[{}]", key),
+                })
+                .unwrap_or_else(|| format!("const[{}]", key));
+            format!(
+                "{:04}  {:<16} r{} = mir_map_any_owner_v1_remove_move(r{}, {})",
+                pc, name, rd, ra, key
+            )
+        }
+        Op::MirMapAnyOwnerV1Size { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_map_any_owner_v1_size(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirMapAnyOwnerV1Contains { rd, ra, key } => {
+            let key = proto
+                .constants
+                .get(*key as usize)
+                .map(|value| match value {
+                    ConstValue::Str(value) => format!("{:?}", value),
+                    _ => format!("const[{}]", key),
+                })
+                .unwrap_or_else(|| format!("const[{}]", key));
+            format!(
+                "{:04}  {:<16} r{} = mir_map_any_owner_v1_contains(r{}, {})",
+                pc, name, rd, ra, key
+            )
+        }
+        Op::MirMapAnyOwnerV1Drop { ra } => {
+            format!("{:04}  {:<16} drop mir_map_any_owner_v1(r{})", pc, name, ra)
+        }
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1New { rd } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_lifecycle_i32_string_v1()",
+            pc, name, rd
+        ),
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Clone { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_lifecycle_i32_string_v1_clone(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Set { rd, ra, key, value } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_lifecycle_i32_string_v1_set_persistent(r{}, r{}, r{})",
+            pc, name, rd, ra, key, value
+        ),
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Remove { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_lifecycle_i32_string_v1_remove_persistent(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Size { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_lifecycle_i32_string_v1_size(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Contains { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_lifecycle_i32_string_v1_contains(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnerLifecycleI32StringV1Drop { ra } => format!(
+            "{:04}  {:<16} drop mir_ordinary_map_owner_lifecycle_i32_string_v1(r{})",
+            pc, name, ra
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1New { rd } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1()",
+            pc, name, rd
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1Clone { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_clone(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1Set { rd, ra, key, value } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_set_persistent(r{}, r{}, r{})",
+            pc, name, rd, ra, key, value
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1Remove { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_remove_persistent(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1Size { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_size(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1Contains { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_contains(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 {
+            rd,
+            ra,
+            key,
+            shapes,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_get_i32(r{}, r{}, Result@c{})",
+            pc, name, rd, ra, key, shapes
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1GetString {
+            rd,
+            ra,
+            key,
+            shapes,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_get_string(r{}, r{}, Result@c{})",
+            pc, name, rd, ra, key, shapes
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1GetAny { rd, ra, key } => format!(
+            "{pc:04}  {name:<16} r{rd} = mir_ordinary_map_owned_get_i32_string_v1_get_any(r{ra}, r{key})"
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1Values { rd, ra } => format!(
+            "{pc:04}  {name:<16} r{rd} = mir_ordinary_map_owned_get_i32_string_v1_values(r{ra})"
+        ),
+        Op::MirManagedAnyOp {
+            rd,
+            ra,
+            operation,
+            contract,
+        } => format!(
+            "{pc:04}  {name:<16} {rd:?} = mir_managed_any_i32_string_v1_{operation:?}(r{ra}) contract=c{contract}"
+        ),
+        Op::MirManagedAnyStringCompare {
+            rd,
+            any,
+            string,
+            equal,
+        } => format!(
+            "{pc:04}  {name:<16} r{rd} = {}(any=r{any}, string=r{string})",
+            if *equal { "eq" } else { "ne" }
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1Drop { ra } => format!(
+            "{:04}  {:<16} drop mir_ordinary_map_owned_get_i32_string_v1(r{})",
+            pc, name, ra
+        ),
         Op::MirVariantPredicate {
             rd,
             ra,
@@ -1124,6 +1338,42 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::Nop | Op::IeeeEnter | Op::IeeeExit => {
             format!("{:04}  {:<16}", pc, name)
         }
+        Op::MirActorSpawn {
+            rd,
+            descriptor,
+            instruction,
+        } => format!(
+            "{pc:04} {name:<16} r{rd} = actor[{descriptor}].spawn() instruction=c{instruction}"
+        ),
+        Op::MirActorCall {
+            rd,
+            ra,
+            descriptor,
+            method,
+            instruction,
+            args_base,
+            argc,
+        } => format!(
+            "{pc:04} {name:<16} r{rd} = actor[{descriptor}].method[{method}](r{ra}, r{args_base}..+{argc}) instruction=c{instruction}"
+        ),
+        Op::MirActorFieldLoad {
+            rd,
+            state,
+            descriptor,
+            field,
+            instruction,
+        } => format!(
+            "{pc:04} {name:<16} r{rd} = actor[{descriptor}].field[{field}](r{state}) instruction=c{instruction}"
+        ),
+        Op::MirActorFieldStore {
+            state,
+            value,
+            descriptor,
+            field,
+            instruction,
+        } => format!(
+            "{pc:04} {name:<16} actor[{descriptor}].field[{field}](r{state}) = r{value} instruction=c{instruction}"
+        ),
         Op::ActorSpawn { rd, actor } | Op::ActorSpawnDetached { rd, actor } => {
             let a = proto
                 .constants
@@ -1139,6 +1389,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             rd,
             flow,
             method,
+            checked_source_state,
             args_base,
             argc,
         } => {
@@ -1158,15 +1409,24 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
                     _ => "?",
                 })
                 .unwrap_or("?");
+            let source = (*checked_source_state)
+                .and_then(|source| proto.constants.get(source as usize))
+                .and_then(|constant| match constant {
+                    ConstValue::Str(source) => Some(source.as_str()),
+                    _ => None,
+                })
+                .map(|source| format!(" checked_source={source}"))
+                .unwrap_or_default();
             format!(
-                "{:04}  {:<16} r{} = {}::{}(r{}..r{})",
+                "{:04}  {:<16} r{} = {}::{}(r{}..r{}){}",
                 pc,
                 name,
                 rd,
                 f,
                 m,
                 args_base,
-                *args_base as u16 + argc.saturating_sub(1)
+                *args_base as u16 + argc.saturating_sub(1),
+                source
             )
         }
         Op::DynMethodCall {
@@ -1227,6 +1487,7 @@ pub fn disassemble(proto: &FunctionProto) -> String {
             ConstValue::Pattern(p) => format!("pattern {:?}", p),
             ConstValue::StrVec(v) => format!("strvec {:?}", v),
             ConstValue::VariantShapes(v) => format!("variant_shapes {:?}", v),
+            ConstValue::ManagedAnyContract(v) => format!("managed_any_contract {:?}", v),
             ConstValue::RecordProjection(v) => format!("record_projection {:?}", v),
             ConstValue::RecordMoveDropProjection(v) => {
                 format!("record_move_drop_projection {:?}", v)

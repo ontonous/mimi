@@ -1,0 +1,17 @@
+// A typed mailbox caller must use the same tuple layout as the legacy actor
+// worker. `Text` is transparent through two aliases, and the string exercises
+// UTF-8 plus an embedded NUL while the non-zero second field detects offsets
+// that accidentally read only the first tuple slot.
+type InnerText = string
+type Text = InnerText
+
+actor Echo {
+    func echo(value: (Text, i32)) -> (Text, i32) { value }
+}
+
+func main() -> i32 {
+    let echo = Echo.spawn()
+    let source: (Text, i32) = ("A\0雪", 73)
+    let result = echo.echo(source)
+    if result.0 == "A\0雪" && result.1 == 73 { 0 } else { 1 }
+}

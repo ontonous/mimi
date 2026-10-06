@@ -1,0 +1,9 @@
+// The power encoder receives an already-evaluated value. Its consumer must
+// still carry the checked division definedness from the left operand.
+func main() -> i32 {
+    let numerator: i32 = 1
+    let denominator: i32 = 0
+    let base = numerator / denominator
+    println(base ** 0)
+    0
+}

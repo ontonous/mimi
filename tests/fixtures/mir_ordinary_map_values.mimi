@@ -1,0 +1,7 @@
+func main() -> i32 {
+    let root = map_new()
+    let snapshot = values(root)
+    drop(snapshot)
+    drop(root)
+    0
+}

@@ -14,7 +14,7 @@ fn fresh_dir() -> PathBuf {
 }
 
 #[test]
-fn recursive_c_export_build_uses_internal_mimi_abi() {
+fn recursive_scalar_c_export_build_uses_internal_mimi_abi() {
     let dir = fresh_dir();
     fs::create_dir_all(&dir).expect("create isolated export test directory");
     let source = dir.join("recursive_export.mimi");
@@ -23,7 +23,6 @@ fn recursive_c_export_build_uses_internal_mimi_abi() {
         &source,
         r#"
             extern "C" func factorial(value: i32) -> i32 {
-                requires: value >= 0
                 if value <= 1 { 1 } else { value * factorial(value - 1) }
             }
             func main() -> i32 {
@@ -44,7 +43,7 @@ fn recursive_c_export_build_uses_internal_mimi_abi() {
     let build_stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
         build.status.success(),
-        "recursive exported body must build through its Mimi-internal symbol: {build_stderr}"
+        "recursive scalar export must build through its canonical Mimi-internal symbol: {build_stderr}"
     );
 
     let run = Command::new(&executable)
@@ -67,13 +66,11 @@ fn recursive_c_export_build_uses_internal_mimi_abi() {
         .output()
         .expect("spawn explicit MIR build");
     assert!(
-        !explicit_mir.status.success(),
-        "an exported C wrapper must remain outside the migrated MIR profile"
+        explicit_mir.status.success(),
+        "scalar export must be admitted by canonical MIR: {}",
+        String::from_utf8_lossy(&explicit_mir.stderr)
     );
-    assert!(
-        !explicit_mir_output.exists(),
-        "explicit MIR rejection must happen before creating a native artifact"
-    );
+    assert!(explicit_mir_output.exists());
 
     let explicit_mir_run = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("run")
@@ -81,14 +78,8 @@ fn recursive_c_export_build_uses_internal_mimi_abi() {
         .arg("--mir")
         .output()
         .expect("spawn explicit MIR run");
-    assert!(
-        !explicit_mir_run.status.success(),
-        "explicit MIR run must reject the missing export-wrapper contract"
-    );
-    assert!(
-        explicit_mir_run.stdout.is_empty(),
-        "explicit MIR run must reject before executing main"
-    );
+    assert!(explicit_mir_run.status.success());
+    assert_eq!(explicit_mir_run.stdout, b"120\n");
 
     let explicit_mir_verify = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("verify")
@@ -96,26 +87,20 @@ fn recursive_c_export_build_uses_internal_mimi_abi() {
         .arg("--mir")
         .output()
         .expect("spawn explicit MIR verification");
-    assert!(
-        !explicit_mir_verify.status.success(),
-        "explicit MIR verification must reject the missing export-wrapper contract"
-    );
+    assert!(explicit_mir_verify.status.success());
 
     let explicit_mir_dump = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("mir")
         .arg(&source)
         .output()
         .expect("spawn canonical MIR dump");
-    assert!(
-        !explicit_mir_dump.status.success(),
-        "MIR dump must reject an exported body whose C wrapper is not modeled"
-    );
+    assert!(explicit_mir_dump.status.success());
 
     fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
+fn scalar_import_with_export_body_uses_canonical_export_route() {
     let dir = fresh_dir();
     fs::create_dir_all(&dir).expect("create isolated export/import test directory");
     let source = dir.join("scalar_import_export_body.mimi");
@@ -124,8 +109,8 @@ fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
     fs::write(
         &source,
         r#"
-            extern "C" { func abs(value: i32) -> i32; }
-            extern "C" func internal_export(value: i32) -> i32 { value + 1 }
+            extern "C" { func abs(value: i64) -> i64; }
+            extern "C" func internal_export(value: i64) -> i64 { value + 1 }
             func main() -> i32 {
                 println(abs(internal_export(-3)))
                 0
@@ -145,12 +130,11 @@ fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
     let build_stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
         build.status.success(),
-        "default build must keep the export-wrapper compatibility implementation: {build_stderr}"
+        "default build must use the canonical scalar export wrapper: {build_stderr}"
     );
     assert!(
-        build_stderr
-            .contains("canonical route disposition: legacy (exported-abi-body-compatibility)"),
-        "default build must disclose the early compatibility route: {build_stderr}"
+        build_stderr.contains("canonical route disposition: canonical (scalar-export-v1)"),
+        "default build must disclose the canonical scalar export route: {build_stderr}"
     );
     let native = Command::new(&executable)
         .output()
@@ -167,8 +151,7 @@ fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
     let run_stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "default run failed: {run_stderr}");
     assert_eq!(run.stdout, b"2\n");
-    assert!(run_stderr
-        .contains("canonical route disposition: legacy (exported-abi-body-compatibility)"));
+    assert!(run_stderr.contains("canonical route disposition: canonical (scalar-export-v1)"));
 
     let verify = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("verify")
@@ -186,8 +169,7 @@ fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
         "default verification without contracts must succeed: {verify_transcript}"
     );
     assert!(verify_transcript.contains("no contracts to verify"));
-    assert!(verify_transcript
-        .contains("canonical route disposition: legacy (exported-abi-body-compatibility)"));
+    assert!(verify_transcript.contains("canonical route disposition: canonical (scalar-export-v1)"));
 
     let explicit_mir_build = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("build")
@@ -197,11 +179,8 @@ fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
         .arg(&explicit_mir_output)
         .output()
         .expect("spawn explicit MIR build");
-    assert!(!explicit_mir_build.status.success());
-    assert!(!explicit_mir_output.exists());
-    let explicit_mir_stderr = String::from_utf8_lossy(&explicit_mir_build.stderr);
-    assert!(explicit_mir_stderr
-        .contains("exported C function body has no canonical MIR export-wrapper ABI"));
+    assert!(explicit_mir_build.status.success());
+    assert!(explicit_mir_output.exists());
 
     let explicit_mir_verify = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("verify")
@@ -209,9 +188,7 @@ fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
         .arg("--mir")
         .output()
         .expect("spawn explicit MIR verification");
-    assert!(!explicit_mir_verify.status.success());
-    assert!(String::from_utf8_lossy(&explicit_mir_verify.stderr)
-        .contains("exported C function body has no canonical MIR export-wrapper ABI"));
+    assert!(explicit_mir_verify.status.success());
 
     let explicit_mir_run = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("run")
@@ -219,16 +196,67 @@ fn scalar_import_with_export_body_uses_explicit_default_compatibility_route() {
         .arg("--mir")
         .output()
         .expect("spawn explicit MIR run");
-    assert!(!explicit_mir_run.status.success());
-    assert!(explicit_mir_run.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&explicit_mir_run.stderr)
-        .contains("exported C function body has no canonical MIR export-wrapper ABI"));
+    assert!(explicit_mir_run.status.success());
+    assert_eq!(explicit_mir_run.stdout, b"2\n");
 
     fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn exported_body_compatibility_route_preserves_called_ffi_contracts() {
+fn scalar_export_abi_variants_use_the_canonical_wrapper() {
+    let dir = fresh_dir();
+    fs::create_dir_all(&dir).expect("create isolated scalar ABI directory");
+    let variants = [
+        (
+            "f32",
+            "extern \"C\" func exported(value: f32) -> f32 { value }",
+        ),
+        (
+            "f64",
+            "extern \"C\" func exported(value: f64) -> f64 { value }",
+        ),
+        (
+            "bool",
+            "extern \"C\" func exported(value: bool) -> bool { value }",
+        ),
+        (
+            "unit",
+            "extern \"C\" func exported(value: i32) { println(value) }",
+        ),
+    ];
+    for (name, declaration) in variants {
+        let source = dir.join(format!("{name}.mimi"));
+        let executable = dir.join(name);
+        fs::write(
+            &source,
+            format!("{declaration}\nfunc main() -> i32 {{ 0 }}\n"),
+        )
+        .expect("write scalar ABI fixture");
+        let build = Command::new(env!("CARGO_BIN_EXE_mimi"))
+            .arg("build")
+            .arg(&source)
+            .arg("--mir")
+            .arg("-o")
+            .arg(&executable)
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .expect("spawn scalar ABI build");
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            build.status.success(),
+            "{name} scalar export must build through the canonical wrapper: {stderr}"
+        );
+        assert!(
+            stderr.contains("canonical (scalar-export-v1)"),
+            "{name}: {stderr}"
+        );
+        assert!(executable.exists());
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn canonical_scalar_export_route_preserves_called_ffi_contracts() {
     let dir = fresh_dir();
     fs::create_dir_all(&dir).expect("create isolated FFI contract directory");
     let source = dir.join("scalar_import_export_body_ffi_contract.mimi");
@@ -260,7 +288,7 @@ fn exported_body_compatibility_route_preserves_called_ffi_contracts() {
     );
     assert!(
         !verify.status.success(),
-        "a violated called FFI contract must fail even on the explicit export compatibility route: {transcript}"
+        "a violated called FFI contract must fail on the canonical scalar export route: {transcript}"
     );
     assert!(
         transcript.contains("calls strict_identity") || transcript.contains("strict_identity"),
@@ -269,22 +297,22 @@ fn exported_body_compatibility_route_preserves_called_ffi_contracts() {
     assert!(
         transcript.contains("precondition may be violated")
             || transcript.contains("may violate precondition"),
-        "expected a fail-closed FFI call-site result: {transcript}"
+        "expected a fail-closed canonical FFI call-site result: {transcript}"
     );
 
     fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn compatibility_verification_keeps_user_contracts_after_excluding_prelude_bodies() {
+fn canonical_export_verification_keeps_user_contracts_after_excluding_prelude_bodies() {
     let dir = fresh_dir();
     fs::create_dir_all(&dir).expect("create isolated contract verification directory");
     let source = dir.join("scalar_import_export_body_contract.mimi");
     fs::write(
         &source,
         r#"
-            extern "C" { func abs(value: i32) -> i32; }
-            extern "C" func internal_export(value: i32) -> i32 { value + 1 }
+            extern "C" { func abs(value: i64) -> i64; }
+            extern "C" func internal_export(value: i64) -> i64 { value + 1 }
 
             func must_fail(value: i32) -> i32 {
                 requires: value > 0
@@ -313,7 +341,7 @@ fn compatibility_verification_keeps_user_contracts_after_excluding_prelude_bodie
     );
     assert!(
         !verify.status.success(),
-        "a disproven user contract must still fail compatibility verification: {transcript}"
+        "a disproven user contract must still fail canonical export verification: {transcript}"
     );
     assert!(
         transcript.contains("must_fail"),
@@ -334,7 +362,7 @@ fn compatibility_verification_keeps_user_contracts_after_excluding_prelude_bodie
 }
 
 #[test]
-fn export_body_route_verifies_ffi_calls_inside_actor_methods() {
+fn export_body_route_verifies_ffi_calls_inside_actor_impl_and_flow_bodies() {
     let dir = fresh_dir();
     fs::create_dir_all(&dir).expect("create isolated actor FFI verification directory");
     let source = dir.join("scalar_import_export_body_actor_ffi.mimi");
@@ -363,6 +391,10 @@ fn export_body_route_verifies_ffi_calls_inside_actor_methods() {
                     return Done { }
                 }
             }
+            func unrelated_contract() -> i32 {
+                ensures: result == 7
+                42
+            }
             func main() -> i32 { 0 }
         "#,
     )
@@ -381,18 +413,18 @@ fn export_body_route_verifies_ffi_calls_inside_actor_methods() {
     );
     assert!(
         !verify.status.success(),
-        "actor-method FFI call-site preconditions must fail closed: {transcript}"
+        "actor, impl, and Flow FFI preconditions must fail closed: {transcript}"
     );
     assert!(
-        transcript.contains("func invoke_actor()")
-            && transcript.contains("func invoke_impl()")
-            && transcript.contains("let checked = strict_identity(-3)")
+        transcript.contains("invoke_actor()")
+            && transcript.contains("invoke_impl()")
+            && transcript.contains("strict_identity(-3)")
             && transcript.matches("may violate precondition").count() >= 3,
-        "missing method/Flow FFI call-site diagnostics: {transcript}"
+        "missing concrete actor/impl/Flow FFI diagnostics: {transcript}"
     );
     assert!(
-        transcript.contains("Disproven") || transcript.contains("may violate precondition"),
-        "expected a failed actor-method FFI precondition: {transcript}"
+        transcript.contains("unrelated_contract") && transcript.contains("Disproven"),
+        "the FFI boundary must not hide the general verifier's user-contract result: {transcript}"
     );
 
     let dump = Command::new(env!("CARGO_BIN_EXE_mimi"))
@@ -408,14 +440,18 @@ fn export_body_route_verifies_ffi_calls_inside_actor_methods() {
     );
     assert!(
         !dump.status.success(),
-        "dump-z3 must retain the same called FFI obligation: {dump_transcript}"
+        "dump-z3 must retain the same actor/impl/Flow FFI failures: {dump_transcript}"
     );
     assert!(
-        dump_transcript.contains("func invoke_actor()")
-            && dump_transcript.contains("func invoke_impl()")
-            && dump_transcript.contains("let checked = strict_identity(-3)")
+        dump_transcript.contains("invoke_actor()")
+            && dump_transcript.contains("invoke_impl()")
+            && dump_transcript.contains("strict_identity(-3)")
             && dump_transcript.matches("may violate precondition").count() >= 3,
-        "dump-z3 omitted method/Flow FFI call-site diagnostics: {dump_transcript}"
+        "dump-z3 omitted concrete actor/impl/Flow FFI diagnostics: {dump_transcript}"
+    );
+    assert!(
+        dump_transcript.contains("unrelated_contract") && dump_transcript.contains("Disproven"),
+        "dump-z3 must retain the general verifier's user-contract result: {dump_transcript}"
     );
     assert!(dump_transcript.contains("Z3 SMT-LIB2 dump"));
 
@@ -423,11 +459,11 @@ fn export_body_route_verifies_ffi_calls_inside_actor_methods() {
 }
 
 #[test]
-fn default_build_and_verify_keep_export_compatibility_ahead_of_maproot() {
+fn export_and_maproot_composition_rejects_before_legacy_fallback() {
     let dir = fresh_dir();
     fs::create_dir_all(&dir).expect("create isolated export/MapRoot directory");
     let source = dir.join("export_with_maproot.mimi");
-    let executable = dir.join("export_with_maproot");
+    let executable = dir.join("must-not-exist");
     fs::write(
         &source,
         r#"
@@ -458,15 +494,11 @@ fn default_build_and_verify_keep_export_compatibility_ahead_of_maproot() {
         .expect("spawn export plus MapRoot native build");
     let build_stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
-        build.status.success(),
-        "compatibility build failed: {build_stderr}"
+        !build.status.success(),
+        "mixed canonical islands must fail closed: {build_stderr}"
     );
-    assert!(build_stderr.contains("legacy (exported-abi-body-compatibility)"));
-    let native = Command::new(&executable)
-        .output()
-        .expect("run export plus MapRoot executable");
-    assert!(native.status.success());
-    assert_eq!(native.stdout, b"2\n");
+    assert!(build_stderr.contains("MIR-COVERAGE-001"));
+    assert!(!executable.exists());
 
     let verify = Command::new(env!("CARGO_BIN_EXE_mimi"))
         .arg("verify")
@@ -480,12 +512,11 @@ fn default_build_and_verify_keep_export_compatibility_ahead_of_maproot() {
         String::from_utf8_lossy(&verify.stderr)
     );
     assert!(
-        verify.status.success(),
-        "compatibility verify failed: {transcript}"
+        !verify.status.success(),
+        "mixed canonical islands must fail closed: {transcript}"
     );
-    assert!(transcript.contains("legacy (exported-abi-body-compatibility)"));
-    assert!(transcript.contains("map_contract"));
-    assert!(!transcript.contains("MIR-MATERIALIZATION-001"));
+    assert!(transcript.contains("MIR-COVERAGE-001"));
+    assert!(!transcript.contains("legacy (exported-abi-body-compatibility)"));
 
     fs::remove_dir_all(&dir).ok();
 }

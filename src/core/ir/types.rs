@@ -42,6 +42,13 @@ pub(crate) fn primitive_type_id(primitive: PrimitiveType) -> ResolvedTypeId {
     ResolvedTypeId::from_canonical(&ResolvedType::Primitive(primitive).canonical())
 }
 
+/// Return the stable identity for a concrete canonical Result type without
+/// retaining a type table. MIR receipt validators use this for closed runtime
+/// ABIs whose success/error payloads are part of the operation contract.
+pub(crate) fn result_type_id(ok: ResolvedTypeId, error: ResolvedTypeId) -> ResolvedTypeId {
+    ResolvedTypeId::from_canonical(&ResolvedType::Result { ok, error }.canonical())
+}
+
 /// Qualified identity of a nominal type declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NominalTypeId(String);
