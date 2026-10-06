@@ -775,6 +775,90 @@ func main() -> i32 { host_text("ok") }
 }
 
 #[test]
+fn dual_literal_non_scalar_ffi_declaration_root_is_ast_free() {
+    // The string ABI intentionally misses ScalarFfi.  A called declaration
+    // whose only proof roots are boolean literals is nevertheless complete at
+    // the checker-owned declaration boundary.  Both public verifier entry
+    // points must keep the dual compatibility owner untouched.
+    let source = r#"
+extern "C" {
+    func host_text(value: string) -> i32
+        requires: true;
+}
+func main() -> i32 { host_text("ok") }
+"#;
+    let file = parse_memory_source(source, "dual-literal-ffi").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_checked_dual(&checked, source_hash.clone())
+        .expect("literal non-scalar FFI dual verification");
+    assert_eq!(results.len(), 1, "declaration-level result: {results:?}");
+    assert_eq!(results[0].func_name, "extern host_text");
+    assert_eq!(results[0].status, VerifStatus::Proven);
+    let artifact = results[0].artifact.as_ref().expect("literal artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_RESOLVED);
+    assert_eq!(artifact.source_hash, source_hash);
+    assert_eq!(artifact.integer_model, "literal-boolean");
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        Vec::<crate::core::LegacyBodyConsumer>::new(),
+        "dual literal declaration root must not read retained source body"
+    );
+}
+
+
+
+#[test]
+fn dual_scalar_ffi_literal_stays_on_canonical_mir_route() {
+    require_z3!();
+    let source = r#"
+extern "C" {
+    func host_i32(value: i32) -> i32
+        requires: true;
+}
+func main() -> i32 { host_i32(1) }
+"#;
+    let file = parse_memory_source(source, "dual-scalar-literal-ffi").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let results = verify_checked_dual(&checked, "dual-scalar-literal-ffi".into())
+        .expect("scalar FFI dual verification");
+    assert_eq!(results.len(), 1, "canonical scalar result: {results:?}");
+    let artifact = results[0].artifact.as_ref().expect("MIR artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn dual_nonliteral_non_scalar_ffi_does_not_match_literal_slice() {
+    // A stateful declaration expression is outside the narrow admission.  It
+    // must remain fail-closed at the public verifier boundary and cannot be
+    // silently reclassified as a literal declaration proof.
+    let source = r#"
+extern "C" {
+    func host_text(value: string) -> i32
+        requires: true && true;
+}
+func main() -> i32 { host_text("ok") }
+"#;
+    let file = parse_memory_source(source, "dual-nonliteral-ffi").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let error = verify_checked_dual(&checked, "dual-nonliteral-ffi".into())
+        .expect_err("non-literal non-scalar FFI must remain outside the slice");
+    assert!(
+        error.contains(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE),
+        "{error}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
+        "boundary rejection must not fall through to a legacy body"
+    );
+}
+
+#[test]
 fn public_checked_verifiers_reject_non_scalar_extern_before_compatibility() {
     let source = r#"
 extern "C" {

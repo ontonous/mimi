@@ -915,6 +915,74 @@ fn verify_ffi_literal_contracts(
     saw_called_contract.then_some(Ok(results))
 }
 
+/// Admit the literal FFI declaration-root profile at the public dual entry
+/// point.  This exact profile has no body-bearing semantic owner: any
+/// callable proof root, Flow/Actor/Session/impl graph, or non-literal/mixed
+/// FFI contract misses the profile and keeps DualVerifierCompatibility live.
+fn verify_dual_literal_ffi_declaration_root(
+    program: &crate::core::CheckedProgram,
+    source_hash: &str,
+) -> Option<Result<Vec<VerificationResult>, String>> {
+    // Scalar FFI already has an independent canonical MIR/dual route.  The
+    // declaration-root slice only covers ABI shapes that still lack that
+    // route; it must not replace a scalar MIR proof or steal a mixed Map
+    // owner request.
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_admitted(admission)
+        || admission.map_root.is_candidate()
+        || admission.map_any_owner.is_candidate()
+        || admission
+            .ordinary_map_owner_lifecycle_i32_string_v1
+            .has_profile_signal()
+        || admission
+            .ordinary_map_owned_get_i32_string_v1
+            .has_profile_signal()
+    {
+        return None;
+    }
+    // `check_program` injects the RuntimeSystem `Main` flow for ordinary
+    // scripts. It carries no user contract and is safe to ignore here, but
+    // an explicit/user Flow (or a second generated flow) keeps the profile
+    // deferred to the normal dual owner.
+    let implicit_main_flow_nodes = program
+        .flows()
+        .values()
+        .filter(|flow| {
+            flow.id.0 == "Main"
+                && matches!(
+                    &flow.origin,
+                    crate::core::Origin::RuntimeSystem { rule, .. }
+                        if rule == "progressive.main"
+                )
+        })
+        .map(|flow| flow.node_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let flows_are_only_implicit_main = !implicit_main_flow_nodes.is_empty()
+        && program.flows().len() == implicit_main_flow_nodes.len()
+        && program.transitions().values().all(|transition| {
+            matches!(
+                &transition.origin,
+                crate::core::Origin::RuntimeSystem { parent, .. }
+                    if implicit_main_flow_nodes.contains(parent)
+            )
+        });
+    if (!program.flows().is_empty() && !flows_are_only_implicit_main)
+        || !program.actors().is_empty()
+        || !program.sessions().is_empty()
+        || !program.impls().is_empty()
+    {
+        return None;
+    }
+    if program
+        .callables()
+        .values()
+        .any(crate::core::ResolvedCallable::has_proof_obligations)
+    {
+        return None;
+    }
+    verify_ffi_literal_contracts(program, source_hash)
+}
+
 /// Check whether the Z3 solver is available at runtime.
 pub fn is_z3_available() -> bool {
     Verifier::new().is_ok()
@@ -939,6 +1007,13 @@ pub fn verify_checked_dual(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    if is_z3_available() {
+        if let Some(results) =
+            verify_dual_literal_ffi_declaration_root(program, &source_hash)
+        {
+            return results;
+        }
+    }
     validate_public_verifier_mir_boundary(program)?;
     if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
         return Ok(results);
