@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::codegen::{call_try_basic_value, CallSiteValueExt, CodeGenerator, VarEntry};
 use crate::error::CompileError;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, FunctionType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 use inkwell::IntPredicate;
 use std::collections::HashMap;
@@ -340,6 +340,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         method_name: &str,
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
+        call_meta: Option<crate::ast::AstNodeMeta>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         // Method call: obj.method(args)
         // Determine the type of the object to find the actor/trait name
@@ -607,13 +608,62 @@ impl<'ctx> CodeGenerator<'ctx> {
             return self.compile_set_method(obj, method_name, args, vars);
         }
 
+        // A checker-selected ProtocolMethod must win before compatibility
+        // string lowering can route the same spelling to a builtin. Exact
+        // Builtin callsites have no protocol receipt and continue to the
+        // existing builtin adapters below.
+        let checked_static_call_callee = if self.checked_native_declarations.is_some()
+            && !obj_type.starts_with("dyn ")
+            && !obj_type.starts_with("impl ")
+        {
+            self.checked_method_callee(call_meta)?
+        } else {
+            None
+        };
+        let checked_static_protocol_target = match checked_static_call_callee.as_ref() {
+            Some(crate::core::ir::ResolvedCallee::ProtocolMethod { .. }) => Some(
+                self.checked_protocol_method_call(call_meta, method_name)?
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "checked ProtocolMethod '{}::{}' has no exact impl target receipt",
+                            obj_type, method_name
+                        ))
+                    })?,
+            ),
+            _ => None,
+        };
+        if let Some(target) = checked_static_protocol_target.as_ref() {
+            let (symbol, type_map) = self.checked_impl_method_for_call(target)?;
+            let emitted_symbol = if type_map.is_empty() {
+                symbol.clone()
+            } else {
+                self.compile_checked_impl_method_instance(&target.key.callable, &type_map)?;
+                Self::mangle_name(&symbol, &type_map)
+            };
+            let function = self.module.get_function(&emitted_symbol).ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "checked protocol method '{}' has no emitted body '{}'",
+                    target.key.callable.0, emitted_symbol
+                ))
+            })?;
+            return self.compile_self_method_call(obj, args, vars, function, "checked_trait_call");
+        }
+
+        let exact_string_builtin = match checked_static_call_callee.as_ref() {
+            Some(crate::core::ir::ResolvedCallee::Builtin(builtin)) => {
+                builtin.as_str() == format!("builtin.method.string.{method_name}")
+            }
+            None => self.checked_native_declarations.is_none(),
+            _ => false,
+        };
+
         // 2. String `.len()` must route to the free-function `len(obj)` BEFORE
         // trait dispatch. The `Str` trait method `len(self) { len(self) }` would
         // otherwise pass the unboxed data pointer (`ensure_self_pointer` extracts
         // field 0) into `len`, which NUL-walks and truncates strings that carry
         // embedded NUL bytes. Routing to `len(obj)` keeps the boxed {ptr,i64}
         // struct so the authoritative byte length survives (BUG H fat-ABI).
-        if obj_type == "string" && method_name == "len" {
+        if obj_type == "string" && method_name == "len" && exact_string_builtin {
             self.pending_len_is_string = true;
             let obj_expr = obj.clone();
             let call_expr = Expr::Call(Box::new(Expr::Ident("len".to_string())), vec![obj_expr]);
@@ -627,7 +677,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         //     losing the embedded byte length and truncating strings that carry
         //     NUL bytes (BUG H fat-ABI). Desugaring to the builtin passes the
         //     boxed {ptr,i64} struct so the authoritative length survives.
-        if obj_type == "string" {
+        if obj_type == "string" && exact_string_builtin {
             if let Some(builtin_name) = string_method_to_builtin(method_name) {
                 let obj_expr = obj.clone();
                 let mut all_args = vec![obj_expr];
@@ -638,37 +688,46 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // 4. Try trait method dispatch: type_impls[type_name][trait_name][method_name]
-        // Impl blocks are keyed by the base type name (e.g. "List") even when the
-        // call site sees a concrete instantiation like "List<T>" or "List<i32>".
-        // For generic impls called with concrete types, monomorphize on-demand.
+        // Checked static calls without a ProtocolMethod receipt may continue
+        // only when the checker classified them as a Builtin. Other missing
+        // or unsupported targets fail closed.
+        if self.checked_native_declarations.is_some()
+            && !obj_type.starts_with("dyn ")
+            && !obj_type.starts_with("impl ")
+            && !matches!(
+                checked_static_call_callee.as_ref(),
+                Some(crate::core::ir::ResolvedCallee::Builtin(_))
+            )
+        {
+            return Err(CompileError::LlvmError(format!(
+                "checked method call '{}::{}' has no checker-selected protocol or builtin target",
+                obj_type, method_name
+            )));
+        }
+
+        // Test-only compatibility route: the surface harness has no
+        // CheckedProgram owner and continues to use the old name registry.
         let base_obj_type = base_type_name(&obj_type);
-        // Find the trait method and fn_name (need immutable borrow first)
-        let trait_method_info: Option<(String, bool, Vec<Type>)> =
-            self.type_impls.get(base_obj_type).and_then(|trait_impls| {
-                trait_impls.iter().find_map(|(trait_name, methods)| {
-                    if !methods.iter().any(|m| m.name == *method_name) {
-                        return None;
-                    }
-                    let fn_name = format!("{}__{}__{}", base_obj_type, trait_name, method_name);
-                    let impl_type_args = self
-                        .impl_type_args
-                        .get(base_obj_type)
-                        .cloned()
-                        .unwrap_or_default();
-                    let is_generic_call = impl_type_args.iter().any(|ta| {
-                        if let Type::Name(tn, _) = ta.unlocated() {
-                            obj_type.contains(&format!("<{}>", tn))
-                        } else {
-                            false
-                        }
-                    });
-                    Some((fn_name, !is_generic_call, impl_type_args))
-                })
+        if let Some((trait_name, _)) = self.type_impls.get(base_obj_type).and_then(|trait_impls| {
+            trait_impls
+                .iter()
+                .find(|(_, methods)| methods.iter().any(|method| method.name == *method_name))
+        }) {
+            let fn_name = format!("{}__{}__{}", base_obj_type, trait_name, method_name);
+            let impl_type_args = self
+                .impl_type_args
+                .get(base_obj_type)
+                .cloned()
+                .unwrap_or_default();
+            let is_generic_call = impl_type_args.iter().any(|argument| {
+                if let Type::Name(name, _) = argument.unlocated() {
+                    obj_type.contains(&format!("<{}>", name))
+                } else {
+                    false
+                }
             });
-        if let Some((fn_name, is_concrete_call, impl_type_args)) = trait_method_info {
             // Try monomorphized version for concrete types
-            if is_concrete_call && !impl_type_args.is_empty() {
+            if !is_generic_call && !impl_type_args.is_empty() {
                 let inner = obj_type.strip_prefix("List<").and_then(|s| {
                     let mut depth = 1u32;
                     let mut end = 0;
@@ -754,7 +813,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         borrow: None,
                                     }
                                 });
-                                self.compile_generic_func(f, &type_map)?;
+                                #[cfg(test)]
+                                self.compile_legacy_generic_test_instance(f, &type_map)?;
+                                #[cfg(not(test))]
+                                {
+                                    return Err(CompileError::CanonicalMirCoverage(format!(
+                                        "MIR-COVERAGE-001/NITS: generic method '{}' reached the retired legacy monomorphizer",
+                                        method_name
+                                    )));
+                                }
                             }
                         }
                         if let Some(function) = self.module.get_function(&mangled) {
@@ -798,7 +865,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         if obj_type.starts_with("impl ") {
             let trait_name = obj_type.strip_prefix("impl ").unwrap_or("");
             if !trait_name.is_empty() && !trait_name.contains(' ') {
-                return self.compile_impl_trait_call(obj, method_name, args, vars, trait_name);
+                return self.compile_impl_trait_call(
+                    obj,
+                    method_name,
+                    args,
+                    vars,
+                    trait_name,
+                    call_meta,
+                );
             }
             return Err(format!(
                 "[E0708] cannot dispatch method '{}' on {}",
@@ -1760,24 +1834,105 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
         trait_name: &str,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let method_idx = self
-            .trait_defs
-            .get(trait_name)
-            .and_then(|tdef| tdef.methods.iter().position(|m| m.name == *method_name));
-        let idx = match method_idx {
-            Some(idx) => idx,
-            None => {
-                return Err(format!(
-                    "[E0708] cannot dispatch method '{}' on dyn {}",
-                    method_name, trait_name
-                )
-                .into());
+        let mut vtable_trait_name = trait_name.to_owned();
+        let (idx, canonical_function_type) = if self.checked_native_declarations.is_some() {
+            let owner = self.checked_trait_owner(trait_name).ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "dyn trait '{}' has no unique checked declaration",
+                    trait_name
+                ))
+            })?;
+            let catalog = self
+                .checked_native_declarations
+                .as_ref()
+                .ok_or_else(|| CompileError::LlvmError("checked trait catalog is absent".into()))?;
+            let declaration = catalog.traits.get(&owner).ok_or_else(|| {
+                CompileError::LlvmError(format!("checked dyn trait '{}' is absent", owner.0))
+            })?;
+            vtable_trait_name = declaration.qualified_name.clone();
+            let mut matching_slots = declaration
+                .slots
+                .iter()
+                .filter(|slot| slot.name == method_name)
+                .collect::<Vec<_>>();
+            if matching_slots.len() != 1 {
+                return Err(CompileError::Unsupported(format!(
+                    "native dyn-trait method '{}::{}' resolves to {} canonical slots",
+                    declaration.qualified_name,
+                    method_name,
+                    matching_slots.len()
+                )));
             }
+            let slot = matching_slots.remove(0);
+            if !slot.signature.generic_parameters.is_empty() {
+                return Err(CompileError::Unsupported(format!(
+                    "generic dyn-trait method '{}::{}' is unsupported without a sealed generic vtable ABI",
+                    declaration.qualified_name, method_name
+                )));
+            }
+            let idx = usize::try_from(slot.ordinal).map_err(|_| {
+                CompileError::LlvmError("trait method slot exceeds platform range".into())
+            })?;
+            let function_type = self.checked_trait_slot_function_type(slot).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "native dyn-trait ABI for '{}::{}' is not materializable",
+                    declaration.qualified_name, method_name
+                ))
+            })?;
+            for implementation in catalog
+                .impl_order
+                .iter()
+                .filter_map(|impl_owner| catalog.impls.get(impl_owner))
+                .filter(|implementation| implementation.trait_owner == owner)
+            {
+                for binding in implementation
+                    .methods
+                    .iter()
+                    .filter(|binding| binding.trait_slots.contains(&slot.ordinal))
+                {
+                    if let Some(function) = self.module.get_function(&binding.symbol) {
+                        if function.get_type() != function_type {
+                            return Err(CompileError::Unsupported(format!(
+                                "native impl method '{}' physical signature differs from checked dyn slot '{}::{}'",
+                                binding.callable.0,
+                                declaration.qualified_name,
+                                method_name
+                            )));
+                        }
+                    }
+                }
+            }
+            (idx, function_type)
+        } else {
+            let method_idx = self
+                .trait_method_names
+                .get(trait_name)
+                .and_then(|methods| methods.iter().position(|name| name == method_name));
+            let idx = match method_idx {
+                Some(idx) => idx,
+                None => {
+                    return Err(format!(
+                        "[E0708] cannot dispatch method '{}' on dyn {}",
+                        method_name, trait_name
+                    )
+                    .into());
+                }
+            };
+            let function = self
+                .find_trait_method_signature(trait_name, method_name)
+                .map(|(value, _)| value.into_function_value())
+                .ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "dyn trait '{}' has no method body for '{}'",
+                        trait_name, method_name
+                    ))
+                })?;
+            (idx, function.get_type())
         };
 
         let vtable_ty = self
             .vtable_types
-            .get(trait_name)
+            .get(&vtable_trait_name)
             .copied()
             .ok_or("no vtable type for trait")?;
 
@@ -1870,52 +2025,396 @@ impl<'ctx> CodeGenerator<'ctx> {
         let data_ptr =
             self.build_load(BasicTypeEnum::PointerType(i8_ptr_ty), data_gep, "data_ptr")?;
 
-        let fn_sig = self.find_trait_method_signature(trait_name, method_name);
-        if let Some((fn_val, _)) = fn_sig {
-            let fn_llvm = fn_val.into_function_value();
-            let fn_type = fn_llvm.get_type();
-            let fn_ptr_cast = self
-                .builder
-                .build_pointer_cast(
-                    fn_ptr,
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                    "fn_cast",
-                )
-                .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
+        let fn_ptr_cast = self
+            .builder
+            .build_pointer_cast(
+                fn_ptr,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "fn_cast",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("cast error: {}", e)))?;
 
-            let mut compiled_args = Vec::new();
-            compiled_args.push(data_ptr);
-            for arg in args {
-                compiled_args.push(self.compile_expr(arg, vars)?);
-            }
-            let metadata_args = self.values_to_metadata(&compiled_args);
-            let call = self
-                .builder
-                .build_indirect_call(fn_type, fn_ptr_cast, &metadata_args, "dyn_call")
-                .map_err(|e| CompileError::LlvmError(format!("dyn indirect call error: {}", e)))?;
-            return Ok(call_try_basic_value(&call)
-                .unwrap_or(self.context.i64_type().const_int(0, false).into()));
+        let mut compiled_args = Vec::new();
+        compiled_args.push(data_ptr);
+        for arg in args {
+            compiled_args.push(self.compile_expr(arg, vars)?);
         }
-
-        Err(format!(
-            "[E0708] cannot dispatch method '{}' on dyn {}",
-            method_name, trait_name
-        )
-        .into())
+        let metadata_args = self.values_to_metadata(&compiled_args);
+        let call = self
+            .builder
+            .build_indirect_call(
+                canonical_function_type,
+                fn_ptr_cast,
+                &metadata_args,
+                "dyn_call",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("dyn indirect call error: {}", e)))?;
+        Ok(call_try_basic_value(&call)
+            .unwrap_or(self.context.i64_type().const_int(0, false).into()))
     }
 
-    /// Find any mangled implementation of a trait method to extract its LLVM signature.
+    fn checked_trait_slot_function_type(
+        &self,
+        slot: &crate::core::ir::NativeTraitSlotDeclaration,
+    ) -> Option<FunctionType<'ctx>> {
+        let mut parameters = vec![BasicMetadataTypeEnum::PointerType(
+            self.context.ptr_type(inkwell::AddressSpace::default()),
+        )];
+        let skip_declared_self = slot
+            .signature
+            .parameters
+            .first()
+            .is_some_and(|parameter| parameter.name == "self");
+        for parameter in slot
+            .signature
+            .parameters
+            .iter()
+            .skip(if skip_declared_self { 1 } else { 0 })
+        {
+            parameters.push(self.checked_native_type_llvm(&parameter.ty, false)?.into());
+        }
+        let result = self.checked_native_type_llvm(&slot.signature.result, false)?;
+        Some(match result {
+            BasicTypeEnum::ArrayType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::FloatType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::IntType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::PointerType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::StructType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::VectorType(ty) => ty.fn_type(&parameters, false),
+            BasicTypeEnum::ScalableVectorType(ty) => ty.fn_type(&parameters, false),
+        })
+    }
+
+    fn checked_method_callee(
+        &self,
+        call_meta: Option<crate::ast::AstNodeMeta>,
+    ) -> Result<Option<crate::core::ir::ResolvedCallee>, CompileError> {
+        let Some(meta) = call_meta else {
+            return Err(CompileError::LlvmError(
+                "checked method call has no source metadata for exact target lookup".into(),
+            ));
+        };
+        let span = meta.span;
+        let key = (
+            span.source_id.raw(),
+            span.start_line,
+            span.start_col,
+            span.end_line,
+            span.end_col,
+        );
+        self.checked_trait_method_dispatch
+            .callee_for_span(&key)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "checked method call at {}:{} has no typed callee receipt",
+                    span.start_line, span.start_col
+                ))
+            })
+    }
+
+    fn checked_protocol_method_call(
+        &self,
+        call_meta: Option<crate::ast::AstNodeMeta>,
+        method_name: &str,
+    ) -> Result<
+        Option<crate::codegen::generic_trait_dispatch::CheckedTraitMethodTarget>,
+        CompileError,
+    > {
+        let Some(meta) = call_meta else {
+            return Ok(None);
+        };
+        let span = meta.span;
+        let key = (
+            span.source_id.raw(),
+            span.start_line,
+            span.start_col,
+            span.end_line,
+            span.end_col,
+        );
+        let Some(targets) = self.checked_trait_method_dispatch.call_targets.get(&key) else {
+            return Ok(None);
+        };
+        if targets.len() != 1 {
+            return Err(CompileError::LlvmError(format!(
+                "checked method call '{}@{}:{}' has {} canonical protocol targets",
+                method_name,
+                span.start_line,
+                span.start_col,
+                targets.len()
+            )));
+        }
+        let target = &targets[0];
+        let target_key = &target.key;
+        let catalog = self
+            .checked_native_declarations
+            .as_ref()
+            .ok_or_else(|| CompileError::LlvmError("checked trait catalog is absent".into()))?;
+        let declaration = catalog.traits.get(&target_key.trait_owner).ok_or_else(|| {
+            CompileError::LlvmError(format!(
+                "checked call target protocol '{}' is absent",
+                target_key.trait_owner.0
+            ))
+        })?;
+        let implementation = catalog.impls.get(&target_key.impl_owner).ok_or_else(|| {
+            CompileError::LlvmError(format!(
+                "checked protocol call target impl '{}' is absent",
+                target_key.impl_owner.0
+            ))
+        })?;
+        if implementation.owner != target_key.impl_owner
+            || implementation.trait_owner != target_key.trait_owner
+        {
+            return Err(CompileError::LlvmError(format!(
+                "checked protocol call target '{}' has a mismatched impl or trait owner",
+                target_key.callable.0
+            )));
+        }
+        let mut bindings = implementation
+            .methods
+            .iter()
+            .filter(|method| method.callable == target_key.callable)
+            .collect::<Vec<_>>();
+        if bindings.len() != 1 {
+            return Err(CompileError::LlvmError(format!(
+                "checked impl '{}' has {} bindings for callable '{}'",
+                target_key.impl_owner.0,
+                bindings.len(),
+                target_key.callable.0
+            )));
+        }
+        let binding = bindings.remove(0);
+        let trait_slots = target_key
+            .trait_slots
+            .iter()
+            .map(|ordinal| {
+                declaration.slots.get(*ordinal as usize).ok_or_else(|| {
+                    CompileError::LlvmError(format!(
+                        "checked trait method '{}' references absent slot {}",
+                        target_key.callable.0, ordinal
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let binder_ids = implementation
+            .generics
+            .iter()
+            .chain(&binding.generics)
+            .map(|generic| generic.binder.clone())
+            .collect::<Vec<_>>();
+        if binding.name != method_name
+            || target.key.trait_slots != binding.trait_slots
+            || trait_slots.iter().any(|slot| slot.name != method_name)
+            || implementation.vtable_slots
+                != declaration
+                    .slots
+                    .iter()
+                    .map(|slot| slot.ordinal)
+                    .collect::<Vec<_>>()
+            || binding.signature.generic_parameters != binder_ids
+            || target.key.binder_ids != binder_ids
+            || target.key.type_arguments.len() != binder_ids.len()
+            || target.compatibility_symbol != binding.symbol
+        {
+            return Err(CompileError::LlvmError(format!(
+                "checked protocol call target '{}' disagrees with its exact method, binder, or slot receipt",
+                target_key.callable.0
+            )));
+        }
+        Ok(Some(target.clone()))
+    }
+
+    fn checked_impl_method_for_call(
+        &self,
+        target: &crate::codegen::generic_trait_dispatch::CheckedTraitMethodTarget,
+    ) -> Result<(String, HashMap<String, Type>), CompileError> {
+        let target_key = &target.key;
+        let catalog = self
+            .checked_native_declarations
+            .as_ref()
+            .ok_or_else(|| CompileError::LlvmError("checked impl catalog is absent".into()))?;
+        let implementation = catalog.impls.get(&target_key.impl_owner).ok_or_else(|| {
+            CompileError::LlvmError(format!(
+                "checked protocol impl '{}' disappeared",
+                target_key.impl_owner.0
+            ))
+        })?;
+        let mut candidates = implementation
+            .methods
+            .iter()
+            .filter(|method| method.callable == target_key.callable)
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
+            return Err(CompileError::LlvmError(format!(
+                "checked protocol method '{}' has {} exact native impl bindings",
+                target_key.callable.0,
+                candidates.len()
+            )));
+        }
+        let method = candidates.remove(0);
+        if implementation.trait_owner != target_key.trait_owner
+            || method.name.is_empty()
+            || method.symbol != target.compatibility_symbol
+        {
+            return Err(CompileError::LlvmError(format!(
+                "checked protocol method '{}' disagrees with the exact impl target receipt",
+                target_key.callable.0
+            )));
+        }
+        let binders = implementation
+            .generics
+            .iter()
+            .chain(&method.generics)
+            .collect::<Vec<_>>();
+        let binder_ids = binders
+            .iter()
+            .map(|generic| generic.binder.clone())
+            .collect::<Vec<_>>();
+        if binder_ids != method.signature.generic_parameters
+            || binder_ids != target_key.binder_ids
+            || target_key.type_arguments.len() != binder_ids.len()
+        {
+            return Err(CompileError::LlvmError(format!(
+                "checked protocol method '{}' has {} call type arguments for {} canonical binders",
+                target_key.callable.0,
+                target_key.type_arguments.len(),
+                binder_ids.len()
+            )));
+        }
+        let types = self
+            .checked_native_types
+            .as_ref()
+            .ok_or_else(|| CompileError::LlvmError("checked native type table is absent".into()))?;
+        if target_key
+            .has_parametric_type_arguments(types)
+            .map_err(CompileError::LlvmError)?
+        {
+            return Err(CompileError::Unsupported(format!(
+                "checked protocol method '{}' retains a generic binder in its ordered type arguments; no unused-binder ABI proof is available",
+                target_key.callable.0
+            )));
+        }
+        let mut type_map = HashMap::new();
+        for (binder, argument) in binders.into_iter().zip(&target_key.type_arguments) {
+            let ty = self
+                .checked_legacy_type_for_resolved(argument, types)
+                .map_err(|error| {
+                    CompileError::Unsupported(format!(
+                        "generic argument for checked method '{}' is not materializable: {error}",
+                        target_key.callable.0
+                    ))
+                })?;
+            let ty = self.resolve_type(&ty);
+            if let Some(previous) = type_map.insert(binder.name.clone(), ty.clone()) {
+                if previous != ty {
+                    return Err(CompileError::Unsupported(format!(
+                        "checked method '{}' shadows generic binder '{}' with a different type",
+                        target_key.callable.0, binder.name
+                    )));
+                }
+            }
+        }
+        if !self
+            .checked_impl_method_bodies
+            .contains_key(&target_key.callable)
+        {
+            return Err(CompileError::LlvmError(format!(
+                "checked impl method '{}' has no canonical body payload",
+                target_key.callable.0
+            )));
+        }
+        Ok((target.compatibility_symbol.clone(), type_map))
+    }
+
+    /// Resolve one checked trait declaration by stable identity, accepting its
+    /// exact qualified or unambiguous short spelling.
+    fn checked_trait_owner(&self, trait_name: &str) -> Option<crate::core::NodeId> {
+        let catalog = self.checked_native_declarations.as_ref()?;
+        let mut candidates = catalog
+            .trait_order
+            .iter()
+            .filter_map(|owner| catalog.traits.get(owner))
+            .filter(|declaration| {
+                declaration.qualified_name == trait_name
+                    || declaration.qualified_name.rsplit("::").next() == Some(trait_name)
+            })
+            .map(|declaration| declaration.owner.clone())
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        (candidates.len() == 1).then(|| candidates.remove(0))
+    }
+
+    /// Select a method only when the concrete implementation identity is
+    /// available. Generic or opaque receivers require the exact resolved-call
+    /// target path and cannot be guessed from declaration order.
+    pub(in crate::codegen) fn checked_impl_method_candidate(
+        &self,
+        type_name: Option<&str>,
+        method_name: &str,
+        trait_name: Option<&str>,
+    ) -> Option<(String, crate::core::NodeId, Vec<Type>)> {
+        let catalog = self.checked_native_declarations.as_ref()?;
+        let trait_owner = trait_name.and_then(|name| self.checked_trait_owner(name));
+        if trait_name.is_some() && trait_owner.is_none() {
+            return None;
+        }
+        let type_name = type_name?;
+        let mut candidates = catalog
+            .impl_order
+            .iter()
+            .filter_map(|owner| catalog.impls.get(owner))
+            .filter(|implementation| {
+                implementation.type_name == type_name
+                    && trait_owner
+                        .as_ref()
+                        .is_none_or(|owner| &implementation.trait_owner == owner)
+            })
+            .flat_map(|implementation| {
+                implementation
+                    .methods
+                    .iter()
+                    .filter(|method| method.name == method_name)
+                    .map(move |method| (implementation, method))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() != 1 {
+            return None;
+        }
+        let (implementation, method) = candidates.remove(0);
+        if !implementation.generics.is_empty() || !method.generics.is_empty() {
+            return None;
+        }
+        Some((method.symbol.clone(), method.callable.clone(), Vec::new()))
+    }
+
+    /// Find an emitted method implementation from the checked native binding.
+    /// The implementation symbol is still required here because LLVM needs the
+    /// physical lowered receiver ABI for the indirect vtable call.
     fn find_trait_method_signature(
         &self,
         trait_name: &str,
         method_name: &str,
     ) -> Option<(inkwell::values::AnyValueEnum<'ctx>, String)> {
-        for (tn, timpls) in &self.type_impls {
-            if let Some(methods) = timpls.get(trait_name) {
-                if methods.iter().any(|m| m.name == *method_name) {
-                    let mangled = format!("{}__{}__{}", tn, trait_name, method_name);
-                    if let Some(f) = self.module.get_function(&mangled) {
-                        return Some((inkwell::values::AnyValueEnum::FunctionValue(f), mangled));
+        if self.checked_native_declarations.is_some() {
+            let (symbol, _, _) =
+                self.checked_impl_method_candidate(None, method_name, Some(trait_name))?;
+            let function = self.module.get_function(&symbol)?;
+            return Some((
+                inkwell::values::AnyValueEnum::FunctionValue(function),
+                symbol,
+            ));
+        }
+        for (type_name, trait_impls) in &self.type_impls {
+            if let Some(methods) = trait_impls.get(trait_name) {
+                if methods.iter().any(|method| method.name == *method_name) {
+                    let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
+                    if let Some(function) = self.module.get_function(&mangled) {
+                        return Some((
+                            inkwell::values::AnyValueEnum::FunctionValue(function),
+                            mangled,
+                        ));
                     }
                 }
             }
@@ -1931,19 +2430,55 @@ impl<'ctx> CodeGenerator<'ctx> {
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
         trait_name: &str,
+        call_meta: Option<crate::ast::AstNodeMeta>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        for (type_name, trait_impls) in &self.type_impls {
-            if let Some(methods) = trait_impls.get(trait_name) {
-                if methods.iter().any(|m| m.name == *method_name) {
-                    let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
-                    if let Some(function) = self.module.get_function(&mangled) {
-                        return self.compile_self_method_call(
-                            obj,
-                            args,
-                            vars,
-                            function,
-                            "impl_trait_call",
-                        );
+        if self.checked_native_declarations.is_some() {
+            let expected_trait = self.checked_trait_owner(trait_name).ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "impl-trait receiver '{}' has no unique checked trait owner",
+                    trait_name
+                ))
+            })?;
+            let Some(target) = self.checked_protocol_method_call(call_meta, method_name)? else {
+                return Err(CompileError::LlvmError(format!(
+                    "impl-trait method '{}::{}' has no exact checker-selected call target",
+                    trait_name, method_name
+                )));
+            };
+            if target.key.trait_owner != expected_trait {
+                return Err(CompileError::LlvmError(format!(
+                    "impl-trait method '{}::{}' resolved to a different checked trait owner",
+                    trait_name, method_name
+                )));
+            }
+            let (symbol, type_map) = self.checked_impl_method_for_call(&target)?;
+            let emitted_symbol = if type_map.is_empty() {
+                symbol.clone()
+            } else {
+                self.compile_checked_impl_method_instance(&target.key.callable, &type_map)?;
+                Self::mangle_name(&symbol, &type_map)
+            };
+            let function = self.module.get_function(&emitted_symbol).ok_or_else(|| {
+                CompileError::LlvmError(format!(
+                    "checked impl-trait method '{}' has no emitted body '{}'",
+                    target.key.callable.0, emitted_symbol
+                ))
+            })?;
+            return self.compile_self_method_call(obj, args, vars, function, "impl_trait_call");
+        } else {
+            for (type_name, trait_impls) in &self.type_impls {
+                if let Some(methods) = trait_impls.get(trait_name) {
+                    if methods.iter().any(|method| method.name == *method_name) {
+                        let mangled = format!("{}__{}__{}", type_name, trait_name, method_name);
+                        if let Some(function) = self.module.get_function(&mangled) {
+                            return self.compile_self_method_call(
+                                obj,
+                                args,
+                                vars,
+                                function,
+                                "impl_trait_call",
+                            );
+                        }
                     }
                 }
             }
@@ -2196,8 +2731,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|f| f.count_basic_blocks() == 0)
             .unwrap_or(true)
         {
-            self.compile_generic_func(&func, &merged_map)
+            #[cfg(test)]
+            self.compile_legacy_generic_test_instance(&func, &merged_map)
                 .map_err(|e| CompileError::Generic(e.to_string()))?;
+            #[cfg(not(test))]
+            {
+                return Err(CompileError::CanonicalMirCoverage(format!(
+                    "MIR-COVERAGE-001/NITS: turbofish '{}' reached the retired legacy monomorphizer",
+                    name
+                )));
+            }
         }
         // Call the mangled function
         self.compile_call_mangled(&mangled, args, vars)
@@ -6025,8 +6568,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.compile_from_json_result_value(&args[0], args.get(1), raw_ptr)
             }
             Type::Result(ok, err) => self.compile_from_json_result_value(ok, Some(err), raw_ptr),
-            Type::Name(type_name, _) => {
+            Type::Name(type_name, args) => {
                 // Type alias → underlying type; Record → field deserialize.
+                if args.is_empty() {
+                    if let Some(aliased) = self.checked_alias_primitive_type(type_name) {
+                        return self.compile_from_json_turbofish_with_ptr(&[aliased], raw_ptr);
+                    }
+                }
                 if let Some(td) = self.type_defs.get(type_name) {
                     if let crate::ast::TypeDefKind::Alias(aliased) = &td.kind {
                         let aliased = aliased.clone();
@@ -6716,8 +7264,13 @@ impl<'ctx> CodeGenerator<'ctx> {
             Type::Tuple(elems) if !elems.is_empty() => {
                 self.compile_from_json_turbofish_with_ptr(&[Type::Tuple(elems.clone())], raw_ptr)
             }
-            Type::Name(type_name, _) => {
+            Type::Name(type_name, args) => {
                 // Type alias or named record Ok payload.
+                if args.is_empty() {
+                    if let Some(aliased) = self.checked_alias_primitive_type(type_name) {
+                        return self.compile_from_json_scalar_ok(&aliased, raw_ptr);
+                    }
+                }
                 if let Some(td) = self.type_defs.get(type_name) {
                     if let crate::ast::TypeDefKind::Alias(aliased) = &td.kind {
                         let aliased = aliased.clone();
@@ -7068,7 +7621,23 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             // Nested Record / type alias: resolve Alias to underlying type,
             // otherwise deserialize JSON object into a Record.
-            crate::ast::Type::Name(nested_name, _) => {
+            crate::ast::Type::Name(nested_name, args) => {
+                if args.is_empty() {
+                    if let Some(aliased) = self.checked_alias_primitive_type(nested_name) {
+                        return self.compile_json_scalar_field(
+                            type_name,
+                            &crate::ast::Field {
+                                meta: field.meta,
+                                name: field.name.clone(),
+                                ty: aliased,
+                            },
+                            raw_val,
+                            json_as_i64_fn,
+                            json_as_f64_fn,
+                            json_as_bool_fn,
+                        );
+                    }
+                }
                 if let Some(td) = self.type_defs.get(nested_name.as_str()) {
                     if let crate::ast::TypeDefKind::Alias(aliased) = &td.kind {
                         let aliased = aliased.clone();

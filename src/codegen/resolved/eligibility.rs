@@ -650,12 +650,19 @@ pub(super) fn require_resolved_native_program(
                 "non-user-origin function requires per-function dispatch (not all-or-nothing)",
             ));
         }
-        if function.is_async || function.extern_abi.is_some() || !function.generics.is_empty() {
+        if function.is_async || function.extern_abi.is_some() {
             return Err(UnsupportedResolvedNode::new(
                 &function.node_id,
                 &function.node_id,
-                "async, export, and generic functions are not in the resolved native slice",
+                "async and export functions are not in the resolved native slice",
             ));
+        }
+        // Generic functions are checker-owned templates. Their concrete
+        // call-site instances are materialized into canonical MIR before the
+        // resolved emitter runs, so an unsubstituted template is not emitted
+        // as an executable body here.
+        if !function.generics.is_empty() {
+            continue;
         }
         if function.qualified_name.contains("::") {
             return Err(UnsupportedResolvedNode::new(

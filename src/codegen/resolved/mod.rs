@@ -8,7 +8,6 @@
 mod eligibility;
 mod types;
 
-use crate::codegen::mono_recover::infer_type_args_from_call_site;
 use std::collections::BTreeMap;
 
 use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum, StructType};
@@ -18,6 +17,8 @@ use crate::ast::BinOp;
 use crate::codegen::{CallSiteValueExt, CodeGenerator};
 use crate::core::ir::{ContractKind, ResolvedFStringPart};
 use crate::core::ir::{ResolvedBinaryOp, ResolvedUnaryOp};
+use crate::core::mir::reference::MirProgram;
+use crate::core::mir::{MirGenericInstanceContract, MirInstance, MirInstructionKind};
 use crate::core::{
     CheckedConversion, CheckedConversionKind, CheckedProgram, FunctionTypeAbi, MethodId, NodeId,
     PrimitiveType, ResolvedBlock, ResolvedBody, ResolvedCall, ResolvedCallee, ResolvedConstValue,
@@ -197,12 +198,14 @@ struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
     /// fault/exit(...) paths, discarded on normal return).
     defer_scopes: Vec<ResolvedBlock>,
     comp_scopes: Vec<ResolvedBlock>,
-    /// 0.39.x E0722 根治 scaffold: composite-T / cap generic call sites that
-    /// currently route to the legacy monomorphizer (route-a, Call arm) are
-    /// recorded here, keyed by (callee qualified name, concrete type args). A
-    /// later round can emit resolved monomorphized instances for these instead
-    /// of falling back to legacy. Populated without changing emission behavior.
+    /// Historical generic-instance bookkeeping retained for the public subset
+    /// return shape. The canonical consumer below never populates this slot or
+    /// routes a resolved call through the legacy monomorphizer.
     pending_generic_instances: Vec<(String, Vec<ResolvedTypeId>)>,
+    /// Canonical generic instances compiled by the MIR adapter before this
+    /// emitter starts. The key is checker-owned (template, concrete arguments);
+    /// the resolved emitter never reconstructs an AST mangle.
+    canonical_generic_instances: BTreeMap<(NodeId, Vec<ResolvedTypeId>), MirInstance>,
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -220,6 +223,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Err(error) = require_resolved_native_program(program) {
             return Err(vec![unsupported_diagnostic(program, error)]);
         }
+        // Generic definitions are templates, not executable MIR bodies.  The
+        // checker-owned call-site arguments identify concrete instances; build
+        // those receipts and native symbols before the resolved caller emits
+        // its call.  Unsupported shapes fail closed in the materializer.
+        let eligible = resolved_eligible_functions(program, false).unwrap_or_default();
+        let canonical_generic_instances = self
+            .prepare_canonical_generic_instances(program, &eligible)
+            .map_err(|error| vec![resolved_compile_diagnostic(program, error)])?;
         NativeResolvedEmitter {
             program,
             generator: self,
@@ -228,6 +239,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             defer_scopes: Vec::new(),
             comp_scopes: Vec::new(),
             pending_generic_instances: Vec::new(),
+            canonical_generic_instances,
         }
         .compile_program()
         .map_err(|error| {
@@ -253,6 +265,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             return Err(vec![dynamic_any_unpack_diagnostic(program, &owner, &node)]);
         }
+        let canonical_generic_instances = self
+            .prepare_canonical_generic_instances(program, eligible)
+            .map_err(|error| vec![resolved_compile_diagnostic(program, error)])?;
         NativeResolvedEmitter {
             program,
             generator: self,
@@ -261,16 +276,174 @@ impl<'ctx> CodeGenerator<'ctx> {
             defer_scopes: Vec::new(),
             comp_scopes: Vec::new(),
             pending_generic_instances: Vec::new(),
+            canonical_generic_instances,
         }
         .compile_subset(eligible)
-        .map_err(|error| {
-            let mut diagnostic = error.to_diagnostic();
-            if let Some(span) = program.entry_span() {
-                diagnostic = diagnostic.with_span(span);
-            }
-            vec![diagnostic]
-        })
+        .map_err(|error| vec![resolved_compile_diagnostic(program, error)])
     }
+
+    /// Materialize checker-owned generic MIR instances needed by resolved
+    /// callers before the AST emitter starts. The closed materializer admits
+    /// ScalarIdentity plus the current List/Set/record/tuple/variant families;
+    /// every unsupported shape fails closed with MIR-COVERAGE-001/NITS rather
+    /// than re-entering the legacy monomorphizer.
+    fn prepare_canonical_generic_instances(
+        &mut self,
+        program: &CheckedProgram,
+        eligible: &std::collections::BTreeSet<NodeId>,
+    ) -> Result<BTreeMap<(NodeId, Vec<ResolvedTypeId>), MirInstance>, CompileError> {
+        let type_catalog = crate::core::mir::types::MirTypeCatalog::from_checked_program(program)
+            .map_err(|errors| {
+            CompileError::Unsupported(format!(
+                "MIR-COVERAGE-001/NITS: canonical generic TypeDesc catalog failed: {errors:?}"
+            ))
+        })?;
+        let mut lowered_callers = BTreeMap::new();
+        for owner in eligible {
+            let Some(callable) = program.callable(owner) else {
+                continue;
+            };
+            let Ok(function) =
+                crate::core::mir::lower::lower_callable_with_type_catalog(callable, &type_catalog)
+            else {
+                // The resolved emitter decides eligibility for this body. A body
+                // that cannot lower to MIR cannot authorize a guessed generic target.
+                continue;
+            };
+            let mut generic_call = false;
+            let mut unsupported_generic_call = false;
+            for instruction in function
+                .blocks
+                .values()
+                .flat_map(|block| block.instructions.iter())
+            {
+                let MirInstructionKind::Call {
+                    callee: ResolvedCallee::Function(template),
+                    type_arguments,
+                    ..
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                let Some(callee) = program.callable(template) else {
+                    if !type_arguments.is_empty() {
+                        unsupported_generic_call = true;
+                    }
+                    continue;
+                };
+                if callee.signature.generic_parameters.is_empty() {
+                    // A non-generic target carrying type arguments is malformed
+                    // for this route; do not let it reach an ABI guess.
+                    if !type_arguments.is_empty() {
+                        unsupported_generic_call = true;
+                    }
+                    continue;
+                }
+                generic_call = true;
+                // The checker normally fills concrete arguments at this edge.
+                // An empty list is therefore a coverage failure, not permission
+                // to call an unsubstituted generic skeleton.
+                if type_arguments.is_empty() {
+                    unsupported_generic_call = true;
+                }
+            }
+            if generic_call && !unsupported_generic_call {
+                lowered_callers.insert(owner.clone(), function);
+            }
+        }
+        if lowered_callers.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        // The checker-owned materializer is the sole admission point for generic
+        // families (identity, List/Set facades, records, tuples, and variants).
+        // It inserts specialized MIR functions and receipts into this graph; no
+        // AST mangle or legacy monomorphizer is consulted here.
+        let instances = crate::core::mir::lower::materialize_concrete_generic_instances(
+            program,
+            &type_catalog,
+            &mut lowered_callers,
+        )
+        .map_err(|errors| {
+            CompileError::Unsupported(format!(
+                "MIR-COVERAGE-001/NITS: canonical generic instance materialization failed: {errors:?}"
+            ))
+        })?;
+        let mut selected_instances = BTreeMap::new();
+        let mut selected_functions = BTreeMap::new();
+        let mut by_call = BTreeMap::new();
+        for (id, instance) in instances {
+            let function = lowered_callers.remove(&instance.function).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "MIR-COVERAGE-001/NITS: canonical generic target '{}' is absent from its lowered MIR graph",
+                    instance.function.0
+                ))
+            })?;
+            selected_functions.insert(instance.function.clone(), function);
+            by_call.insert(
+                (instance.template.clone(), instance.arguments.clone()),
+                instance.clone(),
+            );
+            selected_instances.insert(id, instance);
+        }
+        if selected_instances.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let mir = MirProgram::with_type_catalog_and_instances(
+            selected_functions,
+            type_catalog,
+            selected_instances,
+        )
+        .map_err(|errors| {
+            CompileError::Unsupported(format!(
+                "MIR-COVERAGE-001/NITS: canonical generic instance receipt rejected: {errors:?}"
+            ))
+        })?;
+        self.compile_mir_native(&mir).map_err(|diagnostics| {
+            CompileError::Unsupported(format!(
+                "MIR-COVERAGE-001/NITS: canonical generic native consumer rejected its receipt: {diagnostics:?}"
+            ))
+        })?;
+        Ok(by_call)
+    }
+}
+
+fn is_scalar_generic_identity_callable(
+    program: &CheckedProgram,
+    callable: &crate::core::ir::ResolvedCallable,
+) -> bool {
+    let [binder] = callable.signature.generic_parameters.as_slice() else {
+        return false;
+    };
+    let [parameter] = callable.signature.parameters.as_slice() else {
+        return false;
+    };
+    let [body_parameter] = callable.body.parameters.as_slice() else {
+        return false;
+    };
+    if !matches!(
+        program.resolved_types().get(&parameter.ty),
+        Some(ResolvedType::GenericParameter(found)) if found == binder
+    ) || parameter.ty != callable.signature.result
+        || parameter.mutable
+        || parameter.permission.is_some()
+        || parameter.has_default
+        || !callable.signature.effects.is_empty()
+        || !callable.body.captures.is_empty()
+        || !callable.body.default_values.is_empty()
+        || !callable.contracts.is_empty()
+        || !callable.body.root.statements.is_empty()
+    {
+        return false;
+    }
+    callable.body.root.result.as_deref().is_some_and(|result| {
+        result.ty == parameter.ty
+            && matches!(
+                &result.kind,
+                ResolvedExprKind::Load(place)
+                    if place.base == *body_parameter && place.projections.is_empty()
+            )
+    })
 }
 
 fn unsupported_diagnostic(program: &CheckedProgram, error: UnsupportedResolvedNode) -> Diagnostic {
@@ -290,12 +463,29 @@ fn unsupported_diagnostic(program: &CheckedProgram, error: UnsupportedResolvedNo
     diagnostic
 }
 
-/// Convert a generic callee's resolved type arguments into the AST type map
-/// expected by the legacy monomorphizer (`compile_generic_func`). This is used
-/// when the resolved native slice emits a call to a generic function whose type
-/// variable cannot be substituted inline (e.g. `List<T> -> T` returning a heap
-/// type), so the monomorphized instance is built via the legacy path with the
-/// concrete args taken from the resolved IR's `call.type_arguments`.
+fn resolved_compile_diagnostic(program: &CheckedProgram, error: CompileError) -> Diagnostic {
+    let message = error.to_string();
+    let coverage = message.starts_with("MIR-COVERAGE-001/NITS:");
+    let mut diagnostic = if coverage {
+        Diagnostic::error_code(
+            "MIR-COVERAGE-001",
+            message.clone(),
+            program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+        )
+    } else {
+        error.to_diagnostic()
+    };
+    if !coverage {
+        if let Some(span) = program.entry_span() {
+            diagnostic = diagnostic.with_span(span);
+        }
+    }
+    diagnostic
+}
+
+/// Historical conversion helper retained for compatibility tooling. The
+/// resolved native generic consumer uses checker-owned MIR instance receipts
+/// and does not call this AST mangle path.
 fn resolved_type_args_to_ast(
     generics: &[crate::ast::GenericParam],
     type_args: &[crate::core::ResolvedTypeId],
@@ -414,7 +604,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .program
             .functions()
             .values()
-            .filter(|function| !function.is_comptime)
+            // Generic definitions are templates. Their concrete MIR instance
+            // bodies were emitted by prepare_canonical_generic_instances;
+            // emitting an unsubstituted generic callable here would recreate
+            // the legacy ABI hole.
+            .filter(|function| !function.is_comptime && function.generics.is_empty())
             .collect();
         functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
 
@@ -519,6 +713,16 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // mangling); a leftover terminator-less stub
                             // segfaults LLVM's pass pipeline.
                             self.clear_partial_body(llvm_fn);
+                            if self
+                                .generator
+                                .checked_impl_method_symbols
+                                .contains_key(&function.node_id)
+                            {
+                                return Err(CompileError::CanonicalMirCoverage(format!(
+                                    "MIR-COVERAGE-001/NITS: resolved impl method '{}' failed LLVM verification; refusing legacy body emission",
+                                    function.node_id.0
+                                )));
+                            }
                             if is_core_kernel_function(self.program, function) {
                                 return Err(CompileError::Unsupported(format!(
                                     "resolved emitter hard-error for core callee '{}': LLVM verification failed",
@@ -532,6 +736,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     count += 1;
                 }
                 Err(e) => {
+                    if e.to_string().starts_with("MIR-COVERAGE-001/NITS:") {
+                        let symbol = function.qualified_name.clone();
+                        if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
+                            self.clear_partial_body(llvm_fn);
+                        }
+                        return Err(e);
+                    }
                     // F-004 (0.40.1.8) / A3 E0723: a fail-closed ownership error
                     // (code E0723 — e.g. returning a closure that captures a heap
                     // value) must NOT be silently downgraded to the legacy emitter;
@@ -543,6 +754,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             self.clear_partial_body(llvm_fn);
                         }
                         return Err(e);
+                    }
+                    if self
+                        .generator
+                        .checked_impl_method_symbols
+                        .contains_key(&function.node_id)
+                    {
+                        let symbol = function.qualified_name.clone();
+                        if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
+                            self.clear_partial_body(llvm_fn);
+                        }
+                        return Err(CompileError::CanonicalMirCoverage(format!(
+                            "MIR-COVERAGE-001/NITS: resolved impl method '{}' could not be lowered; refusing legacy body emission: {e}",
+                            function.node_id.0
+                        )));
                     }
                     // Function failed to emit through resolved path.
                     // Record in failed set — the legacy emitter's skip check
@@ -602,6 +827,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
     }
 
     fn callable_symbol(&self, owner: &NodeId) -> Result<String, CompileError> {
+        // Impl methods have a checker-issued native symbol that is also used
+        // by the vtable declaration. Do not reconstruct a surface
+        // `Type_method` spelling here: that would let the resolved emitter
+        // produce a body under a symbol different from the canonical slot
+        // receipt and leave the vtable pointing at an empty declaration.
+        if let Some(symbol) = self.generator.checked_impl_method_symbols.get(owner) {
+            return Ok(symbol.clone());
+        }
         let function = self.program.functions().get(owner).ok_or_else(|| {
             CompileError::Unsupported(format!("function catalog has no owner '{}'", owner.0))
         })?;
@@ -3275,135 +3508,79 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Spawn(value) => self.emit_spawn(value, frame),
             ResolvedExprKind::Await(value) => self.emit_await(value, &expression.ty, frame),
             ResolvedExprKind::Call(call) => {
-                // 0.39.x (L1 parity fix): generic calls are compiled once as a
-                // single resolved skeleton whose type variable T is never
-                // substituted, so `lower_type` drops T to i64 and the call ABI
-                // mismatches the monomorphized callee whenever the concrete
-                // instance does not share the skeleton's i64-based return ABI
-                // (observed: `func first<T>(xs: List<T>) -> T { xs[0] }` called
-                // with `List<string>` segfaulted and with `List<f64>` silently
-                // returned raw bits; the interpreter is correct).
-                // The resolved IR already carries the concrete type arguments in
-                // `call.type_arguments`, so monomorphize the callee on demand via
-                // the legacy emitter using those args, and call the mangled
-                // instance directly. This keeps the resolved fast path for the
-                // surrounding body while fixing the call's ABI.
+                // Generic calls in the resolved native slice are admitted only
+                // through a checker-receipted canonical MIR instance. The
+                // materializer covers ScalarIdentity and the current List/Set,
+                // record, tuple, and variant families; an absent or disagreeing
+                // receipt fails closed before any legacy compatibility route.
                 let mut generic_symbol_override: Option<String> = None;
                 if let ResolvedCallee::Function(owner) = &call.callee {
                     if let Some(callee_fn) = self.program.functions().get(owner) {
-                        if !callee_fn.generics.is_empty() && !call.type_arguments.is_empty() {
-                            // The resolved native slice compiles a generic callee
-                            // once with its type variable T unsubstituted, so it
-                            // cannot lower instances whose ABI differs from that
-                            // skeleton — `lower_type` drops T to i64 and the call
-                            // ABI mismatches the concrete instantiation (observed:
-                            // `List<string>` element segfaulted, `List<f64>`
-                            // silently returned raw bits as i64). Route the call
-                            // to the legacy monomorphizer (which builds a
-                            // correctly-substituted instance from
-                            // `call.type_arguments`) UNLESS the concrete result
-                            // provably shares the skeleton's i64-based ABI: small
-                            // integers / bool / char coerce losslessly, and Unit
-                            // is void in both. Floats live in xmm registers,
-                            // i128/u128 use a wide ABI, strings and every
-                            // composite (nominal/tuple/flow state) differ — those
-                            // fail closed to the legacy emitter. Unknown result
-                            // types fail closed the same way.
-                            let rt = self.program.resolved_types().get(&call.result);
-                            let result_abi_safe = match rt {
-                                Some(ResolvedType::Primitive(p)) => matches!(
-                                    p,
-                                    PrimitiveType::I8
-                                        | PrimitiveType::I16
-                                        | PrimitiveType::I32
-                                        | PrimitiveType::I64
-                                        | PrimitiveType::Isize
-                                        | PrimitiveType::U8
-                                        | PrimitiveType::U16
-                                        | PrimitiveType::U32
-                                        | PrimitiveType::U64
-                                        | PrimitiveType::Usize
-                                        | PrimitiveType::Bool
-                                        | PrimitiveType::Char
-                                        | PrimitiveType::Unit
-                                ),
-                                _ => false,
+                        if !callee_fn.generics.is_empty() {
+                            let key = (owner.clone(), call.type_arguments.clone());
+                            let Some(instance) = self.canonical_generic_instances.get(&key) else {
+                                return Err(CompileError::Unsupported(format!(
+                                    "MIR-COVERAGE-001/NITS: canonical generic instance receipt is absent for '{}' {:?}; legacy generic fallback is forbidden",
+                                    callee_fn.qualified_name, call.type_arguments
+                                )));
                             };
-                            // A generic function whose type parameter is
-                            // instantiated to a composite / non-skeleton type
-                            // (string, float, i128, tuple, named, …) cannot be
-                            // lowered by the resolved skeleton, which collapses
-                            // the type variable T to i64. The body needs the
-                            // concrete type to decode `List<T>` elements
-                            // (Display / index / to_json / contains), so route it
-                            // to the legacy monomorphizer — exactly the same
-                            // treatment already given to composite RETURN types.
-                            // Previously only the RETURN type was checked, so
-                            // `func show<T>(xs: List<T>)` (returns Unit) stayed an
-                            // abstract skeleton and printed `List<unknown>`,
-                            // breaking cross-emitter `List<(T,T)>` / nested
-                            // non-scalar element returns. Closes that gap.
-                            let args_abi_safe = call.type_arguments.iter().all(|tid| {
-                                match self.program.resolved_types().get(tid) {
-                                    Some(ResolvedType::Primitive(p)) => matches!(
-                                        p,
-                                        PrimitiveType::I8
-                                            | PrimitiveType::I16
-                                            | PrimitiveType::I32
-                                            | PrimitiveType::I64
-                                            | PrimitiveType::Isize
-                                            | PrimitiveType::U8
-                                            | PrimitiveType::U16
-                                            | PrimitiveType::U32
-                                            | PrimitiveType::U64
-                                            | PrimitiveType::Usize
-                                            | PrimitiveType::Bool
-                                            | PrimitiveType::Char
-                                            | PrimitiveType::Unit
-                                    ),
-                                    _ => false,
-                                }
-                            });
-                            let needs_legacy = !result_abi_safe || !args_abi_safe;
-                            if needs_legacy {
-                                // E0722 根治 scaffold: record the composite-T / cap
-                                // generic instance required by this call so a later
-                                // round can emit a resolved monomorphization instead
-                                // of routing to the legacy monomorphizer. Emission
-                                // behavior is unchanged by this recording.
-                                self.pending_generic_instances.push((
-                                    callee_fn.qualified_name.clone(),
-                                    call.type_arguments.clone(),
-                                ));
-                                if let Some(fdef) = self
-                                    .generator
-                                    .func_defs
-                                    .get(&callee_fn.qualified_name)
-                                    .cloned()
-                                {
-                                    let ast_map = resolved_type_args_to_ast(
-                                        &callee_fn.generics,
-                                        &call.type_arguments,
-                                        self.program.resolved_types(),
-                                    );
-                                    if !ast_map.is_empty() {
-                                        let mangled =
-                                            CodeGenerator::mangle_name(&fdef.name, &ast_map);
-                                        // GENERIC-SHADOW-MONO-001 mirror: compile when the mangled name is absent
-                                        // OR only forward-declared (no body) — see the shadow arm.
-                                        let needs_compile = self
-                                            .generator
-                                            .module
-                                            .get_function(&mangled)
-                                            .map(|f| f.count_basic_blocks() == 0)
-                                            .unwrap_or(true);
-                                        if needs_compile {
-                                            self.generator.compile_generic_func(&fdef, &ast_map)?;
-                                        }
-                                        generic_symbol_override = Some(mangled);
-                                    }
+                            if instance.template != *owner
+                                || instance.arguments != call.type_arguments
+                            {
+                                return Err(CompileError::Unsupported(format!(
+                                    "MIR-COVERAGE-001/NITS: canonical generic instance receipt disagrees with call '{}', {:?}",
+                                    callee_fn.qualified_name, call.type_arguments
+                                )));
+                            }
+                            if instance.contract == MirGenericInstanceContract::ScalarIdentity {
+                                let scalar_identity_call =
+                                    is_scalar_generic_identity_callable(
+                                        self.program,
+                                        self.program.callable(owner).ok_or_else(|| {
+                                            CompileError::Unsupported(format!(
+                                                "MIR-COVERAGE-001/NITS: generic identity callee '{}' has no checked callable",
+                                                owner.0
+                                            ))
+                                        })?,
+                                    )
+                                        && call.type_arguments.len() == 1
+                                        && matches!(
+                                            self.program
+                                                .resolved_types()
+                                                .get(&call.type_arguments[0]),
+                                            Some(ResolvedType::Primitive(
+                                                PrimitiveType::I32 | PrimitiveType::I64
+                                            ))
+                                        )
+                                        && call.result == call.type_arguments[0]
+                                        && call.arguments.len() == 1
+                                        && call.arguments[0].value.ty == call.type_arguments[0]
+                                        && call.arguments[0].conversion.kind
+                                            == CheckedConversionKind::Identity
+                                        && call.permission.is_none()
+                                        && call.effects.is_empty()
+                                        && call.session.is_empty();
+                                if !scalar_identity_call {
+                                    return Err(CompileError::Unsupported(format!(
+                                        "MIR-COVERAGE-001/NITS: canonical ScalarIdentity instance receipt disagrees with generic call '{}'",
+                                        callee_fn.qualified_name
+                                    )));
                                 }
                             }
+                            let symbol =
+                                crate::codegen::mir::native_symbol_for_owner(&instance.function)
+                                    .map_err(|message| {
+                                        CompileError::Unsupported(format!(
+                                            "canonical generic target symbol rejected: {message}"
+                                        ))
+                                    })?;
+                            if self.generator.module.get_function(&symbol).is_none() {
+                                return Err(CompileError::LlvmError(format!(
+                                    "canonical generic target '{}' is undeclared",
+                                    symbol
+                                )));
+                            }
+                            generic_symbol_override = Some(symbol);
                         }
                     }
                 }
@@ -5109,121 +5286,20 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             // functions.
                             let is_user_decl = self.generator.func_defs.contains_key(name);
                             if is_user_decl {
-                                // 0.39.x matrix sweep (GENERIC-SHADOW-MONO-001):
-                                // a GENERIC stdlib free function whose name
-                                // shadows a builtin (reduce_list over the builtin
-                                // reduce family) arrives here with
-                                // ResolvedCallee::Builtin — the Function-arm
-                                // monomorphization below never runs, so the call
-                                // went to the i64-fallback SKELETON: f64
-                                // accumulators were bitwise-i64-added
-                                // (`sum_float([2.5,1.5])` printed the bit pattern
-                                // 4616189618054758000). Monomorphize on demand
-                                // and retarget to the mangled instance, exactly
-                                // like the Function arm.
-                                if let Some(fdef) = self.generator.func_defs.get(name).cloned() {
-                                    let ast_map: std::collections::HashMap<
-                                        String,
-                                        crate::ast::Type,
-                                    > = if !call.type_arguments.is_empty() {
-                                        resolved_type_args_to_ast(
-                                            &fdef.generics,
-                                            &call.type_arguments,
-                                            self.program.resolved_types(),
-                                        )
-                                    } else {
-                                        // Inferred (non-turbofish) call: recover the
-                                        // bindings structurally from argument types.
-                                        let argument_types: Vec<crate::core::ResolvedTypeId> = call
-                                            .arguments
-                                            .iter()
-                                            .map(|a| a.value.ty.clone())
-                                            .collect();
-                                        let recovered = infer_type_args_from_call_site(
-                                            &fdef,
-                                            &argument_types,
-                                            self.program.resolved_types(),
-                                            resolved_type_to_ast,
-                                        );
-                                        // Require EVERY generic to be recovered; a
-                                        // partial map would mis-instantiate.
-                                        let complete = !fdef.generics.is_empty()
-                                            && fdef
-                                                .generics
-                                                .iter()
-                                                .all(|g| recovered.contains_key(&g.name));
-                                        if complete {
-                                            recovered
-                                        } else {
-                                            Default::default()
-                                        }
-                                    };
-                                    if !fdef.generics.is_empty() && !ast_map.is_empty() {
-                                        let mangled =
-                                            CodeGenerator::mangle_name(&fdef.name, &ast_map);
-                                        // GENERIC-SHADOW-MONO-001: a prior
-                                        // call site may have forward-DECLARED
-                                        // the mangled name without a body —
-                                        // `is_none()` would then skip
-                                        // instantiation and link against an
-                                        // empty declaration. Compile whenever
-                                        // no definition exists yet.
-                                        let needs_compile = self
-                                            .generator
-                                            .module
-                                            .get_function(&mangled)
-                                            .map(|f| f.count_basic_blocks() == 0)
-                                            .unwrap_or(true);
-                                        if needs_compile {
-                                            self.generator.compile_generic_func(&fdef, &ast_map)?;
-                                        }
-                                        if let Some(shadow_fn) =
-                                            self.generator.module.get_function(&mangled)
-                                        {
-                                            let params = shadow_fn.get_params();
-                                            for (i, arg) in arguments.iter_mut().enumerate() {
-                                                if let Some(param) = params.get(i) {
-                                                    let param_ty = param.get_type();
-                                                    let arg_basic: BasicValueEnum = match *arg {
-                                                        BasicMetadataValueEnum::IntValue(iv) => {
-                                                            iv.into()
-                                                        }
-                                                        BasicMetadataValueEnum::FloatValue(fv) => {
-                                                            fv.into()
-                                                        }
-                                                        BasicMetadataValueEnum::PointerValue(
-                                                            pv,
-                                                        ) => pv.into(),
-                                                        BasicMetadataValueEnum::StructValue(
-                                                            svs,
-                                                        ) => svs.into(),
-                                                        _ => continue,
-                                                    };
-                                                    if arg_basic.get_type() != param_ty {
-                                                        let coerced =
-                                                            self.coerce_to(arg_basic, param_ty)?;
-                                                        *arg =
-                                                            BasicMetadataValueEnum::from(coerced);
-                                                    }
-                                                }
-                                            }
-                                            let result = self
-                                                    .generator
-                                                    .build_call(
-                                                        shadow_fn,
-                                                        &arguments,
-                                                        "resolved_generic_shadow_call",
-                                                    )?
-                                                    .try_as_basic_value_opt()
-                                                    .ok_or_else(|| {
-                                                        CompileError::LlvmError(format!(
-                                                            "generic shadow call '{mangled}' returned void"
-                                                        ))
-                                                    })?;
-                                            return self
-                                                .wrap_builtin_string_result(result, &call.result);
-                                        }
-                                    }
+                                // Generic builtin shadows have no canonical MIR
+                                // identity receipt in this slice. Reject before any
+                                // legacy monomorphization or fallback builtin call so
+                                // the compatibility owner cannot hide coverage gaps.
+                                if self
+                                    .generator
+                                    .func_defs
+                                    .get(name)
+                                    .is_some_and(|fdef| !fdef.generics.is_empty())
+                                {
+                                    return Err(CompileError::Unsupported(format!(
+                                        "MIR-COVERAGE-001/NITS: generic builtin shadow '{}' has no canonical MIR receipt; legacy generic fallback is forbidden",
+                                        name
+                                    )));
                                 }
                                 // Coerce arguments to match the shadow
                                 // function's declared parameter types (same
@@ -5607,6 +5683,47 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     // MethodId, construct the impl function name
                     // ("{Type}_{method}"), and call it directly.
                     ResolvedCallee::ProtocolMethod { ref method, .. } => {
+                        if let Some(symbol) = self
+                            .generator
+                            .checked_impl_method_symbols
+                            .get(&NodeId(method.as_str().to_owned()))
+                            .cloned()
+                        {
+                            let callee =
+                                self.generator.module.get_function(&symbol).ok_or_else(|| {
+                                    CompileError::LlvmError(format!(
+                                        "resolved ProtocolMethod callee '{}' is undeclared",
+                                        symbol
+                                    ))
+                                })?;
+                            let params = callee.get_params();
+                            for (i, arg) in arguments.iter_mut().enumerate() {
+                                if let Some(param) = params.get(i) {
+                                    let param_ty = param.get_type();
+                                    let arg_basic: BasicValueEnum = match *arg {
+                                        BasicMetadataValueEnum::IntValue(iv) => iv.into(),
+                                        BasicMetadataValueEnum::FloatValue(fv) => fv.into(),
+                                        BasicMetadataValueEnum::PointerValue(pv) => pv.into(),
+                                        BasicMetadataValueEnum::StructValue(sv) => sv.into(),
+                                        _ => continue,
+                                    };
+                                    if arg_basic.get_type() != param_ty {
+                                        let coerced = self.coerce_to(arg_basic, param_ty)?;
+                                        *arg = BasicMetadataValueEnum::from(coerced);
+                                    }
+                                }
+                            }
+                            return self
+                                .generator
+                                .build_call(callee, &arguments, "resolved_checked_trait_call")?
+                                .try_as_basic_value_opt()
+                                .ok_or_else(|| {
+                                    CompileError::LlvmError(format!(
+                                        "resolved ProtocolMethod '{}' returned void",
+                                        symbol
+                                    ))
+                                });
+                        }
                         // MethodId format: "function:{Trait}:for:{Type}::{method}:{hash}"
                         let method_str = method.as_str();
                         let (impl_type, method_name) = method_str
@@ -10815,28 +10932,45 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             CompileError::Unsupported(format!("invalid method id '{}'", method.as_str()))
         })?;
         let method_key = format!("{actor_type}::{method_name}");
-        let method_id = *self
-            .generator
-            .actor_method_ids
-            .get(&method_key)
-            .ok_or_else(|| {
-                CompileError::Unsupported(format!("unknown actor method '{method_key}'"))
+        let typed_header =
+            self.generator
+                .checked_actor_mailbox_header(self.program, actor, method_name)?;
+        let (method_id, method_params, result_ty) = if let Some(header) = typed_header {
+            (header.method_id, header.parameters, header.result)
+        } else {
+            // Explicit unmigrated mailbox ABI remainder. Keep the original
+            // consumer for supported shapes without a canonical layout receipt.
+            let method_id = *self
+                .generator
+                .actor_method_ids
+                .get(&method_key)
+                .ok_or_else(|| {
+                    CompileError::Unsupported(format!("unknown actor method '{method_key}'"))
+                })?;
+            let actor_def = self.generator.actor_defs.get(actor_type).ok_or_else(|| {
+                CompileError::Unsupported(format!("unknown actor type '{actor_type}'"))
             })?;
-        let actor_def = self.generator.actor_defs.get(actor_type).ok_or_else(|| {
-            CompileError::Unsupported(format!("unknown actor type '{actor_type}'"))
-        })?;
-        let method_def = actor_def
-            .methods
-            .iter()
-            .find(|m| m.name == method_name)
-            .ok_or_else(|| {
-                CompileError::Unsupported(format!(
-                    "actor '{actor_type}' has no method '{method_name}'"
-                ))
-            })?;
-        let method_params: Vec<crate::ast::Type> =
-            method_def.params.iter().map(|p| p.ty.clone()).collect();
-        let method_ret = method_def.ret.clone();
+            let method_def = actor_def
+                .methods
+                .iter()
+                .find(|m| m.name == method_name)
+                .ok_or_else(|| {
+                    CompileError::Unsupported(format!(
+                        "actor '{actor_type}' has no method '{method_name}'",
+                    ))
+                })?;
+            let parameters = method_def
+                .params
+                .iter()
+                .map(|parameter| self.generator.actor_abi_type_for(&parameter.ty))
+                .collect();
+            let result = method_def
+                .ret
+                .as_ref()
+                .map(|ty| self.generator.actor_abi_type_for(ty))
+                .unwrap_or(BasicTypeEnum::IntType(i64_ty));
+            (method_id, parameters, result)
+        };
 
         // The first argument is the actor handle. It must be a pointer.
         let Some(BasicMetadataValueEnum::PointerValue(handle_ptr)) = arguments.first() else {
@@ -10865,9 +10999,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     ))
                 }
             };
-            let param_ty = method_params
-                .get(slot_index - 1)
-                .map(|t| self.generator.actor_abi_type_for(t));
+            let param_ty = method_params.get(slot_index - 1).copied();
             let store_ty = param_ty.unwrap_or_else(|| arg_basic.get_type());
             let slot_size = self.generator.actor_abi_slot_size(store_ty);
             let offset = i64_ty.const_int(blob_offset, false);
@@ -10985,10 +11117,6 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             .build_bit_cast(result_blob, ptr_ty, "actor_result_ptr")
             .map_err(|e| CompileError::LlvmError(format!("actor result bitcast: {e}")))?
             .into_pointer_value();
-        let result_ty = match &method_ret {
-            Some(ty) => self.generator.actor_abi_type_for(ty),
-            None => BasicTypeEnum::IntType(i64_ty),
-        };
         self.generator
             .build_load(result_ty, result_cast, "actor_method_result")
     }
@@ -15001,6 +15129,46 @@ func main() -> i32 { add(40, 2) }
     }
 
     #[test]
+    fn mixed_scalar_generic_identity_call_uses_canonical_mir_instance() {
+        let program = checked(
+            r#"
+func identity<T>(value: T) -> T { value }
+func helper(value: i32) -> i32 { identity(value) }
+func main() -> i32 { helper(41) }
+"#,
+        );
+        let canonical = MirProgram::from_checked_program(&program)
+            .expect("mixed scalar generic identity canonical MIR");
+        let instance = canonical
+            .instances()
+            .values()
+            .find(|instance| {
+                instance.contract == MirGenericInstanceContract::ScalarIdentity
+                    && instance.arguments.len() == 1
+            })
+            .expect("canonical identity instance receipt");
+        let symbol = crate::codegen::mir::native_symbol_for_owner(&instance.function)
+            .expect("canonical identity target symbol");
+
+        let context = inkwell::context::Context::create();
+        let mut generator = CodeGenerator::new(&context, "resolved_mixed_scalar_identity");
+        generator
+            .compile_resolved_native(&program)
+            .expect("resolved caller must consume canonical identity MIR");
+        generator.module.verify().expect("valid LLVM");
+        let ir = generator.module.print_to_string().to_string();
+        assert!(
+            ir.contains(&symbol),
+            "resolved helper must call the canonical MIR instance {symbol}: {ir}"
+        );
+        assert!(
+            ir.contains(&format!("call i32 @{symbol}"))
+                || ir.contains(&format!("call i32 @\"{symbol}\"")),
+            "resolved helper must call the canonical MIR target directly: {ir}"
+        );
+    }
+
+    #[test]
     fn partial_non_core_resolved_emission_retries_cleanly_through_legacy() {
         let program = checked(
             r#"
@@ -15115,6 +15283,7 @@ func main() -> i32 { later_loop(broken_loop(1)) }
                 defer_scopes: Vec::new(),
                 comp_scopes: Vec::new(),
                 pending_generic_instances: Vec::new(),
+                canonical_generic_instances: BTreeMap::new(),
             };
             emitter
                 .compile_subset(&eligible)

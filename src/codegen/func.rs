@@ -633,7 +633,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         ty: &Type,
     ) -> crate::codegen::abi::ownership::OwnershipClass {
         let concrete = self.resolve_type(ty);
-        crate::codegen::abi::ownership::classify_surface(&concrete, &self.type_defs)
+        crate::codegen::abi::ownership::classify_surface(
+            &concrete,
+            &self.type_defs,
+            &self.checked_alias_primitives,
+        )
     }
 
     pub(in crate::codegen) fn clone_surface_structural_return_with_glue(
@@ -2704,6 +2708,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let impl_ret = self.infer_impl_method_return_type(
                                                 &obj_type,
                                                 method_name,
+                                                init.meta(),
                                             );
                                             if !impl_ret.is_empty() {
                                                 register_qualified_var_type(
@@ -2785,6 +2790,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                                             let impl_ret = self.infer_impl_method_return_type(
                                                 &obj_type,
                                                 method_name,
+                                                init.meta(),
                                             );
                                             if !impl_ret.is_empty() {
                                                 register_qualified_var_type(
@@ -2797,8 +2803,11 @@ impl<'ctx> CodeGenerator<'ctx> {
                                     } else {
                                         // Q3: trait-impl method on a
                                         // non-flow/non-string receiver.
-                                        let impl_ret = self
-                                            .infer_impl_method_return_type(&obj_type, method_name);
+                                        let impl_ret = self.infer_impl_method_return_type(
+                                            &obj_type,
+                                            method_name,
+                                            init.meta(),
+                                        );
                                         if !impl_ret.is_empty() {
                                             register_qualified_var_type(
                                                 &mut self.var_type_names,
@@ -4072,6 +4081,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         result
     }
 
+    /// Test-only compatibility helper for exercising the retired surface
+    /// wrapper in low-level LLVM tests. Production checked compilation rejects
+    /// every export that does not have a canonical scalar MIR receipt before
+    /// this fifth-pass path can be entered.
+    #[cfg(test)]
+    fn compile_legacy_export_body(&mut self, func: &FuncDef) -> MimiResult<()> {
+        let saved_flow_failure_result_vars = std::mem::take(&mut self.flow_failure_result_vars);
+        let saved_shadows = self.nested_shadow_symbols.clone();
+        let saved_current_fn = std::mem::replace(&mut self.current_legacy_fn, func.name.clone());
+        let result = self.compile_func_legacy_inner(func);
+        self.flow_failure_result_vars = saved_flow_failure_result_vars;
+        self.restore_nested_shadow_frame(saved_shadows, saved_current_fn);
+        result
+    }
+
     /// Undo the shadows registered by one body frame. Entries inherited from
     /// the enclosing frame (identical mangled symbol in the saved snapshot)
     /// are kept untouched; entries (re)registered by this frame restore the
@@ -4134,30 +4158,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.list_elem_llvm_types.clear();
         self.type_map.clear();
 
-        // Exported extern functions get a C ABI wrapper around an internal body.
+        // Exported extern functions get a C ABI wrapper around an internal body
+        // only in the cfg(test) compatibility harness. Production callers enter
+        // the canonical MIR export island or fail closed before this function.
         if func.extern_abi.is_some() && func.generics.is_empty() {
-            let body_name = Self::export_body_symbol(&func.name);
-            let body_needs_compile = self
-                .module
-                .get_function(&body_name)
-                .map(|body| body.count_basic_blocks() == 0)
-                .unwrap_or(true);
-            if body_needs_compile {
-                let mut body_func = func.clone();
-                body_func.name = body_name.clone();
-                body_func.extern_abi = None;
-                self.compile_func_legacy(&body_func)?;
+            #[cfg(not(test))]
+            {
+                return Err(CompileError::CanonicalMirCoverage(format!(
+                    "MIR-COVERAGE-001: extern C export '{}' reached the retired legacy wrapper",
+                    func.name
+                )));
             }
-            self.module
-                .get_function(&body_name)
-                .ok_or_else(|| {
-                    CompileError::LlvmError(format!(
-                        "exported function '{}': internal body '{}' was not emitted",
-                        func.name, body_name
-                    ))
-                })?
-                .set_linkage(inkwell::module::Linkage::Internal);
-            return self.compile_export_wrapper(func, &body_name);
+            #[cfg(test)]
+            {
+                let body_name = Self::export_body_symbol(&func.name);
+                let body_needs_compile = self
+                    .module
+                    .get_function(&body_name)
+                    .map(|body| body.count_basic_blocks() == 0)
+                    .unwrap_or(true);
+                if body_needs_compile {
+                    let mut body_func = func.clone();
+                    body_func.name = body_name.clone();
+                    body_func.extern_abi = None;
+                    self.compile_legacy_export_body(&body_func)?;
+                }
+                self.module
+                    .get_function(&body_name)
+                    .ok_or_else(|| {
+                        CompileError::LlvmError(format!(
+                            "exported function '{}': internal body '{}' was not emitted",
+                            func.name, body_name
+                        ))
+                    })?
+                    .set_linkage(inkwell::module::Linkage::Internal);
+                return self.compile_export_wrapper(func, &body_name);
+            }
         }
 
         let (function, ret_type) = self.declare_func(func)?;
@@ -4395,6 +4431,10 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// only the tail — tears the partially-emitted instance body down before
     /// propagating. A half-built body left in the module poisons the LLVM pass
     /// pipeline (nondeterministic SIGSEGVs downstream).
+    ///
+    /// The only caller is the cfg(test) compatibility adapter below. Native
+    /// production code consumes checker-owned canonical MIR instances.
+    #[cfg(test)]
     pub(super) fn compile_generic_func(
         &mut self,
         func: &FuncDef,
@@ -4427,6 +4467,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
+    /// Test-only bridge for the retired surface-AST generic monomorphizer.
+    /// Keeping this adapter cfg(test) makes legacy generic codegen unavailable
+    /// to the production native/resolved path.
+    #[cfg(test)]
+    pub(super) fn compile_legacy_generic_test_instance(
+        &mut self,
+        function: &FuncDef,
+        type_map: &HashMap<String, crate::ast::Type>,
+    ) -> MimiResult<()> {
+        self.compile_generic_func(function, type_map)
+    }
+
+    #[cfg(test)]
     fn compile_generic_func_inner(
         &mut self,
         func: &FuncDef,

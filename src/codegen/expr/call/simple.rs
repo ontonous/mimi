@@ -6315,6 +6315,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         callee: &Expr,
         args: &[Expr],
         vars: &HashMap<String, VarEntry<'ctx>>,
+        call_meta: Option<crate::ast::AstNodeMeta>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         match callee.unlocated() {
             Expr::Ident(name) => {
@@ -6436,7 +6437,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         );
                     }
                 }
-                self.compile_method_call(obj, method_name, args, vars)
+                self.compile_method_call(obj, method_name, args, vars, call_meta)
             }
             _ => Err("only direct function calls and method calls supported in codegen".into()),
         }
@@ -7474,12 +7475,23 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             if let Some(fdef) = self.func_defs.get(name).cloned() {
                 if !fdef.generics.is_empty() {
-                    self.compile_generic_func(&fdef, &callee_map).map_err(|e| {
-                        CompileError::Generic(format!(
-                            "failed to monomorphize function '{}': {}",
-                            name, e
-                        ))
-                    })?;
+                    #[cfg(test)]
+                    {
+                        self.compile_legacy_generic_test_instance(&fdef, &callee_map)
+                            .map_err(|e| {
+                                CompileError::Generic(format!(
+                                    "failed to monomorphize function '{}': {}",
+                                    name, e
+                                ))
+                            })?;
+                    }
+                    #[cfg(not(test))]
+                    {
+                        return Err(CompileError::CanonicalMirCoverage(format!(
+                            "MIR-COVERAGE-001/NITS: generic function '{}' reached the retired legacy monomorphizer",
+                            name
+                        )));
+                    }
                 }
             }
         }

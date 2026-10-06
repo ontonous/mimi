@@ -58,6 +58,8 @@ pub enum CompileError {
     UnsupportedStmt(String),
     #[error("unsupported in LLVM codegen: {0}")]
     Unsupported(String),
+    #[error("canonical MIR coverage failure: {0}")]
+    CanonicalMirCoverage(String),
     #[error("unsupported return from native backend: {0}")]
     UnsupportedReturn(String),
     #[error("cannot call {0}: expected a function or closure")]
@@ -151,6 +153,7 @@ impl CompileError {
             Self::UnsupportedExpr(_) => E0722,
             Self::UnsupportedStmt(_) => E0702,
             Self::Unsupported(_) => E0722,
+            Self::CanonicalMirCoverage(_) => "MIR-COVERAGE-001",
             Self::UnsupportedReturn(_) => E0723,
             Self::NotCallable(_) => E0742,
             Self::ContractCondition(_) => E0500,

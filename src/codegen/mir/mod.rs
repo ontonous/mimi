@@ -1,8 +1,8 @@
 //! AST-free native consumer for the closed scalar/owned-String,
 //! recursive-tuple, non-Copy-record, flat-record/flat-variant, scalar-List
 //! (including bounded nested List construction/clone/drop/outer-len/index/reverse/concat), and
-//! local immutable-borrow
-//! Canonical MIR slices.
+//! local immutable-borrow Canonical MIR slices, plus the separately receipted
+//! MapRoot, MapAnyOwner v1, and persistent ordinary-Map owner profiles.
 //!
 //! This module intentionally accepts only `MirProgram`.  It does not import
 //! surface AST or `CheckedProgram`, and it never calls the legacy emitter.  A
@@ -21,7 +21,9 @@ use inkwell::values::{
 use inkwell::{FloatPredicate, IntPredicate};
 
 use crate::codegen::{call_try_basic_value, CodeGenerator};
-use crate::core::ir::{ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp};
+use crate::core::ir::{
+    NativeExportScalarKind, ResolvedBinaryOp, ResolvedCallee, ResolvedLiteral, ResolvedUnaryOp,
+};
 use crate::core::mir::reference::MirProgram;
 use crate::core::mir::types::{
     MirAbiClass, MirBuiltinContract, MirBuiltinKind, MirConversionKind, MirGlueContract,
@@ -49,20 +51,38 @@ use abi::{
 pub use eligibility::validate_mir_native;
 use eligibility::{instruction_kind, mir_symbol, native_symbol_fragment, NativeMirError};
 use validate::NativeMirValidator;
+
+/// Resolve one canonical MIR function owner to the exact LLVM symbol used by
+/// the native MIR adapter.  Resolved callers that consume a materialized
+/// generic instance must use this helper rather than reconstructing a symbol
+/// from surface generic names or an AST mangle.
+pub(crate) fn native_symbol_for_owner(owner: &crate::core::NodeId) -> Result<String, String> {
+    mir_symbol(owner)
+}
+mod actor;
+mod actor_status;
 mod aggregate;
 mod calls;
 mod control_flow;
 mod ffi_contract;
 mod map_root;
+mod ordinary_map;
+mod ordinary_map_any_get;
+mod ordinary_map_owned_get;
 mod ownership;
 mod runtime_glue;
 mod scalar;
+
+#[cfg(test)]
+#[path = "ffi_vararg_tests.rs"]
+mod ffi_vararg_tests;
 
 struct NativeMirEmitter<'a, 'ctx> {
     generator: &'a mut CodeGenerator<'ctx>,
     program: &'a MirProgram,
     functions: BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
     ffi_functions: BTreeMap<String, FunctionValue<'ctx>>,
+    actor_dispatchers: BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
 }
 
 impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
@@ -72,12 +92,15 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             program,
             functions: BTreeMap::new(),
             ffi_functions: BTreeMap::new(),
+            actor_dispatchers: BTreeMap::new(),
         }
     }
 
     fn compile(mut self) -> Result<(), NativeMirError> {
         self.declare_canonical_runtime_helpers();
+        self.declare_actor_runtime();
         self.declare_functions()?;
+        self.declare_actor_dispatchers()?;
         self.declare_ffi_functions()?;
         let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
         for owner in owners {
@@ -95,11 +118,15 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 self.program,
                 &self.functions,
                 &self.ffi_functions,
+                &self.actor_dispatchers,
                 function,
                 llvm_function,
             )
             .emit()?;
         }
+        self.emit_actor_dispatchers()?;
+        self.emit_actor_root_wrapper()?;
+        self.emit_scalar_export_wrappers()?;
         self.generator
             .module
             .verify()
@@ -415,13 +442,328 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 Some(Linkage::External),
             );
         }
+        if self
+            .program
+            .type_catalog()
+            .get(&crate::core::mir::types::map_any_owner_v1_type_id())
+            .is_some()
+        {
+            let map_any_owner_v1_helpers = [
+                ("mimi_mir_map_any_owner_v1_new", i64.fn_type(&[], false)),
+                (
+                    "mimi_mir_map_any_owner_v1_set_i32",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i32),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_map_any_owner_v1_set_string",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_map_any_owner_v1_remove",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_map_any_owner_v1_size",
+                    i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
+                    "mimi_mir_map_any_owner_v1_contains",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_map_any_owner_v1_drop",
+                    void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+            ];
+            for (name, function_type) in map_any_owner_v1_helpers {
+                if self.generator.module.get_function(name).is_none() {
+                    self.generator.module.add_function(
+                        name,
+                        function_type,
+                        Some(Linkage::External),
+                    );
+                }
+            }
+        }
+
+        if (self
+            .program
+            .type_catalog()
+            .get(&crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id())
+            .is_some()
+            || self
+                .program
+                .type_catalog()
+                .get(&crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id())
+                .is_some()
+            || self
+                .program
+                .type_catalog()
+                .get(&crate::core::mir::types::managed_any_i32_string_v1_type_id())
+                .is_some())
+            && self
+                .generator
+                .module
+                .get_function("mimi_mir_ordinary_map_domain_own_string")
+                .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_ordinary_map_domain_own_string",
+                i32.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+
+        if self
+            .program
+            .type_catalog()
+            .get(&crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id())
+            .is_some()
+        {
+            let ordinary_map_helpers = [
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_new",
+                    i64.fn_type(&[], false),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_clone",
+                    i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_i32",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i32),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_string",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_remove",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size",
+                    i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_contains",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop",
+                    void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+            ];
+            for (name, function_type) in ordinary_map_helpers {
+                if self.generator.module.get_function(name).is_none() {
+                    self.generator.module.add_function(
+                        name,
+                        function_type,
+                        Some(Linkage::External),
+                    );
+                }
+            }
+        }
+
+        if self
+            .program
+            .type_catalog()
+            .get(&crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id())
+            .is_some()
+        {
+            let ordinary_map_owned_get_helpers = [
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_new",
+                    i64.fn_type(&[], false),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_clone",
+                    i64.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_set_i32",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i32),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_remove",
+                    i64.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_size",
+                    i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_contains",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_get_i32",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(
+                                self.generator
+                                    .context
+                                    .ptr_type(inkwell::AddressSpace::default()),
+                            ),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_get_string",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::PointerType(
+                                self.generator
+                                    .context
+                                    .ptr_type(inkwell::AddressSpace::default()),
+                            ),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_drop",
+                    void.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+            ];
+            for (name, function_type) in ordinary_map_owned_get_helpers {
+                if self.generator.module.get_function(name).is_none() {
+                    self.generator.module.add_function(
+                        name,
+                        function_type,
+                        Some(Linkage::External),
+                    );
+                }
+            }
+        }
+        self.declare_managed_any_helpers();
     }
 
     fn declare_functions(&mut self) -> Result<(), NativeMirError> {
         for (owner, function) in self.program.functions() {
-            let symbol = mir_symbol(owner)
-                .map_err(|message| NativeMirError::new(owner.0.clone(), message))?;
-            let parameter_types = function
+            let export = self.program.export_declaration(owner);
+            let symbol = if export.is_some() {
+                export
+                    .expect("checked scalar export disappeared")
+                    .body_symbol
+                    .clone()
+            } else {
+                actor_status::actor_native_symbol(self.program, owner)
+                    .map_err(|message| NativeMirError::new(owner.0.clone(), message))?
+            };
+            let tagged = actor_status::is_actor_tagged(self.program, owner);
+            let mut parameter_types = function
                 .parameters
                 .iter()
                 .map(|parameter| {
@@ -437,7 +779,13 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 .type_catalog()
                 .get(&function.result)
                 .ok_or_else(|| NativeMirError::new(owner.0.clone(), "result TypeDesc is absent"))?;
-            let function_type = if result_desc.is_canonical_ffi_unit() {
+            if tagged {
+                parameter_types.push(self.generator.context.i64_type().into());
+            }
+            let function_type = if tagged {
+                actor_status::tagged_i32_type(self.generator.context)
+                    .fn_type(&parameter_types, false)
+            } else if result_desc.is_canonical_ffi_unit() {
                 self.generator
                     .context
                     .void_type()
@@ -450,11 +798,197 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 )?
                 .fn_type(&parameter_types, false)
             };
-            let value =
-                self.generator
-                    .module
-                    .add_function(&symbol, function_type, Some(Linkage::External));
+            let value = self.generator.module.add_function(
+                &symbol,
+                function_type,
+                Some(if tagged {
+                    Linkage::Internal
+                } else if export.is_some() {
+                    Linkage::Internal
+                } else {
+                    Linkage::External
+                }),
+            );
             self.functions.insert(owner.clone(), value);
+        }
+        Ok(())
+    }
+
+    fn emit_scalar_export_wrappers(&mut self) -> Result<(), NativeMirError> {
+        for declaration in self.program.export_declarations().values() {
+            let body = *self.functions.get(&declaration.owner).ok_or_else(|| {
+                NativeMirError::new(
+                    declaration.owner.0.clone(),
+                    "scalar export body declaration is absent",
+                )
+            })?;
+            if self
+                .generator
+                .module
+                .get_function(&declaration.public_symbol)
+                .is_some()
+            {
+                return Err(NativeMirError::new(
+                    declaration.public_symbol.clone(),
+                    "scalar export public symbol collides with an existing LLVM declaration",
+                ));
+            }
+            let c_parameters = declaration
+                .parameters
+                .iter()
+                .map(|(_, kind)| match kind {
+                    NativeExportScalarKind::I32 => {
+                        BasicMetadataTypeEnum::IntType(self.generator.context.i32_type())
+                    }
+                    NativeExportScalarKind::I64 => {
+                        BasicMetadataTypeEnum::IntType(self.generator.context.i64_type())
+                    }
+                    NativeExportScalarKind::F32 => {
+                        BasicMetadataTypeEnum::FloatType(self.generator.context.f32_type())
+                    }
+                    NativeExportScalarKind::F64 => {
+                        BasicMetadataTypeEnum::FloatType(self.generator.context.f64_type())
+                    }
+                    NativeExportScalarKind::Bool => {
+                        BasicMetadataTypeEnum::IntType(self.generator.context.i8_type())
+                    }
+                    NativeExportScalarKind::Unit => {
+                        unreachable!("Unit cannot be an export parameter")
+                    }
+                })
+                .collect::<Vec<_>>();
+            let function_type = match declaration.result.1 {
+                NativeExportScalarKind::Unit => self
+                    .generator
+                    .context
+                    .void_type()
+                    .fn_type(&c_parameters, false),
+                NativeExportScalarKind::I32 => self
+                    .generator
+                    .context
+                    .i32_type()
+                    .fn_type(&c_parameters, false),
+                NativeExportScalarKind::I64 => self
+                    .generator
+                    .context
+                    .i64_type()
+                    .fn_type(&c_parameters, false),
+                NativeExportScalarKind::F32 => self
+                    .generator
+                    .context
+                    .f32_type()
+                    .fn_type(&c_parameters, false),
+                NativeExportScalarKind::F64 => self
+                    .generator
+                    .context
+                    .f64_type()
+                    .fn_type(&c_parameters, false),
+                NativeExportScalarKind::Bool => self
+                    .generator
+                    .context
+                    .i8_type()
+                    .fn_type(&c_parameters, false),
+            };
+            let wrapper = self.generator.module.add_function(
+                &declaration.public_symbol,
+                function_type,
+                Some(Linkage::External),
+            );
+            wrapper.set_call_conventions(crate::ffi::abi_to_llvm_call_conv(&declaration.abi));
+            let block = self.generator.context.append_basic_block(wrapper, "entry");
+            self.generator.builder.position_at_end(block);
+            let mut arguments = Vec::with_capacity(declaration.parameters.len());
+            for (index, (_, kind)) in declaration.parameters.iter().enumerate() {
+                let value = wrapper.get_nth_param(index as u32).ok_or_else(|| {
+                    NativeMirError::new(
+                        declaration.public_symbol.clone(),
+                        format!("scalar export parameter {index} is absent"),
+                    )
+                })?;
+                let value = if matches!(kind, NativeExportScalarKind::Bool) {
+                    let value = value.into_int_value();
+                    self.generator
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            value,
+                            self.generator.context.i8_type().const_zero(),
+                            "export_bool_arg",
+                        )
+                        .map_err(|error| {
+                            NativeMirError::new(
+                                declaration.public_symbol.clone(),
+                                error.to_string(),
+                            )
+                        })?
+                        .into()
+                } else {
+                    value
+                };
+                arguments.push(BasicMetadataValueEnum::from(value));
+            }
+            let call = self
+                .generator
+                .builder
+                .build_call(body, &arguments, "export_body_call")
+                .map_err(|error| {
+                    NativeMirError::new(declaration.public_symbol.clone(), error.to_string())
+                })?;
+            match declaration.result.1 {
+                NativeExportScalarKind::Unit => {
+                    self.generator.builder.build_return(None).map_err(|error| {
+                        NativeMirError::new(declaration.public_symbol.clone(), error.to_string())
+                    })?;
+                }
+                NativeExportScalarKind::Bool => {
+                    let value = call_try_basic_value(&call).ok_or_else(|| {
+                        NativeMirError::new(
+                            declaration.public_symbol.clone(),
+                            "scalar export bool body returned void",
+                        )
+                    })?;
+                    let value = self
+                        .generator
+                        .builder
+                        .build_int_z_extend(
+                            value.into_int_value(),
+                            self.generator.context.i8_type(),
+                            "export_bool_result",
+                        )
+                        .map_err(|error| {
+                            NativeMirError::new(
+                                declaration.public_symbol.clone(),
+                                error.to_string(),
+                            )
+                        })?;
+                    self.generator
+                        .builder
+                        .build_return(Some(&value))
+                        .map_err(|error| {
+                            NativeMirError::new(
+                                declaration.public_symbol.clone(),
+                                error.to_string(),
+                            )
+                        })?;
+                }
+                _ => {
+                    let value = call_try_basic_value(&call).ok_or_else(|| {
+                        NativeMirError::new(
+                            declaration.public_symbol.clone(),
+                            "scalar export body returned void",
+                        )
+                    })?;
+                    self.generator
+                        .builder
+                        .build_return(Some(&value))
+                        .map_err(|error| {
+                            NativeMirError::new(
+                                declaration.public_symbol.clone(),
+                                error.to_string(),
+                            )
+                        })?;
+                }
+            }
         }
         Ok(())
     }
@@ -469,24 +1003,83 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     /// fail-closed scalar-only island.
     fn declare_ffi_functions(&mut self) -> Result<(), NativeMirError> {
         let mut declarations = Vec::new();
-        let mut seen_symbols = BTreeSet::new();
+        let mut declarations_by_symbol: BTreeMap<
+            String,
+            (
+                String,
+                crate::core::ResolvedTypeId,
+                Vec<crate::core::ResolvedTypeId>,
+                usize,
+                bool,
+            ),
+        > = BTreeMap::new();
         // `compile_mir_native` has already run the shared receipt gate and
         // native admission validator.  Use the same canonical source-order
         // receipt view as the route manifest and bytecode descriptor table so
         // a symbol's representative span and declaration order are independent
         // of BTreeMap identity order or MIR block storage order.
         for (_, receipt) in self.program.ffi_call_entries_in_source_order() {
-            if seen_symbols.insert(receipt.symbol.clone()) {
+            if receipt.fixed_argument_count > receipt.parameter_types.len()
+                || receipt.parameter_types.len() != receipt.arguments.len()
+            {
+                return Err(NativeMirError::new(
+                    receipt.symbol.clone(),
+                    "FFI call receipt has an invalid fixed-prefix or physical parameter count",
+                )
+                .with_span(receipt.span));
+            }
+            let tail_count = receipt.parameter_types.len() - receipt.fixed_argument_count;
+            if (!receipt.variadic && tail_count != 0)
+                || tail_count != receipt.variadic_arguments.len()
+            {
+                return Err(NativeMirError::new(
+                    receipt.symbol.clone(),
+                    "FFI variadic tail does not match its call-specific receipt",
+                )
+                .with_span(receipt.span));
+            }
+            for (tail_index, tail) in receipt.variadic_arguments.iter().enumerate() {
+                let argument_index = receipt.fixed_argument_count + tail_index;
+                if tail.argument_index != argument_index
+                    || receipt.parameter_types.get(argument_index) != Some(&tail.promoted_type)
+                {
+                    return Err(NativeMirError::new(
+                        receipt.symbol.clone(),
+                        "FFI variadic receipt does not match its physical parameter type",
+                    )
+                    .with_span(receipt.span));
+                }
+            }
+
+            let fixed_prefix = receipt.parameter_types[..receipt.fixed_argument_count].to_vec();
+            let shape = (
+                receipt.abi.clone(),
+                receipt.result_type.clone(),
+                fixed_prefix.clone(),
+                receipt.fixed_argument_count,
+                receipt.variadic,
+            );
+            if let Some(previous) = declarations_by_symbol.get(&receipt.symbol) {
+                if previous != &shape {
+                    return Err(NativeMirError::new(
+                        receipt.symbol.clone(),
+                        "FFI call receipts for one symbol disagree on ABI, result, fixed prefix, or variadic declaration",
+                    )
+                    .with_span(receipt.span));
+                }
+            } else {
+                declarations_by_symbol.insert(receipt.symbol.clone(), shape);
                 declarations.push((
                     receipt.symbol.clone(),
-                    receipt.parameter_types.clone(),
+                    fixed_prefix,
                     receipt.result_type.clone(),
+                    receipt.variadic,
                     receipt.span,
                 ));
             }
         }
 
-        for (symbol, parameter_type_ids, result_type, symbol_span) in declarations {
+        for (symbol, parameter_type_ids, result_type, variadic, symbol_span) in declarations {
             let parameter_types = parameter_type_ids
                 .iter()
                 .map(|ty| {
@@ -509,7 +1102,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 self.generator
                     .context
                     .void_type()
-                    .fn_type(&parameter_types, false)
+                    .fn_type(&parameter_types, variadic)
             } else {
                 native_ffi_scalar_type(
                     self.generator.context,
@@ -518,7 +1111,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     &symbol,
                 )
                 .map_err(|error| error.with_span(symbol_span))?
-                .fn_type(&parameter_types, false)
+                .fn_type(&parameter_types, variadic)
             };
             if self.generator.module.get_function(&symbol).is_some() {
                 return Err(NativeMirError::new(
@@ -628,6 +1221,8 @@ struct NativeMirFunctionEmitter<'a, 'ctx> {
     program: &'a MirProgram,
     functions: &'a BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
     ffi_functions: &'a BTreeMap<String, FunctionValue<'ctx>>,
+    actor_dispatchers: &'a BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
+    actor_domain: Option<inkwell::values::IntValue<'ctx>>,
     function: &'a MirFunction,
     llvm_function: FunctionValue<'ctx>,
     blocks: BTreeMap<MirBlockId, BasicBlock<'ctx>>,
@@ -647,6 +1242,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         program: &'a MirProgram,
         functions: &'a BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
         ffi_functions: &'a BTreeMap<String, FunctionValue<'ctx>>,
+        actor_dispatchers: &'a BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
         function: &'a MirFunction,
         llvm_function: FunctionValue<'ctx>,
     ) -> Self {
@@ -655,6 +1251,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             program,
             functions,
             ffi_functions,
+            actor_dispatchers,
+            actor_domain: None,
             function,
             llvm_function,
             blocks: BTreeMap::new(),
@@ -732,6 +1330,20 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             })?;
             self.values.insert(parameter.clone(), value);
         }
+        if actor_status::is_actor_tagged(self.program, &self.function.owner) {
+            let index = self.u32_abi(
+                self.function.parameters.len(),
+                "Actor domain argument index",
+                self.function.owner.0.as_str(),
+            )?;
+            let value = self.llvm_function.get_nth_param(index).ok_or_else(|| {
+                NativeMirError::new(
+                    self.function.owner.0.clone(),
+                    "tagged Actor function lacks its hidden domain argument",
+                )
+            })?;
+            self.actor_domain = Some(value.into_int_value());
+        }
         for block in &blocks {
             let llvm_block = *self.blocks.get(&block.id).ok_or_else(|| {
                 NativeMirError::new(block.id.to_string(), "LLVM block was not created")
@@ -782,6 +1394,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         subject: &str,
     ) -> Result<(), NativeMirError> {
         match instruction {
+            MirInstructionKind::Actor { operation } => {
+                self.emit_actor_operation(operation, subject)?
+            }
             MirInstructionKind::Const { result, literal } => {
                 let value = self.emit_const(result, literal, subject)?;
                 self.values.insert(result.clone(), value);
@@ -806,7 +1421,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     .type_catalog()
                     .get(&source_ty)
                     .is_some_and(|desc| matches!(desc.layout, MirLayout::Set { .. }));
-                let value = if is_list {
+                let value = if source_ty
+                    == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
+                {
+                    self.emit_ordinary_map_clone(result, source, subject)?
+                } else if source_ty
+                    == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                {
+                    self.emit_ordinary_map_owned_get_clone(result, source, subject)?
+                } else if is_list {
                     self.emit_list_clone(source, subject)?
                 } else if is_set {
                     self.emit_set_clone(source, subject)?
@@ -1102,6 +1725,99 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             MirInstructionKind::MapRootDrop { root } => {
                 self.emit_map_root_drop(root, subject)?;
             }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result } => {
+                let value = self.emit_ordinary_map_new(result, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSet {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let value = self.emit_ordinary_map_set(result, source, key, value, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleRemove {
+                result,
+                source,
+                key,
+            } => {
+                let value = self.emit_ordinary_map_remove(result, source, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, root } => {
+                let value = self.emit_ordinary_map_size(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, root, key } => {
+                let value = self.emit_ordinary_map_contains(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root } => {
+                self.emit_ordinary_map_drop(root, subject)?;
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result } => {
+                let value = self.emit_ordinary_map_owned_get_new(result, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let value =
+                    self.emit_ordinary_map_owned_get_set(result, source, key, value, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove {
+                result,
+                source,
+                key,
+            } => {
+                let value =
+                    self.emit_ordinary_map_owned_get_remove(result, source, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { result, root } => {
+                let value = self.emit_ordinary_map_owned_get_size(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { result, root, key } => {
+                let value =
+                    self.emit_ordinary_map_owned_get_contains(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { result, root, key } => {
+                let value = self.emit_ordinary_map_get_any(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::ManagedAny {
+                result,
+                source,
+                operation,
+                contract,
+            } => {
+                self.emit_managed_any_operation(
+                    result,
+                    source,
+                    *operation,
+                    contract.as_ref(),
+                    subject,
+                )?;
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { result, root, key } => {
+                let value = self.emit_ordinary_map_owned_get_i32(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetString { result, root, key } => {
+                let value = self.emit_ordinary_map_owned_get_string(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+                self.emit_ordinary_map_owned_get_drop(root, subject)?;
+            }
             MirInstructionKind::Drop { value } => {
                 self.emit_drop(value, subject)?;
             }
@@ -1153,6 +1869,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 self.values.insert(lo.clone(), lo_value);
                 self.values.insert(hi.clone(), hi_value);
             }
+            // No-capture closures have no runtime environment value. The
+            // shared MIR receipt preflight has already proven this binding is
+            // paired with each statically targeted invocation before LLVM
+            // declarations are created.
+            MirInstructionKind::ClosureBind { .. } => {}
+            MirInstructionKind::ClosureInvoke {
+                result,
+                callee,
+                type_arguments,
+                arguments,
+                ..
+            } => self.emit_call(
+                result.as_ref(),
+                &ResolvedCallee::Function(callee.clone()),
+                type_arguments,
+                arguments,
+                None,
+                subject,
+            )?,
             MirInstructionKind::Call {
                 result,
                 callee,
@@ -1262,7 +1997,7 @@ mod tests {
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
     }
 
-    const MAP_ROOT_NATIVE_SOURCE: &str = r#"
+    const MAP_ANY_OWNER_V1_NATIVE_SOURCE: &str = r#"
 func map_size_for(value: i32) -> i32 {
     ensures: result == 1
     let root = map_new()
@@ -1305,7 +2040,7 @@ func main() -> i32 {
 }
 "#;
 
-    const MAP_ROOT_NATIVE_LIFECYCLE_SOURCE: &str = r#"
+    const MAP_ANY_OWNER_V1_NATIVE_LIFECYCLE_SOURCE: &str = r#"
 extern "C" { func mimi_test_map_root_live_count() -> i64; }
 func main() -> i32 {
     let root = map_new()
@@ -1318,7 +2053,7 @@ func main() -> i32 {
 }
 "#;
 
-    const MAP_ROOT_STRING_NATIVE_SOURCE: &str = r#"
+    const MAP_ANY_OWNER_V1_STRING_NATIVE_SOURCE: &str = r#"
 func map_size_for_string(value: string) -> i32 {
     ensures: result == 1
     let root = map_new()
@@ -1382,37 +2117,70 @@ func main() -> i32 {
 }
 "#;
 
+    const MAP_ANY_OWNER_V1_PROOF_STRING_NATIVE_SOURCE: &str = r#"
+func checked_string_owner_size(value: string) -> i32 {
+    ensures: result == 1
+    let root = map_new()
+    let inserted = map_set(root, "payload", value)
+    let size = map_size(inserted)
+    drop(inserted)
+    size
+}
+func false_string_owner_size() -> i32 {
+    ensures: result == 0
+    let root = map_new()
+    let inserted = map_set(root, "payload", "owned")
+    let size = map_size(inserted)
+    drop(inserted)
+    size
+}
+func main() -> i32 {
+    let root = map_new()
+    let inserted = map_set(root, "nul", "a\0b雪")
+    let overwritten = map_set(inserted, "nul", "x\0y")
+    let present = has_key(overwritten, "nul")
+    let removed = map_remove(overwritten, "nul")
+    let absent = has_key(removed, "nul")
+    let size = map_size(removed)
+    println(present)
+    println(absent)
+    println(size)
+    drop(removed)
+    0
+}
+"#;
+
     #[test]
-    fn receipt_backed_map_root_is_one_mir_across_reference_bytecode_native_and_verifier() {
-        let program = canonical_program(MAP_ROOT_NATIVE_SOURCE);
+    fn receipt_backed_map_any_owner_v1_is_one_mir_across_reference_bytecode_native_and_verifier() {
+        let program = canonical_program(MAP_ANY_OWNER_V1_NATIVE_SOURCE);
         crate::verifier::validate_mir_capabilities(&program)
-            .expect("whole-program verifier admits the exact MapRoot profile");
+            .expect("whole-program verifier admits the exact MapAnyOwner v1 profile");
         crate::codegen::mir::validate_mir_native(&program)
-            .expect("native admission revalidates the MapRoot receipt profile");
+            .expect("native admission revalidates the independent MapAnyOwner v1 receipt");
 
         let main = crate::core::NodeId("function:main".into());
         let reference = MirReferenceInterpreter::new(&program)
             .execute_with_output(&main, &[])
-            .expect("reference MapRoot execution");
+            .expect("reference MapAnyOwner v1 execution");
         assert_eq!(reference.value, MirRuntimeValue::Int(0));
         assert_eq!(reference.output, "2\n1\n0\n1\n");
 
         let mut vm = BytecodeVM::new(
-            compile_mir_program(&program).expect("AST-free MapRoot bytecode compilation"),
+            compile_mir_program(&program).expect("AST-free MapAnyOwner v1 bytecode compilation"),
         );
         assert!(matches!(
-            vm.run_value().expect("bytecode MapRoot execution"),
+            vm.run_value().expect("bytecode MapAnyOwner v1 execution"),
             Value::Int(0)
         ));
         assert_eq!(vm.take_stdout(), "2\n1\n0\n1\n");
 
-        let verification = crate::verifier::verify_mir(&program, "map-root-native".into())
-            .expect("public MIR verifier consumes the same MapRoot program");
+        let verification = crate::verifier::verify_mir(&program, "map-any-owner-v1-native".into())
+            .expect("public MIR verifier consumes the same MapAnyOwner v1 program");
         for name in ["main", "map_size_for", "checked_map_size"] {
             let result = verification
                 .iter()
                 .find(|result| result.func_name.ends_with(name))
-                .expect("positive MapRoot contract result");
+                .expect("positive MapAnyOwner v1 contract result");
             assert_eq!(
                 result.status,
                 crate::verifier::VerifStatus::Proven,
@@ -1424,41 +2192,43 @@ func main() -> i32 {
         let wrong = verification
             .iter()
             .find(|result| result.func_name.ends_with("wrong_map_size"))
-            .expect("negative MapRoot contract result");
+            .expect("negative MapAnyOwner v1 contract result");
         assert_eq!(wrong.status, crate::verifier::VerifStatus::Disproven);
 
         let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_native_map_root");
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_owner_v1_i32");
         generator
             .compile_mir_native(&program)
-            .expect("receipt-backed MapRoot native lowering");
+            .expect("receipt-backed MapAnyOwner v1 native lowering");
         generator
             .module
             .verify()
-            .expect("native MapRoot module verifies");
+            .expect("native MapAnyOwner v1 module verifies");
         let native_ir = generator.module.print_to_string().to_string();
         assert!(
             native_ir.contains("mir_map_root_new_nonzero = icmp ne i64"),
-            "production MapHandles may be negative when their generation high bit is set"
+            "opaque MapAnyOwner handles may be negative when their generation high bit is set"
         );
         assert!(
             native_ir.contains("mir_map_root_handle_nonzero = icmp ne i64"),
-            "nonzero is the MapHandle validity sentinel; sign is not"
+            "nonzero is the MapAnyOwner handle validity sentinel; sign is not"
         );
         for runtime in [
-            "mimi_mir_map_root_new",
-            "mimi_mir_map_root_set",
-            "mimi_mir_map_root_remove",
-            "mimi_mir_map_root_size",
-            "mimi_mir_map_root_drop",
+            "mimi_mir_map_any_owner_v1_new",
+            "mimi_mir_map_any_owner_v1_set_i32",
+            "mimi_mir_map_any_owner_v1_remove",
+            "mimi_mir_map_any_owner_v1_size",
+            "mimi_mir_map_any_owner_v1_drop",
         ] {
             assert!(
                 generator.module.get_function(runtime).is_some(),
-                "native MapRoot lowering must declare {runtime}"
+                "native MapAnyOwner v1 lowering must declare {runtime}"
             );
         }
+        assert!(native_ir.contains("call i64 @mimi_mir_map_any_owner_v1_set_i32"));
+        assert!(!native_ir.contains("call i64 @mimi_mir_map_root_set"));
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
-            .expect("same MIR native MapRoot process");
+            .expect("same MIR native MapAnyOwner v1 process");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
         assert_eq!(native.stdout, "2\n1\n0\n1\n");
         assert_eq!(native.stderr, "");
@@ -1476,16 +2246,20 @@ func main() -> i32 {
                         "--tool=memcheck".into(),
                         "--leak-check=full".into(),
                         "--show-leak-kinds=all".into(),
-                        "--errors-for-leak-kinds=all".into(),
+                        // The process-global AnyOwner registry retains its
+                        // descriptor table until process exit. That reachable
+                        // bookkeeping is not lost memory; the map roots and
+                        // payloads themselves must still be fully reclaimed.
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
                         "--error-exitcode=99".into(),
                     ],
                     ..crate::tests::E2EConfig::default()
                 },
             )
             .expect("production runtime link under Valgrind Memcheck");
-            if std::env::var_os("MIMI_MAP_ROOT_VALGRIND_TRACE").is_some() {
+            if std::env::var_os("MIMI_MAP_ANY_OWNER_V1_VALGRIND_TRACE").is_some() {
                 eprintln!(
-                    "Checker-receipted MapRoot lifecycle Memcheck report:\n{}",
+                    "Checker-receipted MapAnyOwner v1 lifecycle Memcheck report:\n{}",
                     memcheck.stderr
                 );
             }
@@ -1494,24 +2268,249 @@ func main() -> i32 {
             assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
             assert!(memcheck
                 .stderr
-                .contains("All heap blocks were freed -- no leaks are possible"));
+                .contains("definitely lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("indirectly lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("possibly lost: 0 bytes in 0 blocks"));
         }
     }
 
     #[test]
-    fn receipt_backed_static_map_root_contains_matches_same_mir_consumers() {
-        let program = canonical_program(include_str!(
-            "../../../tests/real_world/map_root_static_contains.mimi"
-        ));
+    fn ordinary_map_owner_v1_lifecycle_is_one_mir_across_reference_bytecode_native_and_verifier() {
+        let program = canonical_program(
+            r#"
+func key_from_value(key: string) -> string { key }
+
+func checked_source_preserving(key: string) -> i32 {
+    ensures: result == 1
+    let source = map_new()
+    let inserted = map_set(source, key, 1)
+    let source_size = map_size(source)
+    let inserted_size = map_size(inserted)
+    drop(source)
+    drop(inserted)
+    source_size + inserted_size
+}
+
+func checked_remove_preserving(key: string) -> i32 {
+    ensures: result == 1
+    let source = map_new()
+    let inserted = map_set(source, key, 1)
+    let removed = map_remove(inserted, key)
+    let inserted_size = map_size(inserted)
+    let removed_size = map_size(removed)
+    drop(source)
+    drop(inserted)
+    drop(removed)
+    inserted_size + removed_size
+}
+
+func checked_dynamic_contains(key: string) -> bool {
+    ensures: result == true
+    let source = map_new()
+    let inserted = map_set(source, key, 1)
+    let present = has_key(inserted, key)
+    drop(source)
+    drop(inserted)
+    present
+}
+
+func checked_mixed_payload() -> i32 {
+    ensures: result == 2
+    let source = map_new()
+    let numbers = map_set(source, "number", 42)
+    let mixed = map_set(numbers, "label", "forty-two")
+    let size = map_size(mixed)
+    drop(source)
+    drop(numbers)
+    drop(mixed)
+    size
+}
+
+func main() -> i32 {
+    let source = map_new()
+    let number_key = key_from_value("number")
+    let numbers = map_set(source, number_key, 42)
+    let label_key = key_from_value("label")
+    let mixed = map_set(numbers, label_key, "forty-two")
+
+    let source_size = map_size(source)
+    let numbers_has_number = has_key(numbers, number_key)
+    let numbers_has_label = has_key(numbers, label_key)
+    let mixed_has_number = has_key(mixed, number_key)
+    let mixed_has_label = has_key(mixed, label_key)
+    let mixed_size = map_size(mixed)
+
+    let removed = map_remove(mixed, number_key)
+    let mixed_after_remove_has_number = has_key(mixed, number_key)
+    let removed_has_number = has_key(removed, number_key)
+    let removed_has_label = has_key(removed, label_key)
+    let removed_size = map_size(removed)
+
+    println(source_size)
+    println(numbers_has_number)
+    println(numbers_has_label)
+    println(mixed_has_number)
+    println(mixed_has_label)
+    println(mixed_size)
+    println(mixed_after_remove_has_number)
+    println(removed_has_number)
+    println(removed_has_label)
+    println(removed_size)
+
+    drop(source)
+    drop(numbers)
+    drop(mixed)
+    drop(removed)
+    0
+}
+"#,
+        );
+        assert_eq!(
+            program
+                .route_receipt(crate::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND)
+                .profile,
+            crate::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
+        );
         crate::verifier::validate_mir_capabilities(&program)
-            .expect("whole-program verifier admits static MapRoot contains receipts");
+            .expect("verifier admits the independent ordinary Map lifecycle receipt");
         crate::codegen::mir::validate_mir_native(&program)
-            .expect("native validator admits static MapRoot contains receipts");
+            .expect("native admission accepts the ordinary Map lifecycle profile");
 
         let main = crate::core::NodeId("function:main".into());
         let reference = MirReferenceInterpreter::new(&program)
             .execute_with_output(&main, &[])
-            .expect("reference executes the same MapRoot MIR");
+            .expect("reference ordinary Map lifecycle execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(
+            reference.output,
+            "0\ntrue\nfalse\ntrue\ntrue\n2\ntrue\nfalse\ntrue\n1\n"
+        );
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free ordinary Map lifecycle bytecode"),
+        );
+        assert_eq!(
+            vm.run_value()
+                .expect("bytecode ordinary Map lifecycle execution"),
+            Value::Int(0)
+        );
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let verification =
+            crate::verifier::verify_mir(&program, "ordinary-map-owner-v1-lifecycle".into())
+                .expect("public verifier consumes the same ordinary Map lifecycle MIR");
+        for name in [
+            "checked_source_preserving",
+            "checked_remove_preserving",
+            "checked_dynamic_contains",
+            "checked_mixed_payload",
+        ] {
+            let result = verification
+                .iter()
+                .find(|result| result.func_name.ends_with(name))
+                .unwrap_or_else(|| panic!("missing ordinary Map lifecycle proof for {name}"));
+            assert_eq!(
+                result.status,
+                crate::verifier::VerifStatus::Proven,
+                "{}: {}",
+                name,
+                result.message
+            );
+        }
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_ordinary_map_owner_v1");
+        generator
+            .compile_mir_native(&program)
+            .expect("receipt-backed ordinary Map lifecycle native lowering");
+        generator
+            .module
+            .verify()
+            .expect("ordinary Map lifecycle native module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        let final_drop_calls = native_ir
+            .matches("call void @mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop")
+            .count();
+        let normal_drop_operations = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            normal_drop_operations, 14,
+            "the normal MIR graph settles every persistent root once"
+        );
+        assert!(final_drop_calls >= normal_drop_operations,
+            "native lowering includes every normal root Drop and additional trap-only cleanup calls");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("same MIR native ordinary Map lifecycle process");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        // Shared owner registries remain reachable until process exit.
+                        // Fail on invalid access and actual loss, while reporting
+                        // reachable bookkeeping separately.
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                        "--error-exitcode=99".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("production ordinary Map lifecycle under strict Memcheck");
+            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
+            assert_eq!(memcheck.stdout, reference.output);
+            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+            assert!(memcheck
+                .stderr
+                .contains("definitely lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("indirectly lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("possibly lost: 0 bytes in 0 blocks"));
+        }
+    }
+
+    #[test]
+    fn receipt_backed_static_map_any_owner_v1_contains_matches_same_mir_consumers() {
+        let program = canonical_program(include_str!(
+            "../../../tests/real_world/map_root_static_contains.mimi"
+        ));
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("whole-program verifier admits static MapAnyOwner v1 Contains receipts");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native validator admits static MapAnyOwner v1 Contains receipts");
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference executes the same MapAnyOwner v1 MIR");
         assert_eq!(reference.value, MirRuntimeValue::Int(0));
         assert_eq!(
             reference.output,
@@ -1524,8 +2523,9 @@ func main() -> i32 {
         assert_eq!(vm.run_value().expect("bytecode execution"), Value::Int(0));
         assert_eq!(vm.take_stdout(), reference.output);
 
-        let verification = crate::verifier::verify_mir(&program, "map-root-static-contains".into())
-            .expect("public verifier consumes the same receipted MIR");
+        let verification =
+            crate::verifier::verify_mir(&program, "map-any-owner-v1-static-contains".into())
+                .expect("public verifier consumes the same receipted MIR");
         for (name, expected) in [
             (
                 "contains_inserted_key",
@@ -1544,25 +2544,28 @@ func main() -> i32 {
             let result = verification
                 .iter()
                 .find(|result| result.func_name.ends_with(name))
-                .expect("MapRoot contains contract result");
+                .expect("MapAnyOwner v1 Contains contract result");
             assert_eq!(result.status, expected, "{}: {}", name, result.message);
         }
 
         let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_static_map_root_contains");
+        let mut generator = CodeGenerator::new(&context, "mir_static_map_any_owner_v1_contains");
         generator
             .compile_mir_native(&program)
-            .expect("native emitter consumes the same receipted MIR");
+            .expect("native emitter consumes the same independently receipted MIR");
         generator
             .module
             .verify()
             .expect("native contains module verifies");
         assert!(generator
             .module
-            .get_function("mimi_mir_map_root_contains")
+            .get_function("mimi_mir_map_any_owner_v1_contains")
             .is_some());
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("call i32 @mimi_mir_map_any_owner_v1_contains"));
+        assert!(!native_ir.contains("call i32 @mimi_mir_map_root_contains"));
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
-            .expect("native execution of the same MapRoot MIR");
+            .expect("native execution of the same MapAnyOwner v1 MIR");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
         assert_eq!(native.stdout, reference.output);
         assert_eq!(native.stderr, "");
@@ -1586,13 +2589,19 @@ func main() -> i32 {
                     ..crate::tests::E2EConfig::default()
                 },
             )
-            .expect("production MapRoot.contains path under strict Memcheck");
+            .expect("production MapAnyOwner v1 Contains path under strict Memcheck");
             assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
             assert_eq!(memcheck.stdout, reference.output);
             assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(!memcheck.stderr.contains("definitely lost:"));
-            assert!(!memcheck.stderr.contains("indirectly lost:"));
-            assert!(!memcheck.stderr.contains("possibly lost:"));
+            assert!(memcheck
+                .stderr
+                .contains("definitely lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("indirectly lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("possibly lost: 0 bytes in 0 blocks"));
         }
 
         let (_owner, function) = program
@@ -1600,45 +2609,48 @@ func main() -> i32 {
             .iter()
             .find(|(owner, _)| owner.0.ends_with("main"))
             .expect("main MIR");
-        assert!(function.canonical_text().contains("map_root_contains"));
+        let canonical = function.canonical_text();
+        assert!(canonical.contains("checker_map_any_owner["));
+        assert!(canonical.contains("map_root_contains"));
     }
 
     #[test]
-    fn receipt_backed_string_map_root_matches_all_consumers_and_reclaims_payloads() {
-        let program = canonical_program(MAP_ROOT_STRING_NATIVE_SOURCE);
-        let verifier_receipt = program.route_receipt("verifier-mir-v1");
+    fn receipt_backed_string_map_any_owner_v1_matches_all_consumers_and_reclaims_payloads() {
+        let program = canonical_program(MAP_ANY_OWNER_V1_STRING_NATIVE_SOURCE);
+        let verifier_receipt = program.route_receipt(crate::core::mir::MAP_ANY_OWNER_V1_ISLAND);
         crate::verifier::validate_mir_capabilities(&program)
-            .expect("verifier admits the exact typed String MapRoot profile");
+            .expect("verifier admits the exact typed String MapAnyOwner v1 profile");
         crate::codegen::mir::validate_mir_native(&program)
-            .expect("native validator admits Checker-receipted i32/String MapRoot payloads");
+            .expect("native validator admits Checker-receipted i32/String MapAnyOwner payloads");
 
         let main = program
             .functions()
             .keys()
             .find(|owner| owner.0.ends_with("main"))
-            .expect("String MapRoot main")
+            .expect("String MapAnyOwner v1 main")
             .clone();
         let reference = MirReferenceInterpreter::new(&program)
             .execute_with_output(&main, &[])
-            .expect("reference String MapRoot execution");
+            .expect("reference String MapAnyOwner v1 execution");
         assert_eq!(reference.value, MirRuntimeValue::Int(0));
         assert_eq!(reference.output, "1\n1\n1\n");
 
         let mut vm = BytecodeVM::new(
-            compile_mir_program(&program).expect("AST-free String MapRoot bytecode"),
+            compile_mir_program(&program).expect("AST-free String MapAnyOwner v1 bytecode"),
         );
         assert_eq!(
-            vm.run_value().expect("bytecode String MapRoot execution"),
+            vm.run_value()
+                .expect("bytecode String MapAnyOwner v1 execution"),
             Value::Int(0)
         );
         assert_eq!(vm.take_stdout(), reference.output);
 
-        let verification = crate::verifier::verify_mir(&program, "map-root-string".into())
-            .expect("public MIR verifier consumes the same String MapRoot graph");
+        let verification = crate::verifier::verify_mir(&program, "map-any-owner-v1-string".into())
+            .expect("public MIR verifier consumes the same String MapAnyOwner v1 graph");
         let proven = verification
             .iter()
             .find(|result| result.func_name.ends_with("map_size_for_string"))
-            .expect("positive String MapRoot contract");
+            .expect("positive String MapAnyOwner v1 contract");
         assert_eq!(
             proven.status,
             crate::verifier::VerifStatus::Proven,
@@ -1648,7 +2660,7 @@ func main() -> i32 {
         let remove_proven = verification
             .iter()
             .find(|result| result.func_name.ends_with("map_remove_string_size"))
-            .expect("positive String MapRoot Remove contract");
+            .expect("positive String MapAnyOwner v1 Remove contract");
         assert_eq!(
             remove_proven.status,
             crate::verifier::VerifStatus::Proven,
@@ -1658,9 +2670,9 @@ func main() -> i32 {
         let receipt_verification = crate::verifier::verify_mir_with_route_receipt(
             &program,
             &verifier_receipt,
-            "map-root-string-route-receipt".into(),
+            "map-any-owner-v1-string-route-receipt".into(),
         )
-        .expect("public receipt-bound verifier consumes the same String MapRoot graph");
+        .expect("public receipt-bound verifier consumes the same String MapAnyOwner v1 graph");
         assert!(receipt_verification.iter().any(|result| {
             result.func_name.ends_with("map_size_for_string")
                 && result.status == crate::verifier::VerifStatus::Proven
@@ -1668,12 +2680,12 @@ func main() -> i32 {
         let disproven = verification
             .iter()
             .find(|result| result.func_name.ends_with("wrong_string_map_size"))
-            .expect("negative String MapRoot contract");
+            .expect("negative String MapAnyOwner v1 contract");
         assert_eq!(disproven.status, crate::verifier::VerifStatus::Disproven);
         let remove_disproven = verification
             .iter()
             .find(|result| result.func_name.ends_with("wrong_map_remove_string_size"))
-            .expect("negative String MapRoot Remove contract");
+            .expect("negative String MapAnyOwner v1 Remove contract");
         assert_eq!(
             remove_disproven.status,
             crate::verifier::VerifStatus::Disproven,
@@ -1681,88 +2693,104 @@ func main() -> i32 {
             remove_disproven.message
         );
 
-        let mut forged = program.clone();
-        let i32_ty = forged
-            .type_catalog()
-            .iter()
-            .find_map(|(ty, desc)| {
-                (desc.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32))
-                    .then(|| ty.clone())
-            })
-            .expect("canonical i32 TypeDesc");
-        let mut function = forged.functions().get(&main).expect("main MIR").clone();
-        assert!(function
+        let mut missing_checker_receipt = program.clone();
+        let mut main_without_checker_receipt = missing_checker_receipt
+            .functions()
+            .get(&main)
+            .expect("String MapAnyOwner v1 main")
+            .clone();
+        main_without_checker_receipt
             .ownership
-            .forge_checker_map_root_set_value_type_for_test_only(i32_ty));
-        forged.replace_function_for_test_only(function);
-        let forged_construction = crate::core::mir::reference::MirProgram::with_type_catalog(
-            forged.functions().clone(),
-            forged.type_catalog().clone(),
-        )
-        .expect_err("the public MIR constructor must reject a forged String payload receipt");
-        assert!(forged_construction.iter().any(|error| error
-            .message
-            .contains("MapRoot operation disagrees with its private Checker")));
-        let forged_route = crate::verifier::verify_mir_with_route_receipt(
-            &forged,
+            .clear_checker_map_any_owner_actions_for_test_only();
+        missing_checker_receipt.replace_function_for_test_only(main_without_checker_receipt);
+        let missing_receipt_construction =
+            crate::core::mir::reference::MirProgram::with_type_catalog(
+                missing_checker_receipt.functions().clone(),
+                missing_checker_receipt.type_catalog().clone(),
+            )
+            .expect_err("MapAnyOwner v1 TypeDesc must not outlive its independent Checker receipt");
+        assert!(missing_receipt_construction.iter().any(|error| {
+            error
+                .message
+                .contains("MapAnyOwner v1 TypeDesc has no independent Checker receipt")
+        }));
+        assert!(
+            crate::codegen::mir::validate_mir_native(&missing_checker_receipt)
+                .expect_err("native admission must reject a missing MapAnyOwner v1 receipt")
+                .iter()
+                .any(|error| error.to_string().contains("MapAnyOwner v1"))
+        );
+        assert!(
+            crate::verifier::validate_mir_capabilities(&missing_checker_receipt)
+                .expect_err("verifier admission must reject a missing MapAnyOwner v1 receipt")
+                .iter()
+                .any(|error| error.contains("MapAnyOwner v1"))
+        );
+        assert!(crate::verifier::verify_mir_with_route_receipt(
+            &missing_checker_receipt,
             &verifier_receipt,
-            "map-root-string-forged-receipt".into(),
+            "map-any-owner-v1-string-missing-checker-receipt".into(),
         )
-        .expect_err("a valid verifier receipt must not replay against forged String MIR");
-        assert!(forged_route.contains("canonical route receipt rejected"));
-        assert!(crate::codegen::mir::validate_mir_native(&forged)
-            .expect_err("forged String payload descriptor must fail native admission")
-            .iter()
-            .any(|error| error
-                .to_string()
-                .contains("MapRoot receipt/shape validation failed")));
-        assert!(crate::verifier::validate_mir_capabilities(&forged)
-            .expect_err("forged String payload descriptor must fail verifier admission")
-            .iter()
-            .any(|error| error.contains("MapRoot MIR validation failed")));
+        .expect_err("a valid v1 route receipt must not replay without its Checker ledger")
+        .contains("canonical route receipt rejected"));
 
         let mut forged_remove = program.clone();
         let mut main_with_forged_remove = forged_remove
             .functions()
             .get(&main)
-            .expect("String MapRoot main")
+            .expect("String MapAnyOwner v1 main")
             .clone();
-        assert!(main_with_forged_remove
-            .ownership
-            .forge_checker_map_root_remove_key_for_test_only("forged-key".into()));
+        let remove = main_with_forged_remove
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::MapRootRemove { .. }
+                )
+            })
+            .expect("MapAnyOwner v1 Remove instruction");
+        let crate::core::mir::MirInstructionKind::MapRootRemove { key, .. } = &mut remove.kind
+        else {
+            unreachable!("located Remove instruction")
+        };
+        *key = "forged-key".into();
         forged_remove.replace_function_for_test_only(main_with_forged_remove);
         let forged_remove_construction =
             crate::core::mir::reference::MirProgram::with_type_catalog(
                 forged_remove.functions().clone(),
                 forged_remove.type_catalog().clone(),
             )
-            .expect_err("public MIR constructor must reject a forged Remove key receipt");
+            .expect_err("MIR constructor must reject a forged MapAnyOwner v1 Remove key");
         assert!(forged_remove_construction
             .iter()
             .any(|error| error.message.contains("MapRoot operation disagrees")));
-        assert!(crate::codegen::mir::validate_mir_native(&forged_remove)
-            .expect_err("native admission must reject the forged Remove key")
-            .iter()
-            .any(|error| error
-                .to_string()
-                .contains("MapRoot receipt/shape validation failed")));
+        let forged_remove_native_errors = crate::codegen::mir::validate_mir_native(&forged_remove)
+            .expect_err("native admission must reject the forged MapAnyOwner v1 Remove key");
+        assert!(
+            forged_remove_native_errors
+                .iter()
+                .any(|error| error.to_string().contains("MapAnyOwner v1")),
+            "native validator errors: {forged_remove_native_errors:#?}"
+        );
         assert!(crate::verifier::validate_mir_capabilities(&forged_remove)
-            .expect_err("verifier capability gate must reject the forged Remove key")
+            .expect_err("verifier capability gate must reject the forged MapAnyOwner v1 key")
             .iter()
-            .any(|error| error.contains("MapRoot MIR validation failed")));
+            .any(|error| error.contains("MapAnyOwner v1")));
         assert!(crate::verifier::verify_mir_with_route_receipt(
             &forged_remove,
             &verifier_receipt,
-            "map-root-string-forged-remove-key".into(),
+            "map-any-owner-v1-string-forged-remove-key".into(),
         )
-        .expect_err("valid route receipt cannot authorize a forged Remove key")
+        .expect_err("valid v1 route receipt cannot authorize a forged Remove key")
         .contains("canonical route receipt rejected"));
 
         let mut missing_string_drop = program.clone();
         let mut main_without_string_drop = missing_string_drop
             .functions()
             .get(&main)
-            .expect("main MIR")
+            .expect("String MapAnyOwner v1 main")
             .clone();
         let block = main_without_string_drop
             .blocks
@@ -1780,7 +2808,7 @@ func main() -> i32 {
                     )
                 })
             })
-            .expect("MapRoot Set and its owned String temporary Drop");
+            .expect("MapAnyOwner v1 Set and its owned String temporary Drop");
         let set_index = block
             .instructions
             .windows(2)
@@ -1795,54 +2823,55 @@ func main() -> i32 {
                         )
                 )
             })
-            .expect("MapRoot Set temporary Drop pair");
+            .expect("MapAnyOwner v1 Set temporary Drop pair");
         block.instructions.remove(set_index + 1);
         missing_string_drop.replace_function_for_test_only(main_without_string_drop);
         let missing_drop_construction = crate::core::mir::reference::MirProgram::with_type_catalog(
             missing_string_drop.functions().clone(),
             missing_string_drop.type_catalog().clone(),
         )
-        .expect_err("the public MIR constructor must reject a missing String payload Drop");
+        .expect_err("the public MIR constructor must reject a missing MapAnyOwner v1 String Drop");
         assert!(missing_drop_construction.iter().any(|error| error
             .message
             .contains("MapRoot operation disagrees with its private Checker")));
         let missing_drop_route = crate::verifier::verify_mir_with_route_receipt(
             &missing_string_drop,
             &verifier_receipt,
-            "map-root-string-missing-drop".into(),
+            "map-any-owner-v1-string-missing-drop".into(),
         )
-        .expect_err("a valid verifier receipt must not replay against MIR missing String Drop");
+        .expect_err("a valid v1 route receipt must not replay against MIR missing String Drop");
         assert!(missing_drop_route.contains("canonical route receipt rejected"));
         assert!(
             crate::codegen::mir::validate_mir_native(&missing_string_drop)
-                .expect_err("omitted String temporary Drop must fail native admission")
+                .expect_err("omitted MapAnyOwner v1 String Drop must fail native admission")
                 .iter()
-                .any(|error| error
-                    .to_string()
-                    .contains("MapRoot receipt/shape validation failed"))
+                .any(|error| error.to_string().contains("MapAnyOwner v1"))
         );
         assert!(
             crate::verifier::validate_mir_capabilities(&missing_string_drop)
-                .expect_err("omitted String temporary Drop must fail verifier admission")
+                .expect_err("omitted MapAnyOwner v1 String Drop must fail verifier admission")
                 .iter()
-                .any(|error| error.contains("MapRoot MIR validation failed"))
+                .any(|error| error.contains("MapAnyOwner v1"))
         );
 
         let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_native_string_map_root");
+        let mut generator = CodeGenerator::new(&context, "mir_native_string_map_any_owner_v1");
         generator
             .compile_mir_native(&program)
-            .expect("native emitter consumes the same receipt-backed String MapRoot MIR");
+            .expect("native emitter consumes the same receipt-backed String MapAnyOwner v1 MIR");
         generator
             .module
             .verify()
-            .expect("native String MapRoot module verifies");
+            .expect("native String MapAnyOwner v1 module verifies");
         assert!(generator
             .module
-            .get_function("mimi_mir_map_root_set_string")
+            .get_function("mimi_mir_map_any_owner_v1_set_string")
             .is_some());
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("call i64 @mimi_mir_map_any_owner_v1_set_string"));
+        assert!(!native_ir.contains("call i64 @mimi_mir_map_root_set_string"));
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
-            .expect("production native String MapRoot process");
+            .expect("production native String MapAnyOwner v1 process");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
         assert_eq!(native.stdout, reference.output);
         assert_eq!(native.stderr, "");
@@ -1866,69 +2895,228 @@ func main() -> i32 {
                     ..crate::tests::E2EConfig::default()
                 },
             )
-            .expect("production String MapRoot lifecycle under Memcheck");
+            .expect("production String MapAnyOwner v1 lifecycle under Memcheck");
             assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
             assert_eq!(memcheck.stdout, reference.output);
             assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(!memcheck.stderr.contains("definitely lost:"));
-            assert!(!memcheck.stderr.contains("indirectly lost:"));
-            assert!(!memcheck.stderr.contains("possibly lost:"));
+            assert!(memcheck
+                .stderr
+                .contains("definitely lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("indirectly lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("possibly lost: 0 bytes in 0 blocks"));
         }
     }
 
     #[test]
-    fn native_map_root_admission_rejects_forged_and_missing_receipts_before_llvm() {
-        let program = canonical_program(MAP_ROOT_NATIVE_SOURCE);
+    fn map_any_owner_v1_is_one_mir_across_reference_bytecode_native_verifier_and_memcheck() {
+        let program = canonical_program(MAP_ANY_OWNER_V1_PROOF_STRING_NATIVE_SOURCE);
+        let verifier_receipt = program.route_receipt(crate::core::mir::MAP_ANY_OWNER_V1_ISLAND);
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("whole-program verifier admits the exact MapAnyOwner v1 profile");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native validator admits the receipted String owner profile");
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference executes the same MapAnyOwner v1 MIR");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "true\nfalse\n0\n");
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free bytecode consumes the same MIR"),
+        );
+        assert_eq!(vm.run_value().expect("bytecode execution"), Value::Int(0));
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let verification = crate::verifier::verify_mir(&program, "map-any-owner-v1-string".into())
+            .expect("public verifier consumes the same typed-owner MIR");
+        for (name, expected) in [
+            (
+                "checked_string_owner_size",
+                crate::verifier::VerifStatus::Proven,
+            ),
+            (
+                "false_string_owner_size",
+                crate::verifier::VerifStatus::Disproven,
+            ),
+        ] {
+            let result = verification
+                .iter()
+                .find(|result| result.func_name.ends_with(name))
+                .unwrap_or_else(|| panic!("missing MapAnyOwner v1 proof for {name}"));
+            assert_eq!(result.status, expected, "{}: {}", name, result.message);
+            assert_eq!(
+                result
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| artifact.engine.as_str()),
+                Some(crate::verifier::ProofArtifact::ENGINE_MIR)
+            );
+        }
+        let receipt_verification = crate::verifier::verify_mir_with_route_receipt(
+            &program,
+            &verifier_receipt,
+            "map-any-owner-v1-string-route-receipt".into(),
+        )
+        .expect("route-bound verifier consumes the same Checker receipt");
+        assert!(receipt_verification.iter().any(|result| {
+            result.func_name.ends_with("checked_string_owner_size")
+                && result.status == crate::verifier::VerifStatus::Proven
+        }));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_owner_v1_string");
+        generator
+            .compile_mir_native(&program)
+            .expect("native emitter consumes the same receipted MIR");
+        generator
+            .module
+            .verify()
+            .expect("native MapAnyOwner v1 module verifies");
+        for runtime in [
+            "mimi_mir_map_any_owner_v1_new",
+            "mimi_mir_map_any_owner_v1_set_string",
+            "mimi_mir_map_any_owner_v1_remove",
+            "mimi_mir_map_any_owner_v1_size",
+            "mimi_mir_map_any_owner_v1_contains",
+            "mimi_mir_map_any_owner_v1_drop",
+        ] {
+            assert!(
+                generator.module.get_function(runtime).is_some(),
+                "native V1 lowering must declare {runtime}"
+            );
+        }
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("call i64 @mimi_mir_map_any_owner_v1_set_string"));
+        assert!(!native_ir.contains("call i64 @mimi_mir_map_root_set_string"));
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("same MIR native MapAnyOwner v1 process");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        // The process-global owner registry and its descriptor
+                        // table remain reachable until process exit. Treat
+                        // actual losses as errors and report reachable state
+                        // separately; runtime lifecycle tests assert that all
+                        // Map-owned tokens return to their live-count baseline.
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                        "--error-exitcode=99".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("production MapAnyOwner v1 runtime under strict Memcheck");
+            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
+            assert_eq!(memcheck.stdout, reference.output);
+            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+            assert!(memcheck
+                .stderr
+                .contains("definitely lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("indirectly lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("possibly lost: 0 bytes in 0 blocks"));
+        }
+    }
+
+    #[test]
+    fn map_any_owner_v1_mir_rejects_a_missing_checker_receipt() {
+        let program = canonical_program(MAP_ANY_OWNER_V1_STRING_NATIVE_SOURCE);
+        let main = crate::core::NodeId("function:main".into());
+        let mut function = program.functions().get(&main).expect("main MIR").clone();
+        function
+            .ownership
+            .clear_checker_map_any_owner_actions_for_test_only();
+        let errors = function
+            .validate()
+            .expect_err("v1 synthetic owner types cannot outlive their private Checker ledger");
+        assert!(errors.iter().any(|error| {
+            error
+                .message
+                .contains("MapAnyOwner v1 TypeDesc has no independent Checker receipt")
+        }));
+    }
+
+    #[test]
+    fn native_map_any_owner_v1_admission_rejects_forged_and_missing_receipts_before_llvm() {
+        let program = canonical_program(MAP_ANY_OWNER_V1_NATIVE_SOURCE);
         let owner = crate::core::NodeId("function:main".into());
 
         let mut forged = program.clone();
         let mut function = forged
             .functions()
             .get(&owner)
-            .expect("MapRoot main")
+            .expect("MapAnyOwner v1 main")
             .clone();
-        assert!(function
-            .ownership
-            .forge_checker_map_root_set_key_for_test_only("forged".into()));
+        let set = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| block.instructions.iter_mut())
+            .find(|instruction| matches!(&instruction.kind, MirInstructionKind::MapRootSet { .. }))
+            .expect("MapAnyOwner v1 Set instruction");
+        let MirInstructionKind::MapRootSet { key, .. } = &mut set.kind else {
+            unreachable!("located Set instruction")
+        };
+        *key = "forged".into();
         forged.replace_function_for_test_only(function);
         let errors = crate::codegen::mir::validate_mir_native(&forged)
-            .expect_err("native admission must reject an altered private receipt");
-        assert!(errors.iter().any(|error| {
-            error
-                .to_string()
-                .contains("MapRoot receipt/shape validation failed")
-        }));
+            .expect_err("native admission must reject MIR that disagrees with its v1 receipt");
+        assert!(
+            errors
+                .iter()
+                .any(|error| { error.to_string().contains("MapAnyOwner v1") }),
+            "native validator errors: {errors:#?}"
+        );
         let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_native_map_root_forged");
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_owner_v1_forged");
         assert!(generator.compile_mir_native(&forged).is_err());
         assert!(generator
             .module
-            .get_function("mimi_mir_map_root_new")
+            .get_function("mimi_mir_map_any_owner_v1_new")
             .is_none());
 
         let mut missing = program.clone();
         let mut function = missing
             .functions()
             .get(&owner)
-            .expect("MapRoot main")
+            .expect("MapAnyOwner v1 main")
             .clone();
         function
             .ownership
-            .clear_checker_map_root_actions_for_test_only();
+            .clear_checker_map_any_owner_actions_for_test_only();
         missing.replace_function_for_test_only(function);
         let errors = crate::codegen::mir::validate_mir_native(&missing)
-            .expect_err("native admission must reject missing private receipts");
-        assert!(errors.iter().any(|error| {
-            error
-                .to_string()
-                .contains("MapRoot receipt/shape validation failed")
-        }));
+            .expect_err("native admission must reject missing independent v1 receipts");
+        assert!(errors
+            .iter()
+            .any(|error| { error.to_string().contains("MapAnyOwner v1") }));
 
         let mut out_of_range = program.clone();
         let mut function = out_of_range
             .functions()
             .get(&owner)
-            .expect("MapRoot main")
+            .expect("MapAnyOwner v1 main")
             .clone();
         let set_value = function
             .blocks
@@ -1938,7 +3126,7 @@ func main() -> i32 {
                 MirInstructionKind::MapRootSet { value, .. } => Some(value.clone()),
                 _ => None,
             })
-            .expect("MapRoot Set scalar");
+            .expect("MapAnyOwner v1 Set scalar");
         let constant = function
             .blocks
             .values_mut()
@@ -1949,13 +3137,13 @@ func main() -> i32 {
                     MirInstructionKind::Const { result, .. } if result == &set_value
                 )
             })
-            .expect("MapRoot Set scalar constant");
+            .expect("MapAnyOwner v1 Set scalar constant");
         let MirInstructionKind::Const {
             literal: crate::core::ir::ResolvedLiteral::Int(literal),
             ..
         } = &mut constant.kind
         else {
-            panic!("MapRoot Set scalar must be an integer literal");
+            panic!("MapAnyOwner v1 Set scalar must be an integer literal");
         };
         *literal = i64::from(i32::MAX) + 1;
         out_of_range.replace_function_for_test_only(function);
@@ -1969,21 +3157,24 @@ func main() -> i32 {
     }
 
     #[test]
-    fn emitted_map_root_drop_reclaims_the_production_runtime_entry() {
-        let program = canonical_program(MAP_ROOT_NATIVE_LIFECYCLE_SOURCE);
+    fn emitted_map_any_owner_v1_drop_reclaims_the_production_runtime_entry() {
+        let program = canonical_program(MAP_ANY_OWNER_V1_NATIVE_LIFECYCLE_SOURCE);
         crate::codegen::mir::validate_mir_native(&program)
-            .expect("native MapRoot lifecycle probe is admitted");
+            .expect("native MapAnyOwner v1 lifecycle probe is admitted");
         let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_native_map_root_lifecycle");
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_owner_v1_lifecycle");
         generator
             .compile_mir_native(&program)
-            .expect("receipt-backed MapRoot lifecycle lowering");
+            .expect("receipt-backed MapAnyOwner v1 lifecycle lowering");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("call void @mimi_mir_map_any_owner_v1_drop"));
+        assert!(!native_ir.contains("call void @mimi_mir_map_root_drop"));
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
             .expect("production runtime link observes the emitted Drop");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
         assert_eq!(
             native.stdout, "0\n0\n",
-            "emitted Drop must remove the live root"
+            "emitted v1 Drop must remove the live map owner from the shared table"
         );
 
         if std::process::Command::new("valgrind")
@@ -1999,19 +3190,28 @@ func main() -> i32 {
                         "--tool=memcheck".into(),
                         "--leak-check=full".into(),
                         "--show-leak-kinds=all".into(),
-                        "--errors-for-leak-kinds=all".into(),
+                        // The process-global AnyOwner registry and descriptor
+                        // table stay reachable until process exit. Treat real
+                        // losses as errors and report reachable bookkeeping.
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
                         "--error-exitcode=99".into(),
                     ],
                     ..crate::tests::E2EConfig::default()
                 },
             )
-            .expect("production runtime MapRoot lifecycle under Memcheck");
+            .expect("production runtime MapAnyOwner v1 lifecycle under Memcheck");
             assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
             assert_eq!(memcheck.stdout, "0\n0\n");
             assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
             assert!(memcheck
                 .stderr
-                .contains("All heap blocks were freed -- no leaks are possible"));
+                .contains("definitely lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("indirectly lost: 0 bytes in 0 blocks"));
+            assert!(memcheck
+                .stderr
+                .contains("possibly lost: 0 bytes in 0 blocks"));
         }
     }
 

@@ -1,5 +1,6 @@
 use crate::ast::*;
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::sync::Arc;
 
 use crate::error::{CompileError, MimiResult};
@@ -70,6 +71,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
+    fn install_checked_actor_metadata(&mut self, program: &crate::core::CheckedProgram) {
+        let mut actors = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            actors.insert(actor.qualified_name.clone(), actor.methods.clone());
+        }
+        self.resolved_actors = Some(actors);
+
+        let mut actor_method_signatures = std::collections::HashMap::new();
+        let mut actor_method_params = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            for method in &actor.method_signatures {
+                let key = format!("{}.{}", actor.qualified_name, method.name);
+                actor_method_signatures
+                    .insert(key.clone(), (method.params.len(), method.ret.clone()));
+                actor_method_params.insert(key.clone(), method.params.clone());
+            }
+        }
+        self.resolved_actor_method_signatures = Some(actor_method_signatures);
+        self.resolved_actor_method_params = Some(actor_method_params);
+
+        let mut actor_fields = std::collections::HashMap::new();
+        for actor in program.actors().values() {
+            if !actor.fields.is_empty() {
+                actor_fields.insert(
+                    actor.qualified_name.clone(),
+                    actor
+                        .fields
+                        .iter()
+                        .map(|(name, ty, mut_)| (name.clone(), crate::core::fmt_type(ty), *mut_))
+                        .collect(),
+                );
+            }
+        }
+        self.resolved_actor_fields = Some(actor_fields);
+    }
+
     fn compile_checked_inner(
         &mut self,
         program: &crate::core::CheckedProgram,
@@ -110,8 +147,52 @@ impl<'ctx> CodeGenerator<'ctx> {
         // `compile_checked` callers too: an unrelated MapRoot/record candidate
         // must not make MIR materialization fail on the export body after the
         // caller has entered the compatibility API.
-        if crate::core::mir::exported_abi_body_boundary_reason(program).is_none() {
+        // Existing ordinary Map lifecycle gaps retain their compatibility
+        // route. The new typed owned-Get API has no legacy backend semantics,
+        // so its incomplete receipt must fail closed before the legacy
+        // remainder is considered.
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+        if let Some(reason) =
+            crate::core::mir::unsupported_nested_callable_boundary_reason(program, None)
+        {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                reason,
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
+        if admission
+            .ordinary_map_owned_get_i32_string_v1
+            .has_profile_signal()
+            && !admission.ordinary_map_owned_get_i32_string_v1_complete()
+        {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                "Checker recognized an ordinary Map owned-get attempt without complete consumer coverage",
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
+        let ordinary_map_compatibility = admission
+            .ordinary_map_owner_lifecycle_i32_string_v1
+            .has_profile_signal()
+            && !admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
+            && !admission.map_any_owner.is_candidate()
+            && !admission.ordinary_map_owned_get_i32_string_v1_complete();
+        if let Some(reason) = crate::core::mir::exported_abi_body_boundary_reason(program) {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                format!(
+                    "{reason}; aggregate, generic, variadic, errno, parameter-mode, async, and contract-bearing exports remain outside the trusted canonical scalar subset"
+                ),
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
+        if crate::core::mir::exported_abi_body_boundary_reason(program).is_none()
+            && crate::core::mir::scalar_actor_contract_boundary_reason(program).is_none()
+            && !ordinary_map_compatibility
+        {
             if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)? {
+                self.install_checked_actor_metadata(program);
                 let receipt =
                     canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
                 return self.compile_mir_native_with_route_receipt(&canonical, &receipt);
@@ -151,7 +232,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
         // AD-6: transition tables built once in CheckedProgram, shared by both backends.
-        let tables = program.build_transition_tables();
+        let tables = program
+            .native_declarations()
+            .build_transition_tables(program.resolved_types());
         self.resolved_transitions = Some(tables.resolved);
         self.resolved_fallback_transitions = Some(tables.fallbacks);
         self.resolved_ffi_pinned_transitions = Some(tables.pinned);
@@ -221,11 +304,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             session_displays.insert(session.qualified_name.clone(), session.body_display.clone());
         }
         self.resolved_session_displays = Some(session_displays);
-        let mut actors = std::collections::HashMap::new();
-        for actor in program.actors().values() {
-            actors.insert(actor.qualified_name.clone(), actor.methods.clone());
-        }
-        self.resolved_actors = Some(actors);
+        self.install_checked_actor_metadata(program);
         self.resolved_capabilities = Some(
             program
                 .capabilities()
@@ -440,32 +519,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
         self.resolved_extern_no_panic = Some(extern_no_panic);
         self.resolved_extern_unsafe = Some(extern_unsafe);
-        let mut actor_method_signatures = std::collections::HashMap::new();
-        let mut actor_method_params = std::collections::HashMap::new();
-        for actor in program.actors().values() {
-            for method in &actor.method_signatures {
-                let key = format!("{}.{}", actor.qualified_name, method.name);
-                actor_method_signatures
-                    .insert(key.clone(), (method.params.len(), method.ret.clone()));
-                actor_method_params.insert(key.clone(), method.params.clone());
-            }
-        }
-        self.resolved_actor_method_signatures = Some(actor_method_signatures);
-        self.resolved_actor_method_params = Some(actor_method_params);
-        let mut actor_fields = std::collections::HashMap::new();
-        for actor in program.actors().values() {
-            if !actor.fields.is_empty() {
-                actor_fields.insert(
-                    actor.qualified_name.clone(),
-                    actor
-                        .fields
-                        .iter()
-                        .map(|(name, ty, mut_)| (name.clone(), crate::core::fmt_type(ty), *mut_))
-                        .collect(),
-                );
-            }
-        }
-        self.resolved_actor_fields = Some(actor_fields);
         let mut method_signatures = std::collections::HashMap::new();
         let mut method_params = std::collections::HashMap::new();
         for trait_def in program.traits().values() {
@@ -596,41 +649,69 @@ impl<'ctx> CodeGenerator<'ctx> {
         // propagate directly; there is deliberately no typed-error → AST
         // fallback. Unmigrated body classes remain on the explicit legacy arm
         // until their slice is implemented and its oracle tests are green.
+        // Generic checked ProtocolMethod calls currently have exact checker
+        // receipts but no materialized concrete native instance ABI. The
+        // resolved emitter parses the declaration symbol and uses erased Any
+        // handles, while the legacy body fallback may miss the AST call-span
+        // receipt. Stop before either compatibility emitter can produce a
+        // mismatched call. A complete canonical MIR route returned above is
+        // allowed to own this shape once it materializes the exact instance.
+        self.install_checked_declaration_names(program).map_err(|error| {
+            vec![crate::diagnostic::Diagnostic::error_code(
+                "NATIVE-CHECKED-METHOD-RECEIPT-001",
+                format!("native generic-method preflight could not install exact checked receipts: {error}"),
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]
+        })?;
+        for site in program.call_sites_sorted() {
+            if !matches!(
+                site.resolved_callee.as_ref(),
+                Some(crate::core::ir::ResolvedCallee::ProtocolMethod { .. })
+            ) {
+                continue;
+            }
+            let span = site.origin.user_span();
+            let checked_span = (
+                span.source_id.raw(),
+                span.start_line,
+                span.start_col,
+                span.end_line,
+                span.end_col,
+            );
+            let Some(target) = self
+                .checked_trait_method_dispatch
+                .call_targets
+                .get(&checked_span)
+                .and_then(|targets| {
+                    targets
+                        .iter()
+                        .find(|target| !target.key.type_arguments.is_empty())
+                })
+            else {
+                continue;
+            };
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                "NATIVE-GENERIC-PROTOCOL-ABI-001",
+                format!(
+                    "native codegen cannot emit checked generic ProtocolMethod '{}' until a concrete MIR instance owns its ABI; stopped before resolved or legacy compatibility emission",
+                    target.key.callable.0
+                ),
+                span,
+            )]);
+        }
         if super::resolved::supports_resolved_native(program) {
             return self.compile_resolved_native(program);
         }
-        // Per-function dispatch (S12): resolved subset compilation is deferred
-        // to inside compile_file, after the setup phase (forward declarations,
-        // impl methods, vtables) completes. This ensures all symbols are
-        // declared before the resolved emitter compiles eligible bodies.
-        // ✅ 2026-07-28: Per-function dispatch (S12) enabled by default.
-        // Three ABI fixes resolved the remaining blockers:
-        //   1. `coerce_to_i64` — handle PointerValue/StructValue for list
-        //      element storage (string ptr → i64).
-        //   2. `resolved_type_display_name` — emit composite type names
-        //      (List<string>, Option<i32>, etc.) instead of "unknown", so
-        //      the print formatter dispatches to mimi_list_to_string etc.
-        //   3. `return_owns_heap` — drain (not free) heap scope when the
-        //      return type holds pointer fields (list/string structs).
-        //   4. `push`/`pop` alloca-swap — pass the original alloca pointer
-        //      to mutating builtins instead of a loaded copy.
-        // Set MIMI_USE_PER_FUNCTION_DISPATCH=0 or unset to disable.
-        let eligible: Option<std::collections::BTreeSet<crate::core::NodeId>> =
-            if std::env::var("MIMI_USE_PER_FUNCTION_DISPATCH").map_or(true, |v| v != "0") {
-                super::resolved::resolved_eligible_functions(program, self.verify_contracts)
-            } else {
-                None
-            };
-        self.compile_file_with_resolved(program, eligible.as_ref())
-            .map_err(|error| {
-                let mut diagnostic = error.to_diagnostic();
-                if diagnostic.span.start_line == 0 || diagnostic.span.start_col == 0 {
-                    if let Some(span) = program.entry_span() {
-                        diagnostic = diagnostic.with_span(span);
-                    }
-                }
-                vec![diagnostic]
-            })
+        // No canonical route admitted this checked program. The former
+        // per-function dispatch would retain a surface AST snapshot here and
+        // send the ineligible remainder to `compile_func_legacy`; that owner
+        // is retired. Return a checker-owned coverage result before any body
+        // accessor or compatibility emitter can run.
+        Err(vec![crate::diagnostic::Diagnostic::error_code(
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            "MIR-COVERAGE-001/NITS: CodegenLegacyRemainder is retired; this checked program has no complete canonical native route",
+            program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+        )])
     }
 
     /// Probe the direct native boundary for already closed MIR islands.
@@ -657,7 +738,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         // island would force unrelated legacy prelude arithmetic through the
         // narrow native Float contract and poison the graph before emission.
         let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
-        let excluded_sources = if admission.copy_option_f64_complete()
+        let excluded_sources = if admission.scalar_export
+            || admission.scalar_actor
+            || admission.scalar_nested
+            || admission.copy_option_f64_complete()
             || admission.map_root_complete()
             // R6-1091 parity: a complete copy-Option (i32/bool/i64) admission
             // must see the same prelude-free graph the CLI dispatch wrapper
@@ -681,6 +765,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             || admission.session_complete()
             || admission.flow_failure_retry
             || admission.flow_complete()
+            || admission.map_any_owner_complete()
+            || admission.ordinary_map_owned_get_i32_string_v1_complete()
+            || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
             // R6-1048 parity: a complete flat Copy-record admission must see
             // the same prelude-free graph the CLI dispatch wrapper builds.
             // Without the exclusion, preloaded prelude bodies carrying Assign
@@ -711,6 +798,14 @@ impl<'ctx> CodeGenerator<'ctx> {
             }) => {
                 let (code, detail) = match (profile, stage) {
                     (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarActor,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => ("MIR-LOWERING-001", format!("complete scalar Actor construction failed: {message}")),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::ScalarActor,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => ("MIR-COVERAGE-001", format!("complete scalar Actor receipt failed: {message}")),
+                    (
                         crate::core::mir::CanonicalMirRouteProfile::MapRoot,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
                     ) => (
@@ -724,9 +819,59 @@ impl<'ctx> CodeGenerator<'ctx> {
                         "MIR-COVERAGE-001",
                         format!("complete MapRoot MIR island materialization failed: {message}"),
                     ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("complete MapAnyOwner v1 MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("complete MapAnyOwner v1 MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map owner lifecycle MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map owner lifecycle MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map owned-get MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map owned-get MIR island materialization failed: {message}"),
+                    ),
                     (crate::core::mir::CanonicalMirRouteProfile::ScalarFfi, stage) => (
                         "MIR-FFI-COVERAGE-001",
                         format!("scalar FFI canonical MIR {stage:?} failed: {message}"),
+                    ),
+                    (crate::core::mir::CanonicalMirRouteProfile::ScalarNested, stage) => (
+                        "MIR-NESTED-COVERAGE-001",
+                        format!("scalar nested canonical MIR {stage:?} failed: {message}"),
+                    ),
+                    (crate::core::mir::CanonicalMirRouteProfile::ScalarExport, stage) => (
+                        "MIR-EXPORT-COVERAGE-001",
+                        format!("scalar export canonical MIR {stage:?} failed: {message}"),
                     ),
                     (
                         crate::core::mir::CanonicalMirRouteProfile::ScalarGenericIdentityI32,
@@ -1262,9 +1407,125 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let canonical = &route.program;
+        let scalar_export_candidate =
+            route.admission.scalar_export && route.materialized_scalar_export_candidate;
+        if scalar_export_candidate {
+            let island = crate::core::mir::SCALAR_EXPORT_ISLAND;
+            if canonical.export_declarations().is_empty() {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR export receipt",
+                    island,
+                    "scalar export route has no checker-owned declarations",
+                ));
+            }
+            crate::verifier::validate_mir_capabilities(canonical).map_err(|errors| {
+                Self::mir_gate_diagnostics(program, "MIR verifier capability", island, errors)
+            })?;
+            let receipt =
+                canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(canonical, &receipt)
+                .map_err(|errors| {
+                    Self::mir_gate_diagnostics(program, "MIR bytecode", island, errors)
+                })?;
+            crate::codegen::mir::validate_mir_native(canonical)?;
+            let results =
+                crate::verifier::verify_mir_with_route_receipt(canonical, &receipt, String::new())
+                    .map_err(|error| {
+                        Self::mir_gate_diagnostics(program, "MIR verifier", island, error)
+                    })?;
+            if !results.is_empty() {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR export verifier",
+                    island,
+                    results,
+                ));
+            }
+            return Ok(Some(route.program));
+        }
+        let scalar_actor_candidate =
+            route.admission.scalar_actor && route.materialized_scalar_actor_candidate;
+        if scalar_actor_candidate {
+            let island = crate::core::mir::SCALAR_ACTOR_ISLAND;
+            crate::core::mir::validate_scalar_actor_island(canonical).map_err(|errors| {
+                Self::mir_gate_diagnostics(program, "MIR Actor receipt", island, errors)
+            })?;
+            crate::verifier::validate_mir_capabilities(canonical).map_err(|errors| {
+                Self::mir_gate_diagnostics(program, "MIR verifier capability", island, errors)
+            })?;
+            let receipt =
+                canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(canonical, &receipt)
+                .map_err(|errors| {
+                    Self::mir_gate_diagnostics(program, "MIR bytecode", island, errors)
+                })?;
+            crate::codegen::mir::validate_mir_native(canonical)?;
+            let results =
+                crate::verifier::verify_mir_with_route_receipt(canonical, &receipt, String::new())
+                    .map_err(|error| {
+                        Self::mir_gate_diagnostics(program, "MIR verifier", island, error)
+                    })?;
+            if !results.is_empty() {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR neutral NoContracts",
+                    island,
+                    results,
+                ));
+            }
+            return Ok(Some(route.program));
+        }
+        let scalar_nested_candidate =
+            route.admission.scalar_nested && route.materialized_scalar_nested_candidate;
+        if scalar_nested_candidate {
+            let island = crate::core::mir::SCALAR_NESTED_ISLAND;
+            if canonical.nested_callable_scopes().is_empty() {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR nested-callable receipt",
+                    island,
+                    "canonical route has no nested-callable scope receipt",
+                ));
+            }
+            crate::verifier::validate_mir_capabilities(canonical).map_err(|errors| {
+                Self::mir_gate_diagnostics(program, "MIR verifier capability", island, errors)
+            })?;
+            let receipt =
+                canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(canonical, &receipt)
+                .map_err(|errors| {
+                    Self::mir_gate_diagnostics(program, "MIR bytecode", island, errors)
+                })?;
+            crate::codegen::mir::validate_mir_native(canonical)?;
+            let results =
+                crate::verifier::verify_mir_with_route_receipt(canonical, &receipt, String::new())
+                    .map_err(|error| {
+                        vec![crate::diagnostic::Diagnostic::error_code(
+                            "MIR-VERIFY-001",
+                            format!("MIR nested-callable verifier contract pass failed: {error}"),
+                            program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                        )]
+                    })?;
+            if !crate::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    "MIR-VERIFY-001",
+                    format!(
+                        "MIR verifier returned an unsupported or inconclusive result for the {island}"
+                    ),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            return Ok(Some(route.program));
+        }
         let scalar_ffi_candidate =
             route.admission.scalar_ffi && route.materialized_scalar_ffi_candidate;
         let map_root_candidate = route.materialized_map_root_candidate;
+        let map_any_owner_v1_candidate = route.materialized_map_any_owner_candidate;
+        let ordinary_map_owned_get_i32_string_v1_candidate =
+            route.materialized_ordinary_map_owned_get_i32_string_v1_candidate;
+        let ordinary_map_owner_lifecycle_v1_candidate =
+            route.materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate;
         let scalar_generic_identity_i32_candidate =
             route.admission.scalar_generic_identity_i32_complete()
                 && route.materialized_scalar_generic_identity_i32_candidate;
@@ -1275,8 +1536,11 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Its dedicated Checker receipt and all-consumer preflight own that
         // graph; the older collection-only validator rejects MapRoot by
         // design and must not steal this narrower route.
-        let scalar_collection_candidate =
-            route.materialized_collection_candidate && !map_root_candidate;
+        let scalar_collection_candidate = route.materialized_collection_candidate
+            && !map_root_candidate
+            && !map_any_owner_v1_candidate
+            && !ordinary_map_owned_get_i32_string_v1_candidate
+            && !ordinary_map_owner_lifecycle_v1_candidate;
         let flat_copy_record_candidate = route.materialized_record_candidate;
         let flow_transition_candidate = route.materialized_flow_candidate;
         let flow_failure_retry_candidate = route.materialized_flow_failure_retry_candidate;
@@ -1308,6 +1572,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         let session_candidate =
             route.admission.session_complete() && route.materialized_session_candidate;
         if !map_root_candidate
+            && !map_any_owner_v1_candidate
+            && !ordinary_map_owned_get_i32_string_v1_candidate
+            && !ordinary_map_owner_lifecycle_v1_candidate
             && !scalar_ffi_candidate
             && !scalar_generic_identity_i32_candidate
             && !scalar_generic_identity_i64_candidate
@@ -1338,7 +1605,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         // validator then rejects the unsupported combination.  This keeps the
         // candidate precedence identical to canonical_dispatch and prevents
         // a flat record from accidentally widening the collection envelope.
-        let island = if map_root_candidate {
+        let island = if map_any_owner_v1_candidate {
+            crate::core::mir::MAP_ANY_OWNER_V1_ISLAND
+        } else if ordinary_map_owned_get_i32_string_v1_candidate {
+            crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+        } else if ordinary_map_owner_lifecycle_v1_candidate {
+            crate::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
+        } else if map_root_candidate {
             crate::core::mir::MAP_ROOT_ISLAND
         } else if scalar_ffi_candidate {
             "scalar FFI island"
@@ -1648,31 +1921,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                 implicit_single: false,
             }),
             None,
-        )
-    }
-
-    /// Compile with per-function resolved dispatch (S12). The resolved subset
-    /// is compiled after the setup phase (forward declarations, impl methods,
-    /// vtables) but before the legacy body compilation pass. This ensures all
-    /// symbols are declared before the resolved emitter compiles eligible bodies.
-    ///
-    /// 0.32.27+: `file` is obtained from the explicitly tagged
-    /// `CodegenLegacyRemainder` compatibility owner, eliminating the surface
-    /// body parameter at the caller site (C1 migration).
-    pub(crate) fn compile_file_with_resolved(
-        &mut self,
-        program: &crate::core::CheckedProgram,
-        eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
-    ) -> MimiResult<()> {
-        self.shared_dynamic_any_preflight_passed = false;
-        // C1 (permanent): the fifth pass compiles ineligible body classes
-        // (capturing lambdas, generics, extern ABI wrappers) from the
-        // surface AST. The resolved native emitter handles the eligible subset;
-        // The tagged compatibility owner provides the permanent remainder to
-        // the legacy emitter.
-        self.compile_file_inner(
-            program.legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder),
-            Some((program, eligible)),
+            true,
         )
     }
 
@@ -1682,9 +1931,12 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// snapshot even though the canonical body is already authoritative.
     ///
     /// A declaration, exported C wrapper, generic callable, or a resolved
-    /// emission that failed verification remains on the compatibility path.
-    /// The module-body check is the proof that the selected callable actually
-    /// emitted successfully; eligibility alone is not enough.
+    /// emission that failed verification is not admitted here. The caller
+    /// turns that miss into a structured MIR-COVERAGE-001 result instead of
+    /// handing the body to the retired surface-AST emitter. The module-body
+    /// check is the proof that the selected callable actually emitted
+    /// successfully; eligibility alone is not enough.
+    #[cfg(test)]
     fn resolved_top_level_body_emitted(
         &self,
         program: &crate::core::CheckedProgram,
@@ -1712,13 +1964,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             .is_some_and(|llvm_function| llvm_function.count_basic_blocks() != 0)
     }
 
-    fn compile_file_inner(
+    #[cfg(test)]
+    pub(crate) fn compile_file_inner(
         &mut self,
         file_arc: Arc<File>,
         resolved_ctx: Option<(
             &crate::core::CheckedProgram,
             Option<&std::collections::BTreeSet<crate::core::NodeId>>,
         )>,
+        allow_legacy_test_harness: bool,
     ) -> MimiResult<()> {
         let file = file_arc.as_ref();
         // Register built-in Record types used by builtins
@@ -1737,13 +1991,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         // GEP access. Seed every actor name before resolving any user type so
         // forward references in records, tuples, and function signatures use
         // the runtime handle ABI instead of the state layout or i64 fallback.
-        Self::process_items(&file.items, &mut |item| {
-            if let Item::Actor(actor) = item {
-                self.actor_names.insert(actor.name.clone());
-                self.actor_defs.insert(actor.name.clone(), actor.clone());
-            }
-            Ok(())
-        })?;
+        if resolved_ctx.is_none() {
+            Self::process_items(&file.items, &mut |item| {
+                if let Item::Actor(actor) = item {
+                    self.actor_names.insert(actor.name.clone());
+                }
+                Ok(())
+            })?;
+        }
 
         // v0.28.21 — Evaluate top-level `comptime func` and `const` items via the
         // interpreter and cache the results so `Expr::Comptime` blocks and
@@ -1772,6 +2027,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     self.register_type_def(t)?;
                 }
                 Item::Actor(actor) => {
+                    // Retained body metadata; name installation already came
+                    // from CheckedProgram before the tagged AST remainder.
+                    self.actor_defs.insert(actor.name.clone(), actor.clone());
                     self.register_actor_def(actor)?;
                 }
                 Item::Func(f) => {
@@ -1780,7 +2038,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                         self.comptime_func_names.insert(f.name.clone());
                     }
                 }
-                Item::Cap(cap) => {
+                Item::Cap(cap) if resolved_ctx.is_none() => {
                     self.cap_type_names.insert(cap.name.clone());
                     let components = if let Some(ref combined) = cap.combined_with {
                         let parts: Vec<String> = combined
@@ -1797,10 +2055,18 @@ impl<'ctx> CodeGenerator<'ctx> {
                     };
                     self.cap_components.insert(cap.name.clone(), components);
                 }
-                Item::Trait(t) => {
-                    self.trait_defs.insert(t.name.clone(), t.clone());
+                Item::Trait(t) if resolved_ctx.is_none() => {
+                    // Test-only surface compile_file harness. Production
+                    // obtains this directory from CheckedProgram.
+                    self.trait_method_names.insert(
+                        t.name.clone(),
+                        t.methods.iter().map(|method| method.name.clone()).collect(),
+                    );
                 }
-                Item::Impl(imp) => {
+                Item::Impl(imp) if resolved_ctx.is_none() => {
+                    // Test-only surface harness. Production impl signatures and
+                    // method selection are installed from checked native owner
+                    // receipts; AST methods are retained separately as bodies.
                     self.type_impls
                         .entry(imp.type_name.clone())
                         .or_default()
@@ -1811,6 +2077,7 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .or_insert_with(|| imp.type_args.clone());
                     }
                 }
+                Item::Impl(_) => {}
                 Item::Const {
                     name,
                     value,
@@ -1898,6 +2165,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Ok(())
         })?;
+        if let Some((program, _)) = resolved_ctx {
+            self.install_checked_impl_method_bodies(file, program)?;
+        }
         // Second pass: register extern functions and external types
         Self::process_items(&file.items, &mut |item| {
             match item {
@@ -1956,8 +2226,28 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Third pass: compile impl methods (needed before vtable construction)
-        self.compile_impl_methods()?;
+        // Third pass: compile impl methods (needed before vtable construction).
+        // Production walks checked impl identities and their body payloads;
+        // the name-keyed compatibility map remains only for the test harness.
+        if let Some((program, eligible)) = resolved_ctx {
+            self.compile_checked_impl_methods_with_eligibility(program, eligible)?;
+        } else {
+            // The surface-AST impl emitter exists only for the unit-test
+            // compatibility harness.  Production compilation must have an
+            // explicit checked/resolved eligibility receipt before it can
+            // materialize any impl body; otherwise fail closed instead of
+            // silently reopening the legacy owner.
+            #[cfg(test)]
+            {
+                self.compile_impl_methods()?;
+            }
+            #[cfg(not(test))]
+            {
+                return Err(CompileError::CanonicalMirCoverage(
+                    "MIR-COVERAGE-001/NITS: unchecked impl body compilation is test-only; production requires checked resolved-native eligibility".into(),
+                ));
+            }
+        }
         // Fourth pass: compile vtables (needed before user function compilation)
         self.compile_vtables()?;
         // S12: Per-function resolved dispatch — compile eligible function bodies
@@ -1983,6 +2273,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                             .unwrap_or_else(|| "E0723: unsupported native return".into()),
                     ));
                 }
+                if let Some(diag) = diagnostics
+                    .iter()
+                    .find(|d| d.code.as_deref() == Some("MIR-COVERAGE-001"))
+                {
+                    return Err(CompileError::CanonicalMirCoverage(diag.message.clone()));
+                }
                 // 0.1.8 Phase 0: core-callee emit failures are hard errors
                 // (function name + reason), not a quiet legacy downgrade.
                 if let Some(diag) = diagnostics
@@ -1998,12 +2294,12 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        // Fifth pass (legacy emitter): compile user functions, actors, and flow
-        // transitions from the surface AST. Functions already compiled by the
-        // resolved native emitter (fourth pass) are skipped via the
-        // count_basic_blocks != 0 guard in compile_func_legacy.
-        // Permanent ineligible body classes: capturing lambdas, generics,
-        // extern ABI wrappers, view/mutate borrow params (non-self).
+        // Fifth pass: compile actors and flow transitions from the retained
+        // declaration view. Ordinary top-level functions have no legacy
+        // fallback anymore: every body must either have a complete canonical
+        // resolved/MIR emission above or fail closed with MIR-COVERAGE-001.
+        // This keeps an eligibility miss from silently re-entering the old
+        // surface-AST emitter and preserves one native semantic producer.
         // v0.28.21 — `comptime func` items are folded at codegen-start by
         // `fold_comptime_items` and intentionally NOT compiled to LLVM IR
         // (the caller resolves them via the cached `comptime_values` map,
@@ -2022,7 +2318,33 @@ impl<'ctx> CodeGenerator<'ctx> {
                             })
                             .unwrap_or(false);
                         if !resolved_native_body {
-                            self.compile_func_legacy(f).map_err(|e| e.at(f.meta.span))?;
+                            // The production path is canonical-only. A
+                            // cfg(test) surface harness still exercises the
+                            // historical emitter through an explicitly named
+                            // adapter in `codegen::tests`; this keeps the
+                            // compatibility tests useful without leaving a
+                            // production call edge from the fifth pass.
+                            #[cfg(test)]
+                            {
+                                if allow_legacy_test_harness {
+                                    self.compile_legacy_test_function(f)
+                                        .map_err(|e| e.at(f.meta.span))?;
+                                } else {
+                                    return Err(CompileError::CanonicalMirCoverage(format!(
+                                        "MIR-COVERAGE-001/NITS: ordinary function '{}' has no complete canonical MIR body; legacy fifth-pass codegen is retired",
+                                        f.name
+                                    ))
+                                    .at(f.meta.span));
+                                }
+                            }
+                            #[cfg(not(test))]
+                            {
+                                return Err(CompileError::CanonicalMirCoverage(format!(
+                                    "MIR-COVERAGE-001/NITS: ordinary function '{}' has no complete canonical MIR body; legacy fifth-pass codegen is retired",
+                                    f.name
+                                ))
+                                .at(f.meta.span));
+                            }
                         }
                     }
                 }
@@ -2169,13 +2491,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Convert a flow transition into a synthetic FuncDef for codegen.
+    /// Convert a flow transition into a synthetic FuncDef for test-only
+    /// compatibility helpers and declaration metadata.
     ///
-    /// Parameters: `self` (from-state payload) + event params.
-    /// Return type: the single declared target state's nominal LLVM layout.
-    /// Multi-target transitions are rejected by `compile_flow` until codegen
-    /// has a closed tagged-state-union ABI.
-    /// Body: the transition body (v0.34.27: `do { }` removed — plain block).
+    /// Production transition bodies are lowered by the canonical MIR route.
+    /// This descriptor remains useful for symbol declarations and for the
+    /// explicit fail-closed test adapter; `compile_flow` never emits it into
+    /// the deleted legacy production owner.
     pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
         let origin = AstOrigin::RuntimeSystem("codegen.transition_lowering");
         let meta = AstNodeMeta::inherited(t.meta.span, origin);
@@ -2248,54 +2570,31 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Compile all transitions of a flow as ordinary LLVM functions.
+    /// Guard the retired surface-AST Flow emission entry point.
+    ///
+    /// Canonical MIR owns every production transition body; reaching this
+    /// helper is therefore a coverage failure rather than permission to emit
+    /// a legacy LLVM function.
     pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
-        self.current_flow_name = flow.name.clone();
-        // H4 (audit-codegen): persistent field names for the panic→Fault
-        // shadow, taken from the FlowDef so BOTH compilation entry points
-        // (compile_checked + legacy compile_file) see them.
-        self.current_persistent_fields = flow.persistent_fields.clone();
-        for t in &flow.transitions {
-            if t.body.is_none() {
-                continue; // abstract / protocol-style transition — no body
-            }
-            if t.to_states.len() != 1 {
-                // Multi-target: ret type is the synthetic union; return
-                // statements are wrapped (tag + boxed payload) below.
-                let func = Self::transition_to_func(flow, t);
-                self.in_multi_target_transition = true;
-                self.multi_target_states = t.to_states.clone();
-                self.current_from_state = t.from_state.clone();
-                let result = self
-                    .compile_func_legacy(&func)
-                    .map_err(|e| e.at(t.meta.span));
-                self.in_multi_target_transition = false;
-                self.multi_target_states = Vec::new();
-                self.current_from_state = String::new();
-                self.fault_self_entry = None;
-                result?;
-                continue;
-            }
-            let func = Self::transition_to_func(flow, t);
-            // FLOW-TURN-001: flag transition bodies with `fails E` so
-            // compile_try_expr can emit a fail-closed error (Rejected
-            // codegen not yet implemented) instead of mimi_try_exit.
-            self.in_fails_transition = t.fails.is_some();
-            let result = self
-                .compile_func_legacy(&func)
-                .map_err(|e| e.at(t.meta.span));
-            self.in_fails_transition = false;
-            result?;
+        // Flow transition bodies are emitted only by the canonical MIR route.
+        // Re-entering the surface-AST emitter here would make a mixed or
+        // unsupported Flow silently regain the deleted CodegenLegacyRemainder
+        // owner. Exact S8/recoverable Flow graphs return from
+        // `compile_checked_inner` after `compile_mir_native_with_route_receipt`
+        // and never reach this compatibility entry point. Any body that does
+        // reach it therefore stops before LLVM emission with the checker-owned
+        // coverage code used by the route selector.
+        if let Some(transition) = flow
+            .transitions
+            .iter()
+            .find(|transition| transition.body.is_some())
+        {
+            return Err(CompileError::CanonicalMirCoverage(format!(
+                "Flow '{}' transition '{}' is outside the canonical MIR route; legacy transition emission is disabled",
+                flow.name, transition.name
+            ))
+            .at(transition.meta.span));
         }
-        // 0.37.x: flow-compilation state used to leak after compiling a Flow.
-        // `current_flow_name` stayed set while subsequent plain functions were
-        // compiled, so a builtin named like a Flow EventId variant (e.g. the
-        // network `accept(fd)` vs an `accept` transition) was miscompiled as
-        // the flow's EventId enum constructor and produced a struct in integer
-        // comparison. Clear the per-flow context when the Flow pass finishes.
-        self.current_flow_name = String::new();
-        self.current_persistent_fields = Vec::new();
-        self.current_from_state = String::new();
         Ok(())
     }
 
