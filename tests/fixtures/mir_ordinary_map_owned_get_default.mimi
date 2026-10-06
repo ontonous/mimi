@@ -1,0 +1,23 @@
+func main() -> i32 {
+    let empty = map_new()
+    let with_number = map_set(empty, "number", 42)
+    let full = map_set(with_number, "text", "owned string")
+
+    let number = map_get_i32(full, "number")
+    let wrong_number = map_get_i32(full, "text")
+    let missing_number = map_get_i32(full, "missing")
+    let text = map_get_string(full, "text")
+    let wrong_text = map_get_string(full, "number")
+    let missing_text = map_get_string(full, "missing")
+
+    drop(text)
+    drop(wrong_text)
+    drop(missing_text)
+    let full_size = map_size(full)
+    let empty_size = map_size(empty)
+
+    drop(empty)
+    drop(with_number)
+    drop(full)
+    full_size - 2 + empty_size
+}

@@ -1,0 +1,9 @@
+func main() -> i32 {
+    let empty = map_new()
+    let numbers = map_set(empty, "number", 42)
+    let full = map_set(numbers, "text", "owned text")
+    let alias = full
+    drop(full)
+    let changed = map_remove(alias, "number")
+    map_size(alias) + map_size(changed) + map_size(empty) - 3
+}

@@ -1,0 +1,10 @@
+func main() -> i32 {
+    let empty = map_new()
+    let full = map_set(empty, "text", "owned text")
+    let alias = full
+    drop(full)
+    let snapshot = map_get_string(alias, "text")
+    let count = map_size(alias)
+    drop(snapshot)
+    count - 1
+}

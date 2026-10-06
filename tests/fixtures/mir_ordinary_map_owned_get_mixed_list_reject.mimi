@@ -1,0 +1,16 @@
+// A bare List construction is outside the ordinary Map/Any scalar-tail
+// receipt.  The route must reject this composition before either backend is
+// selected; `drop(values)` is deliberately the only List use so no ListOp
+// candidate can hide the collection boundary.
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 1)
+    let typed = map_get_i32(root, "answer")
+
+    let values = [1, 2, 3]
+    println(1)
+    drop(values)
+    drop(empty)
+    drop(root)
+    0
+}
