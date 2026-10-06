@@ -482,6 +482,48 @@ fn compile_checked_tags_unmigrated_generic_body_with_legacy_owner() {
 }
 
 #[test]
+fn compile_checked_does_not_reenter_legacy_for_resolved_plain_scalar_body() {
+    let source = r#"
+        func add_one(value: i32) -> i32 { value + 1 }
+        func choose<T>(left: T, right: T) -> T { left }
+        func main() -> i32 { add_one(choose(40, 41)) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "resolved_plain_scalar_no_legacy_reentry");
+    codegen
+        .compile_checked(&program)
+        .expect("resolved plain scalar body plus generic compatibility body");
+    assert!(
+        codegen
+            .module
+            .get_function("add_one")
+            .is_some_and(|function| function.count_basic_blocks() != 0),
+        "resolved plain scalar function must have a native body"
+    );
+    let legacy_calls = crate::core::CheckedProgram::test_legacy_codegen_function_calls();
+    assert!(
+        !legacy_calls.iter().any(|name| name == "add_one"),
+        "already-emitted plain scalar body must not enter legacy emitter: {legacy_calls:?}"
+    );
+    assert!(
+        legacy_calls.iter().any(|name| name == "choose"),
+        "generic compatibility body must retain an explicit legacy call: {legacy_calls:?}"
+    );
+    assert_eq!(
+        crate::core::CheckedProgram::test_legacy_body_access(),
+        vec![crate::core::LegacyBodyConsumer::CodegenLegacyRemainder]
+    );
+}
+
+#[test]
 fn codegen_shares_checker_ast_snapshot_for_progressive_comptime() {
     let source = r#"
         comptime func forty_two() -> i32 { 42 }

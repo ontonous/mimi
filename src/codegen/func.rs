@@ -4049,6 +4049,9 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// Permanent ineligible body classes: capturing lambdas, generics,
     /// async, extern ABI wrappers, view/mutate borrow params (non-self).
     pub(super) fn compile_func_legacy(&mut self, func: &FuncDef) -> MimiResult<()> {
+        #[cfg(test)]
+        crate::core::CheckedProgram::record_test_legacy_codegen_function_call(&func.name);
+
         // Failure-payload ABI provenance is local to one legacy function body.
         // Legacy functions are compiled sequentially, and the same surface
         // variable name may legally mean an ordinary Result in the next body.

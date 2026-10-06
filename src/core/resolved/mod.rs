@@ -45,6 +45,12 @@ impl LegacyBodyConsumer {
 thread_local! {
     static TEST_LEGACY_BODY_ACCESS: std::cell::RefCell<Vec<LegacyBodyConsumer>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Test-only trace of legacy codegen body entry points.  This is kept
+    /// separate from the owner accessor trace: a compatibility snapshot may
+    /// still be retained for one body class while an already-emitted
+    /// canonical callable must never enter the legacy emitter.
+    static TEST_LEGACY_CODEGEN_FUNCTION_CALLS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub const RESOLVED_IR_VERSION: &str = "mimi-resolved-ir-1";
@@ -1453,6 +1459,21 @@ impl CheckedProgram {
     #[cfg(test)]
     pub(crate) fn test_legacy_body_access() -> Vec<LegacyBodyConsumer> {
         TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow().clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_test_legacy_codegen_function_calls() {
+        TEST_LEGACY_CODEGEN_FUNCTION_CALLS.with(|calls| calls.borrow_mut().clear());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_test_legacy_codegen_function_call(name: &str) {
+        TEST_LEGACY_CODEGEN_FUNCTION_CALLS.with(|calls| calls.borrow_mut().push(name.to_owned()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_legacy_codegen_function_calls() -> Vec<String> {
+        TEST_LEGACY_CODEGEN_FUNCTION_CALLS.with(|calls| calls.borrow().clone())
     }
 
     pub(crate) fn legacy_body_file(&self, _consumer: LegacyBodyConsumer) -> Arc<File> {

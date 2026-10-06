@@ -1676,6 +1676,42 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
     }
 
+    /// Return true only when the resolved emitter has produced a complete LLVM
+    /// body for this top-level callable.  The fifth pass must not enter the
+    /// legacy emitter for that body: doing so would consume the retained AST
+    /// snapshot even though the canonical body is already authoritative.
+    ///
+    /// A declaration, exported C wrapper, generic callable, or a resolved
+    /// emission that failed verification remains on the compatibility path.
+    /// The module-body check is the proof that the selected callable actually
+    /// emitted successfully; eligibility alone is not enough.
+    fn resolved_top_level_body_emitted(
+        &self,
+        program: &crate::core::CheckedProgram,
+        eligible: &std::collections::BTreeSet<crate::core::NodeId>,
+        function: &FuncDef,
+    ) -> bool {
+        if function.is_comptime || function.extern_abi.is_some() || !function.generics.is_empty() {
+            return false;
+        }
+        let fallback_owner = crate::core::NodeId(format!("function:{}", function.name));
+        let callable = program.functions().get(&fallback_owner).or_else(|| {
+            program
+                .functions()
+                .values()
+                .find(|candidate| candidate.qualified_name == function.name)
+        });
+        let Some(callable) = callable else {
+            return false;
+        };
+        if !eligible.contains(&callable.node_id) {
+            return false;
+        }
+        self.module
+            .get_function(&callable.qualified_name)
+            .is_some_and(|llvm_function| llvm_function.count_basic_blocks() != 0)
+    }
+
     fn compile_file_inner(
         &mut self,
         file_arc: Arc<File>,
@@ -1978,7 +2014,16 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if f.is_comptime {
                         // Skip — folded value lives in self.comptime_values.
                     } else {
-                        self.compile_func_legacy(f).map_err(|e| e.at(f.meta.span))?;
+                        let resolved_native_body = resolved_ctx
+                            .and_then(|(program, eligible)| {
+                                eligible.map(|eligible| {
+                                    self.resolved_top_level_body_emitted(program, eligible, f)
+                                })
+                            })
+                            .unwrap_or(false);
+                        if !resolved_native_body {
+                            self.compile_func_legacy(f).map_err(|e| e.at(f.meta.span))?;
+                        }
                     }
                 }
                 Item::Actor(actor) => {
