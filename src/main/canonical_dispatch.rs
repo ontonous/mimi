@@ -131,6 +131,24 @@ pub(crate) fn build_canonical_program_for_sources_with_diagnostics(
     merged_file: &File,
     included_sources: Option<&HashSet<mimi::span::SourceId>>,
 ) -> Result<MirProgram, MirProgramBuildError> {
+    if let Some(included_sources) = included_sources {
+        if let Some(error) =
+            source_scope_import_boundary_error(checked, merged_file, included_sources)
+        {
+            return Err(MirProgramBuildError::Validation(vec![error]));
+        }
+    }
+    if let Some(reason) = mimi::core::mir::unknown_effect_boundary_reason(checked) {
+        return Err(MirProgramBuildError::Validation(vec![
+            mimi::core::mir::MirValidationError {
+                subject: "effect boundary".into(),
+                message: format!(
+                    "{}: {reason}",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                ),
+            },
+        ]));
+    }
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
     if !admission.scalar_export {
         if let Some(reason) = mimi::core::mir::exported_abi_body_boundary_reason(checked) {
@@ -188,7 +206,103 @@ pub(crate) fn build_canonical_program_for_sources_with_diagnostics(
         })
         .map(|record| record.id)
         .collect::<HashSet<_>>();
-    MirProgram::from_checked_program_excluding_sources(checked, &excluded_sources)
+    let canonical = MirProgram::from_checked_program_excluding_sources(checked, &excluded_sources)?;
+    if admission.ordinary_map_owned_get_i32_string_v1_complete() {
+        if let Some(reason) =
+            mimi::core::mir::ordinary_map_owned_get_result_settlement_reason(&canonical)
+        {
+            return Err(MirProgramBuildError::Validation(vec![
+                mimi::core::mir::MirValidationError {
+                    subject: "route coverage".into(),
+                    message: format!(
+                        "{}: {reason}",
+                        mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                    ),
+                },
+            ]));
+        }
+    }
+    Ok(canonical)
+}
+
+/// A source-scoped `mimi mir` graph cannot claim to inspect a closed call graph
+/// when a retained callable directly targets a callable whose source was
+/// filtered out. Detect that boundary from typed Checker call identities
+/// before MIR lowering so an incomplete graph is reported as coverage, rather
+/// than leaking a downstream ManagedAny call-census implementation error.
+fn source_scope_import_boundary_error(
+    checked: &CheckedProgram,
+    merged_file: &File,
+    included_sources: &HashSet<mimi::span::SourceId>,
+) -> Option<mimi::core::mir::MirValidationError> {
+    let mut first_boundary = None;
+    for site in checked.call_sites_sorted() {
+        let Some(mimi::core::ir::ResolvedCallee::Function(target_owner)) =
+            site.resolved_callee.as_ref()
+        else {
+            continue;
+        };
+        let caller_owner = mimi::core::NodeId(site.owner.clone());
+        let Some(caller) = checked.callable(&caller_owner) else {
+            continue;
+        };
+        let caller_source = caller.body.root.origin.user_span().source_id;
+        if !included_sources.contains(&caller_source) {
+            continue;
+        }
+        let Some(target) = checked.callable(target_owner) else {
+            continue;
+        };
+        let target_source = target.body.root.origin.user_span().source_id;
+        if included_sources.contains(&target_source)
+            || merged_file
+                .sources
+                .key(target_source)
+                .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
+        {
+            continue;
+        }
+
+        let error = mimi::core::mir::MirValidationError {
+            subject: "source-scope coverage".into(),
+            message: format!(
+                "{}: source-scoped MIR excludes imported callable '{}' from source {}; included caller '{}' from source {} calls it. Use `mimi mir --all` to inspect the complete user import graph",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                target_owner.0,
+                source_scope_source_label(merged_file, target_source),
+                site.owner,
+                source_scope_source_label(merged_file, caller_source),
+            ),
+        };
+
+        // Report the entry edge first when present. It is the most direct
+        // explanation for an inspection requested on a single source file.
+        if site.owner == "function:main" {
+            return Some(error);
+        }
+        if first_boundary.is_none() {
+            first_boundary = Some(error);
+        }
+    }
+    first_boundary
+}
+
+fn source_scope_source_label(merged_file: &File, source_id: mimi::span::SourceId) -> String {
+    let Some(record) = merged_file.sources.record(source_id) else {
+        return format!("source-id:{}", source_id.raw());
+    };
+    let key = record.key.as_str();
+    let file_name = record
+        .disk_path
+        .as_deref()
+        .and_then(std::path::Path::file_name)
+        .map(|name| name.to_string_lossy());
+    match file_name {
+        Some(file_name) if !key.ends_with(file_name.as_ref()) => {
+            format!("'{}' ({})", key, file_name)
+        }
+        _ => format!("'{}'", key),
+    }
 }
 
 /// Return the source-level diagnostic shared by Canonical MIR execution and
@@ -327,6 +441,16 @@ fn select_default_route_inner(
     // so an unrelated C-export body cannot route a program containing it to
     // the AST-backed emitter.
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    // A source-qualified module call is itself a production boundary: once
+    // the checker resolved `alias::function` to a concrete exported owner,
+    // it must use that owner in the default route. Leaving this shape
+    // outside every migration island would send the caller to bytecode even
+    // though the same checked graph can be materialized as Canonical MIR.
+    let module_alias_call_hint = checked.call_sites().values().any(|site| {
+        matches!(site.kind, mimi::core::ResolvedCallKind::Function)
+            && site.target_function.is_some()
+            && site.callee.contains("::")
+    });
     // Map owner receipts and scalar FFI currently have no combined route.
     // Check the same shared composition contract as MIR materialization
     // before Actor proof compatibility can route execution/build to legacy.
@@ -385,7 +509,24 @@ fn select_default_route_inner(
                 mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
             ));
         }
+        if module_alias_call_hint {
+            return DefaultMirRoute::Rejected(format!(
+                "{}: resolved module-qualified function graph cannot use the Actor proof-obligations compatibility route: {reason}",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
         return DefaultMirRoute::Legacy(LegacyRouteReason::ActorProofObligationsCompatibility);
+    }
+    // Resolve the finite-effect boundary only after the Actor proof owner and
+    // Map/Any composition gates above.  Proof-bearing Actor compatibility
+    // deliberately retains its named verifier, while execution graphs with
+    // an independent Map/Any owner are rejected by the shared composition
+    // gate before an opaque FFI/dynamic effect can mask that reason.
+    if let Some(reason) = mimi::core::mir::unknown_effect_boundary_reason(checked) {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: {reason}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
     }
     // The two historical Actor fallbacks are direct nested-callable methods
     // (capture/shadow).  Once such a candidate is visible in the checked
@@ -767,6 +908,7 @@ fn select_default_route_inner(
         && !copy_option_f64_hint
         && !copy_result_i32_hint
         && !session_hint
+        && !module_alias_call_hint
     {
         return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
     }
@@ -922,6 +1064,11 @@ fn select_default_route_inner(
             ) {
                 return DefaultMirRoute::Rejected(format!(
                     "session-channel canonical MIR {stage:?} failed: {message}"
+                ));
+            }
+            if module_alias_call_hint {
+                return DefaultMirRoute::Rejected(format!(
+                    "resolved module-qualified function graph failed canonical MIR {stage:?}: {message}"
                 ));
             }
             let reason = match stage {
@@ -1298,6 +1445,12 @@ fn select_default_route_inner(
                     "canonical Copy Result<i32, i32> projection candidate did not materialize a supported MIR shape",
                 );
             }
+            if module_alias_call_hint {
+                return DefaultMirRoute::Rejected(format!(
+                    "{}: resolved module-qualified function call did not materialize a complete Canonical MIR graph",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                ));
+            }
             return DefaultMirRoute::Legacy(
                 LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
             );
@@ -1431,6 +1584,11 @@ fn select_default_route_inner(
     if mimi::core::mir::contains_multi_target_flow_union_candidate(canonical)
         && !mimi::core::mir::multi_target_flow_union_face_closed(canonical)
     {
+        if module_alias_call_hint {
+            return DefaultMirRoute::Rejected(
+                "resolved module-qualified function graph includes an unsupported multi-target Flow union".into(),
+            );
+        }
         return DefaultMirRoute::Legacy(
             LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
         );
@@ -1552,6 +1710,7 @@ fn select_default_route_inner(
         && !managed_result_call_route_candidate
         && !multi_target_union_route_candidate
         && !session_route_candidate
+        && !module_alias_call_hint
     {
         return DefaultMirRoute::Legacy(
             LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate,
@@ -1583,6 +1742,12 @@ fn select_default_route_inner(
             // previously working program.  A materialized List/Set OPERATION
             // keeps its cannot-re-enter-legacy tripwire below.
             if !route.materialized_collection_operation_candidate && !flow_route_candidate {
+                if module_alias_call_hint {
+                    return DefaultMirRoute::Rejected(format!(
+                        "{}: resolved module-qualified function graph failed scalar collection capability gate: {errors:?}",
+                        mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                    ));
+                }
                 return DefaultMirRoute::Legacy(
                     LegacyRouteReason::PlainScalarIslandPreflightCompatibility,
                 );
@@ -1810,6 +1975,11 @@ fn select_default_route_inner(
                 "S0 flat Copy record candidate is not eligible for the default route: verifier capability gate failed: {error:?}"
             ));
         }
+        if module_alias_call_hint {
+            return DefaultMirRoute::Rejected(format!(
+                "resolved module-qualified function graph failed MIR verifier capability gate: {error:?}"
+            ));
+        }
         return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
@@ -1857,6 +2027,11 @@ fn select_default_route_inner(
                 mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
         }
+        if module_alias_call_hint {
+            return DefaultMirRoute::Rejected(format!(
+                "resolved module-qualified function graph failed MIR-bytecode preflight: {errors:?}"
+            ));
+        }
         return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
@@ -1884,6 +2059,11 @@ fn select_default_route_inner(
                 mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
         }
+        if module_alias_call_hint {
+            return DefaultMirRoute::Rejected(format!(
+                "resolved module-qualified function graph failed native MIR preflight: {errors:?}"
+            ));
+        }
         return reject_migrated_candidates_with_copy(
             flow_route_candidate,
             collection_route_candidate,
@@ -1904,41 +2084,49 @@ fn select_default_route_inner(
     // disproven result is still a valid verifier observation; an unsupported
     // or inconclusive verifier result means this program is not yet a complete
     // default-switch island.
-    let verifier_ready =
-        match mimi::verifier::verify_mir_with_route_receipt(canonical, &receipt, String::new()) {
-            Ok(results) => mimi::verifier::canonical_execution_route_verifier_ready(
-                &results,
-                exact_f64_flow_failure_route_candidate,
-                mimi::core::mir::contains_multi_target_flow_union_candidate(canonical),
-            ),
-            Err(error) => {
-                if materialized_managed_result_call_candidate {
-                    return DefaultMirRoute::Rejected(format!(
-                        "managed Result direct-call verifier contract pass failed: {error}"
-                    ));
-                }
-                if materialized_session_candidate {
-                    return DefaultMirRoute::Rejected(format!(
-                        "{} verifier contract pass failed: {error}",
-                        mimi::core::mir::SESSION_CHANNEL_ISLAND
-                    ));
-                }
-                return reject_migrated_candidates_with_copy(
-                    flow_route_candidate,
-                    collection_route_candidate,
-                    record_route_candidate,
-                    option_string_route_candidate,
-                    CopyCandidateFlags {
-                        option_i32: copy_option_i32_route_candidate,
-                        option_bool: copy_option_bool_route_candidate,
-                        option_i64: copy_option_i64_route_candidate,
-                        option_f64: copy_option_f64_route_candidate,
-                        result_i32: copy_result_i32_route_candidate,
-                    },
-                    format!("verifier contract pass failed: {error}"),
-                );
+    let verifier_ready = match mimi::verifier::verify_mir_with_route_receipt(
+        canonical,
+        &receipt,
+        String::new(),
+    ) {
+        Ok(results) => mimi::verifier::canonical_execution_route_verifier_ready(
+            &results,
+            exact_f64_flow_failure_route_candidate,
+            mimi::core::mir::contains_multi_target_flow_union_candidate(canonical),
+        ),
+        Err(error) => {
+            if materialized_managed_result_call_candidate {
+                return DefaultMirRoute::Rejected(format!(
+                    "managed Result direct-call verifier contract pass failed: {error}"
+                ));
             }
-        };
+            if materialized_session_candidate {
+                return DefaultMirRoute::Rejected(format!(
+                    "{} verifier contract pass failed: {error}",
+                    mimi::core::mir::SESSION_CHANNEL_ISLAND
+                ));
+            }
+            if module_alias_call_hint {
+                return DefaultMirRoute::Rejected(format!(
+                        "resolved module-qualified function graph failed verifier contract pass: {error}"
+                    ));
+            }
+            return reject_migrated_candidates_with_copy(
+                flow_route_candidate,
+                collection_route_candidate,
+                record_route_candidate,
+                option_string_route_candidate,
+                CopyCandidateFlags {
+                    option_i32: copy_option_i32_route_candidate,
+                    option_bool: copy_option_bool_route_candidate,
+                    option_i64: copy_option_i64_route_candidate,
+                    option_f64: copy_option_f64_route_candidate,
+                    result_i32: copy_result_i32_route_candidate,
+                },
+                format!("verifier contract pass failed: {error}"),
+            );
+        }
+    };
     if !verifier_ready {
         if materialized_managed_result_call_candidate {
             return DefaultMirRoute::Rejected(
@@ -1951,6 +2139,11 @@ fn select_default_route_inner(
                 "{} verifier returned an unsupported or inconclusive result",
                 mimi::core::mir::SESSION_CHANNEL_ISLAND
             ));
+        }
+        if module_alias_call_hint {
+            return DefaultMirRoute::Rejected(
+                "resolved module-qualified function graph has an unsupported or inconclusive verifier result".into(),
+            );
         }
         return reject_migrated_candidates_with_copy(
             flow_route_candidate,
@@ -2426,6 +2619,118 @@ mod tests {
             .expect("parse");
         let checked = mimi::core::check_program(&file).expect("check");
         (checked, file)
+    }
+
+    fn checked_module_alias_graph(main_source: &str) -> (CheckedProgram, File, std::path::PathBuf) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mimi-canonical-route-module-alias-{}-{unique}",
+            std::process::id()
+        ));
+        let apps = directory.join("apps");
+        std::fs::create_dir_all(&apps).expect("create module alias directory");
+        std::fs::write(
+            apps.join("left.mimi"),
+            "pub func parse(value: i32) -> i32 { value + 1 }\n",
+        )
+        .expect("write aliased module export");
+        let main_path = directory.join("main.mimi");
+        std::fs::write(&main_path, main_source).expect("write module alias entry");
+        let tokens = mimi::lexer::Lexer::new(main_source)
+            .tokenize()
+            .expect("lex module alias entry");
+        let main_file = mimi::loader::parser_for_path(tokens, &main_path)
+            .expect("module alias parser setup")
+            .parse_file()
+            .expect("parse module alias entry");
+        let mut loader = mimi::loader::ModuleLoader::new(directory.clone());
+        loader
+            .load_main_with_file(&main_path, main_file)
+            .expect("load module alias graph");
+        let mut merged_file = loader.merge_all().expect("merge module alias graph");
+        mimi::loader::merge_prelude_into(&mut merged_file);
+        let checked = mimi::core::check_program(&merged_file).expect("check module alias graph");
+        (checked, merged_file, directory)
+    }
+
+    #[test]
+    fn module_alias_with_actor_proof_boundary_rejects_instead_of_using_legacy() {
+        let actor_prefix = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/real_world/actor_nested_func_capture.mimi"
+        ))
+        .split("\nfunc main() -> i32 {")
+        .next()
+        .expect("Actor fixture has its main entry");
+        let main_source = format!(
+            "use apps::left as left;\n{actor_prefix}\n\
+             func guarded(value: i32) -> i32 {{\n\
+                 requires: value >= 0\n\
+                 ensures: result == value\n\
+                 value\n\
+             }}\n\
+             func main() -> i32 {{\n\
+                 let counter = Counter.spawn()\n\
+                 let imported = left.parse(1)\n\
+                 let actor_value = counter.bump(imported)\n\
+                 guarded(actor_value)\n\
+                 0\n\
+             }}"
+        );
+        let (checked, file, directory) = checked_module_alias_graph(&main_source);
+        assert!(
+            checked.call_sites().values().any(|site| {
+                matches!(site.kind, mimi::core::ResolvedCallKind::Function)
+                    && site.target_function.is_some()
+                    && site.callee.contains("::")
+            }),
+            "fixture must contain a resolved module alias call"
+        );
+        assert!(
+            mimi::core::mir::scalar_actor_contract_boundary_reason(&checked).is_some(),
+            "fixture must exercise the Actor proof-compatibility boundary"
+        );
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!("module alias plus Actor proof obligations must not enter Legacy");
+        };
+        assert!(reason.contains("MIR-COVERAGE-001"), "{reason}");
+        assert!(reason.contains("module-qualified"), "{reason}");
+        assert!(!reason.contains("legacy"), "{reason}");
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn module_alias_with_plain_scalar_native_preflight_rejects_instead_of_legacy() {
+        let main_source = r#"
+            use apps::left as left;
+
+            func main() -> i32 {
+                println(left.parse(1))
+                left.parse(2) << 1
+            }
+        "#;
+        let (checked, file, directory) = checked_module_alias_graph(main_source);
+        let materialized = mimi::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect("imported alias graph should materialize before consumer preflights");
+        assert_eq!(
+            materialized.admission.collection,
+            mimi::core::mir::ScalarCollectionAdmission::MixedCoverage,
+            "the imported source keeps the collection scan mixed"
+        );
+        assert!(!materialized.materialized_collection_candidate);
+        assert!(!materialized.materialized_collection_operation_candidate);
+        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
+            panic!(
+                "an aliased imported graph outside the scalar MIR preflight must not enter Legacy"
+            );
+        };
+        assert!(reason.contains("native MIR preflight"), "{reason}");
+        assert!(reason.contains("module-qualified"), "{reason}");
+        assert!(!reason.contains("legacy"), "{reason}");
+        std::fs::remove_dir_all(directory).ok();
     }
 
     #[test]
@@ -3166,6 +3471,56 @@ func main() -> i32 {
         assert!(error
             .to_string()
             .contains("typed owned-get Map candidate without complete operation-attempt coverage"));
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_direct_mir_boundary_rejects_scope_only_result_consumers() {
+        for (label, source) in [
+            (
+                "Values",
+                r#"
+                    func main() -> i32 {
+                        let root = map_new()
+                        let snapshot = values(root)
+                        let count = snapshot.len()
+                        drop(root)
+                        count
+                    }
+                "#,
+            ),
+            (
+                "GetAny",
+                r#"
+                    func main() -> i32 {
+                        let root = map_new()
+                        let pair = map_get(root, "answer")
+                        let found = pair.0
+                        drop(root)
+                        if found { 1 } else { 0 }
+                    }
+                "#,
+            ),
+        ] {
+            let (checked, file) = checked(source);
+            assert_eq!(
+                mimi::core::mir::classify_canonical_mir_route_admission(&checked)
+                    .ordinary_map_owned_get_i32_string_v1,
+                mimi::core::mir::OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage,
+                "{label} operation should have complete checker operation coverage"
+            );
+            let error = build_canonical_program_for_sources_with_diagnostics(&checked, &file, None)
+                .expect_err(
+                    "direct MIR construction must reject a result settled only by scope cleanup",
+                );
+            assert!(
+                error.diagnostic_codes().contains(&Some("MIR-COVERAGE-001")),
+                "{label}: {error}"
+            );
+            assert!(
+                error.to_string().contains("not settled"),
+                "{label}: {error}"
+            );
+        }
     }
 
     #[test]

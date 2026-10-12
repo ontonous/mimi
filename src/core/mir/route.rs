@@ -11,7 +11,7 @@
 //! report the structured failure and may not re-enter a legacy consumer.
 //! `MixedCoverage` and `OutsideProfile` remain explicit compatibility states.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::core::mir::reference::MirProgram;
 use crate::core::{
@@ -851,7 +851,6 @@ pub(super) fn classify_map_owner_profile_admission_with_closure_source(
             // roots remain visible and block composition.
             let selected_ordinary_map_owner = if map_any_owner
                 == MapAnyOwnerAdmission::CompleteCoverage
-                && ordinary_map_owner_lifecycle_i32_string_v1.is_complete()
                 && ordinary_attempts_fully_covered_by_map_any_owner_v1
             {
                 OrdinaryMapOwnerLifecycleI32StringV1Admission::CoveredByMapAnyOwnerV1
@@ -917,6 +916,182 @@ pub fn classify_canonical_mir_route_admission(
         copy_result_i32: classify_copy_result_i32_variant_admission(program),
         session: classify_session_channel_admission(program),
     }
+}
+
+/// Return a stable route diagnostic when checker-finalized effects contain an
+/// opaque/unknown operation.  Unknown effects are never treated as an empty
+/// effect list: an unresolved call, dynamic callable, or foreign operation
+/// must keep the whole program out of a canonical MIR route.  This check is
+/// intentionally route-owned so native, bytecode, and verifier dispatchers
+/// share the same fail-closed boundary before any backend materializes code.
+pub fn unknown_effect_boundary_reason(program: &CheckedProgram) -> Option<String> {
+    let mut functions = program.functions().values().collect::<Vec<_>>();
+    functions.sort_by(|left, right| {
+        left.qualified_name
+            .cmp(&right.qualified_name)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    for function in functions {
+        // The prelude contains effect-polymorphic higher-order helpers such
+        // as `apply`. Their bodies necessarily contain a dynamic call, but a
+        // dormant helper body is not a reachable program effect. A user call
+        // to such a helper is still checked at its user call site below.
+        if is_prelude_origin(program, &function.origin) {
+            continue;
+        }
+        for effect in &function.effects {
+            match crate::core::effects::EffectKind::parse(effect) {
+                Some(crate::core::effects::EffectKind::Unknown) | None => {
+                    if actor_unknown_effects_are_receipted(program, &function.node_id) {
+                        continue;
+                    }
+                    return Some(format!(
+                        "callable '{}' carries unknown effect '{}'; canonical MIR requires a finite effect boundary",
+                        function.qualified_name, effect
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    for site in program.call_sites_sorted() {
+        // Compiler-generated Flow transition scaffolding may contain a
+        // constructor-shaped call whose surface name is not present in the
+        // user callable directory (for example a generated fault state). It
+        // is not a user dynamic/FFI boundary; user-origin call sites remain
+        // fail-closed below.
+        if is_prelude_origin(program, &site.origin)
+            || !matches!(&site.origin, crate::core::Origin::User(_))
+        {
+            continue;
+        }
+        if site.effects.is_empty()
+            && matches!(
+                site.kind,
+                crate::core::ResolvedCallKind::Extern | crate::core::ResolvedCallKind::Unknown
+            )
+        {
+            return Some(format!(
+                "call site '{}' in '{}' has no finite effect summary; canonical MIR refuses an opaque foreign/dynamic call",
+                site.callee, site.owner
+            ));
+        }
+        if site.effects.iter().any(|effect| {
+            matches!(
+                crate::core::effects::EffectKind::parse(effect),
+                Some(crate::core::effects::EffectKind::Unknown) | None
+            )
+        }) && site.effects.iter().all(|effect| {
+            matches!(
+                crate::core::effects::EffectKind::parse(effect),
+                Some(crate::core::effects::EffectKind::Unknown)
+            )
+        }) && actor_unknown_call_site_is_receipted(program, site)
+        {
+            continue;
+        }
+        for effect in &site.effects {
+            match crate::core::effects::EffectKind::parse(effect) {
+                Some(crate::core::effects::EffectKind::Unknown) | None => {
+                    return Some(format!(
+                        "call site '{}' in '{}' carries unknown effect '{}'; canonical MIR requires a finite effect boundary",
+                        site.callee, site.owner, effect
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    None
+}
+
+/// The scalar Actor island owns two deliberately narrow sources of the
+/// checker's conservative `unknown` summary: a direct nested helper call and
+/// the typed mailbox/spawn boundary.  The helper is used only by the shared
+/// route gate; Actor lowering still validates the complete lexical, payload,
+/// and operation receipts before materializing code.
+fn actor_unknown_effects_are_receipted(
+    program: &CheckedProgram,
+    owner: &crate::core::NodeId,
+) -> bool {
+    let Some(callable) = program.callable(owner) else {
+        return false;
+    };
+    let unknown_sites = program
+        .call_sites_sorted()
+        .into_iter()
+        .filter(|site| site.owner == owner.0)
+        .filter(|site| {
+            site.effects.iter().any(|effect| {
+                matches!(
+                    crate::core::effects::EffectKind::parse(effect),
+                    Some(crate::core::effects::EffectKind::Unknown) | None
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    !unknown_sites.is_empty()
+        && unknown_sites
+            .iter()
+            .all(|site| actor_unknown_call_site_is_receipted(program, site))
+        && (callable.body.root.statements.iter().any(|statement| {
+            matches!(
+                statement.kind,
+                crate::core::ir::ResolvedStmtKind::NestedCallable(_)
+            )
+        }) || owner.0 == "function:main")
+}
+
+fn actor_unknown_call_site_is_receipted(
+    program: &CheckedProgram,
+    site: &crate::core::ResolvedCallSite,
+) -> bool {
+    match site.resolved_callee.as_ref() {
+        Some(crate::core::ir::ResolvedCallee::Function(target)) => {
+            let parent = crate::core::NodeId(site.owner.clone());
+            program.actor_descriptors().values().any(|descriptor| {
+                descriptor.scalar_i32_receipt(program).is_ok()
+                    && descriptor.methods.iter().any(|method| {
+                        method.owner == parent
+                            && program.callable(&parent).is_some_and(|callable| {
+                                callable.body.root.statements.iter().any(|statement| {
+                                    matches!(
+                                        &statement.kind,
+                                        crate::core::ir::ResolvedStmtKind::NestedCallable(owner)
+                                            if owner == target
+                                    )
+                                })
+                            })
+                    })
+            })
+        }
+        Some(crate::core::ir::ResolvedCallee::ActorMethod { actor, method }) => program
+            .actor_descriptors()
+            .get(actor)
+            .is_some_and(|descriptor| {
+                descriptor.scalar_i32_receipt(program).is_ok()
+                    && descriptor
+                        .methods
+                        .iter()
+                        .any(|entry| entry.owner.0 == method.as_str())
+            }),
+        Some(crate::core::ir::ResolvedCallee::Builtin(builtin))
+            if builtin.as_str() == "actor.spawn" =>
+        {
+            program
+                .actor_descriptors()
+                .values()
+                .any(|descriptor| descriptor.scalar_i32_receipt(program).is_ok())
+        }
+        _ => false,
+    }
+}
+
+fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> bool {
+    program
+        .source_registry()
+        .key(origin.user_span().source_id)
+        .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
 }
 
 fn classify_ordinary_map_owned_get_i32_string_v1_admission(
@@ -1291,9 +1466,9 @@ pub fn ordinary_map_attempts_fully_covered_by_map_any_owner_v1(program: &Checked
     saw_ordinary_attempts
 }
 
-/// Whether every MapAnyOwner v1 action is also represented by the exact
-/// ordinary lifecycle source operation. This is descriptive evidence only;
-/// it never authorizes an incomplete MapAnyOwner ledger.
+/// Whether every MapAnyOwner v1 action has one exact ordinary lifecycle source
+/// attempt. This is descriptive evidence only; it never authorizes an
+/// incomplete MapAnyOwner ledger.
 #[doc(hidden)]
 pub fn map_any_owner_v1_actions_are_within_ordinary_map_profile(program: &CheckedProgram) -> bool {
     let mut saw_map_any_actions = false;
@@ -1386,32 +1561,22 @@ fn ordinary_attempt_has_map_any_owner_v1_receipt(
     analysis: &crate::core::ResourceAnalysis,
     attempt: &crate::core::OrdinaryMapOwnerLifecycleAttempt,
 ) -> bool {
-    use crate::core::MapAnyOwnerActionKind as MapAny;
     use OrdinaryMapOwnerLifecycleAttemptKind as Attempt;
 
-    if attempt.kind == Attempt::ScopeDrop {
-        return analysis.ordinary_scope_drop_is_settled_by_map_any_owner_v1(attempt);
+    if matches!(
+        attempt.kind,
+        Attempt::New
+            | Attempt::Set
+            | Attempt::Remove
+            | Attempt::Size
+            | Attempt::HasKey
+            | Attempt::Drop
+            | Attempt::ScopeDrop
+    ) {
+        analysis.map_any_owner_v1_covers_ordinary_attempt(attempt)
+    } else {
+        false
     }
-    let expected_kind = match attempt.kind {
-        Attempt::New => MapAny::New,
-        Attempt::Set => MapAny::Set,
-        Attempt::Remove => MapAny::Remove,
-        Attempt::Size => MapAny::Size,
-        Attempt::HasKey => MapAny::Contains,
-        Attempt::Drop => MapAny::Drop,
-        Attempt::Clone
-        | Attempt::ScopeDrop
-        | Attempt::Get
-        | Attempt::Keys
-        | Attempt::Values
-        | Attempt::FromList
-        | Attempt::MapLiteral => return false,
-    };
-    analysis.map_any_owner_actions.iter().any(|action| {
-        action.profile_version == crate::core::MapAnyOwnerProfileVersion::V1
-            && action.point == attempt.point
-            && action.kind == expected_kind
-    })
 }
 
 fn classify_map_any_owner_ledger(
@@ -1741,6 +1906,15 @@ pub fn materialize_canonical_mir_route(
     let materialized_ordinary_map_owned_get_i32_string_v1_candidate = admission
         .ordinary_map_owned_get_i32_string_v1_complete()
         && contains_ordinary_map_owned_get_i32_string_v1_candidate(&canonical);
+    if materialized_ordinary_map_owned_get_i32_string_v1_candidate {
+        if let Some(message) = ordinary_map_owned_get_result_settlement_reason(&canonical) {
+            return Err(CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message,
+            });
+        }
+    }
     if admission.map_root_complete() && !materialized_map_root_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::MapRoot,
@@ -2176,6 +2350,153 @@ pub fn materialize_canonical_mir_route(
     })
 }
 
+/// Recognize the one scalar stdout effect that shares a value already owned
+/// by a complete MapAnyOwner receipt: a single PrintlnInt consuming a direct
+/// Copy/Clone/Move chain from Size, or a single PrintlnBool consuming the same
+/// chain from Contains. A free-standing println, transformed value, second
+/// output, or collection value stays in MixedCoverage and cannot borrow this
+/// exception.
+fn contains_exact_map_any_scalar_stdout(program: &MirProgram) -> bool {
+    use crate::core::mir::types::{MirAbiClass, MirBuiltinKind, MirOwnership};
+    use crate::core::mir::{MirInstructionKind, MirManagedAnyOperation, MirValueId};
+
+    let mut stdout_count = 0usize;
+    let mut matched_size_stdout = false;
+    for function in program.functions().values() {
+        let size_results = function
+            .ownership
+            .checker_map_any_owners
+            .iter()
+            .filter(|action| {
+                action.profile_version == crate::core::MapAnyOwnerProfileVersion::V1
+                    && action.kind == crate::core::MapAnyOwnerActionKind::Size
+            })
+            .filter_map(|action| action.result.clone())
+            .collect::<Vec<_>>();
+        let contains_results = function
+            .ownership
+            .checker_map_any_owners
+            .iter()
+            .filter(|action| {
+                action.profile_version == crate::core::MapAnyOwnerProfileVersion::V1
+                    && action.kind == crate::core::MapAnyOwnerActionKind::Contains
+            })
+            .filter_map(|action| action.result.clone())
+            .collect::<Vec<_>>();
+        let map_any_scalar_results = size_results
+            .iter()
+            .chain(contains_results.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let size_value_origin = |value: &MirValueId| {
+            let mut current = value.clone();
+            let mut seen = Vec::new();
+            for _ in 0..=function.values.len() {
+                if map_any_scalar_results.contains(&current) {
+                    return true;
+                }
+                if seen.contains(&current) {
+                    return false;
+                }
+                seen.push(current.clone());
+                let mut sources = function
+                    .blocks
+                    .values()
+                    .flat_map(|block| block.instructions.iter())
+                    .filter_map(|instruction| match &instruction.kind {
+                        MirInstructionKind::Clone { result, source }
+                        | MirInstructionKind::Copy { result, source }
+                        | MirInstructionKind::Move { result, source }
+                            if result == &current =>
+                        {
+                            Some(source.clone())
+                        }
+                        _ => None,
+                    });
+                let Some(source) = sources.next() else {
+                    return false;
+                };
+                if sources.next().is_some() {
+                    return false;
+                }
+                current = source;
+            }
+            false
+        };
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                let (kind, arguments, has_string_field_contract) = match &instruction.kind {
+                    MirInstructionKind::BuiltinCall {
+                        kind:
+                            kind @ (MirBuiltinKind::PrintlnBool
+                            | MirBuiltinKind::PrintlnInt
+                            | MirBuiltinKind::PrintlnFloat
+                            | MirBuiltinKind::PrintlnString),
+                        arguments,
+                        string_field_contract,
+                        ..
+                    } => (*kind, arguments, string_field_contract.is_some()),
+                    MirInstructionKind::ManagedAny {
+                        operation: MirManagedAnyOperation::Println,
+                        ..
+                    } => {
+                        stdout_count += 1;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                stdout_count += 1;
+                if has_string_field_contract || arguments.len() != 1 {
+                    continue;
+                }
+                let expected_results = match kind {
+                    MirBuiltinKind::PrintlnInt => &size_results,
+                    MirBuiltinKind::PrintlnBool => &contains_results,
+                    _ => continue,
+                };
+                let argument = &arguments[0];
+                let Some(argument_value) = function.values.get(argument) else {
+                    continue;
+                };
+                let Some(argument_type) = program.type_catalog().get(&argument_value.ty) else {
+                    continue;
+                };
+                let expected_abi = match kind {
+                    MirBuiltinKind::PrintlnInt => MirAbiClass::Integer {
+                        bits: 32,
+                        signed: true,
+                    },
+                    MirBuiltinKind::PrintlnBool => MirAbiClass::Bool,
+                    _ => continue,
+                };
+                if argument_type.abi != expected_abi
+                    || argument_type.ownership != MirOwnership::Copy
+                {
+                    continue;
+                }
+
+                for scalar_result in expected_results {
+                    let Some(size_value) = function.values.get(scalar_result) else {
+                        continue;
+                    };
+                    let Some(size_type) = program.type_catalog().get(&size_value.ty) else {
+                        continue;
+                    };
+                    if size_type.abi != expected_abi
+                        || size_type.ownership != MirOwnership::Copy
+                        || size_value.ty != argument_value.ty
+                    {
+                        continue;
+                    }
+
+                    matched_size_stdout |= size_value_origin(argument);
+                }
+            }
+        }
+    }
+    stdout_count == 1 && matched_size_stdout
+}
+
 fn unsupported_map_root_composition_reasons(
     admission: CanonicalMirRouteAdmission,
     materialized_collection_operation_candidate: bool,
@@ -2194,19 +2515,11 @@ fn unsupported_map_root_composition_reasons(
     if materialized_collection_operation_candidate {
         reasons.push("materialized List/Set operation");
     }
-    // A complete ordinary owned-get receipt owns the heterogeneous Map/Any
-    // graph, including its scalar println/tail values.  The scalar
-    // collection scanner quite deliberately reports that graph as
-    // MixedCoverage because DynamicAny is outside the standalone scalar
-    // island; that is not an unvalidated fallback here: the ordinary owner
-    // receipt and its MIR consumer validate the whole graph.  Keep the
-    // composition boundary for every other owner, and whenever a real
-    // List/Set operation would cross the scalar island.
-    // The owned-get Any composition exception is intentionally narrower than
-    // the scalar collection admission itself.  A bare List/Set literal is
-    // still an independent collection candidate even when no List/Set
-    // operation was emitted; the only List shape admitted here is the
-    // `values()` List<DynamicAny>/List<ManagedAny> pair owned by this receipt.
+    // Complete Map owner receipts may carry only their exact scalar stdout
+    // tail through MixedCoverage. The older typed owned-get profile owns its
+    // heterogeneous values list; MapAnyOwner admits only a direct PrintlnInt
+    // of its receipted Size result. Both paths keep bare List/Set values and
+    // materialized collection operations outside the exception.
     let ordinary_owned_get_scalar_tail = admission.ordinary_map_owned_get_i32_string_v1_complete()
         && !materialized_collection_operation_candidate
         && !contains_unadmitted_collection_materialization(
@@ -2214,7 +2527,11 @@ fn unsupported_map_root_composition_reasons(
             admission.ordinary_map_owned_get_i32_string_v1_complete()
                 && contains_ordinary_map_owned_get_values_instruction(canonical),
         );
-    if !ordinary_owned_get_scalar_tail
+    let map_any_owner_scalar_tail = admission.map_any_owner_complete()
+        && !materialized_collection_operation_candidate
+        && !contains_unadmitted_collection_materialization(canonical, false)
+        && contains_exact_map_any_scalar_stdout(canonical);
+    if !(ordinary_owned_get_scalar_tail || map_any_owner_scalar_tail)
         && !matches!(
             admission.collection,
             ScalarCollectionAdmission::OutsideProfile
@@ -2419,6 +2736,298 @@ fn contains_ordinary_map_owned_get_values_instruction(program: &MirProgram) -> b
             })
         })
     })
+}
+
+/// Check the owner produced by the ordinary Map `map_get`/`values` face.
+///
+/// The Checker receipt records the operation and the Map root lifecycle, but
+/// it does not by itself prove that the aggregate result was subsequently
+/// settled.  A projection (`pair.0` or `snapshot.len()`) is a read and keeps
+/// the aggregate owner live.  The canonical route therefore requires an
+/// explicit drop, a consuming move/call/construct, or an exact return/fault
+/// transfer on every reachable path.  Scope cleanup is deliberately not
+/// accepted here: its synthetic `drop.managed_scope:*` instruction is a
+/// compatibility cleanup and cannot serve as the owner-result receipt.
+///
+/// This check is shared by default route materialization and direct `--mir`
+/// construction through the public MIR helper below.  Keep it independent of
+/// a backend so bytecode, native and verifier callers cannot disagree about
+/// the owner boundary.
+pub fn ordinary_map_owned_get_result_settlement_reason(program: &MirProgram) -> Option<String> {
+    for function in program.functions().values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                let (result, label) = match &instruction.kind {
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny {
+                        result,
+                        ..
+                    } => (result, "map_get"),
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values {
+                        result,
+                        ..
+                    } => (result, "values"),
+                    _ => continue,
+                };
+                if ordinary_map_owned_get_result_unsettled_on_any_path(function, result) {
+                    return Some(format!(
+                        "ordinary Map owned-get result '{}' from {} is not settled on every canonical MIR path; explicit drop, ownership transfer, or return is required",
+                        result, label,
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Apply the same owner-result check to a checked program for verifier callers
+/// that have not selected a canonical route yet (notably the no-Z3 public
+/// verifier APIs).  Construction failures remain the responsibility of the
+/// normal route boundary; this helper only reports an observed unsettled
+/// `GetAny`/`Values` result.
+pub fn ordinary_map_owned_get_result_settlement_reason_checked(
+    program: &CheckedProgram,
+) -> Option<String> {
+    let admission = classify_canonical_mir_route_admission(program);
+    if !admission.ordinary_map_owned_get_i32_string_v1_complete() {
+        return None;
+    }
+    let excluded_sources = program
+        .source_registry()
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<HashSet<_>>();
+    let canonical =
+        MirProgram::from_checked_program_excluding_sources(program, &excluded_sources).ok()?;
+    ordinary_map_owned_get_result_settlement_reason(&canonical)
+}
+
+fn ordinary_map_owned_get_result_unsettled_on_any_path(
+    function: &crate::core::mir::MirFunction,
+    root: &crate::core::mir::MirValueId,
+) -> bool {
+    let mut pending = vec![(function.entry.clone(), BTreeSet::from([root.clone()]))];
+    let mut seen = BTreeSet::new();
+    let mut explored = 0usize;
+
+    while let Some((block_id, mut aliases)) = pending.pop() {
+        if !seen.insert((block_id.clone(), aliases.clone())) {
+            continue;
+        }
+        explored += 1;
+        // A malformed/hostile CFG must not turn route admission into an
+        // unbounded search.  Failing closed preserves the ownership gate.
+        if explored > 4096 {
+            return true;
+        }
+        let Some(block) = function.blocks.get(&block_id) else {
+            return true;
+        };
+
+        for instruction in &block.instructions {
+            match &instruction.kind {
+                crate::core::mir::MirInstructionKind::Move { result, source }
+                    if aliases.remove(source) =>
+                {
+                    aliases.insert(result.clone());
+                }
+                crate::core::mir::MirInstructionKind::Clone { result, source }
+                    if aliases.contains(source)
+                        && !instruction.id.as_str().contains("list-borrow") =>
+                {
+                    aliases.insert(result.clone());
+                }
+                crate::core::mir::MirInstructionKind::Drop { value }
+                    if (instruction.id.as_str().contains("stmt.drop")
+                        || instruction.id.as_str().contains("list-borrow"))
+                        && aliases.remove(value) => {}
+                crate::core::mir::MirInstructionKind::ManagedAny {
+                    source,
+                    operation: crate::core::mir::MirManagedAnyOperation::Drop,
+                    ..
+                } if aliases.remove(source) => {}
+                crate::core::mir::MirInstructionKind::MoveProject { base, .. }
+                | crate::core::mir::MirInstructionKind::MoveProjectDrop { base, .. }
+                | crate::core::mir::MirInstructionKind::VariantProjectMove { base, .. }
+                    if aliases.remove(base) =>
+                {
+                    // These operations consume the aggregate base.  The
+                    // owned-get tuple/list profiles have no field-level
+                    // projection receipt that can recreate the owner here.
+                }
+                crate::core::mir::MirInstructionKind::Call {
+                    result, arguments, ..
+                }
+                | crate::core::mir::MirInstructionKind::ClosureInvoke {
+                    result, arguments, ..
+                } => {
+                    let consumed = arguments.iter().any(|argument| aliases.contains(argument));
+                    if consumed {
+                        aliases.retain(|alias| !arguments.contains(alias));
+                        if let Some(result) = result {
+                            aliases.insert(result.clone());
+                        }
+                    }
+                }
+                crate::core::mir::MirInstructionKind::FlowTransition {
+                    result, arguments, ..
+                } => {
+                    let consumed = arguments.iter().any(|argument| aliases.contains(argument));
+                    if consumed {
+                        aliases.retain(|alias| !arguments.contains(alias));
+                        aliases.insert(result.clone());
+                    }
+                }
+                crate::core::mir::MirInstructionKind::BuiltinCall {
+                    result,
+                    arguments,
+                    string_field_contract,
+                    ..
+                } if string_field_contract.is_none() => {
+                    let consumed = arguments.iter().any(|argument| aliases.contains(argument));
+                    if consumed {
+                        aliases.retain(|alias| !arguments.contains(alias));
+                        aliases.insert(result.clone());
+                    }
+                }
+                crate::core::mir::MirInstructionKind::Construct { result, fields, .. }
+                | crate::core::mir::MirInstructionKind::ConstructList {
+                    result,
+                    elements: fields,
+                    ..
+                }
+                | crate::core::mir::MirInstructionKind::ConstructSet {
+                    result,
+                    elements: fields,
+                } => {
+                    if fields.iter().any(|field| aliases.contains(field)) {
+                        aliases.retain(|alias| !fields.contains(alias));
+                        aliases.insert(result.clone());
+                    }
+                }
+                crate::core::mir::MirInstructionKind::ConstructVariant {
+                    result, fields, ..
+                }
+                | crate::core::mir::MirInstructionKind::ConstructVariantMove {
+                    result,
+                    fields,
+                    ..
+                } => {
+                    if fields.iter().any(|(_, field)| aliases.contains(field)) {
+                        aliases.retain(|alias| !fields.iter().any(|(_, field)| field == alias));
+                        aliases.insert(result.clone());
+                    }
+                }
+                crate::core::mir::MirInstructionKind::UpdateRecord {
+                    result,
+                    base,
+                    fields,
+                    ..
+                } => {
+                    let consumed = aliases.contains(base)
+                        || fields.iter().any(|field| aliases.contains(field));
+                    if consumed {
+                        aliases.remove(base);
+                        aliases.retain(|alias| !fields.contains(alias));
+                        aliases.insert(result.clone());
+                    }
+                }
+                crate::core::mir::MirInstructionKind::ListOp {
+                    result,
+                    operation: crate::core::mir::MirListOperation::Concat,
+                    list,
+                    argument: Some(argument),
+                    ..
+                } if aliases.contains(list) || aliases.contains(argument) => {
+                    aliases.remove(list);
+                    aliases.remove(argument);
+                    aliases.insert(result.clone());
+                }
+                _ => {}
+            }
+        }
+
+        match &block.terminator {
+            crate::core::mir::MirTerminator::Goto {
+                target, arguments, ..
+            } => enqueue_owned_get_edge(function, &mut pending, target, arguments, &aliases),
+            crate::core::mir::MirTerminator::Branch {
+                then_target,
+                then_arguments,
+                else_target,
+                else_arguments,
+                ..
+            } => {
+                enqueue_owned_get_edge(
+                    function,
+                    &mut pending,
+                    then_target,
+                    then_arguments,
+                    &aliases,
+                );
+                enqueue_owned_get_edge(
+                    function,
+                    &mut pending,
+                    else_target,
+                    else_arguments,
+                    &aliases,
+                );
+            }
+            crate::core::mir::MirTerminator::Switch { arms, .. }
+            | crate::core::mir::MirTerminator::SwitchMove { arms, .. } => {
+                for arm in arms {
+                    enqueue_owned_get_edge(
+                        function,
+                        &mut pending,
+                        &arm.target,
+                        &arm.arguments,
+                        &aliases,
+                    );
+                }
+            }
+            crate::core::mir::MirTerminator::Return { value }
+            | crate::core::mir::MirTerminator::Fault { value } => {
+                if value.as_ref().is_some_and(|value| aliases.contains(value)) {
+                    aliases.remove(value.as_ref().expect("value checked above"));
+                }
+                if !aliases.is_empty() {
+                    return true;
+                }
+            }
+            crate::core::mir::MirTerminator::Trap { .. }
+            | crate::core::mir::MirTerminator::Unreachable => {
+                if !aliases.is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn enqueue_owned_get_edge(
+    function: &crate::core::mir::MirFunction,
+    pending: &mut Vec<(
+        crate::core::mir::MirBlockId,
+        BTreeSet<crate::core::mir::MirValueId>,
+    )>,
+    target: &crate::core::mir::MirBlockId,
+    arguments: &[crate::core::mir::MirValueId],
+    aliases: &BTreeSet<crate::core::mir::MirValueId>,
+) {
+    let mut next = aliases.clone();
+    let Some(block) = function.blocks.get(target) else {
+        pending.push((target.clone(), next));
+        return;
+    };
+    for (parameter, argument) in block.parameters.iter().zip(arguments) {
+        if next.remove(argument) {
+            next.insert(parameter.value.clone());
+        }
+    }
+    pending.push((target.clone(), next));
 }
 
 /// Return true when a canonical ordinary owned-get graph materializes a
@@ -3154,6 +3763,38 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_map_owned_get_values_scope_cleanup_does_not_settle_result_owner() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let snapshot = values(root)
+                    let count = snapshot.len()
+                    drop(root)
+                    count
+                }
+            "#,
+        );
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage,
+            "Values operation and Map root lifecycle are checker-complete even though the result owner is only scope-cleaned"
+        );
+
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("scope cleanup must not discharge a Values result owner");
+        match error {
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message,
+            } => assert!(message.contains("not settled"), "{message}"),
+            other => panic!("scope-only Values result must fail at coverage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ordinary_map_owned_get_any_materializes_a_get_any_only_candidate() {
         let program = checked(
             r#"
@@ -3197,6 +3838,38 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn ordinary_map_owned_get_any_scope_cleanup_does_not_settle_result_owner() {
+        let program = checked(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let pair = map_get(root, "answer")
+                    let found = pair.0
+                    drop(root)
+                    if found { 1 } else { 0 }
+                }
+            "#,
+        );
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program)
+                .ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage,
+            "GetAny operation and Map root lifecycle are checker-complete even though the tuple owner is only scope-cleaned"
+        );
+
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("scope cleanup must not discharge a GetAny result owner");
+        match error {
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message,
+            } => assert!(message.contains("not settled"), "{message}"),
+            other => panic!("scope-only GetAny result must fail at coverage, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3368,8 +4041,8 @@ mod tests {
         );
         assert_eq!(
             admission.ordinary_map_owner_lifecycle_i32_string_v1,
-            OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
-            "covered source attempts share the selected MapAnyOwner identity"
+            OrdinaryMapOwnerLifecycleI32StringV1Admission::CoveredByMapAnyOwnerV1,
+            "the fully joined ordinary attempts share the selected MapAnyOwner identity"
         );
         let route = materialize_canonical_mir_route(&covered, None)
             .expect("complete covering MapAnyOwner receipt materializes");
@@ -3434,6 +4107,50 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn map_any_owner_mixed_collection_allows_only_its_exact_size_stdout_value() {
+        for (printed, admits_route) in [("size", true), ("1", false), ("size + 1", false)] {
+            let program = checked(&format!(
+                r#"
+                    func main() -> i32 {{
+                        let root = map_new()
+                        let updated = map_set(root, "answer", 42)
+                        let size = map_size(updated)
+                        println({printed})
+                        drop(updated)
+                        0
+                    }}
+                "#
+            ));
+            let admission = classify_canonical_mir_route_admission(&program);
+            assert_eq!(
+                admission.map_any_owner,
+                MapAnyOwnerAdmission::CompleteCoverage,
+                "{printed} retains the complete independent MapAnyOwner receipt"
+            );
+            assert_eq!(
+                admission.collection,
+                ScalarCollectionAdmission::MixedCoverage,
+                "the standalone scalar-collection classifier remains unchanged"
+            );
+
+            let route = materialize_canonical_mir_route(&program, None);
+            if admits_route {
+                let route = route.expect("only the receipted Size value may cross stdout");
+                assert!(CanonicalMirRouteProfile::MapAnyOwnerV1.is_materialized(&route));
+            } else {
+                assert!(matches!(
+                    route,
+                    Err(CanonicalMirRouteMaterializationError::Complete {
+                        profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
+                        stage: CanonicalMirRouteFailureStage::Coverage,
+                        message,
+                    }) if message.contains("mixed scalar-collection admission")
+                ));
+            }
+        }
     }
 
     #[test]

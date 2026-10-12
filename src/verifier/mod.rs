@@ -7,11 +7,11 @@ mod ctx;
 // engine even though no production route can legally call it.
 #[cfg(test)]
 mod expr;
-#[cfg(test)]
-pub mod ffi;
 mod ffi_checked;
 #[cfg(test)]
 mod flow;
+#[cfg(test)]
+mod flow_retirement_tests;
 #[cfg(test)]
 mod func;
 #[cfg(test)]
@@ -31,10 +31,7 @@ pub(crate) use ctx::{SolverSession, VerifierCtx};
 #[cfg(test)] // §11-#48 regression tests (audit_fix_verifier.rs)
 pub(crate) use expr::encode_match_bool;
 #[cfg(test)]
-pub use flow::{
-    flow_verify_ffi_call_sites, flow_verify_ffi_call_sites_or_mock, FlowAcc, FlowEvent,
-    VerifierState,
-};
+pub use flow::{FlowAcc, FlowEvent, VerifierState};
 
 /// Convert a canonical route verifier error into the shared diagnostic
 /// representation without changing the public `Result<_, String>` API used by
@@ -353,6 +350,159 @@ pub(crate) fn actor_ffi_results_or_boundary(
     }
 }
 
+/// Build the no-solver result set for the checked Actor compatibility route.
+///
+/// The ordinary mock verifier is still the result owner for accepted callable
+/// proofs, so they stay explicit infrastructure failures with no artifact.
+/// Preserve owner-specific checker boundaries alongside those rows: a
+/// deferred owner is a coverage result, not a solver failure. FFI remains on
+/// its dedicated checked call-site route, which distinguishes Requires from
+/// foreign Ensures even when Z3 cannot be created.
+fn actor_compatibility_no_z3_results(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Vec<VerificationResult> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let boundaries = match mir_request::prepare(program) {
+        mir_request::Preparation::Deferred(boundaries) => boundaries,
+        mir_request::Preparation::Complete(_) => Vec::new(),
+    };
+    let mut owner_reasons = BTreeMap::<crate::core::NodeId, Vec<String>>::new();
+    for boundary in boundaries {
+        // The Actor/impl graph boundary applies to the overall compatibility
+        // request. Keep it from downgrading every otherwise eligible scalar
+        // proof owner; only a boundary attached to that owner becomes NITS.
+        if boundary.owner.0 == "verification:request" || boundary.owner.0 == "verification:consumer"
+        {
+            continue;
+        }
+        let Some(callable) = program.callable(&boundary.owner) else {
+            continue;
+        };
+        let has_callsite_obligations = resolved_expr::has_resolved_callsite_obligations(
+            callable,
+            program.callables(),
+            program.resolved_types(),
+        );
+        if !callable.has_proof_obligations() && !has_callsite_obligations {
+            continue;
+        }
+        owner_reasons
+            .entry(boundary.owner)
+            .or_default()
+            .push(boundary.reason);
+    }
+
+    let mut deferred = owner_reasons
+        .into_iter()
+        .map(|(owner, reasons)| {
+            let name = program
+                .functions()
+                .get(&owner)
+                .map(|function| function.qualified_name.clone())
+                .or_else(|| {
+                    program.transitions().values().find_map(|transition| {
+                        (transition.node_id == owner)
+                            .then(|| format!("{}::{}", transition.id.flow.0, transition.id.event))
+                    })
+                })
+                .unwrap_or_else(|| owner.0.clone());
+            let message = format!(
+                "{}: typed Actor proof owner '{}' remains outside the admitted proof request: {}",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                name,
+                reasons.join("; ")
+            );
+            let span = program
+                .node_meta()
+                .get(&owner)
+                .map(|meta| meta.origin.user_span())
+                .or_else(|| program.entry_span())
+                .unwrap_or(crate::span::Span::UNKNOWN);
+            VerificationResult {
+                func_name: name,
+                status: VerifStatus::NotInTrustedSubset,
+                diagnostic: Some(crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    message.clone(),
+                    span,
+                )),
+                message,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // Declaration expressions do not have callable entries in the mock
+    // result table. Retain proof-bearing user initializers as span-bearing
+    // owner boundaries rather than silently dropping them from an Actor
+    // proof census. Extern roots are classified by the FFI call-site adapter.
+    for root in program.declaration_expression_bodies().values() {
+        if matches!(
+            &root.kind,
+            crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternRequires
+                | crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternEnsures
+        ) {
+            continue;
+        }
+        let has_obligation = match &root.body {
+            Ok(body) => body.has_proof_obligations(),
+            Err(_) => true,
+        };
+        if !has_obligation {
+            continue;
+        }
+        let message = format!(
+            "{}: typed Actor declaration proof owner '{}' is outside the admitted proof request",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            root.display_name
+        );
+        let span = program
+            .node_meta()
+            .get(&root.node_id)
+            .or_else(|| program.node_meta().get(&root.owner))
+            .map(|meta| meta.origin.user_span())
+            .or_else(|| {
+                root.body
+                    .as_ref()
+                    .ok()
+                    .map(|body| body.root.origin.user_span())
+            })
+            .or_else(|| program.entry_span())
+            .unwrap_or(crate::span::Span::UNKNOWN);
+        deferred.push(VerificationResult {
+            func_name: root.display_name.clone(),
+            status: VerifStatus::NotInTrustedSubset,
+            diagnostic: Some(crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                message.clone(),
+                span,
+            )),
+            message,
+            duration_us: 0,
+            constraint_count: 0,
+            artifact: None,
+            trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+        });
+    }
+
+    let deferred_names = deferred
+        .iter()
+        .map(|result| result.func_name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut results = ctx::mock_verify_checked(program);
+    results.retain(|result| {
+        !result.func_name.starts_with("extern ") && !deferred_names.contains(&result.func_name)
+    });
+    results.extend(deferred);
+    results.extend(actor_ffi_results_or_boundary(program, source_hash));
+    results
+}
+
 fn item_source_id(item: &crate::ast::Item) -> Option<crate::span::SourceId> {
     use crate::ast::Item;
     let span = match item {
@@ -388,6 +538,25 @@ pub fn verify_source_with(
     let program = crate::core::check_program(&file).map_err(format_check_errors)?;
     // P1-24: compute source hash for tamper detection in ProofArtifact.
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    // A caller-supplied verifier is the retained compatibility engine used by
+    // timeout/configuration tests.  Once Checker admission recognizes an
+    // ordinary Map owned-get candidate, keep this source entry on the same
+    // canonical route as `verify_checked`; otherwise the configured engine
+    // could silently consume the old Resolved body and bypass the owner
+    // settlement gate.
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&program);
+    if admission.map_root.is_candidate()
+        || admission.map_any_owner.is_candidate()
+        || admission
+            .ordinary_map_owner_lifecycle_i32_string_v1
+            .has_profile_signal()
+        || admission
+            .ordinary_map_owned_get_i32_string_v1
+            .has_profile_signal()
+    {
+        validate_public_verifier_mir_boundary(&program)?;
+        return verify_checked(&program, source_hash);
+    }
     verifier.set_source_hash(source_hash);
     Ok(verifier.verify_checked(&program))
 }
@@ -438,6 +607,24 @@ fn validate_public_verifier_mir_boundary(
     if admission.map_any_owner.is_candidate() && !admission.map_any_owner_complete() {
         return Err(format!(
             "{}: Checker recognized a MapAnyOwner v1 candidate but withheld its complete independent lifecycle receipt",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if admission
+        .ordinary_map_owned_get_i32_string_v1
+        .has_profile_signal()
+        && !admission.ordinary_map_owned_get_i32_string_v1_complete()
+    {
+        return Err(format!(
+            "{}: Checker recognized an ordinary Map owned-get attempt without complete consumer coverage",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if let Some(reason) =
+        crate::core::mir::ordinary_map_owned_get_result_settlement_reason_checked(program)
+    {
+        return Err(format!(
+            "{}: {reason}",
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
     }
@@ -646,7 +833,14 @@ pub fn verify_checked(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
-    let deferred_boundaries = if is_z3_available() {
+    // Run the checker-owned route boundary before MIR request preparation.
+    // `mir_request::prepare` can complete and return directly when Z3 is
+    // available; placing this check below that early return would let an
+    // incomplete ordinary Map/GetAny or Values owner reach a proof engine.
+    validate_public_verifier_mir_boundary(program)?;
+    let z3_available = is_z3_available();
+    let actor_compatibility = is_actor_proof_compatibility(program);
+    let deferred_boundaries = if z3_available {
         match mir_request::prepare(program) {
             mir_request::Preparation::Complete(request) => {
                 return mir_request::verify(&request, program, source_hash);
@@ -656,13 +850,53 @@ pub fn verify_checked(
     } else {
         None
     };
-    validate_public_verifier_mir_boundary(program)?;
-    if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
-        return Ok(results);
+    if !z3_available && actor_compatibility {
+        return Ok(actor_compatibility_no_z3_results(program, source_hash));
     }
-    if crate::core::mir::scalar_actor_contract_boundary_reason(program).is_some()
-        && is_z3_available()
-    {
+    if !z3_available {
+        // A closed MIR profile cannot produce a proof without its solver.
+        // Keep the checked no-solver result algebra instead of materializing
+        // that profile and failing during SolverSession initialization.
+        return Ok(ctx::mock_verify_checked(program));
+    }
+    match verify_closed_mir_program(program, source_hash.clone()) {
+        Ok(Some(results))
+            if deferred_boundaries
+                .as_deref()
+                .is_some_and(|boundaries| !boundaries.is_empty())
+                && results.iter().any(|result| {
+                    result
+                        .message
+                        .contains("proof worklist coverage gap: DeferredBoundary")
+                }) =>
+        {
+            return Ok(deferred_verification_results(
+                program,
+                deferred_boundaries.as_deref().unwrap_or_default(),
+            ));
+        }
+        Ok(Some(results)) => return Ok(results),
+        Ok(None) => {}
+        Err(error)
+            if deferred_boundaries
+                .as_deref()
+                .is_some_and(|boundaries| !boundaries.is_empty())
+                && error.contains("proof worklist coverage gap: DeferredBoundary") =>
+        {
+            // The checker has already sealed this owner as a deferred proof
+            // boundary.  A later scalar island probe may discover that the
+            // same body cannot be materialized, but that is still an
+            // owner-scoped coverage result, not a verifier infrastructure
+            // failure.  Preserve the typed boundary and never reopen the
+            // retained AST/Flow owner.
+            return Ok(deferred_verification_results(
+                program,
+                deferred_boundaries.as_deref().unwrap_or_default(),
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+    if actor_compatibility {
         let mut verifier = Verifier::new()?;
         verifier.set_source_hash(source_hash);
         return Ok(verifier.verify_checked(program));
@@ -674,24 +908,10 @@ pub fn verify_checked(
         // already identified the exact owner and unsupported proof shape.
         return Ok(deferred_verification_results(program, boundaries));
     }
-    if is_z3_available() {
-        // No callable proof roots were requested.  The old Flow verifier used
-        // to return an empty batch here after reading the source file; an
-        // empty typed result is equivalent and keeps the AST owner unreachable.
-        return Ok(Vec::new());
-    } else {
-        // C4 mock path: from CheckedProgram, no retained surface body needed.
-        let mut results = ctx::mock_verify_checked(program);
-        if is_actor_proof_compatibility(program) {
-            // Mock verification historically reports every extern declaration,
-            // including declarations with no call-site obligation. Actor's
-            // FFI adapter is deliberately call-site based, so discard only
-            // those declaration-level placeholders before adding its results.
-            results.retain(|result| !result.func_name.starts_with("extern "));
-            results.extend(actor_ffi_results_or_boundary(program, source_hash));
-        }
-        Ok(results)
-    }
+    // No callable proof roots were requested. The old Flow verifier used to
+    // return an empty batch here after reading the source file; an empty typed
+    // result is equivalent and keeps the AST owner unreachable.
+    Ok(Vec::new())
 }
 
 /// Parse source and verify extern call sites using Z3.
@@ -814,6 +1034,7 @@ pub fn verify_ffi_checked_with_source_hash(
     // CheckedProgram owns declaration identity and arity. Validate them before
     // deciding whether this API has an obligation, so malformed call-site
     // metadata cannot be hidden by an otherwise empty result.
+    let mut has_called_extern = false;
     let mut called_contract_names = std::collections::BTreeSet::new();
     let mut called_requires_names = std::collections::BTreeSet::new();
     let mut unmodeled_ensures_call_sites = Vec::new();
@@ -821,6 +1042,7 @@ pub fn verify_ffi_checked_with_source_hash(
         if site.kind != crate::core::ResolvedCallKind::Extern {
             continue;
         }
+        has_called_extern = true;
         let same_identity_count = program
             .call_sites()
             .values()
@@ -875,11 +1097,9 @@ pub fn verify_ffi_checked_with_source_hash(
         }
     }
 
-    if called_contract_names.is_empty() {
-        // No called declaration contributes an FFI verification obligation.
-        // In particular, an uncalled contract, an uncontracted extern, or a
-        // contract on an unrelated Mimi callable must not enter any verifier
-        // route or manufacture a proof status.
+    if !has_called_extern {
+        // An uncalled extern declaration, or a contract on an unrelated Mimi
+        // callable, must not enter an FFI route or manufacture a proof status.
         return Ok(Vec::new());
     }
 
@@ -889,8 +1109,10 @@ pub fn verify_ffi_checked_with_source_hash(
     // a non-scalar declaration with `requires: true`/`false` is still fully
     // decidable from the typed declaration and must not reopen the retained
     // FFI body merely because its ABI is outside ScalarFfi.
-    if let Some(results) = verify_ffi_literal_contracts(program, &source_hash) {
-        return results;
+    if !called_contract_names.is_empty() {
+        if let Some(results) = verify_ffi_literal_contracts(program, &source_hash) {
+            return results;
+        }
     }
 
     let profile = crate::core::mir::CanonicalMirRouteProfile::ScalarFfi;
@@ -915,6 +1137,12 @@ pub fn verify_ffi_checked_with_source_hash(
                 "{}: complete ScalarFfi admission did not materialize a canonical verifier graph",
                 crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
             ));
+        }
+        if called_contract_names.is_empty() {
+            // Route validation still owns every real call, even when there is
+            // no contract root to prove. Do not ask either proof engine to
+            // manufacture a result for an obligation-free declaration.
+            return Ok(Vec::new());
         }
         if is_z3_available() {
             let canonical = route.program;
@@ -949,8 +1177,8 @@ pub fn verify_ffi_checked_with_source_hash(
     }
 
     // Map-owner profiles have independent canonical ownership receipts. A
-    // program that combines one with called FFI contracts cannot choose the
-    // AST verifier for the FFI portion and a canonical owner for the rest.
+    // program that combines one with called externs cannot choose the AST
+    // verifier for the FFI portion and a canonical owner for the rest.
     // Incomplete Map attempts also remain visible here so they cannot turn a
     // mixed program into a compatibility route.
     let map_owner_candidate = admission.map_root.is_candidate()
@@ -963,6 +1191,12 @@ pub fn verify_ffi_checked_with_source_hash(
             .has_profile_signal();
     if map_owner_candidate {
         if actor_compatibility {
+            if called_contract_names.is_empty() {
+                return Err(format!(
+                    "{}: called externs cannot borrow an independent canonical Map owner receipt from the Actor compatibility route",
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                ));
+            }
             // The Actor compatibility route cannot borrow a separate Map
             // receipt. Preserve each called FFI obligation as explicitly
             // deferred rather than allowing the Actor selector to bypass the
@@ -984,9 +1218,44 @@ pub fn verify_ffi_checked_with_source_hash(
             return Ok(results);
         }
         return Err(format!(
-            "{}: called extern contracts conflict with a separate canonical Map owner profile",
+            "{}: called externs conflict with a separate canonical Map owner profile",
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
+    }
+
+    if called_contract_names.is_empty() {
+        // A real but obligation-free extern still has to cross the checked
+        // source/ABI and route boundary. Keep the no-obligation result only
+        // for a pure compatibility input with no canonical candidate; every
+        // incomplete or mixed candidate must remain a hard route error.
+        let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
+            Ok(route) => route,
+            Err(error) => {
+                if let crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
+                    admission: compatibility_admission,
+                    ..
+                } = &error
+                {
+                    if !compatibility_admission.has_candidate() {
+                        return Ok(Vec::new());
+                    }
+                }
+                return Err(match error.diagnostic_code() {
+                    Some(code) => format!("{code}: {error}"),
+                    None => format!(
+                        "{}: called extern has no complete canonical ScalarFfi route: {error}",
+                        crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                    ),
+                });
+            }
+        };
+        if !profile.is_admitted(admission) || !profile.is_materialized(&route) {
+            return Err(format!(
+                "{}: called extern did not receive a complete canonical ScalarFfi admission and materialization",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        return Ok(Vec::new());
     }
 
     if !is_z3_available() {
@@ -1490,6 +1759,13 @@ fn ffi_infrastructure_error(func_name: String) -> VerificationResult {
 
 /// Check whether the Z3 solver is available at runtime.
 pub fn is_z3_available() -> bool {
+    // The integration CLI needs a deterministic way to exercise the same
+    // no-Z3 branch on hosts where libz3 is installed. Keep this hook confined
+    // to debug builds; release users always receive the real runtime check.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("MIMI_TEST_FORCE_NO_Z3").is_some() {
+        return false;
+    }
     Verifier::new().is_ok()
 }
 
@@ -1513,6 +1789,22 @@ pub fn verify_checked_dual(
     program
         .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(format_check_errors)?;
+    // Keep the dual entry point on the same admission boundary before its
+    // typed request fast path.  Otherwise a complete request envelope could
+    // bypass the ordinary Map result-settlement check used by the single
+    // verifier and canonical CLI route.
+    validate_public_verifier_mir_boundary(program)?;
+    let z3_available = is_z3_available();
+    let actor_compatibility = is_actor_proof_compatibility(program);
+    if !z3_available {
+        if actor_compatibility {
+            return Ok(actor_compatibility_no_z3_results(program, source_hash));
+        }
+        // The dual wrapper preserves the same no-solver result algebra as the
+        // single checked entry. Never enter a closed MIR profile that would
+        // attempt to initialize SolverSession without Z3.
+        return Ok(ctx::mock_verify_checked(program));
+    }
 
     // Ordinary Map/Any ownership is a checker-owned canonical profile.  Once
     // its receipt is complete, running the retained Resolved body verifier
@@ -1554,16 +1846,13 @@ pub fn verify_checked_dual(
         || admission
             .ordinary_map_owned_get_i32_string_v1
             .has_profile_signal();
-    if crate::core::mir::scalar_actor_contract_boundary_reason(program).is_some()
-        && !map_owner_candidate
-        && is_z3_available()
-    {
+    if actor_compatibility && !map_owner_candidate {
         let mut verifier = Verifier::new()?;
         verifier.set_source_hash(source_hash);
         return Ok(verifier.verify_checked(program));
     }
     let mut deferred_boundaries = Vec::new();
-    if is_z3_available() {
+    if z3_available {
         match mir_request::prepare(program) {
             mir_request::Preparation::Complete(request) => {
                 // Independent primary is still the Resolved expression/body
@@ -1598,18 +1887,42 @@ pub fn verify_checked_dual(
         }
     }
     validate_public_verifier_mir_boundary(program)?;
-    if let Some(results) = verify_closed_mir_program(program, source_hash.clone())? {
-        return Ok(results);
-    }
-    let actor_compatibility = is_actor_proof_compatibility(program);
-    if !is_z3_available() {
-        // C4 mock path: from CheckedProgram, no retained surface body needed.
-        let mut results = ctx::mock_verify_checked(program);
-        if actor_compatibility {
-            results.retain(|result| !result.func_name.starts_with("extern "));
-            results.extend(verify_ffi_checked_with_source_hash(program, source_hash)?);
+    match verify_closed_mir_program(program, source_hash.clone()) {
+        Ok(Some(results))
+            if !deferred_boundaries.is_empty()
+                && results.iter().any(|result| {
+                    result
+                        .message
+                        .contains("proof worklist coverage gap: DeferredBoundary")
+                }) =>
+        {
+            let mut primary = Verifier::new()?;
+            primary.set_source_hash(source_hash.clone());
+            let resolved_results = primary.verify_checked_without_actor_ffi(program);
+            return Ok(dual_verifier_coverage_results(
+                program,
+                resolved_results,
+                &deferred_boundaries,
+                &source_hash,
+            ));
         }
-        return Ok(results);
+        Ok(Some(results)) => return Ok(results),
+        Ok(None) => {}
+        Err(error)
+            if !deferred_boundaries.is_empty()
+                && error.contains("proof worklist coverage gap: DeferredBoundary") =>
+        {
+            let mut primary = Verifier::new()?;
+            primary.set_source_hash(source_hash.clone());
+            let resolved_results = primary.verify_checked_without_actor_ffi(program);
+            return Ok(dual_verifier_coverage_results(
+                program,
+                resolved_results,
+                &deferred_boundaries,
+                &source_hash,
+            ));
+        }
+        Err(error) => return Err(error),
     }
     // Primary engine: resolved (verifies from Resolved IR).
     let mut primary = Verifier::new()?;
