@@ -457,6 +457,7 @@ mod copy_option_island;
 mod copy_result_island;
 mod eligibility;
 mod ffi_source_census;
+pub mod flow_domain;
 mod identity_island;
 mod islands;
 mod managed_any;
@@ -598,15 +599,17 @@ pub use receipt::{
 pub use route::{
     classify_canonical_mir_route_admission, has_scalar_actor_nested_callable_candidate,
     map_any_owner_v1_actions_are_within_ordinary_map_profile, materialize_canonical_mir_route,
-    ordinary_map_attempts_fully_covered_by_map_any_owner_v1, scalar_actor_contract_boundary_reason,
-    scalar_ffi_map_owner_composition_failure, validate_scalar_actor_island,
-    CanonicalMirRouteAdmission, CanonicalMirRouteFailureStage, CanonicalMirRouteMaterialization,
-    CanonicalMirRouteMaterializationError, CanonicalMirRouteProfile, MapAnyOwnerAdmission,
-    MapRootAdmission, OrdinaryMapOwnedGetI32StringV1Admission,
-    OrdinaryMapOwnerLifecycleI32StringV1Admission, S8FlowAdmission, MAP_ANY_OWNER_V1_ISLAND,
-    MAP_ROOT_ISLAND, ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND,
-    ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND, SCALAR_ACTOR_ISLAND, SCALAR_EXPORT_ISLAND,
-    SCALAR_NESTED_ISLAND,
+    ordinary_map_attempts_fully_covered_by_map_any_owner_v1,
+    ordinary_map_owned_get_result_settlement_reason,
+    ordinary_map_owned_get_result_settlement_reason_checked, scalar_actor_contract_boundary_reason,
+    scalar_ffi_map_owner_composition_failure, unknown_effect_boundary_reason,
+    validate_scalar_actor_island, CanonicalMirRouteAdmission, CanonicalMirRouteFailureStage,
+    CanonicalMirRouteMaterialization, CanonicalMirRouteMaterializationError,
+    CanonicalMirRouteProfile, MapAnyOwnerAdmission, MapRootAdmission,
+    OrdinaryMapOwnedGetI32StringV1Admission, OrdinaryMapOwnerLifecycleI32StringV1Admission,
+    S8FlowAdmission, MAP_ANY_OWNER_V1_ISLAND, MAP_ROOT_ISLAND,
+    ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND, ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND,
+    SCALAR_ACTOR_ISLAND, SCALAR_EXPORT_ISLAND, SCALAR_NESTED_ISLAND,
 };
 #[cfg(test)]
 pub(crate) use route::{reset_test_route_materialization_count, test_route_materialization_count};
@@ -3907,7 +3910,7 @@ impl MirOwnershipSummary {
         if let Some(receipt) = &self.checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt {
             let _ = writeln!(
                 output,
-                "    checker_ordinary_map_owned_get_i32_string_v1_cfg profile={} owner={} entry={} map_block={} blocks={} edges={} attempts={} actions={}",
+                "    checker_ordinary_map_owned_get_i32_string_v1_cfg profile={} owner={} entry={} map_block={} blocks={} edges={} attempts={} actions={} result_receipts={}",
                 receipt.profile_version.canonical_text(),
                 receipt.owner.0,
                 receipt.entry.0 .0,
@@ -3916,6 +3919,7 @@ impl MirOwnershipSummary {
                 receipt.reachable_edges.len(),
                 receipt.attempts.len(),
                 receipt.action_points.len(),
+                receipt.result_receipts.len(),
             );
             for (block, fact) in &receipt.reachable_blocks {
                 let points = fact
@@ -3984,8 +3988,34 @@ impl MirOwnershipSummary {
                     .join(",");
                 let _ = writeln!(
                     output,
-                    "      cfg_attempt {:?} point={} args=[{}]",
-                    attempt.kind, attempt.point.0, arguments
+                    "      cfg_attempt {:?} point={} args=[{}] receiver={} result={}",
+                    attempt.kind,
+                    attempt.point.0,
+                    arguments,
+                    attempt
+                        .receiver_local
+                        .as_ref()
+                        .map_or_else(|| "none".into(), |local| format!("local:{}", local.0 .0)),
+                    attempt
+                        .result_local
+                        .as_ref()
+                        .map_or_else(|| "none".into(), |local| format!("local:{}", local.0 .0)),
+                );
+            }
+            for result in &receipt.result_receipts {
+                let _ = writeln!(
+                    output,
+                    "      cfg_result_receipt profile={} operation={} kind={} result={} binding={} settlement={} settlement_point={}",
+                    result.profile_version.canonical_text(),
+                    result.operation.0,
+                    result.kind.as_str(),
+                    result.result.0,
+                    result
+                        .binding
+                        .as_ref()
+                        .map_or_else(|| "none".into(), |local| format!("local:{}", local.0 .0)),
+                    result.settlement.as_str(),
+                    result.settlement_point.as_ref().map_or_else(|| "none".into(), |point| point.0.clone()),
                 );
             }
             for point in &receipt.action_points {
@@ -5345,12 +5375,14 @@ enum OrdinaryMapOwnedGetCfgEdgeRole {
     Goto,
     Then,
     Else,
+    MatchArm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OrdinaryMapOwnedGetCfgTerminatorRole {
     Goto,
     Branch,
+    Switch,
     Return,
 }
 
@@ -5409,6 +5441,21 @@ fn ordinary_map_owned_get_mir_block_id(
             };
             format!("bb:{prefix}:{}", edge.source.node.0)
         }
+        "match-join" => format!("bb:match.join:{source_node}"),
+        "match-arm" => {
+            let block = receipt.reachable_blocks.get(block_id)?;
+            let mut incoming = receipt.reachable_edges.values().filter(|edge| {
+                edge.to == *block_id && edge.kind == crate::core::cfg::EdgeKind::MatchArm
+            });
+            let edge = incoming.next()?;
+            if incoming.next().is_some() {
+                return None;
+            }
+            if block.points.is_empty() {
+                return None;
+            }
+            format!("bb:match.arm:{}", edge.source.node.0)
+        }
         _ => return None,
     };
     MirBlockId::new(mir_id).ok()
@@ -5444,9 +5491,26 @@ fn ordinary_map_owned_get_mir_edge_id(
     let (parent, branch_kind) = match edge.kind {
         EdgeKind::Then => (edge.source.node.clone(), EdgeKind::Then),
         EdgeKind::Else => (edge.source.node.clone(), EdgeKind::Else),
-        EdgeKind::Fallthrough => ordinary_map_owned_get_fallthrough_arm(receipt, edge)?,
+        EdgeKind::MatchArm => (edge.source.node.clone(), EdgeKind::MatchArm),
+        EdgeKind::Fallthrough => {
+            if let Some((parent, branch_kind)) =
+                ordinary_map_owned_get_fallthrough_arm(receipt, edge)
+            {
+                (parent, branch_kind)
+            } else {
+                ordinary_map_owned_get_fallthrough_match_arm(receipt, edge)?
+            }
+        }
         _ => return None,
     };
+    if branch_kind == EdgeKind::MatchArm {
+        let role = if edge.kind == EdgeKind::MatchArm {
+            "match.arm"
+        } else {
+            "match.arm.join"
+        };
+        return MirEdgeId::new(format!("edge:{role}:{}", edge.source.node.0)).ok();
+    }
     let join_id = crate::core::cfg::BasicBlockId(crate::core::NodeId(format!(
         "{}/cfg:block:if-join",
         parent.0
@@ -5515,6 +5579,45 @@ fn ordinary_map_owned_get_fallthrough_arm(
         return Some((branch.source.node.clone(), branch_kind));
     }
     None
+}
+
+/// Recover a `match` arm's shared join for the owned-get CFG receipt. The
+/// source fallthrough is named by the arm node, while the enclosing match
+/// expression is identified by the unique incoming `MatchArm` edge.
+fn ordinary_map_owned_get_fallthrough_match_arm(
+    receipt: &crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+    edge: &crate::core::cfg::CfgEdge,
+) -> Option<(crate::core::NodeId, crate::core::cfg::EdgeKind)> {
+    use crate::core::cfg::EdgeKind;
+
+    if edge.kind != EdgeKind::Fallthrough {
+        return None;
+    }
+    let arm = crate::core::cfg::BasicBlockId(crate::core::NodeId(format!(
+        "{}/cfg:block:match-arm",
+        edge.source.node.0
+    )));
+    if edge.from != arm || !receipt.reachable_blocks.contains_key(&arm) {
+        return None;
+    }
+    let mut incoming = receipt
+        .reachable_edges
+        .values()
+        .filter(|candidate| candidate.to == arm && candidate.kind == EdgeKind::MatchArm);
+    let _match_arm = incoming.next()?;
+    if incoming.next().is_some() {
+        return None;
+    }
+    let to_role = edge
+        .to
+        .0
+         .0
+        .rsplit_once("/cfg:block:")
+        .map(|(_, role)| role);
+    if to_role != Some("match-join") {
+        return None;
+    }
+    Some((edge.source.node.clone(), EdgeKind::MatchArm))
 }
 
 fn validate_ordinary_map_owned_get_cfg_receipt(
@@ -5614,11 +5717,21 @@ fn validate_ordinary_map_owned_get_cfg_receipt(
                     errors.push(malformed("attaches an outgoing edge to a Return"));
                 }
             }
+            CfgTerminator::Match { arms, .. } => {
+                let valid = arms.iter().all(|edge_id| {
+                    cfg_receipt
+                        .reachable_edges
+                        .get(edge_id)
+                        .is_some_and(|edge| edge.from == *id && edge.kind == CfgEdgeKind::MatchArm)
+                });
+                if !valid {
+                    errors.push(malformed("does not bind a match's MatchArm edges"));
+                }
+            }
             CfgTerminator::Break { .. }
             | CfgTerminator::Continue { .. }
             | CfgTerminator::Diverge
-            | CfgTerminator::Unreachable
-            | CfgTerminator::Match { .. } => {
+            | CfgTerminator::Unreachable => {
                 errors.push(malformed(
                     "contains a control-flow form outside this version",
                 ));
@@ -5728,6 +5841,7 @@ fn validate_ordinary_map_owned_get_cfg_receipt(
         let role = match cfg_block.terminator {
             CfgTerminator::Goto { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Goto,
             CfgTerminator::Branch { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Branch,
+            CfgTerminator::Match { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Switch,
             CfgTerminator::Return { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Return,
             _ => continue,
         };
@@ -5767,6 +5881,17 @@ fn validate_ordinary_map_owned_get_cfg_receipt(
                 ));
                 OrdinaryMapOwnedGetCfgTerminatorRole::Branch
             }
+            MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
+                for arm in arms {
+                    actual_edges.insert((
+                        id.clone(),
+                        OrdinaryMapOwnedGetCfgEdgeRole::MatchArm,
+                        arm.edge.clone(),
+                        arm.target.clone(),
+                    ));
+                }
+                OrdinaryMapOwnedGetCfgTerminatorRole::Switch
+            }
             MirTerminator::Return { .. } => OrdinaryMapOwnedGetCfgTerminatorRole::Return,
             _ => {
                 errors.push(malformed(
@@ -5792,6 +5917,7 @@ fn validate_ordinary_map_owned_get_cfg_receipt(
         let role = match edge.kind {
             CfgEdgeKind::Then => OrdinaryMapOwnedGetCfgEdgeRole::Then,
             CfgEdgeKind::Else => OrdinaryMapOwnedGetCfgEdgeRole::Else,
+            CfgEdgeKind::MatchArm => OrdinaryMapOwnedGetCfgEdgeRole::MatchArm,
             CfgEdgeKind::Fallthrough => OrdinaryMapOwnedGetCfgEdgeRole::Goto,
             _ => {
                 errors.push(malformed("contains an unsupported source edge kind"));
@@ -5879,6 +6005,61 @@ fn validate_ordinary_map_owned_get_cfg_receipt(
             errors.push(malformed(
                 "Map attempts are not confined to the entry block",
             ));
+        }
+        if let Some(entry_cfg_block) = cfg_receipt
+            .reachable_blocks
+            .get(&cfg_receipt.map_operation_block)
+        {
+            let mut point_rank = BTreeMap::new();
+            for (rank, (point, _)) in entry_cfg_block.points.iter().enumerate() {
+                if point_rank.insert(point.clone(), rank).is_some() {
+                    errors.push(malformed(
+                        "entry block contains duplicate Checker point identities",
+                    ));
+                }
+            }
+
+            let mut expected_action_order = receipts
+                .iter()
+                .filter_map(|action| {
+                    point_rank
+                        .get(&action.point)
+                        .map(|rank| (*rank, action.point.clone()))
+                })
+                .collect::<Vec<_>>();
+            expected_action_order.sort_by_key(|(rank, _)| *rank);
+
+            let action_instructions = receipts
+                .iter()
+                .map(|action| action.instruction.clone())
+                .collect::<BTreeSet<_>>();
+            let actual_action_order = function
+                .blocks
+                .get(&function.entry)
+                .into_iter()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| {
+                    action_instructions
+                        .contains(&instruction.id)
+                        .then(|| {
+                            receipts
+                                .iter()
+                                .find(|action| action.instruction == instruction.id)
+                                .map(|action| action.point.clone())
+                        })
+                        .flatten()
+                })
+                .collect::<Vec<_>>();
+            if expected_action_order
+                .iter()
+                .map(|(_, point)| point)
+                .collect::<Vec<_>>()
+                != actual_action_order.iter().collect::<Vec<_>>()
+            {
+                errors.push(malformed(
+                    "entry MIR action order disagrees with Checker CFG point order",
+                ));
+            }
         }
         if receipts.iter().any(|action| {
             function.blocks.iter().any(|(block_id, block)| {
@@ -6173,6 +6354,84 @@ fn validate_ordinary_map_owned_get_per_edge_root_facts(
     errors
 }
 
+fn validate_ordinary_map_owned_get_result_receipts(
+    function: &MirFunction,
+    actions: &[MirCheckerOrdinaryMapOwnedGetI32StringV1Action],
+    cfg_receipt: &crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+) -> Vec<MirValidationError> {
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind as Kind;
+
+    let malformed = |message: String| MirValidationError {
+        subject: function.owner.0.clone(),
+        message: format!("ordinary Map owned-get result receipt {message}"),
+    };
+    let aggregate_actions = actions
+        .iter()
+        .filter(|action| matches!(action.kind, Kind::GetAny | Kind::Values))
+        .collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for result in &cfg_receipt.result_receipts {
+        if result.profile_version != crate::core::OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1
+            || result.operation != result.result
+            || !seen.insert(result.operation.clone())
+            || result.settlement_point.is_none()
+        {
+            errors.push(malformed(format!(
+                "has an invalid profile, operation/result identity, duplicate operation, or missing settlement point for '{}'",
+                result.operation.0
+            )));
+        }
+        let matching = aggregate_actions
+            .iter()
+            .filter(|action| action.point == result.operation && action.kind == result.kind)
+            .count();
+        if matching != 1 {
+            errors.push(malformed(format!(
+                "does not bind exactly one GetAny/Values action at '{}'",
+                result.operation.0
+            )));
+        }
+        let attempt = cfg_receipt
+            .attempts
+            .iter()
+            .find(|attempt| attempt.point == result.operation);
+        if let Some(attempt) = attempt {
+            if attempt.result_local != result.binding {
+                errors.push(malformed(format!(
+                    "binding for '{}' disagrees with the source attempt",
+                    result.operation.0
+                )));
+            }
+        } else {
+            errors.push(malformed(format!(
+                "has no source attempt at '{}'",
+                result.operation.0
+            )));
+        }
+    }
+    if cfg_receipt.result_receipts.len() != aggregate_actions.len() {
+        errors.push(malformed(format!(
+            "count {} disagrees with GetAny/Values action count {}",
+            cfg_receipt.result_receipts.len(),
+            aggregate_actions.len()
+        )));
+    }
+    for action in aggregate_actions {
+        if !cfg_receipt
+            .result_receipts
+            .iter()
+            .any(|result| result.operation == action.point && result.kind == action.kind)
+        {
+            errors.push(malformed(format!(
+                "is missing a source result receipt for '{}'",
+                action.point.0
+            )));
+        }
+    }
+    errors
+}
+
 fn validate_ordinary_map_owned_get_i32_string_v1_action_receipts(
     function: &MirFunction,
 ) -> Vec<MirValidationError> {
@@ -6251,6 +6510,11 @@ fn validate_ordinary_map_owned_get_i32_string_v1_action_receipts(
         return errors;
     };
     errors.extend(validate_ordinary_map_owned_get_cfg_receipt(
+        function,
+        receipts,
+        cfg_receipt,
+    ));
+    errors.extend(validate_ordinary_map_owned_get_result_receipts(
         function,
         receipts,
         cfg_receipt,

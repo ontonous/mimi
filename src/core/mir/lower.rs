@@ -1114,9 +1114,11 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
 /// facade call itself preserves the caller's source List by passing a clone.
 /// The polymorphic body then performs the operation-specific transfer on its
 /// parameter: Len/Reverse borrow the cloned input and Concat consumes the two
-/// cloned inputs.  This keeps the caller-side `drop(source)` obligation
-/// visible and prevents the generic call boundary from turning a read/clone
-/// facade into an accidental Move of the caller's local.
+/// cloned inputs.  Read/clone bodies drop both their temporary operation
+/// receiver and the owned facade parameter before returning.  This keeps the
+/// caller-side `drop(source)` obligation visible and prevents the generic call
+/// boundary from turning a read/clone facade into an accidental Move of the
+/// caller's local.
 fn rewrite_scalar_list_facade_call_arguments(
     caller: &mut MirFunction,
     block_id: &MirBlockId,
@@ -3056,6 +3058,60 @@ fn materialize_generic_instance(
     }
     if !specialization_errors.is_empty() {
         return Err(specialization_errors);
+    }
+    // A generic List len/reverse facade receives a caller-side clone so the
+    // source local remains available for its own Drop.  The lowered facade
+    // already drops the temporary clone used by ListOp, but its by-value
+    // parameter is a second owned handle and must be settled as well.  Add
+    // that boundary after TypeDesc specialization so the drop glue is
+    // concrete for every admitted List<T> instance.
+    let list_read_facade = generic_list_facade
+        && function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::ListOp {
+                        operation: super::MirListOperation::Len | super::MirListOperation::Reverse,
+                        ..
+                    }
+                )
+            })
+        });
+    if list_read_facade {
+        let parameter = function.parameters.first().cloned().ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic List read facade has no owned parameter".into(),
+            }]
+        })?;
+        let block = function.blocks.get_mut(&function.entry).ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: "generic List read facade entry block is absent".into(),
+            }]
+        })?;
+        let already_dropped = block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Drop { value } if value == &parameter
+            )
+        });
+        if !already_dropped {
+            let drop_id = MirInstructionId::new(format!(
+                "inst:drop:list-facade-parameter:{}",
+                instance_id.as_str()
+            ))
+            .map_err(|error| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message: error.to_string(),
+                }]
+            })?;
+            block.instructions.push(MirInstruction {
+                id: drop_id,
+                kind: MirInstructionKind::Drop { value: parameter },
+            });
+        }
     }
     if is_managed_any_identity {
         let managed_type_argument = type_catalog.canonical_managed_any_type(&concrete);
@@ -5641,9 +5697,13 @@ pub(crate) fn validate_scalar_list_facade_mir(
                     "scalar List facade read/clone operation unexpectedly has an argument".into(),
                 );
             }
-            if drops != vec![list_operand.clone()] {
+            let parameter = function
+                .parameters
+                .first()
+                .ok_or_else(|| "scalar List facade read/clone parameter is absent".to_string())?;
+            if drops != vec![list_operand.clone(), parameter.clone()] {
                 return Err(
-                    "scalar List facade read/clone operation must Drop its temporary receiver exactly once".into(),
+                    "scalar List facade read/clone operation must Drop its temporary receiver and owned parameter exactly once".into(),
                 );
             }
         }
@@ -9743,6 +9803,95 @@ impl<'a> Lowerer<'a> {
         format!("ordinary_map_owner_lifecycle_v1_{}:{value}", kind.as_str())
     }
 
+    /// Lower a Map binding through whichever checker-owned receipt selected
+    /// the callable's canonical route. Root and nested blocks share this
+    /// dispatch so a fresh local in an If arm cannot fall through to a generic
+    /// Move while the same receipt is consumed specially at the root.
+    fn lower_checker_map_binding(
+        &mut self,
+        target: &ResolvedLocalId,
+        initializer: &ResolvedExpr,
+    ) -> bool {
+        self.lower_map_any_owner_v2_binding(target, initializer)
+            || self.lower_ordinary_map_owned_get_i32_string_v1_binding(target, initializer)
+            || self.lower_ordinary_map_owner_lifecycle_v1_binding(target, initializer)
+            || self.lower_map_root_binding(target, initializer)
+    }
+
+    /// The ordinary Map/Any owner-v2 contract has not yet been admitted as a
+    /// canonical MIR profile.  Keep this hook explicit so the shared binding
+    /// dispatch cannot accidentally reinterpret a v2 candidate as one of the
+    /// older MapRoot/MapAnyOwner representations.  The checker-owned route
+    /// classifier remains the authority for the eventual profile; until it
+    /// exposes a complete receipt this method must fail closed and leave the
+    /// binding to the normal compatibility/error path.
+    fn lower_map_any_owner_v2_binding(
+        &mut self,
+        _target: &ResolvedLocalId,
+        _initializer: &ResolvedExpr,
+    ) -> bool {
+        false
+    }
+
+    /// Emit a direct Map Drop only when the exact source point and local have
+    /// a Checker receipt. Keeping the source statement NodeId here preserves
+    /// branch-local action identity in MIR and lets the same implementation
+    /// serve root and nested blocks.
+    fn lower_checker_map_drop(&mut self, node: &NodeId, local: &ResolvedLocalId) -> bool {
+        if self
+            .ordinary_map_owned_get_i32_string_v1_action(
+                node,
+                crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                Some(local),
+            )
+            .is_some()
+        {
+            let value = self.ordinary_map_owned_get_i32_string_v1_local_value(local, node);
+            self.emit(
+                node,
+                &self.ordinary_map_owned_get_i32_string_v1_role(
+                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                    &value,
+                ),
+                MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root: value },
+            );
+            return true;
+        }
+
+        if self
+            .ordinary_map_owner_lifecycle_v1_action(
+                node,
+                crate::core::OrdinaryMapOwnerLifecycleActionKind::Drop,
+                Some(local),
+            )
+            .is_some()
+        {
+            let value = self.ordinary_map_owner_lifecycle_v1_local_value(local, node);
+            self.emit(
+                node,
+                &self.ordinary_map_owner_lifecycle_v1_role(
+                    crate::core::OrdinaryMapOwnerLifecycleActionKind::Drop,
+                    &value,
+                ),
+                MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root: value },
+            );
+            return true;
+        }
+
+        if let Some(action) = self.map_root_action(node, crate::core::MapRootActionKind::Drop) {
+            if action.local == *local {
+                let value = self.map_root_local_value(local, node);
+                self.emit(
+                    node,
+                    &self.map_root_instruction_role(crate::core::MapRootActionKind::Drop, &value),
+                    MirInstructionKind::MapRootDrop { root: value },
+                );
+                return true;
+            }
+        }
+        false
+    }
+
     fn lower_ordinary_map_owner_lifecycle_v1_binding(
         &mut self,
         target: &ResolvedLocalId,
@@ -10022,6 +10171,7 @@ impl<'a> Lowerer<'a> {
                     local: action.local.clone(),
                     root: crate::core::ResourceId(action.root.0.clone()),
                     key: action.key.clone(),
+                    key_expression: action.key_expression.clone(),
                     value: action.value.clone(),
                     value_type: action.value_type.clone(),
                     source_local: action.source_local.clone(),
@@ -10700,15 +10850,7 @@ impl<'a> Lowerer<'a> {
                         if self.lower_closure_binding(local, initializer) {
                             continue;
                         }
-                        if self
-                            .lower_ordinary_map_owned_get_i32_string_v1_binding(local, initializer)
-                        {
-                            continue;
-                        }
-                        if self.lower_ordinary_map_owner_lifecycle_v1_binding(local, initializer) {
-                            continue;
-                        }
-                        if self.lower_map_root_binding(local, initializer) {
+                        if self.lower_checker_map_binding(local, initializer) {
                             continue;
                         }
                     }
@@ -10821,71 +10963,10 @@ impl<'a> Lowerer<'a> {
                             );
                             continue;
                         }
-                        let map_root = self.has_map_root_action(
-                            &statement.node_id,
-                            crate::core::MapRootActionKind::Drop,
-                        ) && self
-                            .map_root_action(
-                                &statement.node_id,
-                                crate::core::MapRootActionKind::Drop,
-                            )
-                            .is_some_and(|action| action.local == place.base);
-                        let ordinary_map = self
-                            .ordinary_map_owner_lifecycle_v1_action(
-                                &statement.node_id,
-                                crate::core::OrdinaryMapOwnerLifecycleActionKind::Drop,
-                                Some(&place.base),
-                            )
-                            .is_some();
-                        let ordinary_owned_get = self
-                            .ordinary_map_owned_get_i32_string_v1_action(
-                                &statement.node_id,
-                                crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
-                                Some(&place.base),
-                            )
-                            .is_some();
-                        let value = if ordinary_owned_get {
-                            Ok(self.ordinary_map_owned_get_i32_string_v1_local_value(
-                                &place.base,
-                                &statement.node_id,
-                            ))
-                        } else if ordinary_map {
-                            Ok(self.ordinary_map_owner_lifecycle_v1_local_value(
-                                &place.base,
-                                &statement.node_id,
-                            ))
-                        } else if map_root {
-                            Ok(self.map_root_local_value(&place.base, &statement.node_id))
-                        } else {
-                            self.local_value(&place.base)
-                        };
-                        match value {
-                            Ok(value) if ordinary_owned_get => self.emit(
-                                &statement.node_id,
-                                &self.ordinary_map_owned_get_i32_string_v1_role(
-                                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
-                                    &value,
-                                ),
-                                MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop {
-                                    root: value,
-                                },
-                            ),
-                            Ok(value) if ordinary_map => self.emit(
-                                &statement.node_id,
-                                &self.ordinary_map_owner_lifecycle_v1_role(
-                                    crate::core::OrdinaryMapOwnerLifecycleActionKind::Drop,
-                                    &value,
-                                ),
-                                MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root: value },
-                            ),
-                            Ok(value) if map_root => self.emit(
-                                &statement.node_id,
-                                &self.map_root_instruction_role(
-                                    crate::core::MapRootActionKind::Drop,
-                                    &value,
-                                ),
-                                MirInstructionKind::MapRootDrop { root: value },
-                            ),
+                        if self.lower_checker_map_drop(&statement.node_id, &place.base) {
+                            continue;
+                        }
+                        match self.local_value(&place.base) {
                             Ok(value)
                                 if self.values.get(&value).is_some_and(|descriptor| {
                                     descriptor.ty
@@ -14963,13 +15044,7 @@ impl<'a> Lowerer<'a> {
                         // must not be lowered as a generic Move after its
                         // dedicated owner instruction has been emitted.
                         if self.lower_closure_binding(local, initializer)
-                            || self.lower_ordinary_map_owned_get_i32_string_v1_binding(
-                                local,
-                                initializer,
-                            )
-                            || self
-                                .lower_ordinary_map_owner_lifecycle_v1_binding(local, initializer)
-                            || self.lower_map_root_binding(local, initializer)
+                            || self.lower_checker_map_binding(local, initializer)
                         {
                             continue;
                         }
@@ -15046,43 +15121,21 @@ impl<'a> Lowerer<'a> {
                             );
                             continue;
                         }
-                        let ordinary_map = self
-                            .ordinary_map_owner_lifecycle_v1_action(
-                                &statement.node_id,
-                                crate::core::OrdinaryMapOwnerLifecycleActionKind::Drop,
-                                Some(&place.base),
-                            )
-                            .is_some();
-                        let value = if ordinary_map {
-                            self.ordinary_map_owner_lifecycle_v1_local_value(
-                                &place.base,
-                                &statement.node_id,
-                            )
-                        } else {
-                            match self.local_value(&place.base) {
-                                Ok(value) => value,
-                                Err(errors) => {
-                                    self.errors.extend(errors);
-                                    continue;
-                                }
+                        if self.lower_checker_map_drop(&statement.node_id, &place.base) {
+                            continue;
+                        }
+                        let value = match self.local_value(&place.base) {
+                            Ok(value) => value,
+                            Err(errors) => {
+                                self.errors.extend(errors);
+                                continue;
                             }
                         };
-                        if ordinary_map {
-                            self.emit(
-                                &statement.node_id,
-                                &self.ordinary_map_owner_lifecycle_v1_role(
-                                    crate::core::OrdinaryMapOwnerLifecycleActionKind::Drop,
-                                    &value,
-                                ),
-                                MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root: value },
-                            );
-                        } else {
-                            self.emit(
-                                &statement.node_id,
-                                &format!("drop.{index}"),
-                                MirInstructionKind::Drop { value },
-                            );
-                        }
+                        self.emit(
+                            &statement.node_id,
+                            &format!("drop.{index}"),
+                            MirInstructionKind::Drop { value },
+                        );
                     }
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
@@ -15311,10 +15364,15 @@ impl<'a> Lowerer<'a> {
         let [argument] = call.arguments.as_slice() else {
             return false;
         };
+        // `println` is the one effectful builtin admitted by this narrow
+        // ManagedAny island.  The checker still propagates its finite
+        // shared-mutation effect; all other effect facets stay outside the
+        // island.
+        let stdout_effect = call.effects.len() == 1 && call.effects[0].as_str() == "shared.modify";
         let unit_type = crate::core::ir::primitive_type_id(PrimitiveType::Unit);
         if builtin.as_str() != "println"
             || call.type_arguments.len() != 0
-            || !call.effects.is_empty()
+            || (!call.effects.is_empty() && !stdout_effect)
             || !call.session.is_empty()
             || call.result != unit_type
             || expression.ty != unit_type
@@ -17442,6 +17500,29 @@ func main() -> i32 {
                 )
             }),
             "{root_errors:?}"
+        );
+
+        let mut functions = super::lower_program_with_type_catalog(&program, &catalog)
+            .expect("fresh Map CFG lowering");
+        let function = functions.get_mut(&owner).expect("main MIR");
+        function
+            .ownership
+            .checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .as_mut()
+            .expect("source CFG receipt")
+            .result_receipts
+            .clear();
+        let result_receipt_errors = function
+            .validate()
+            .expect_err("missing source result receipts");
+        assert!(
+            result_receipt_errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("ordinary Map owned-get result receipt count")
+                    || error.message.contains("is missing a source result receipt")
+            }),
+            "{result_receipt_errors:?}"
         );
 
         let mut functions = super::lower_program_with_type_catalog(&program, &catalog)

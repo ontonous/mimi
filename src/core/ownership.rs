@@ -609,6 +609,10 @@ pub(crate) struct MapRootAction {
     /// only admits literals without embedded NUL so every consumer observes
     /// the same key.
     pub(crate) key: Option<String>,
+    /// Exact resolved key expression for key-taking operations. Keeping it
+    /// alongside the static key lets independent lifecycle receipts join on
+    /// source operand identity rather than key contents alone.
+    pub(crate) key_expression: Option<NodeId>,
     /// Value expression consumed by `Set`. The canonical lowering maps this
     /// stable node identity to its SSA value and the MIR receipt binds it.
     pub(crate) value: Option<NodeId>,
@@ -671,6 +675,8 @@ pub(crate) struct MapAnyOwnerAction {
     pub(crate) local: ResolvedLocalId,
     pub(crate) root: ResourceId,
     pub(crate) key: Option<String>,
+    /// Exact resolved key operand for key-taking operations.
+    pub(crate) key_expression: Option<NodeId>,
     pub(crate) value: Option<NodeId>,
     /// Exact Checker-resolved payload type for a Set. MapAnyOwner v1 admits
     /// only the primitive i32 and owned String payload descriptors.
@@ -766,6 +772,13 @@ pub(crate) struct OrdinaryMapOwnerLifecycleAttempt {
     pub(crate) kind: OrdinaryMapOwnerLifecycleAttemptKind,
     pub(crate) point: NodeId,
     pub(crate) arguments: Vec<NodeId>,
+    /// Direct unprojected receiver/root local for Map calls, when present.
+    /// The argument NodeIds remain the exact operand identities; this local
+    /// records the root edge needed to join an attempt to a MapAny receipt.
+    pub(crate) receiver_local: Option<ResolvedLocalId>,
+    /// Bound result local for a direct Map root-producing call, when present.
+    /// It ties New/Set/Remove receipts to the exact destination root.
+    pub(crate) result_local: Option<ResolvedLocalId>,
 }
 
 /// Schema/profile version for the owned-result typed getters over ordinary
@@ -880,6 +893,73 @@ pub(crate) struct OrdinaryMapOwnedGetI32StringV1Attempt {
     pub(crate) kind: OrdinaryMapOwnedGetI32StringV1AttemptKind,
     pub(crate) point: NodeId,
     pub(crate) arguments: Vec<NodeId>,
+    /// Direct unprojected Map root receiver, when the source operation has
+    /// one.  Keeping the source local alongside the argument node ids lets a
+    /// result receipt join the operation to the exact root edge without
+    /// re-reading surface syntax in a consumer.
+    pub(crate) receiver_local: Option<ResolvedLocalId>,
+    /// Direct binding that receives a `map_get`/`values` result (or a new
+    /// persistent root).  `None` is intentional for a return, a nested
+    /// expression, or an expression statement; those forms are classified
+    /// separately by the source result receipt collector.
+    pub(crate) result_local: Option<ResolvedLocalId>,
+}
+
+/// Source-level settlement classification for an owned `map_get`/`values`
+/// result.  This is deliberately separate from the Map root's synthetic
+/// scope-drop action: a scope destructor is only scheduling evidence and does
+/// not prove that the aggregate result owner was discharged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedGetResultSettlementKind {
+    /// An explicit `drop(result)` statement consumed the result owner.
+    ExplicitDrop,
+    /// The result was moved into the callable's return/fault envelope.
+    Return,
+    /// The result was moved into another value by assignment or a direct
+    /// consuming call boundary.
+    Transfer,
+    /// The result was captured by an aggregate/closure/task escape.
+    Escape,
+    /// The result had no source-level discharge; any cleanup is synthetic
+    /// scope cleanup and is not a receipt.
+    ScopeDrop,
+    /// A source use was observed but no exact consuming edge was proved.
+    Unsettled,
+}
+
+impl OrdinaryMapOwnedGetResultSettlementKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitDrop => "explicit-drop",
+            Self::Return => "return",
+            Self::Transfer => "transfer",
+            Self::Escape => "escape",
+            Self::ScopeDrop => "scope-drop",
+            Self::Unsettled => "unsettled",
+        }
+    }
+
+    pub(crate) const fn is_receipted(self) -> bool {
+        matches!(
+            self,
+            Self::ExplicitDrop | Self::Return | Self::Transfer | Self::Escape
+        )
+    }
+}
+
+/// One Checker-owned source result receipt for a `GetAny` or `Values` action.
+/// The result node remains distinct from its Map root and from any bound local
+/// so a later MIR consumer cannot mistake root scope cleanup for result
+/// ownership settlement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct OrdinaryMapOwnedGetResultReceipt {
+    pub(crate) profile_version: OrdinaryMapOwnedGetI32StringV1ProfileVersion,
+    pub(crate) operation: NodeId,
+    pub(crate) kind: OrdinaryMapOwnedGetI32StringV1ActionKind,
+    pub(crate) result: NodeId,
+    pub(crate) binding: Option<ResolvedLocalId>,
+    pub(crate) settlement: OrdinaryMapOwnedGetResultSettlementKind,
+    pub(crate) settlement_point: Option<NodeId>,
 }
 
 /// Version one keeps all owned Map operations in the entry block and closes
@@ -924,6 +1004,10 @@ pub(crate) struct OrdinaryMapOwnedGetI32StringV1CfgReceipt {
     pub(crate) reachable_edges: BTreeMap<EdgeId, CfgEdge>,
     pub(crate) attempts: BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
     pub(crate) action_points: BTreeSet<NodeId>,
+    /// Independent source-level owner receipts for `GetAny` and `Values`
+    /// aggregate results.  A `ScopeDrop` entry is retained as evidence of a
+    /// missing explicit consumer and must never be upgraded by a backend.
+    pub(crate) result_receipts: Vec<OrdinaryMapOwnedGetResultReceipt>,
     /// Exact path-sensitive Map-root facts at each reachable source block.
     /// The v2 profile requires these maps to cover all blocks/edges and the
     /// consumer independently replays every receipted action.
@@ -1001,6 +1085,90 @@ fn map_any_v1_action_covers_ordinary_attempt(
     if action.kind != map_any_kind {
         return false;
     }
+    let map_any_root_matches_local =
+        action.root.0 .0 == format!("map-any-owner-v1:{}", action.local.0 .0);
+    let map_any_source_matches_local = match (&action.source_local, &action.source) {
+        (Some(local), Some(source)) => source.0 .0 == format!("map-any-owner-v1:{}", local.0 .0),
+        (None, None) => true,
+        _ => false,
+    };
+    if !map_any_root_matches_local || !map_any_source_matches_local {
+        return false;
+    }
+
+    let arguments = &attempt.arguments;
+    let map_any_operands_match = match attempt.kind {
+        Attempt::New => {
+            arguments.is_empty()
+                && attempt.receiver_local.is_none()
+                && attempt.result_local.as_ref() == Some(&action.local)
+                && action.key.is_none()
+                && action.key_expression.is_none()
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && action.source_local.is_none()
+                && action.source.is_none()
+        }
+        Attempt::Set => {
+            arguments.len() == 3
+                && attempt.receiver_local.as_ref() == action.source_local.as_ref()
+                && attempt.receiver_local.is_some()
+                && attempt.result_local.as_ref() == Some(&action.local)
+                && action.key.is_some()
+                && action.key_expression.as_ref() == arguments.get(1)
+                && action.value.as_ref() == arguments.get(2)
+                && action.value.is_some()
+                && action.value_type.is_some()
+                && action.source.is_some()
+        }
+        Attempt::Remove => {
+            arguments.len() == 2
+                && attempt.receiver_local.as_ref() == action.source_local.as_ref()
+                && attempt.receiver_local.is_some()
+                && attempt.result_local.as_ref() == Some(&action.local)
+                && action.key.is_some()
+                && action.key_expression.as_ref() == arguments.get(1)
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && action.source.is_some()
+        }
+        Attempt::Size => {
+            arguments.len() == 1
+                && attempt.receiver_local.as_ref() == Some(&action.local)
+                && action.key.is_none()
+                && action.key_expression.is_none()
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && action.source_local.is_none()
+                && action.source.is_none()
+        }
+        Attempt::HasKey => {
+            arguments.len() == 2
+                && attempt.receiver_local.as_ref() == Some(&action.local)
+                && action.key.is_some()
+                && action.key_expression.as_ref() == arguments.get(1)
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && action.source_local.is_none()
+                && action.source.is_none()
+        }
+        Attempt::Drop => {
+            arguments.len() == 1
+                && action.local.0 == arguments[0]
+                && attempt.receiver_local.as_ref() == Some(&action.local)
+                && action.key.is_none()
+                && action.key_expression.is_none()
+                && action.value.is_none()
+                && action.value_type.is_none()
+                && action.source_local.is_none()
+                && action.source.is_none()
+        }
+        _ => false,
+    };
+    if !map_any_operands_match {
+        return false;
+    }
+
     let mut ordinary_actions = analysis
         .ordinary_map_owner_lifecycle_v1_actions
         .iter()
@@ -1010,20 +1178,17 @@ fn map_any_v1_action_covers_ordinary_attempt(
                 && ordinary_action.kind == ordinary_kind
         });
     let Some(ordinary_action) = ordinary_actions.next() else {
-        return false;
+        // Values such as an inline scalar FFI result are valid MapAnyOwner
+        // payloads while deliberately outside the ordinary lifecycle action
+        // profile. The independent receipt and exact source attempt still
+        // form a complete join.
+        return true;
     };
-    let map_any_root_matches_local =
-        action.root.0 .0 == format!("map-any-owner-v1:{}", action.local.0 .0);
     let ordinary_root_matches_local = ordinary_action.root.0 .0
         == format!(
             "ordinary-map-owner-lifecycle-i32-string-v1:{}",
             ordinary_action.local.0 .0
         );
-    let map_any_source_matches_local = match (&action.source_local, &action.source) {
-        (Some(local), Some(source)) => source.0 .0 == format!("map-any-owner-v1:{}", local.0 .0),
-        (None, None) => true,
-        _ => false,
-    };
     let ordinary_source_matches_local =
         match (&ordinary_action.source_local, &ordinary_action.source) {
             (Some(local), Some(source)) => {
@@ -1032,24 +1197,9 @@ fn map_any_v1_action_covers_ordinary_attempt(
             (None, None) => true,
             _ => false,
         };
-    if ordinary_actions.next().is_some()
-        || action.local != ordinary_action.local
-        || action.source_local != ordinary_action.source_local
-        || !map_any_root_matches_local
-        || !ordinary_root_matches_local
-        || !map_any_source_matches_local
-        || !ordinary_source_matches_local
-    {
-        return false;
-    }
-
-    let arguments = &attempt.arguments;
-    match attempt.kind {
+    let ordinary_operands_match = match attempt.kind {
         Attempt::New => {
             arguments.is_empty()
-                && action.key.is_none()
-                && action.value.is_none()
-                && action.value_type.is_none()
                 && ordinary_action.key.is_none()
                 && ordinary_action.key_type.is_none()
                 && ordinary_action.value.is_none()
@@ -1059,63 +1209,61 @@ fn map_any_v1_action_covers_ordinary_attempt(
         }
         Attempt::Set => {
             arguments.len() == 3
-                && action.key.is_some()
                 && ordinary_action.key.as_ref() == arguments.get(1)
-                && ordinary_action.value.as_ref() == arguments.get(2)
-                && action.value == ordinary_action.value
-                && action.value_type == ordinary_action.value_type
-                && action.value.is_some()
-                && action.value_type.is_some()
                 && ordinary_action.key_type.is_some()
-                && ordinary_action.source_local.is_some()
+                && ordinary_action.value.as_ref() == arguments.get(2)
+                && ordinary_action.value_type.is_some()
+                && ordinary_action.source_local == attempt.receiver_local
                 && ordinary_action.source.is_some()
         }
         Attempt::Remove => {
             arguments.len() == 2
-                && action.key.is_some()
                 && ordinary_action.key.as_ref() == arguments.get(1)
-                && action.value.is_none()
-                && action.value_type.is_none()
                 && ordinary_action.key_type.is_some()
                 && ordinary_action.value.is_none()
                 && ordinary_action.value_type.is_none()
-                && ordinary_action.source_local.is_some()
+                && ordinary_action.source_local == attempt.receiver_local
                 && ordinary_action.source.is_some()
         }
         Attempt::Size => {
             arguments.len() == 1
-                && action.key.is_none()
-                && action.value.is_none()
-                && action.value_type.is_none()
                 && ordinary_action.key.is_none()
                 && ordinary_action.key_type.is_none()
                 && ordinary_action.value.is_none()
                 && ordinary_action.value_type.is_none()
+                && ordinary_action.source_local.is_none()
+                && ordinary_action.source.is_none()
         }
         Attempt::HasKey => {
             arguments.len() == 2
-                && action.key.is_some()
                 && ordinary_action.key.as_ref() == arguments.get(1)
-                && action.value.is_none()
-                && action.value_type.is_none()
                 && ordinary_action.key_type.is_some()
                 && ordinary_action.value.is_none()
                 && ordinary_action.value_type.is_none()
+                && ordinary_action.source_local.is_none()
+                && ordinary_action.source.is_none()
         }
         Attempt::Drop => {
             arguments.len() == 1
-                && action.local.0 == arguments[0]
                 && ordinary_action.local.0 == arguments[0]
-                && action.key.is_none()
-                && action.value.is_none()
-                && action.value_type.is_none()
                 && ordinary_action.key.is_none()
                 && ordinary_action.key_type.is_none()
                 && ordinary_action.value.is_none()
                 && ordinary_action.value_type.is_none()
+                && ordinary_action.source_local.is_none()
+                && ordinary_action.source.is_none()
         }
         _ => false,
-    }
+    };
+    ordinary_actions.next().is_none()
+        && action.local == ordinary_action.local
+        && action.source_local == ordinary_action.source_local
+        && action.key_expression == ordinary_action.key
+        && action.value == ordinary_action.value
+        && action.value_type == ordinary_action.value_type
+        && ordinary_root_matches_local
+        && ordinary_source_matches_local
+        && ordinary_operands_match
 }
 
 impl ResourceAnalysis {
@@ -1148,6 +1296,23 @@ impl ResourceAnalysis {
         !self
             .ordinary_map_owner_lifecycle_v1_operation_attempts
             .is_empty()
+    }
+
+    /// Whether one exact MapAnyOwner v1 action covers this independently
+    /// recorded ordinary Map source attempt. Unsupported attempt kinds and
+    /// ambiguous duplicate actions remain uncovered.
+    pub(crate) fn map_any_owner_v1_covers_ordinary_attempt(
+        &self,
+        attempt: &OrdinaryMapOwnerLifecycleAttempt,
+    ) -> bool {
+        if attempt.kind == OrdinaryMapOwnerLifecycleAttemptKind::ScopeDrop {
+            return self.ordinary_scope_drop_is_settled_by_map_any_owner_v1(attempt);
+        }
+        let mut matching_actions = self
+            .map_any_owner_actions
+            .iter()
+            .filter(|action| map_any_v1_action_covers_ordinary_attempt(self, action, attempt));
+        matching_actions.next().is_some() && matching_actions.next().is_none()
     }
 
     /// Typed owned-get admission consults only its own sealed Checker receipt.

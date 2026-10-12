@@ -6,6 +6,7 @@ pub(crate) use std::collections::HashMap;
 pub mod builtins;
 pub mod cfg;
 mod checker;
+pub mod effects;
 pub(crate) mod helpers;
 pub mod phase;
 pub mod type_folder;
@@ -49,6 +50,7 @@ pub(crate) use ownership::{
     OrdinaryMapOwnedGetI32StringV1Attempt, OrdinaryMapOwnedGetI32StringV1AttemptKind,
     OrdinaryMapOwnedGetI32StringV1CfgBlock, OrdinaryMapOwnedGetI32StringV1CfgProfileVersion,
     OrdinaryMapOwnedGetI32StringV1CfgReceipt, OrdinaryMapOwnedGetI32StringV1ProfileVersion,
+    OrdinaryMapOwnedGetResultReceipt, OrdinaryMapOwnedGetResultSettlementKind,
     OrdinaryMapOwnerLifecycleAction, OrdinaryMapOwnerLifecycleActionKind,
     OrdinaryMapOwnerLifecycleAttempt, OrdinaryMapOwnerLifecycleAttemptKind,
     OrdinaryMapOwnerLifecycleProfileVersion,

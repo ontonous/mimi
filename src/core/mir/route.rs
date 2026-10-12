@@ -1740,6 +1740,15 @@ pub fn materialize_canonical_mir_route(
             message: "Checker recognized a typed owned-get Map candidate but withheld its complete independent operation-attempt receipt".into(),
         });
     }
+    if admission.ordinary_map_owned_get_i32_string_v1_complete() {
+        if let Some(message) = ordinary_map_owned_get_source_result_settlement_reason(program) {
+            return Err(CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message,
+            });
+        }
+    }
     if admission.ordinary_map_owner_lifecycle_i32_string_v1
         == OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage
         && !(admission.map_any_owner_complete()
@@ -2792,6 +2801,9 @@ pub fn ordinary_map_owned_get_result_settlement_reason_checked(
     if !admission.ordinary_map_owned_get_i32_string_v1_complete() {
         return None;
     }
+    if let Some(message) = ordinary_map_owned_get_source_result_settlement_reason(program) {
+        return Some(message);
+    }
     let excluded_sources = program
         .source_registry()
         .records()
@@ -2802,6 +2814,35 @@ pub fn ordinary_map_owned_get_result_settlement_reason_checked(
     let canonical =
         MirProgram::from_checked_program_excluding_sources(program, &excluded_sources).ok()?;
     ordinary_map_owned_get_result_settlement_reason(&canonical)
+}
+
+/// Check the source-owned result receipts before a checked program is lowered
+/// to MIR.  This is the authoritative L1 boundary for `map_get`/`values`:
+/// synthetic scope cleanup is retained as evidence, but it cannot discharge
+/// the aggregate result owner.  The MIR alias walk remains a second L2/L3
+/// check after lowering.
+pub fn ordinary_map_owned_get_source_result_settlement_reason(
+    program: &CheckedProgram,
+) -> Option<String> {
+    for (owner, analysis) in program.resource_analyses() {
+        let Some(receipt) = analysis
+            .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .as_ref()
+        else {
+            continue;
+        };
+        for result in &receipt.result_receipts {
+            if !result.settlement.is_receipted() {
+                return Some(format!(
+                    "Checker source receipt for ordinary Map owned-get result '{}' in '{}' is not settled: '{}' rather than an explicit drop, ownership transfer, or return",
+                    result.result.0,
+                    owner.0,
+                    result.settlement.as_str(),
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn ordinary_map_owned_get_result_unsettled_on_any_path(
