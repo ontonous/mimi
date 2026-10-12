@@ -1,11 +1,10 @@
 # Changelog
 
-## [Unreleased] — 0.2.0-dev
+## [Unreleased] — 0.1.11-dev
 
-- 0.1.11-dev 的生产收口已完成：普通 Map/Any 的 checker-owned ownership
-  receipts、两个原始 Actor fallback、以及四类 Legacy owner 的生产可达依赖均已按
-  L1/L2/L3 route gate 收口。复现命令和未通过的全库历史回归保存在本地
-  `devdocs/V0.2/09-0.1.11交接门禁.md`，0.2 工作按 V0.2 任务合同继续推进。
+- 0.1.11-dev 仍在收口：普通 Map/Any、两个原始 Actor fallback 和四类 Legacy owner
+  的当前源码证据尚未全部复核通过。版本保持在 0.1.11-dev，直到 L1/L2/L3、双后端、
+  路由与验证门禁均绑定同一候选提交并取得可复现绿证据。
 
 ## [0.1.11] — 2026-10-06
 
@@ -14,16 +13,23 @@
   源类型及透明别名选择该入口，避免将同布局的 Actor 句柄元组误当字符串。
   Map/Set 内部操作租约改用无分配、不可重用的线程身份，避免 native C 入口的 TLS 残留。
   此切片不宣称普通 Map/Any 的全类型描述符、自动销毁或逃逸生命周期已经闭合。
+- 0.1.11-dev 后续收口了有界普通 Map/Any ownership profile：checker receipt 与 owner
+  ledger 覆盖支持的普通值、typed `Any` 快照读路径、`values`/`remove`/覆盖/销毁和跨线程
+  清理，并将该 profile 接入 reference/bytecode/native/verifier 共同路由。范围不扩展到
+  任意聚合值或未建模的容器组合；这些形状仍需拒绝或使用已声明的兼容边界。
 - 线性值进入普通 Map/Any 擦除位置时以 E0432 拒绝，诊断指向实际参数；容器、透明别名
   和含线性字段的记录保持原消费义务。修复嵌套记录/别名的 canonical 身份查找，
   具体类型的线性 Map 继续按整体消费规则检查。
 - Checker 生成带字段顺序、初始化值和方法身份的 Actor 声明描述符，并拒绝伪造描述符。
-  复杂初始化显式保持未物化；两个 nested Actor fallback 的执行迁移仍在进行。
+  复杂初始化显式保持未物化；两个原始 capture/shadow Actor fallback 已有 canonical
+  路由及执行回归。测试兼容代码仍保留在 `cfg(test)`。
 - 修复兼容 VIR 对 bool `result` 后置条件的编码，正反例与 resolved 验证结论一致。
 - 限定的纯标量无环合约程序进入共享 Canonical MIR 路由，合约库验证允许没有 `main`。
   合约表达式保留 checker 确定的类型，算术证明覆盖短路求值、除零、MIN/-1 和溢出；
   调用前置条件沿辅助函数传递，保留精确的 FFI 调用失败位置。
-  四类 legacy owner 仍需整体迁移，本切片不宣布 owner 退休。
+  四类 legacy body owner 的生产可达调用已收至零，并由 route guard 阻止重新进入；其
+  测试适配器仍保留，物理删除尚未完成。L1/L2/L3 和完整回归的最终可复现记录仍待重新
+  执行与归档。
 
 ## [0.1.10] - 2026-09-29
 
