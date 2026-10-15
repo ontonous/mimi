@@ -881,6 +881,8 @@ thread_local! {
     static OWNED_GET_FAILURE_TRIGGERED: Cell<bool> = const { Cell::new(false) };
     static OWNED_ANY_V2_ROOT_PUBLISH_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    static OWNED_ANY_V2_GET_ANY_PUBLISH_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Test-only allocation oracle shared by the independent owned-Get consumers.
@@ -994,6 +996,68 @@ pub(crate) fn with_ordinary_map_owned_any_v2_root_publish_failure_for_test<T>(
         attempts: OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS.with(|value| value.replace(0)),
     };
     operation()
+}
+
+/// A shared logical failpoint at the V2 GetAny owner-publication boundary.
+/// Consumers invoke this after staging the selected payload (or canonical
+/// miss owner) and immediately before exposing the result. A failure therefore
+/// drops only the private staged owner and leaves the source Map untouched.
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test() -> Result<(), ()> {
+    OWNED_ANY_V2_GET_ANY_PUBLISH_FAIL_AFTER.with(|fail_after| match fail_after.get() {
+        Some(remaining) => {
+            OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS
+                .with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+            if remaining == 0 {
+                Err(())
+            } else {
+                fail_after.set(Some(remaining - 1));
+                Ok(())
+            }
+        }
+        None => Ok(()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_get_any_publish_attempts_for_test() -> usize {
+    OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS.with(Cell::get)
+}
+
+/// Install one thread-local GetAny owner-publication failure and restore the
+/// prior oracle state even if the operation unwinds.
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test<T>(
+    stages_before_failure: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreFailpoint {
+        fail_after: Option<usize>,
+        attempts: usize,
+    }
+    impl Drop for RestoreFailpoint {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_GET_ANY_PUBLISH_FAIL_AFTER.with(|value| value.set(self.fail_after));
+            OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS.with(|value| value.set(self.attempts));
+        }
+    }
+
+    let _restore = RestoreFailpoint {
+        fail_after: OWNED_ANY_V2_GET_ANY_PUBLISH_FAIL_AFTER
+            .with(|value| value.replace(Some(stages_before_failure))),
+        attempts: OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS.with(|value| value.replace(0)),
+    };
+    operation()
+}
+
+fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), ManagedAnyStatus> {
+    #[cfg(test)]
+    {
+        return ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test()
+            .map_err(|_| ManagedAnyStatus::Capacity);
+    }
+    #[cfg(not(test))]
+    Ok(())
 }
 
 fn snapshot_allocation_checkpoint() -> Result<(), OrdinaryMapSnapshotError> {
@@ -2992,6 +3056,7 @@ pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_get(
                 (false, zero_owner)
             }
         };
+        ordinary_map_owned_any_v2_get_any_publish_checkpoint()?;
         let owner = owner.publish_managed()?;
         Ok::<_, ManagedAnyStatus>((found, owner))
     })();
@@ -3465,6 +3530,12 @@ mod tests {
     const V2_I32_HASH: [u8; 32] = [11; 32];
     const V2_TEST_FAILURE_TYPE_ID: &[u8; 35] = b"rt:22222222222222222222222222222222";
     const V2_TEST_FAILURE_HASH: [u8; 32] = [191; 32];
+    const V2_GET_ANY_TEST_TYPE_ID: &[u8; 35] = b"rt:33333333333333333333333333333333";
+    const V2_GET_ANY_TEST_HASH: [u8; 32] = [203; 32];
+
+    thread_local! {
+        static V2_GET_ANY_COUNTED_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     static V2_VALUES_CLONE_FAIL: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
@@ -3477,6 +3548,10 @@ mod tests {
     }
 
     unsafe extern "C" fn drop_v2_byte(_payload: *mut u8) {}
+
+    unsafe extern "C" fn drop_v2_get_any_counted(_payload: *mut u8) {
+        V2_GET_ANY_COUNTED_DROPS.with(|drops| drops.set(drops.get().saturating_add(1)));
+    }
 
     unsafe extern "C" fn clone_v2_i32(destination: *mut u8, source: *const u8) -> i32 {
         unsafe {
@@ -3578,6 +3653,29 @@ mod tests {
         owner
     }
 
+    fn new_v2_get_any_record_owner(value: u8) -> i64 {
+        let mut owner = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_new(
+                    5,
+                    V2_GET_ANY_TEST_TYPE_ID.as_ptr(),
+                    V2_GET_ANY_TEST_TYPE_ID.len() as i64,
+                    V2_GET_ANY_TEST_HASH.as_ptr(),
+                    &value,
+                    1,
+                    1,
+                    Some(clone_v2_byte),
+                    Some(drop_v2_get_any_counted),
+                    &mut owner,
+                )
+            },
+            0
+        );
+        assert_ne!(owner, 0);
+        owner
+    }
+
     fn set_v2_owner(
         root: i64,
         key: &[u8],
@@ -3659,6 +3757,26 @@ mod tests {
                     output.as_mut_ptr(),
                     expected.size as i64,
                     expected.align as i64,
+                )
+            },
+            0
+        );
+        unsafe { output.assume_init() }
+    }
+
+    fn unpack_v2_i32(owner: i64) -> i32 {
+        let mut output = std::mem::MaybeUninit::<i32>::uninit();
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_unpack(
+                    owner,
+                    1,
+                    V2_I32_TYPE_ID.as_ptr(),
+                    V2_I32_TYPE_ID.len() as i64,
+                    V2_I32_HASH.as_ptr(),
+                    output.as_mut_ptr().cast::<u8>(),
+                    std::mem::size_of::<i32>() as i64,
+                    std::mem::align_of::<i32>() as i64,
                 )
             },
             0
@@ -3904,6 +4022,110 @@ mod tests {
         drop_v2_map(empty);
         drop_v2_map(populated);
         assert_eq!(any_owner::live_count(), Ok(owner_baseline));
+    }
+
+    #[test]
+    fn owned_any_v2_get_any_publication_capacity_preserves_source_and_outputs() {
+        let empty = new_v2_map();
+        let short_key = b"k";
+        let long_key = "k\0雪".as_bytes();
+        let i32_payload = new_v2_i32_owner(37);
+        let with_i32 = set_v2_owner(
+            empty,
+            short_key,
+            i32_payload,
+            1,
+            V2_I32_TYPE_ID,
+            &V2_I32_HASH,
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(i32_payload), 0);
+        let record_payload = new_v2_get_any_record_owner(99);
+        let populated = set_v2_owner(
+            with_i32,
+            long_key,
+            record_payload,
+            5,
+            V2_GET_ANY_TEST_TYPE_ID,
+            &V2_GET_ANY_TEST_HASH,
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(record_payload), 0);
+        let record_drops_before_failure = V2_GET_ANY_COUNTED_DROPS.with(std::cell::Cell::get);
+        assert_eq!(size_v2(populated), (0, 2));
+        assert_eq!(contains_v2(populated, short_key), (0, 1));
+        assert_eq!(contains_v2(populated, long_key), (0, 1));
+        assert_eq!(contains_v2(populated, b"k\0"), (0, 0));
+
+        for query in [short_key, long_key, "k\0🧪".as_bytes()] {
+            let ((status, found, owner), attempts) =
+                super::with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test(0, || {
+                    let result = get_v2(populated, query);
+                    let attempts =
+                        super::ordinary_map_owned_any_v2_get_any_publish_attempts_for_test();
+                    (result, attempts)
+                });
+            assert_eq!(status, ManagedAnyStatus::Capacity as i32);
+            assert_eq!(found, 0, "failure must not publish the found flag");
+            assert_eq!(owner, 0, "failure must not publish an owner handle");
+            assert_eq!(attempts, 1);
+            assert_eq!(size_v2(populated), (0, 2));
+            assert_eq!(contains_v2(populated, short_key), (0, 1));
+            assert_eq!(contains_v2(populated, long_key), (0, 1));
+        }
+        assert_eq!(
+            V2_GET_ANY_COUNTED_DROPS.with(std::cell::Cell::get),
+            record_drops_before_failure + 1,
+            "the failed Record hit drops its private staged owner exactly once"
+        );
+
+        let ((registration_status, registration_found, registration_owner), record_drops_after) =
+            super::super::ordinary_map_domain::with_registration_failure_for_test(|| {
+                (
+                    get_v2(populated, long_key),
+                    V2_GET_ANY_COUNTED_DROPS.with(std::cell::Cell::get),
+                )
+            });
+        assert_eq!(registration_status, ManagedAnyStatus::Capacity as i32);
+        assert_eq!(registration_found, 0);
+        assert_eq!(registration_owner, 0);
+        assert_eq!(record_drops_after, record_drops_before_failure + 2);
+        assert_eq!(size_v2(populated), (0, 2));
+
+        let (hit_status, hit_found, hit_owner) = get_v2(populated, short_key);
+        assert_eq!((hit_status, hit_found), (0, 1));
+        assert_eq!(
+            any_owner::validate(AnyOwnerToken::from_wire_bits(hit_owner as u64).unwrap()),
+            Ok(AnyOwnerKind::ManagedV2)
+        );
+        assert_eq!(contains_v2(populated, short_key), (0, 1));
+        assert_eq!(contains_v2(populated, long_key), (0, 1));
+
+        let (record_status, record_found, record_owner) = get_v2(populated, long_key);
+        assert_eq!((record_status, record_found), (0, 1));
+
+        let (miss_status, miss_found, miss_owner) = get_v2(populated, "k\0🧪".as_bytes());
+        assert_eq!((miss_status, miss_found), (0, 0));
+        assert_ne!(
+            miss_owner, 0,
+            "a successful miss publishes its i32-zero owner"
+        );
+        assert_eq!(unpack_v2_i32(miss_owner), 0);
+        assert_eq!(size_v2(populated), (0, 2));
+
+        drop_v2_map(populated);
+        drop_v2_map(with_i32);
+        drop_v2_map(empty);
+        assert_eq!(
+            unpack_v2_i32(hit_owner),
+            37,
+            "the hit owner outlives its Map"
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(hit_owner), 0);
+        assert_eq!(
+            super::mimi_any_payload_v2_drop(record_owner),
+            0,
+            "a successful Record hit publishes an independently owned payload"
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(miss_owner), 0);
     }
 
     fn read_i32(value: &OwnedAny) -> i32 {

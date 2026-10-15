@@ -252,6 +252,15 @@ fn ordinary_map_owned_any_v2_root_publish_checkpoint() -> Result<(), ()> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn try_copy_owned_get_query_string(value: &str, reserve_terminator: bool) -> Option<String> {
     #[cfg(test)]
     crate::runtime::ordinary_map_owned_get_allocation_checkpoint_for_test().ok()?;
@@ -10065,6 +10074,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                         },
                     )
                 };
+                ordinary_map_owned_any_v2_get_any_publish_checkpoint().map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 GetAny result publication failed",
+                    )
+                })?;
                 values.insert(
                     result.clone(),
                     MirRuntimeValue::Tuple(vec![
@@ -24671,6 +24686,61 @@ func main() -> i64 { println(foreign(1 as i64)); 0 }
             let error = execution.expect_err("the selected publication must trap");
             assert!(error.message().contains("E0800"), "{error}");
             assert_eq!(attempts, stage + 1, "bytecode stage {stage}");
+        }
+    }
+    #[test]
+    fn ordinary_map_owned_any_v2_get_any_capacity_matches_consumers_before_result_visibility() {
+        for query_key in ["zero", "label", "missing\0雪"] {
+            let (owner, program) = ordinary_map_owned_any_v2_get_program(query_key);
+            let main = program.functions().get(&owner).expect("main MIR");
+            let get_any_count = main
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                    )
+                })
+                .count();
+            assert_eq!(get_any_count, 1, "fixture must exercise V2 GetAny");
+
+            let (execution, output, attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test(
+                    0,
+                    || {
+                        let interpreter = MirReferenceInterpreter::new(&program);
+                        let execution = interpreter.execute_with_output(&owner, &[]);
+                        let output = interpreter.captured_output();
+                        let attempts = crate::runtime::
+                            ordinary_map_owned_any_v2_get_any_publish_attempts_for_test();
+                        (execution, output, attempts)
+                    },
+                );
+            let error = execution.expect_err("GetAny publication must trap");
+            assert!(error.to_string().contains("E0800"), "{error}");
+            assert_eq!(output, "", "the failed GetAny publishes no output");
+            assert_eq!(attempts, 1);
+
+            let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+                .expect("compile canonical V2 MIR into bytecode");
+            let (execution, output, attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test(
+                    0,
+                    || {
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                        let execution = vm.run_value_for_component().map(|_| ());
+                        let output = vm.take_stdout();
+                        let attempts = crate::runtime::
+                            ordinary_map_owned_any_v2_get_any_publish_attempts_for_test();
+                        (execution, output, attempts)
+                    },
+                );
+            let error = execution.expect_err("GetAny publication must trap");
+            assert!(error.message().contains("E0800"), "{error}");
+            assert_eq!(output, "", "the failed GetAny publishes no output");
+            assert_eq!(attempts, 1);
         }
     }
 }

@@ -559,10 +559,12 @@ fn ordinary_map_owned_any_v2_instruction_may_fail(
 }
 
 /// New, persistent Set/Remove, and a direct root Clone all build a private
-/// replacement and publish it only after staging succeeds. Their externally
-/// visible capacity outcome is therefore represented by one E0800 edge at
-/// the root-publication boundary. Other V2 allocation sites remain outside
-/// this model and continue to receive an owner-scoped NITS result.
+/// replacement and publish it only after staging succeeds. GetAny similarly
+/// stages a private selected payload (or canonical miss owner) before result
+/// publication. These externally visible capacity outcomes each have an
+/// E0800 edge at their corresponding publication boundary. Other V2 allocation
+/// sites remain outside this model and continue to receive an owner-scoped
+/// NITS result.
 fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
     instruction: &crate::core::mir::MirInstruction,
     function: &MirFunction,
@@ -571,7 +573,8 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
     match &instruction.kind {
         MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
         | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
-        | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. } => true,
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. } => true,
         MirInstructionKind::Clone { source, .. } => {
             function.values.get(source).is_some_and(|value| {
                 value.ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
@@ -11939,6 +11942,7 @@ fn eval_instruction(
                 },
             ]);
             ensure_result_shape(function, catalog, result, &symbolic)?;
+            add_ordinary_map_owned_any_v2_get_any_capacity_failure(state, instruction_id)?;
             state.values.insert(result.clone(), symbolic);
         }
         MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
@@ -19438,6 +19442,20 @@ fn add_ordinary_map_owned_any_v2_root_publish_capacity_failure(
     add_definedness(state, published, "E0800")
 }
 
+fn add_ordinary_map_owned_any_v2_get_any_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    // A fresh symbol is required on every dynamic visit to the same MIR site.
+    // This is a distinct allocation boundary from root replacement: GetAny
+    // publishes a newly owned payload result while preserving its source Map.
+    let published = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.get_any_publish.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, published, "E0800")
+}
+
 fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
@@ -23369,6 +23387,112 @@ mod managed_any_verifier_tests {
     }
 
     #[test]
+    fn ordinary_map_owned_any_v2_get_any_has_its_own_capacity_trap_edge() {
+        let program = canonical(
+            r#"
+            type Label { text: string }
+
+            func observe() -> bool {
+                let label = Label { text: "owned" }
+                let empty = map_new()
+                let one = map_set(empty, "present", label)
+                let pair = map_get(one, "missing")
+                drop(pair)
+                drop(empty)
+                drop(one)
+                drop(label)
+                false
+            }
+
+            func main() -> i32 { 0 }
+            "#,
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:observe".into()))
+            .expect("V2 GetAny observer");
+        let instruction = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                )
+            })
+            .expect("Checker-lowered GetAny instruction");
+        let MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, root, key } =
+            &instruction.kind
+        else {
+            unreachable!();
+        };
+        let catalog = program.type_catalog();
+        assert!(ordinary_map_owned_any_v2_instruction_may_fail(
+            instruction,
+            function,
+            catalog
+        ));
+        assert!(ordinary_map_owned_any_v2_instruction_failure_is_modelled(
+            instruction,
+            function,
+            catalog
+        ));
+        assert!(
+            !function_has_unmodeled_ordinary_map_owned_any_v2_failure(function, &program),
+            "New, Set, and GetAny now have explicit failure models"
+        );
+
+        // Seed only the source operands so this proof checks GetAny's own
+        // allocation boundary without relying on a preceding New/Set trap.
+        let mut state = SymbolicState {
+            values: BTreeMap::from([
+                (
+                    root.clone(),
+                    SymbolicValue::OrdinaryMapOwnedAnyV2 {
+                        entries: BTreeMap::new(),
+                        symbolic_entries: Vec::new(),
+                    },
+                ),
+                (
+                    key.clone(),
+                    SymbolicValue::String(SymbolicString::Literal("missing".into())),
+                ),
+            ]),
+            constraints: Vec::new(),
+            callable_entry_values: None,
+            callable_entry_constraints: None,
+            traps: Vec::new(),
+            list_shapes: BTreeMap::new(),
+            known_ints: BTreeMap::new(),
+            known_strings: BTreeMap::new(),
+            ffi_checks: Vec::new(),
+            normal_path_terminated: false,
+        };
+        eval_instruction(
+            function,
+            &program,
+            catalog,
+            &mut state,
+            &instruction.id,
+            &instruction.kind,
+        )
+        .expect("GetAny symbolically stages the canonical miss result");
+        assert!(state.values.contains_key(result));
+        let [trap] = state.traps.as_slice() else {
+            panic!("GetAny result publication must add exactly one capacity trap");
+        };
+        assert_eq!(trap.code, "E0800");
+        assert!(
+            trap.condition
+                .iter()
+                .any(|condition| condition.to_string().contains("get_any_publish")),
+            "the E0800 condition must come from GetAny result publication: {:?}",
+            trap.condition
+        );
+    }
+
+    #[test]
     fn ordinary_map_owned_any_v2_get_any_preserves_hit_identity_and_miss_i32() {
         let program = canonical(
             r#"
@@ -23407,8 +23531,21 @@ mod managed_any_verifier_tests {
         );
         crate::verifier::validate_mir_capabilities(&program)
             .expect("exact Checker GetAny and explicit result Drop are admitted");
-        assert_contract(&program, "observe", VerifStatus::NotInTrustedSubset);
-        assert_contract(&program, "observe_hit", VerifStatus::NotInTrustedSubset);
+        assert_contract(&program, "observe", VerifStatus::Disproven);
+        assert_contract(&program, "observe_hit", VerifStatus::Disproven);
+        let results = verify_program(&program, "v2-get-any-capacity-edge".into())
+            .expect("GetAny capacity is a symbolic E0800 trap");
+        for name in ["observe", "observe_hit"] {
+            let result = results
+                .iter()
+                .find(|result| result.func_name.ends_with(name))
+                .expect("GetAny contract result");
+            assert!(
+                result.message.contains("can reach trap 'E0800'"),
+                "the modeled GetAny failure must remain visible: {}",
+                result.message
+            );
+        }
 
         let selection = program
             .ordinary_map_owned_any_v2_payload_selection_receipt()
@@ -23494,7 +23631,7 @@ mod managed_any_verifier_tests {
     }
 
     #[test]
-    fn ordinary_map_owned_any_v2_withholds_symbolic_key_proofs_without_capacity_model() {
+    fn ordinary_map_owned_any_v2_withholds_unsupported_symbolic_key_proofs() {
         let program = canonical(
             r#"
             type Label { text: string }
@@ -23677,23 +23814,27 @@ mod managed_any_verifier_tests {
             assert_eq!(result.status, expected, "{}: {}", name, result.message);
             assert_eq!(result.constraint_count, 0, "{}: {}", name, result.message);
             assert!(result.artifact.is_none(), "{}: {}", name, result.message);
-            assert!(
-                result.message.contains("Capacity as E0800")
-                    && result.message.contains("no shared failure model"),
-                "V2 proof must be withheld at the runtime-failure boundary: {}",
-                result.message
-            );
-            if expected == VerifStatus::NotInTrustedSubset {
+            if name == "dynamic_heterogeneous_lookup_is_fail_closed" {
                 assert!(
-                    result.message.contains("E0800"),
-                    "wrong-tag and miss unpack must retain the E0800 trap: {}",
+                    result
+                        .message
+                        .contains("conditional DynamicAny type erasure is not modeled"),
+                    "heterogeneous dynamic GetAny must remain fail-closed: {}",
+                    result.message
+                );
+            } else {
+                assert!(
+                    result.message.contains("Capacity as E0800")
+                        && result.message.contains("no shared failure model"),
+                    "V2 proof must be withheld at the remaining runtime-failure boundary: {}",
                     result.message
                 );
             }
-            if name == "dynamic_heterogeneous_lookup_is_fail_closed" {
+            if expected == VerifStatus::NotInTrustedSubset {
                 assert!(
-                    result.message.contains("no shared failure model"),
-                    "dynamic heterogeneous owner must be explicitly withheld before proof: {}",
+                    result.message.contains("E0800")
+                        || name == "dynamic_heterogeneous_lookup_is_fail_closed",
+                    "wrong-tag and miss unpack must retain the E0800 trap: {}",
                     result.message
                 );
             }

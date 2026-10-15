@@ -186,6 +186,20 @@ fn ordinary_map_owned_any_v2_root_publish_checkpoint() -> Result<(), InterpError
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test()
+            .map_err(|_| {
+                InterpError::new(
+                    "[E0800] ordinary Map/Any owner-v2 GetAny result publication failed",
+                )
+            });
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn try_copy_ordinary_map_owned_get_string(value: &str, reserve_terminator: bool) -> Option<String> {
     let needs_terminator = value.is_empty() || value.as_bytes().last() != Some(&0);
     let capacity = if reserve_terminator && needs_terminator {
@@ -6576,6 +6590,7 @@ impl BytecodeVM {
                         }
                     };
                     let any = Arc::new(any);
+                    ordinary_map_owned_any_v2_get_any_publish_checkpoint()?;
                     if let Some((type_id, value)) = unpack_backing {
                         self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
                             &any, type_id, value,
