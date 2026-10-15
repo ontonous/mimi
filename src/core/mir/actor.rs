@@ -10,7 +10,7 @@ use crate::core::ir::{
     Permission, ResolvedActorInitializerKind, ResolvedCall, ResolvedCallee, ResolvedLiteral,
     ResolvedLocalId, ResolvedScalarActorReceipt, ResolvedTypeId,
 };
-use crate::core::{CheckedProgram, NodeId};
+use crate::core::{CheckedProgram, EffectId, NodeId};
 
 use super::types::{
     MirAbiClass, MirFieldDesc, MirGlueContract, MirGlueKind, MirLayout, MirOwnership,
@@ -178,6 +178,10 @@ pub struct MirActorMethodContract {
     /// Only parameter zero changes to the internal state TypeDesc.
     pub execution_parameter_types: Vec<ResolvedTypeId>,
     pub result_type: ResolvedTypeId,
+    /// Exact checker effect summary. Nested helper bodies may contribute the
+    /// conservative `unknown` effect; it is still part of the source receipt
+    /// and cannot be substituted by a caller-provided effect.
+    pub source_effects: Vec<EffectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,7 +266,7 @@ impl MirActorCatalog {
             .find(|entry| entry.owner.0 == method.as_str())
             .ok_or("source mailbox method owner is foreign to the Actor")?;
         if call.permission != entry.source_receiver_permission
-            || !call.effects.is_empty()
+            || call.effects != entry.source_effects
             || !call.session.is_empty()
             || !call.type_arguments.is_empty()
             || call.result != entry.result_type
@@ -650,6 +654,7 @@ fn materialize_snapshot(snapshot: CheckedActorSnapshot) -> Result<MirActorContra
             source_receiver_permission,
             execution_parameter_types,
             result_type: method.signature.result.clone(),
+            source_effects: method.signature.effects.clone(),
         });
     }
     Ok(MirActorContract {
@@ -766,6 +771,10 @@ impl MirActorContract {
             ] {
                 frame(&mut text, value);
             }
+            text.push_str("source-effects ");
+            for effect in &method.source_effects {
+                frame(&mut text, effect.as_str());
+            }
             for ty in &method.source_parameter_types {
                 frame(&mut text, ty.as_str());
             }
@@ -845,7 +854,11 @@ mod tests {
             })
             .expect("checked mailbox call");
         assert_eq!(call.permission, Some(Permission::Mutate));
-        assert!(call.effects.is_empty() && call.session.is_empty());
+        assert_eq!(
+            call.effects,
+            vec![crate::core::EffectId::new("unknown").unwrap()]
+        );
+        assert!(call.session.is_empty());
         actors.validate_source_mailbox_call(call).unwrap();
         for permission in [None, Some(Permission::View), Some(Permission::Consume)] {
             let mut forged = call.clone();

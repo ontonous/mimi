@@ -90,7 +90,10 @@ pub(crate) fn contract_boundary_reason(
         if included(callable.body.root.origin.user_span().source_id)
             && callable.has_proof_obligations()
         {
-            return Some(format!("scalar Actor NoContracts profile cannot discard proof obligations in checked user callable '{}'", owner.0));
+            return Some(format!(
+                "scalar Actor NoContracts profile cannot discard proof obligations in checked user callable '{}'",
+                owner.0
+            ));
         }
     }
     use crate::core::ir::lower::ResolvedDeclarationExpressionKind as K;
@@ -235,10 +238,25 @@ impl<'a> ActorLowerer<'a> {
         environments: &'a CheckedActorEnvironmentPlan,
         operations: &'a mut MirActorOperationReceipts,
     ) -> Result<Self, Vec<String>> {
-        if callable.owner != callable.body.owner
+        let is_root = callable.owner.0 == "function:main";
+        let has_nested_callable = callable
+            .body
+            .root
+            .statements
+            .iter()
+            .any(|statement| matches!(statement.kind, ResolvedStmtKind::NestedCallable(_)));
+        let effects_outside_receipt = !is_root
+            && !callable.signature.effects.is_empty()
+            && (!has_nested_callable
+                || callable
+                    .signature
+                    .effects
+                    .iter()
+                    .any(|effect| effect.as_str() != "unknown"));
+        let concrete_signature_invalid = callable.owner != callable.body.owner
             || callable.owner != callable.signature.owner
             || !callable.signature.generic_parameters.is_empty()
-            || !callable.signature.effects.is_empty()
+            || effects_outside_receipt
             || !callable.contracts.is_empty()
             || !callable.body.default_values.is_empty()
             || callable
@@ -261,8 +279,8 @@ impl<'a> ActorLowerer<'a> {
                 })
             || callable.signature.parameters.len() != callable.body.parameters.len()
             || (!callable.body.captures.is_empty()
-                && environments.target(&callable.owner).is_none())
-        {
+                && environments.target(&callable.owner).is_none());
+        if concrete_signature_invalid {
             return Err(vec![format!(
                 "Actor graph function '{}' has no concrete finite scalar signature",
                 callable.owner.0
@@ -557,7 +575,9 @@ impl<'a> ActorLowerer<'a> {
                     self.emit_capture(callee, &statement.node_id)?
                 }
                 _ => {
-                    return Err(self.error("statement has no finite scalar Actor lowering contract"))
+                    return Err(
+                        self.error("statement has no finite scalar Actor lowering contract")
+                    );
                 }
             }
         }
@@ -587,7 +607,18 @@ impl<'a> ActorLowerer<'a> {
     }
 
     fn expr(&mut self, expression: &ResolvedExpr) -> Result<MirValueId, Vec<String>> {
-        if !expression.effects.is_empty() || !expression.backend_requirements.is_empty() {
+        let effectful_call_is_owned = match &expression.kind {
+            ResolvedExprKind::Call(call) => match &call.callee {
+                ResolvedCallee::ActorMethod { .. } => true,
+                ResolvedCallee::Builtin(builtin) => builtin.as_str() == "actor.spawn",
+                ResolvedCallee::Function(target) => self.environments.target(target).is_some(),
+                _ => false,
+            },
+            _ => false,
+        };
+        if (!expression.effects.is_empty() && !effectful_call_is_owned)
+            || !expression.backend_requirements.is_empty()
+        {
             return Err(self.error("expression has an unmodeled effect or backend requirement"));
         }
         match &expression.kind {
@@ -706,11 +737,21 @@ impl<'a> ActorLowerer<'a> {
         expression: &ResolvedExpr,
         call: &ResolvedCall,
     ) -> Result<MirValueId, Vec<String>> {
+        let nested_helper_call = matches!(
+            &call.callee,
+            ResolvedCallee::Function(target) if self.environments.target(target).is_some()
+        );
+        let actor_spawn_call = matches!(
+            &call.callee,
+            ResolvedCallee::Builtin(builtin) if builtin.as_str() == "actor.spawn"
+        );
         if matches!(call.callee, ResolvedCallee::ActorMethod { .. }) {
             self.actors
                 .validate_source_mailbox_call(call)
                 .map_err(|message| self.error(&message))?;
-        } else if !call.effects.is_empty() || !call.session.is_empty() || call.permission.is_some()
+        } else if (!call.effects.is_empty() && !nested_helper_call && !actor_spawn_call)
+            || !call.session.is_empty()
+            || call.permission.is_some()
         {
             return Err(self.error("call has an unmodeled effect/session/borrow"));
         }
@@ -828,7 +869,7 @@ impl<'a> ActorLowerer<'a> {
             _ => {
                 return Err(
                     self.error("call requires an unsupported mailbox/extern/indirect contract")
-                )
+                );
             }
         }
         Ok(result)

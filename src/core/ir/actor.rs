@@ -211,7 +211,6 @@ impl ResolvedActorDescriptor {
                 || function.is_comptime
                 || function.extern_abi.is_some()
                 || !method.signature.generic_parameters.is_empty()
-                || !method.signature.effects.is_empty()
                 || !is_i32(&method.signature.result)
                 || method.signature.parameters.iter().skip(1).any(|parameter| {
                     !is_i32(&parameter.ty)
@@ -226,8 +225,26 @@ impl ResolvedActorDescriptor {
             let callable = program
                 .callable(&method.owner)
                 .ok_or_else(|| self.error("method has no canonical callable body"))?;
+            let has_nested_callable = callable.body.root.statements.iter().any(|statement| {
+                matches!(
+                    statement.kind,
+                    crate::core::ir::ResolvedStmtKind::NestedCallable(_)
+                )
+            });
             if callable.owner != method.owner || callable.signature != method.signature {
                 return Err(self.error("method callable and declaration signatures disagree"));
+            }
+            if !method.signature.effects.is_empty()
+                && (!has_nested_callable
+                    || method
+                        .signature
+                        .effects
+                        .iter()
+                        .any(|effect| effect.as_str() != "unknown"))
+            {
+                return Err(self.error(
+                    "method effect set is outside the checked nested-callable Actor contract",
+                ));
             }
         }
         Ok(ResolvedScalarActorReceipt {

@@ -25505,7 +25505,7 @@ fn canonical_mir_string_assign_keeps_compatibility_route() {
 
 // The two original Actor regressions now require the same checked state,
 // mailbox and lexical environment graph through default and explicit routes.
-fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8]) {
+fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memcheck: bool) {
     let source = project_root().join("tests/real_world").join(fixture);
     let dir = std::env::temp_dir().join(format!(
         "mimi-actor-route-{}-{}-{}",
@@ -25517,6 +25517,21 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8]) {
             .as_nanos()
     ));
     fs::create_dir_all(&dir).unwrap();
+    if strict_memcheck {
+        let version = Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .expect("strict Actor L3 requires Valgrind; it must not be skipped");
+        assert!(
+            version.status.success(),
+            "strict Actor L3 requires a working Valgrind executable: {}",
+            String::from_utf8_lossy(&version.stderr)
+        );
+        eprintln!(
+            "strict Actor L3 Valgrind: {}",
+            String::from_utf8_lossy(&version.stdout).trim()
+        );
+    }
     let receipt = Command::new(mimi_bin())
         .arg("mir")
         .arg(&source)
@@ -25589,6 +25604,55 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8]) {
             String::from_utf8_lossy(&native.stderr)
         );
         assert_eq!(native.stdout, expected);
+        if strict_memcheck {
+            let mode = if explicit {
+                "explicit --mir"
+            } else {
+                "default route"
+            };
+            let checked = Command::new("valgrind")
+                .args([
+                    "--tool=memcheck",
+                    "--leak-check=full",
+                    "--show-leak-kinds=all",
+                    "--errors-for-leak-kinds=definite,indirect,possible",
+                    "--error-exitcode=99",
+                ])
+                .arg(&binary)
+                .current_dir(project_root())
+                .output()
+                .expect("strict Actor L3 Valgrind Memcheck invocation");
+            let report = String::from_utf8_lossy(&checked.stderr);
+            eprintln!("Memcheck {fixture} ({mode}) report:\n{report}");
+            assert_eq!(
+                checked.status.code(),
+                Some(0),
+                "Memcheck {fixture} ({mode}) must exit 0; status={:?}\n{report}",
+                checked.status
+            );
+            assert_eq!(
+                checked.stdout, expected,
+                "Memcheck {fixture} ({mode}) stdout must match the original Actor result"
+            );
+            for leak_kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+                assert!(
+                    report.lines().any(|line| {
+                        line.contains(&format!("{leak_kind}: 0 bytes in 0 blocks"))
+                    }),
+                    "Memcheck {fixture} ({mode}) must report zero {leak_kind}:\n{report}"
+                );
+            }
+            assert!(
+                report
+                    .lines()
+                    .any(|line| line.contains("ERROR SUMMARY: 0 errors")),
+                "Memcheck {fixture} ({mode}) must report ERROR SUMMARY: 0 errors:\n{report}"
+            );
+            assert!(
+                report.contains("still reachable:"),
+                "retain the actual still-reachable count in the Memcheck report:\n{report}"
+            );
+        }
     }
     let disasm = Command::new(mimi_bin())
         .env("MIMI_ROUTE_CENSUS", "1")
@@ -25616,12 +25680,260 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8]) {
 
 #[test]
 fn canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback() {
-    assert_original_actor_cli_routes("actor_nested_func_capture.mimi", b"15\n");
+    assert_original_actor_cli_routes("actor_nested_func_capture.mimi", b"15\n", false);
 }
 
 #[test]
 fn canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback() {
-    assert_original_actor_cli_routes("actor_nested_func_shadow.mimi", b"42\n101\n");
+    assert_original_actor_cli_routes("actor_nested_func_shadow.mimi", b"42\n101\n", false);
+}
+
+#[test]
+#[ignore = "strict Actor CLI Memcheck L3; requires Valgrind and explicit --ignored"]
+fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memcheck_l3() {
+    let version = Command::new("valgrind")
+        .arg("--version")
+        .output()
+        .expect("strict Actor L3 requires Valgrind; it must not be skipped");
+    assert!(
+        version.status.success(),
+        "strict Actor L3 requires a working Valgrind executable: {}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    eprintln!(
+        "strict Actor L3 Valgrind: {}",
+        String::from_utf8_lossy(&version.stdout).trim()
+    );
+
+    for (fixture, expected) in [
+        ("actor_nested_func_capture.mimi", &b"15\n"[..]),
+        ("actor_nested_func_shadow.mimi", &b"42\n101\n"[..]),
+    ] {
+        // Retain the complete CLI route, verifier, disassembly, and ordinary
+        // native-output checks. The strict pass below rebuilds the four bins
+        // so each Valgrind report is checked here against the exact L3 owner.
+        assert_original_actor_cli_routes(fixture, expected, false);
+
+        let source = project_root().join("tests/real_world").join(fixture);
+        let receipt = Command::new(mimi_bin())
+            .arg("mir")
+            .arg(&source)
+            .arg("--receipt")
+            .output()
+            .expect("read original Actor MIR receipt for strict L3");
+        assert!(
+            receipt.status.success(),
+            "{fixture} MIR receipt failed:\n{}",
+            String::from_utf8_lossy(&receipt.stderr)
+        );
+        let manifest = String::from_utf8_lossy(&receipt.stdout);
+        let digest = manifest
+            .lines()
+            .find_map(|line| line.strip_prefix("mir_digest="))
+            .expect("original Actor MIR receipt digest")
+            .to_owned();
+
+        for explicit_mir in [false, true] {
+            let mode = if explicit_mir {
+                "explicit --mir"
+            } else {
+                "default route"
+            };
+            let dir = std::env::temp_dir().join(format!(
+                "mimi-actor-strict-memcheck-{}-{}-{}-{}",
+                fixture,
+                std::process::id(),
+                if explicit_mir { "mir" } else { "default" },
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock")
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&dir).expect("create strict Actor L3 directory");
+            let binary = dir.join("actor");
+            let mut build = Command::new(mimi_bin());
+            build.current_dir(project_root()).arg("build").arg(&source);
+            if explicit_mir {
+                build.arg("--mir");
+            }
+            let built = build
+                .arg("--output")
+                .arg(&binary)
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .expect("build original Actor native L3 binary");
+            let build_stderr = String::from_utf8_lossy(&built.stderr);
+            assert!(
+                built.status.success(),
+                "{fixture} {mode} native build failed:\n{build_stderr}"
+            );
+            assert!(
+                !build_stderr.contains("canonical route disposition: legacy"),
+                "{fixture} {mode} native build used a legacy fallback:\n{build_stderr}"
+            );
+            if !explicit_mir {
+                assert!(
+                    build_stderr.contains(&format!(
+                        "canonical route disposition: canonical (scalar-actor-domain-v1) mir_digest={digest}"
+                    )),
+                    "{fixture} default native build must use the inspected Actor graph:\n{build_stderr}"
+                );
+            }
+
+            let native = Command::new(&binary)
+                .current_dir(project_root())
+                .output()
+                .expect("run original Actor native L3 binary");
+            assert!(
+                native.status.success(),
+                "{fixture} {mode} native binary failed:\n{}",
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_eq!(
+                native.stdout, expected,
+                "{fixture} {mode} native binary changed its expected stdout"
+            );
+
+            let checked = Command::new("valgrind")
+                .args([
+                    "--tool=memcheck",
+                    "--leak-check=full",
+                    "--show-leak-kinds=all",
+                    "--errors-for-leak-kinds=definite,indirect,possible",
+                    "--error-exitcode=99",
+                ])
+                .arg(&binary)
+                .current_dir(project_root())
+                .output()
+                .expect("strict Actor L3 Valgrind Memcheck invocation");
+            let report = String::from_utf8_lossy(&checked.stderr);
+            eprintln!("Memcheck {fixture} ({mode}) report:\n{report}");
+            assert_eq!(
+                checked.status.code(),
+                Some(0),
+                "Memcheck {fixture} ({mode}) must exit 0; status={:?}\n{report}",
+                checked.status
+            );
+            assert_eq!(
+                checked.stdout, expected,
+                "Memcheck {fixture} ({mode}) changed its expected stdout"
+            );
+
+            let leak_summary_start = report
+                .lines()
+                .position(|line| line.contains("LEAK SUMMARY:"))
+                .expect("Memcheck LEAK SUMMARY section");
+            let leak_summary_rows = report
+                .lines()
+                .skip(leak_summary_start + 1)
+                .take_while(|line| !line.contains("ERROR SUMMARY:"))
+                .filter(|line| line.contains("bytes in") && line.contains(" blocks"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                leak_summary_rows.len(),
+                5,
+                "Memcheck {fixture} ({mode}) must emit exactly the five known leak-category rows:\n{report}"
+            );
+            for (category, expected_line) in [
+                ("definitely lost:", "definitely lost: 0 bytes in 0 blocks"),
+                ("indirectly lost:", "indirectly lost: 0 bytes in 0 blocks"),
+                ("possibly lost:", "possibly lost: 0 bytes in 0 blocks"),
+                ("suppressed:", "suppressed: 0 bytes in 0 blocks"),
+            ] {
+                let lines = leak_summary_rows
+                    .iter()
+                    .copied()
+                    .filter(|line| line.contains(category))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    lines.len(),
+                    1,
+                    "Memcheck {fixture} ({mode}) must emit exactly one {category} summary line:\n{report}"
+                );
+                assert!(
+                    lines[0].trim_end().ends_with(expected_line),
+                    "Memcheck {fixture} ({mode}) has an unexpected {category} result:\n{report}"
+                );
+            }
+
+            let reachable_summaries = leak_summary_rows
+                .iter()
+                .copied()
+                .filter(|line| line.contains("reachable:"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                reachable_summaries.len(),
+                1,
+                "Memcheck {fixture} ({mode}) must have no missing or unknown reachable summary category:\n{report}"
+            );
+            assert!(
+                reachable_summaries[0]
+                    .trim_end()
+                    .ends_with("still reachable: 192 bytes in 1 blocks"),
+                "Memcheck {fixture} ({mode}) reachable summary must be exactly the 192-byte Actor registry:\n{report}"
+            );
+            let in_use_lines = report
+                .lines()
+                .filter(|line| line.contains("in use at exit:"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                in_use_lines.len(),
+                1,
+                "Memcheck {fixture} ({mode}) must emit exactly one heap-at-exit summary line:\n{report}"
+            );
+            assert!(
+                in_use_lines[0]
+                    .trim_end()
+                    .ends_with("in use at exit: 192 bytes in 1 blocks"),
+                "Memcheck {fixture} ({mode}) has an unexpected heap-at-exit allocation:\n{report}"
+            );
+
+            let loss_records = report
+                .lines()
+                .filter(|line| line.contains(" in loss record "))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                loss_records.len(),
+                1,
+                "Memcheck {fixture} ({mode}) must identify exactly one reachable allocation:\n{report}"
+            );
+            assert!(
+                loss_records[0]
+                    .trim_end()
+                    .ends_with("192 bytes in 1 blocks are still reachable in loss record 1 of 1"),
+                "Memcheck {fixture} ({mode}) has an unknown or unexpected reachable allocation:\n{report}"
+            );
+            let allocation = report
+                .lines()
+                .skip_while(|line| !line.contains(" in loss record "))
+                .take_while(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                allocation.contains("BTreeMap<u64")
+                    && allocation.contains("NativeDomainRoot")
+                    && allocation.contains("mimi_mir_actor_domain_open"),
+                "Memcheck {fixture} ({mode}) 192-byte reachable allocation must be the NativeDomainRoot registry opened by the Actor runtime:\n{allocation}"
+            );
+
+            let error_summaries = report
+                .lines()
+                .filter(|line| line.contains("ERROR SUMMARY:"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                error_summaries.len(),
+                1,
+                "Memcheck {fixture} ({mode}) must emit exactly one error summary:\n{report}"
+            );
+            assert!(
+                error_summaries[0]
+                    .trim_end()
+                    .ends_with("ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)"),
+                "Memcheck {fixture} ({mode}) must report 0 errors and no suppressed error contexts:\n{report}"
+            );
+            fs::remove_dir_all(&dir).expect("remove strict Actor L3 directory");
+        }
+    }
 }
 
 #[test]
