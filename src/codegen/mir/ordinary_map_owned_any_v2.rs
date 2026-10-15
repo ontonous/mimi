@@ -273,7 +273,7 @@ fn values_selection_receipt_error(message: String) -> String {
         || message.contains("no Checker-selected Set payload TypeDescs")
         || message.contains("no AnyOwner-v2 payload selection")
     {
-        "ordinary Map/Any owner-v2 Values cannot admit an empty payload selection without an exact Core empty-selection and empty-root receipt; Checker/MIR must extend that proof before native can support values(map_new())".into()
+        "ordinary Map/Any owner-v2 Values has no exact Core payload-selection receipt; an empty selection requires the exact empty-root proof".into()
     } else {
         message
     }
@@ -361,16 +361,11 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_list_type(
 /// The Core receipt digest and runtime descriptor-registry hash are separate
 /// authorities and are both checked by their respective layers.
 pub(super) fn ordinary_map_owned_any_v2_values_selector_frame(
-    catalog: &MirTypeCatalog,
+    program: &MirProgram,
     selection: &crate::core::mir::OrdinaryMapOwnedAnyV2PayloadSelectionReceipt,
 ) -> Result<(Vec<u8>, [u8; 32]), String> {
-    selection.validate()?;
-    if selection.selected_types.is_empty() {
-        // A map may legitimately be empty at runtime after Remove, but an
-        // empty selector is authority-bearing: admit it only after Core
-        // provides a receipt proving this exact source root is empty.
-        return Err("ordinary Map/Any owner-v2 Values cannot admit an empty selector without an exact Core empty-selection and empty-root receipt".into());
-    }
+    selection.validate_against_program(program)?;
+    let catalog = program.type_catalog();
     let count = u32::try_from(selection.selected_types.len())
         .map_err(|_| "ordinary Map/Any owner-v2 Values selector count exceeds u32".to_string())?;
     let mut records = Vec::with_capacity(selection.selected_types.len());
@@ -493,7 +488,7 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_native_contract(
         .map_err(|message| vec![message])?;
     validate_ordinary_map_owned_any_v2_values_list_type(program.type_catalog(), &values_type)
         .map_err(|message| vec![message])?;
-    ordinary_map_owned_any_v2_values_selector_frame(program.type_catalog(), &selection)
+    ordinary_map_owned_any_v2_values_selector_frame(program, &selection)
         .map_err(|message| vec![message])?;
 
     for receipt in receipts {
@@ -586,7 +581,7 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_unpack_native_contract(
         .map_err(|message| vec![message])?;
     validate_ordinary_map_owned_any_v2_values_list_type(program.type_catalog(), &values_type)
         .map_err(|message| vec![message])?;
-    ordinary_map_owned_any_v2_values_selector_frame(program.type_catalog(), &selection)
+    ordinary_map_owned_any_v2_values_selector_frame(program, &selection)
         .map_err(|message| vec![message])?;
 
     let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
@@ -1148,7 +1143,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "ordinary Map/Any owner-v2 Values is missing its exact MIR operation, direct binding Move, or receipted explicit Drop",
             ));
         }
-        ordinary_map_owned_any_v2_values_selector_frame(catalog, &selection)
+        ordinary_map_owned_any_v2_values_selector_frame(self.program, &selection)
             .map_err(|message| NativeMirError::new(subject, message))?;
         Ok(((**receipt).clone(), selection))
     }
@@ -4571,7 +4566,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         NativeMirError,
     > {
         let (frame, registry_hash) =
-            ordinary_map_owned_any_v2_values_selector_frame(self.program.type_catalog(), selection)
+            ordinary_map_owned_any_v2_values_selector_frame(self.program, selection)
                 .map_err(|message| NativeMirError::new(subject, message))?;
         let hash_hex = registry_hash
             .iter()

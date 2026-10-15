@@ -1058,18 +1058,28 @@ impl<'a> CapabilityGate<'a> {
             descriptor.kind == MirTypeKind::ManagedAnyI32StringV1
                 || descriptor.layout == MirLayout::ManagedAnyI32StringV1
         });
-        // Both the tuple-valued `map_get` and the owned `values()` snapshot
-        // materialize the same checker-authorized ManagedAny element
-        // descriptor.  Keep the capability census aligned with the TypeDesc
-        // materializer: a values-only callable still has a legitimate
-        // ManagedAny producer even though it has no GetAny tuple instruction.
-        let has_get_any = self.program.functions().values().any(|function| {
+        // V1 map_get/Values and V2 map_get/Values use separate receipt
+        // families. A few V2 compatibility shapes still carry the shared
+        // ManagedAny TypeDesc, but many V2 programs do not; count a V2 query
+        // as its producer only when that shared descriptor is actually present.
+        let has_v1_get_any = self.program.functions().values().any(|function| {
             function.blocks.values().any(|block| {
                 block.instructions.iter().any(|instruction| {
                     matches!(
                         instruction.kind,
                         MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
                             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+                    )
+                })
+            })
+        });
+        let has_v2_query = self.program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
                     )
                 })
             })
@@ -1088,7 +1098,9 @@ impl<'a> CapabilityGate<'a> {
                 })
             })
         });
-        if has_managed_any_type != (has_get_any || has_checked_i32_pack) {
+        let has_managed_any_producer =
+            has_v1_get_any || has_checked_i32_pack || (has_managed_any_type && has_v2_query);
+        if has_managed_any_type != has_managed_any_producer {
             self.error("ManagedAny TypeDesc presence must match a separately Checker-receipted GetAny/Values or exact i32-pack producer".into());
         }
         let ordinary_map_owner_ty =

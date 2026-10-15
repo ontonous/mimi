@@ -5706,10 +5706,17 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
                     .into(),
             );
         }
-        if self.payload_bindings.is_empty() != self.payload_selection_digest.is_none() {
+        // A program-bound empty selection has a canonical digest but no Set
+        // bindings.  Non-empty Set tables still require the digest, while
+        // V2 New/GetAny/Values-only programs may legitimately carry the
+        // empty-selection receipt.
+        let has_set_bindings = self
+            .payload_bindings
+            .values()
+            .any(|bindings| !bindings.is_empty());
+        if has_set_bindings && self.payload_selection_digest.is_none() {
             return Err(
-                "ordinary Map/Any owner-v2 payload selection digest disagrees with Set bindings"
-                    .into(),
+                "ordinary Map/Any owner-v2 Set bindings have no payload selection digest".into(),
             );
         }
         if self

@@ -2922,6 +2922,137 @@ func main() -> i32 {
     }
 
     #[test]
+    fn ordinary_map_owned_any_v2_receipted_empty_values_match_consumers() {
+        let source = r#"
+            func main() -> i32 {
+                ensures: result == 0
+                let root = map_new()
+                let snapshot = values(root)
+                drop(snapshot)
+                drop(root)
+                0
+            }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("empty-selection receipt validates")
+            .expect("New action proves the empty payload closure");
+        assert!(selection.entries.is_empty());
+        assert!(selection.selected_types.is_empty());
+        selection
+            .validate_against_program(&program)
+            .expect("empty selection remains bound to the exact Checker/MIR program");
+        let foreign_program = canonical_program(
+            r#"
+                func main() -> i32 {
+                    let root = map_new()
+                    let snapshot = values(root)
+                    drop(snapshot)
+                    drop(root)
+                    1
+                }
+            "#,
+        );
+        let foreign_selection = foreign_program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("foreign program empty selection validates")
+            .expect("foreign program has its own exact empty-root Values receipt");
+        assert!(foreign_selection.entries.is_empty());
+        assert!(foreign_selection.selected_types.is_empty());
+        assert!(
+            selection
+                .validate_against_program(&foreign_program)
+                .is_err(),
+            "an empty selection receipt cannot authorize another MIR program"
+        );
+        assert!(
+            super::ordinary_map_owned_any_v2::ordinary_map_owned_any_v2_values_selector_frame(
+                &foreign_program,
+                &selection,
+            )
+            .is_err(),
+            "native selector framing must revalidate the receipt against its exact MIR program"
+        );
+        // These source-level ListLen/MIR clone paths do not yet carry an
+        // exact V2 Values-list receipt. Keep this test on the Values producer
+        // itself; dedicated VM/runtime tests assert that its empty result has
+        // length zero.
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.ordinary_map_owned_any_v2,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        );
+        assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("empty-root query receipts pass capability validation");
+        let proof_results = crate::verifier::verify_mir(&program, String::new())
+            .expect("Verifier consumes the same empty-root MIR");
+        let main_proof = proof_results
+            .iter()
+            .find(|result| result.func_name == "function:main")
+            .expect("the empty-root result contract is visible to Verifier");
+        assert_eq!(
+            main_proof.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset,
+            "diagnostic-only V2 does not issue an empty-root proof: {}",
+            main_proof.message
+        );
+        assert!(main_proof.artifact.is_none());
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference executes the receipted empty-root query");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "");
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program)
+                .expect("AST-free bytecode compiles an empty Values query"),
+        );
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode executes an empty Values query"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native admission accepts the program-bound empty selector");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_empty_root");
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("native compiler emits the program-bound empty selector");
+        generator
+            .module
+            .verify()
+            .expect("native empty-root query module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native executes empty-root queries");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &strict_map_any_memcheck_config(),
+            )
+            .expect("empty-root query runs under strict Memcheck");
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
+        }
+    }
+
+    #[test]
     fn ordinary_map_owned_any_v2_clone_uses_one_mir_across_verifier_reference_bytecode_native_and_memcheck(
     ) {
         let program = canonical_program(include_str!(
