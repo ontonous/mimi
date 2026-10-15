@@ -883,6 +883,8 @@ thread_local! {
     static OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static OWNED_ANY_V2_GET_ANY_PUBLISH_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    static OWNED_ANY_V2_VALUES_PUBLISH_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static OWNED_ANY_V2_VALUES_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static OWNED_ANY_V2_UNPACK_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static OWNED_ANY_V2_UNPACK_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
 }
@@ -1052,6 +1054,57 @@ pub(crate) fn with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test<T>
     operation()
 }
 
+/// A shared logical failpoint at the V2 Values-list publication boundary.
+/// Consumers consult it after staging the complete sorted snapshot and just
+/// before exposing it, so failure leaves the source Map and output untouched.
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_values_publish_checkpoint_for_test() -> Result<(), ()> {
+    OWNED_ANY_V2_VALUES_PUBLISH_FAIL_AFTER.with(|fail_after| match fail_after.get() {
+        Some(remaining) => {
+            OWNED_ANY_V2_VALUES_PUBLISH_ATTEMPTS
+                .with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+            if remaining == 0 {
+                Err(())
+            } else {
+                fail_after.set(Some(remaining - 1));
+                Ok(())
+            }
+        }
+        None => Ok(()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_values_publish_attempts_for_test() -> usize {
+    OWNED_ANY_V2_VALUES_PUBLISH_ATTEMPTS.with(Cell::get)
+}
+
+/// Install one thread-local Values-publication failure and restore the prior
+/// oracle state even if the operation unwinds.
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_values_publish_failure_for_test<T>(
+    stages_before_failure: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreFailpoint {
+        fail_after: Option<usize>,
+        attempts: usize,
+    }
+    impl Drop for RestoreFailpoint {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_VALUES_PUBLISH_FAIL_AFTER.with(|value| value.set(self.fail_after));
+            OWNED_ANY_V2_VALUES_PUBLISH_ATTEMPTS.with(|value| value.set(self.attempts));
+        }
+    }
+
+    let _restore = RestoreFailpoint {
+        fail_after: OWNED_ANY_V2_VALUES_PUBLISH_FAIL_AFTER
+            .with(|value| value.replace(Some(stages_before_failure))),
+        attempts: OWNED_ANY_V2_VALUES_PUBLISH_ATTEMPTS.with(|value| value.replace(0)),
+    };
+    operation()
+}
+
 /// A shared logical failure oracle at the typed V2 payload-unpack boundary.
 /// The runtime, reference interpreter, and bytecode VM consult it only after
 /// the exact payload TypeDesc matches and before any result bytes are written.
@@ -1117,6 +1170,16 @@ fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), ManagedA
     #[cfg(test)]
     {
         return ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test()
+            .map_err(|_| ManagedAnyStatus::Capacity);
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_publish_checkpoint() -> Result<(), ManagedAnyStatus> {
+    #[cfg(test)]
+    {
+        return ordinary_map_owned_any_v2_values_publish_checkpoint_for_test()
             .map_err(|_| ManagedAnyStatus::Capacity);
     }
     #[cfg(not(test))]
@@ -3418,6 +3481,7 @@ pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_values_list(
             let owner = value.publish_managed()?;
             list.push_owner(owner)?;
         }
+        ordinary_map_owned_any_v2_values_publish_checkpoint()?;
         Ok::<_, ManagedAnyStatus>(list.publish())
     })();
     match result {
@@ -5066,6 +5130,50 @@ mod tests {
         assert_eq!(invalid_utf8.1, 0);
 
         drop_v2_map(empty);
+        drop_v2_map(root);
+    }
+
+    #[test]
+    fn v2_values_list_publication_capacity_keeps_output_empty_and_source_live() {
+        let empty = new_v2_map();
+        let bool_hash = [231; 32];
+        let bool_owner = new_v2_bool_owner(1, &bool_hash);
+        let with_bool = set_v2_owner(empty, b"z", bool_owner, 3, V2_BOOL_TYPE_ID, &bool_hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(bool_owner), 0);
+
+        let i32_owner = new_v2_i32_owner(23);
+        let root = set_v2_owner(with_bool, b"a", i32_owner, 1, V2_I32_TYPE_ID, &V2_I32_HASH);
+        assert_eq!(super::mimi_any_payload_v2_drop(i32_owner), 0);
+        let (selection_bytes, selection_hash) = selection_records(&[
+            (1, V2_I32_TYPE_ID, &V2_I32_HASH),
+            (3, V2_BOOL_TYPE_ID, &bool_hash),
+        ]);
+
+        // Fail only after the sorted list and both independently owned
+        // payloads have been staged. The ABI must leave its output null and
+        // the RAII list guard must retire every unpublished token.
+        super::begin_failure_injection(100);
+        let (status, list, attempts) =
+            super::with_ordinary_map_owned_any_v2_values_publish_failure_for_test(0, || {
+                let (status, list) = values_list_v2(root, &selection_bytes, &selection_hash);
+                let attempts = super::ordinary_map_owned_any_v2_values_publish_attempts_for_test();
+                (status, list, attempts)
+            });
+        let staged = super::end_failure_injection();
+        assert_eq!(status, 3, "Capacity is the stable ABI status code");
+        assert!(list.is_null(), "failed Values publication exposes no List");
+        assert_eq!(attempts, 1);
+        assert!(staged.len() >= 2, "both payload owners were staged");
+        for token in staged {
+            assert_eq!(
+                any_owner::validate(token),
+                Err(any_owner::AnyOwnerError::StaleToken),
+                "failed Values publication leaked a staged element owner"
+            );
+        }
+        assert_eq!(size_v2(root), (0, 2), "the source remains usable");
+        drop_v2_map(empty);
+        drop_v2_map(with_bool);
         drop_v2_map(root);
     }
 

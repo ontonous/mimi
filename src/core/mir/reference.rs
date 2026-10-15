@@ -270,6 +270,15 @@ fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ()> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_values_publish_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_publish_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn try_copy_owned_get_query_string(value: &str, reserve_terminator: bool) -> Option<String> {
     #[cfg(test)]
     crate::runtime::ordinary_map_owned_get_allocation_checkpoint_for_test().ok()?;
@@ -10666,6 +10675,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                     })?;
                     snapshot.push(MirRuntimeValue::OrdinaryMapOwnedAnyV2ValuesElement(payload));
                 }
+                ordinary_map_owned_any_v2_values_publish_checkpoint().map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 Values publication failed",
+                    )
+                })?;
                 values.insert(result.clone(), MirRuntimeValue::List(snapshot));
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => {
@@ -24877,5 +24892,83 @@ func main() -> i64 { println(foreign(1 as i64)); 0 }
             assert_eq!(output, "before\n", "failed Unpack exposes no result");
             assert_eq!(attempts, expected_attempts, "bytecode {target}/{key}");
         }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_capacity_matches_consumers_before_result_visibility() {
+        let source = r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let text = "selected string"
+                let label = Label { text: "selected label" }
+                let empty = map_new()
+                let numbers = map_set(empty, "number", 42)
+                let strings = map_set(numbers, "text", text)
+                let mixed = map_set(strings, "label", label)
+                println("before")
+                let snapshot = values(mixed)
+                println("after")
+                drop(snapshot)
+                drop(empty)
+                drop(numbers)
+                drop(strings)
+                drop(mixed)
+                drop(text)
+                drop(label)
+                0
+            }
+        "#;
+        let (owner, program) = direct_v2_program_with_main(source);
+        let main = program.functions().get(&owner).expect("MIR main");
+        assert_eq!(
+            main.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(|instruction| matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+                ))
+                .count(),
+            1,
+            "fixture must contain exactly one V2 Values instruction"
+        );
+
+        let (execution, output, attempts) =
+            crate::runtime::with_ordinary_map_owned_any_v2_values_publish_failure_for_test(
+                0,
+                || {
+                    let interpreter = MirReferenceInterpreter::new(&program);
+                    let execution = interpreter.execute_with_output(&owner, &[]);
+                    let output = interpreter.captured_output();
+                    let attempts =
+                        crate::runtime::ordinary_map_owned_any_v2_values_publish_attempts_for_test(
+                        );
+                    (execution, output, attempts)
+                },
+            );
+        let error = execution.expect_err("reference Values publication must trap");
+        assert!(error.to_string().contains("E0800"), "{error}");
+        assert_eq!(output, "before\n", "failed Values exposes no result");
+        assert_eq!(attempts, 1);
+
+        let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+            .expect("compile canonical V2 MIR into bytecode");
+        let (execution, output, attempts) =
+            crate::runtime::with_ordinary_map_owned_any_v2_values_publish_failure_for_test(
+                0,
+                || {
+                    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                    let execution = vm.run_value_for_component().map(|_| ());
+                    let output = vm.take_stdout();
+                    let attempts =
+                        crate::runtime::ordinary_map_owned_any_v2_values_publish_attempts_for_test(
+                        );
+                    (execution, output, attempts)
+                },
+            );
+        let error = execution.expect_err("bytecode Values publication must trap");
+        assert!(error.message().contains("E0800"), "{error}");
+        assert_eq!(output, "before\n", "failed Values exposes no result");
+        assert_eq!(attempts, 1);
     }
 }

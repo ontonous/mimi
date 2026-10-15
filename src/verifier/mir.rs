@@ -560,10 +560,10 @@ fn ordinary_map_owned_any_v2_instruction_may_fail(
 
 /// New, persistent Set/Remove, and a direct root Clone all build a private
 /// replacement and publish it only after staging succeeds. GetAny similarly
-/// stages a private selected payload (or canonical miss owner), and Unpack
-/// stages an exact typed clone before exposing the destination. These
-/// externally visible capacity outcomes each have an E0800 edge at their
-/// corresponding publication boundary. Other V2 allocation sites remain
+/// stages a private selected payload (or canonical miss owner), Unpack stages
+/// an exact typed clone, and Values stages a sorted owned list before exposing
+/// their results. These modeled capacity outcomes each have an E0800 edge at
+/// the corresponding publication boundary. Other V2 allocation sites remain
 /// outside this model and continue to receive an owner-scoped NITS result.
 fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
     instruction: &crate::core::mir::MirInstruction,
@@ -575,7 +575,8 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
         | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
         | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
         | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
-        | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. } => true,
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. } => true,
         MirInstructionKind::Clone { source, .. } => {
             function.values.get(source).is_some_and(|value| {
                 value.ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
@@ -591,9 +592,9 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
 /// Identify operations whose capacity failures are not represented by a
 /// symbolic E0800 path. Follow exact executable call edges so a caller cannot
 /// prove a postcondition by assuming an unmodeled helper allocation succeeds.
-/// Root publication, GetAny publication, and typed Unpack have explicit shared
-/// trap edges; Size has a separate E0802 overflow edge, and Contains/IsEmpty
-/// are read-only queries.
+/// Root/GetAny/Values publication and typed Unpack have explicit shared trap
+/// edges; Size has a separate E0802 overflow edge, and Contains/IsEmpty are
+/// read-only queries.
 fn function_has_unmodeled_ordinary_map_owned_any_v2_failure(
     function: &MirFunction,
     program: &MirProgram,
@@ -12296,6 +12297,7 @@ fn eval_instruction(
                 )?,
             };
             ensure_result_shape(function, catalog, result, &value)?;
+            add_ordinary_map_owned_any_v2_values_capacity_failure(state, instruction_id)?;
             if state.values.insert(result.clone(), value).is_some() {
                 return Err(format!(
                     "{instruction_id}: ordinary Map/Any owner-v2 Values result is already defined"
@@ -19472,6 +19474,19 @@ fn add_ordinary_map_owned_any_v2_unpack_capacity_failure(
     add_definedness(state, unpacked, "E0800")
 }
 
+fn add_ordinary_map_owned_any_v2_values_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    // A fresh symbol per dynamic visit models failure after the sorted list is
+    // fully staged but before the Values result becomes visible.
+    let published = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.values_publish.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, published, "E0800")
+}
+
 fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
@@ -23620,6 +23635,127 @@ mod managed_any_verifier_tests {
     }
 
     #[test]
+    fn ordinary_map_owned_any_v2_values_has_its_own_capacity_trap_edge() {
+        let program = canonical(
+            r#"
+            type Label { text: string }
+
+            func snapshot() -> i32 {
+                let label = Label { text: "owned" }
+                let empty = map_new()
+                let one = map_set(empty, "label", label)
+                let values = values(one)
+                drop(values)
+                drop(empty)
+                drop(one)
+                drop(label)
+                0
+            }
+
+            func main() -> i32 { 0 }
+            "#,
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:snapshot".into()))
+            .expect("V2 Values observer");
+        let instruction = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+                )
+            })
+            .expect("Checker-lowered Values instruction");
+        let MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, root } = &instruction.kind
+        else {
+            unreachable!();
+        };
+        let catalog = program.type_catalog();
+        assert!(ordinary_map_owned_any_v2_instruction_may_fail(
+            instruction,
+            function,
+            catalog
+        ));
+        assert!(ordinary_map_owned_any_v2_instruction_failure_is_modelled(
+            instruction,
+            function,
+            catalog
+        ));
+        assert!(
+            !function_has_unmodeled_ordinary_map_owned_any_v2_failure(function, &program),
+            "New, Set, and Values have explicit failure models"
+        );
+
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("payload-selection receipt")
+            .expect("Label payload selection");
+        let label_type = selection
+            .selected_types
+            .iter()
+            .find(|selected| {
+                selected.type_id
+                    != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+            })
+            .expect("selected Label TypeDesc")
+            .type_id
+            .clone();
+        let (label_value, _) =
+            super::symbolic_value_for_type(catalog, &label_type, "v2.values.capacity.label")
+                .expect("symbolic Label payload");
+        let entries = BTreeMap::from([(
+            "label".to_string(),
+            super::SymbolicOrdinaryMapOwnedAnyV2Entry {
+                payload_type: label_type.clone(),
+                payload: Box::new(label_value),
+            },
+        )]);
+        let mut state = SymbolicState {
+            values: BTreeMap::from([(
+                root.clone(),
+                SymbolicValue::OrdinaryMapOwnedAnyV2 {
+                    entries,
+                    symbolic_entries: Vec::new(),
+                },
+            )]),
+            constraints: Vec::new(),
+            callable_entry_values: None,
+            callable_entry_constraints: None,
+            traps: Vec::new(),
+            list_shapes: BTreeMap::new(),
+            known_ints: BTreeMap::new(),
+            known_strings: BTreeMap::new(),
+            ffi_checks: Vec::new(),
+            normal_path_terminated: false,
+        };
+        eval_instruction(
+            function,
+            &program,
+            catalog,
+            &mut state,
+            &instruction.id,
+            &instruction.kind,
+        )
+        .expect("Values symbolically stages its exact sorted snapshot");
+        assert!(state.values.contains_key(result));
+        let [trap] = state.traps.as_slice() else {
+            panic!("Values publication must add exactly one capacity trap");
+        };
+        assert_eq!(trap.code, "E0800");
+        assert!(
+            trap.condition
+                .iter()
+                .any(|condition| condition.to_string().contains("values_publish")),
+            "the E0800 condition must come from Values publication: {:?}",
+            trap.condition
+        );
+    }
+
+    #[test]
     fn ordinary_map_owned_any_v2_get_any_preserves_hit_identity_and_miss_i32() {
         let program = canonical(
             r#"
@@ -24590,9 +24726,8 @@ mod managed_any_verifier_tests {
         assert_eq!(values.constraint_count, 0, "{}", values.message);
         assert!(values.artifact.is_none(), "{}", values.message);
         assert!(
-            values.message.contains("Capacity as E0800")
-                && values.message.contains("no shared failure model"),
-            "the remaining Values proof must stay withheld: {}",
+            values.message.contains("source-known key ordering"),
+            "only symbolic runtime-key ordering should withhold this Values proof: {}",
             values.message
         );
     }
