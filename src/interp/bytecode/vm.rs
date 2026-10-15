@@ -200,6 +200,17 @@ fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), InterpEr
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_unpack_checkpoint_for_test().map_err(
+            |_| InterpError::new("[E0800] ordinary Map/Any owner-v2 unpack Capacity failure"),
+        );
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn try_copy_ordinary_map_owned_get_string(value: &str, reserve_terminator: bool) -> Option<String> {
     let needs_terminator = value.is_empty() || value.as_bytes().last() != Some(&0);
     let capacity = if reserve_terminator && needs_terminator {
@@ -6740,8 +6751,15 @@ impl BytecodeVM {
                             owner,
                             &binding.target_type,
                         )?;
+                        ordinary_map_owned_any_v2_unpack_checkpoint()?;
                         self.set_reg(rd, Value::Int(value as i64));
                     } else if binding.target_type == string_type {
+                        if owner.string_for_type_id(&binding.target_type).is_none() {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 unpack String payload TypeDesc does not exactly match its target",
+                            ));
+                        }
+                        ordinary_map_owned_any_v2_unpack_checkpoint()?;
                         let owned = copy_ordinary_map_owned_any_v2_string_for_unpack(
                             owner,
                             &binding.target_type,
@@ -6761,6 +6779,15 @@ impl BytecodeVM {
                                     "ordinary Map/Any owner-v2 unpack target is not an exact selected record payload",
                                 )
                             })?;
+                        if owner
+                            .record_text_for_type_id(&binding.target_type, &selected_nominal)
+                            .is_none()
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 unpack record payload TypeDesc or nominal identity does not exactly match its target",
+                            ));
+                        }
+                        ordinary_map_owned_any_v2_unpack_checkpoint()?;
                         let owned = copy_ordinary_map_owned_any_v2_record_for_unpack(
                             owner,
                             &binding.target_type,

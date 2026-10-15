@@ -883,6 +883,8 @@ thread_local! {
     static OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static OWNED_ANY_V2_GET_ANY_PUBLISH_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    static OWNED_ANY_V2_UNPACK_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static OWNED_ANY_V2_UNPACK_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Test-only allocation oracle shared by the independent owned-Get consumers.
@@ -1048,6 +1050,67 @@ pub(crate) fn with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test<T>
         attempts: OWNED_ANY_V2_GET_ANY_PUBLISH_ATTEMPTS.with(|value| value.replace(0)),
     };
     operation()
+}
+
+/// A shared logical failure oracle at the typed V2 payload-unpack boundary.
+/// The runtime, reference interpreter, and bytecode VM consult it only after
+/// the exact payload TypeDesc matches and before any result bytes are written.
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_unpack_checkpoint_for_test() -> Result<(), ()> {
+    OWNED_ANY_V2_UNPACK_FAIL_AFTER.with(|fail_after| match fail_after.get() {
+        Some(remaining) => {
+            OWNED_ANY_V2_UNPACK_ATTEMPTS
+                .with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+            if remaining == 0 {
+                Err(())
+            } else {
+                fail_after.set(Some(remaining - 1));
+                Ok(())
+            }
+        }
+        None => Ok(()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_unpack_attempts_for_test() -> usize {
+    OWNED_ANY_V2_UNPACK_ATTEMPTS.with(Cell::get)
+}
+
+/// Install one thread-local typed-unpack failure and restore prior state even
+/// if the operation unwinds.
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_unpack_failure_for_test<T>(
+    stages_before_failure: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreFailpoint {
+        fail_after: Option<usize>,
+        attempts: usize,
+    }
+    impl Drop for RestoreFailpoint {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_UNPACK_FAIL_AFTER.with(|value| value.set(self.fail_after));
+            OWNED_ANY_V2_UNPACK_ATTEMPTS.with(|value| value.set(self.attempts));
+        }
+    }
+
+    let _restore = RestoreFailpoint {
+        fail_after: OWNED_ANY_V2_UNPACK_FAIL_AFTER
+            .with(|value| value.replace(Some(stages_before_failure))),
+        attempts: OWNED_ANY_V2_UNPACK_ATTEMPTS.with(|value| value.replace(0)),
+    };
+    operation()
+}
+
+fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ManagedAnyStatus> {
+    #[cfg(test)]
+    {
+        return ordinary_map_owned_any_v2_unpack_checkpoint_for_test()
+            .map_err(|_| ManagedAnyStatus::Capacity);
+    }
+    #[cfg(not(test))]
+    Ok(())
 }
 
 fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), ManagedAnyStatus> {
@@ -2868,6 +2931,7 @@ pub unsafe extern "C" fn mimi_any_payload_v2_unpack(
         if actual != expected {
             return Err(ManagedAnyStatus::TypeMismatch);
         }
+        ordinary_map_owned_any_v2_unpack_checkpoint()?;
         managed_allocation_checkpoint()?;
         unsafe {
             any_owner::unpack_managed_v2_owner(token, expected, output, output_size, output_align)
@@ -3528,6 +3592,7 @@ mod tests {
     const V2_BOOL_TYPE_ID: &[u8; 35] = b"rt:0123456789abcdef0123456789abcdef";
     const V2_AGGREGATE_TYPE_ID: &[u8; 35] = b"rt:fedcba9876543210fedcba9876543210";
     const V2_I32_HASH: [u8; 32] = [11; 32];
+    const V2_BOOL_HASH: [u8; 32] = [51; 32];
     const V2_TEST_FAILURE_TYPE_ID: &[u8; 35] = b"rt:22222222222222222222222222222222";
     const V2_TEST_FAILURE_HASH: [u8; 32] = [191; 32];
     const V2_GET_ANY_TEST_TYPE_ID: &[u8; 35] = b"rt:33333333333333333333333333333333";
@@ -3782,6 +3847,72 @@ mod tests {
             0
         );
         unsafe { output.assume_init() }
+    }
+
+    #[test]
+    fn owned_any_v2_unpack_capacity_keeps_destination_and_source_owner_unchanged() {
+        let owner = new_v2_i32_owner(37);
+        let sentinel = 0x1357_2468i32;
+        let wrong_tag_sentinel = 0xa5u8;
+        let mut wrong_tag_output = wrong_tag_sentinel;
+        let mut output = sentinel;
+        let (mismatch_status, attempts_after_mismatch, status, attempts) =
+            super::with_ordinary_map_owned_any_v2_unpack_failure_for_test(0, || {
+                let mismatch_status = unsafe {
+                    super::mimi_any_payload_v2_unpack(
+                        owner,
+                        3,
+                        V2_BOOL_TYPE_ID.as_ptr(),
+                        V2_BOOL_TYPE_ID.len() as i64,
+                        V2_BOOL_HASH.as_ptr(),
+                        &mut wrong_tag_output,
+                        1,
+                        1,
+                    )
+                };
+                let attempts_after_mismatch =
+                    super::ordinary_map_owned_any_v2_unpack_attempts_for_test();
+                let status = unsafe {
+                    super::mimi_any_payload_v2_unpack(
+                        owner,
+                        1,
+                        V2_I32_TYPE_ID.as_ptr(),
+                        V2_I32_TYPE_ID.len() as i64,
+                        V2_I32_HASH.as_ptr(),
+                        (&mut output as *mut i32).cast::<u8>(),
+                        std::mem::size_of::<i32>() as i64,
+                        std::mem::align_of::<i32>() as i64,
+                    )
+                };
+                (
+                    mismatch_status,
+                    attempts_after_mismatch,
+                    status,
+                    super::ordinary_map_owned_any_v2_unpack_attempts_for_test(),
+                )
+            });
+
+        assert_eq!(mismatch_status, ManagedAnyStatus::TypeMismatch as i32);
+        assert_eq!(wrong_tag_output, wrong_tag_sentinel);
+        assert_eq!(
+            attempts_after_mismatch, 0,
+            "a wrong TypeDesc must fail before the Capacity boundary"
+        );
+        assert_eq!(status, ManagedAnyStatus::Capacity as i32);
+        assert_eq!(
+            output, sentinel,
+            "failure must leave destination bytes intact"
+        );
+        assert_eq!(
+            attempts, 1,
+            "the exact typed Unpack boundary was reached once"
+        );
+        assert_eq!(
+            unpack_v2_i32(owner),
+            37,
+            "the borrowed source owner survives"
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
     }
 
     fn selection(tag: i32, type_id: &[u8; 35], hash: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {

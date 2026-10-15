@@ -560,11 +560,11 @@ fn ordinary_map_owned_any_v2_instruction_may_fail(
 
 /// New, persistent Set/Remove, and a direct root Clone all build a private
 /// replacement and publish it only after staging succeeds. GetAny similarly
-/// stages a private selected payload (or canonical miss owner) before result
-/// publication. These externally visible capacity outcomes each have an
-/// E0800 edge at their corresponding publication boundary. Other V2 allocation
-/// sites remain outside this model and continue to receive an owner-scoped
-/// NITS result.
+/// stages a private selected payload (or canonical miss owner), and Unpack
+/// stages an exact typed clone before exposing the destination. These
+/// externally visible capacity outcomes each have an E0800 edge at their
+/// corresponding publication boundary. Other V2 allocation sites remain
+/// outside this model and continue to receive an owner-scoped NITS result.
 fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
     instruction: &crate::core::mir::MirInstruction,
     function: &MirFunction,
@@ -574,7 +574,8 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
         MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
         | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
         | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
-        | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. } => true,
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. } => true,
         MirInstructionKind::Clone { source, .. } => {
             function.values.get(source).is_some_and(|value| {
                 value.ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
@@ -590,8 +591,9 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
 /// Identify operations whose capacity failures are not represented by a
 /// symbolic E0800 path. Follow exact executable call edges so a caller cannot
 /// prove a postcondition by assuming an unmodeled helper allocation succeeds.
-/// Root publication operations have an explicit shared trap edge; Size has a
-/// separate E0802 overflow edge, and Contains/IsEmpty are read-only queries.
+/// Root publication, GetAny publication, and typed Unpack have explicit shared
+/// trap edges; Size has a separate E0802 overflow edge, and Contains/IsEmpty
+/// are read-only queries.
 fn function_has_unmodeled_ordinary_map_owned_any_v2_failure(
     function: &MirFunction,
     program: &MirProgram,
@@ -814,7 +816,7 @@ fn verify_program_inner(
             ordinary_map_owned_any_v2_failure_rejections
                 .entry(owner.clone())
                 .or_insert_with(|| {
-                    "ordinary Map/Any owner-v2 operations outside the root-publication model can surface Capacity as E0800; no shared failure model covers those remaining edges, so the owner proof is withheld".into()
+                    "ordinary Map/Any owner-v2 operations outside the shared V2 Capacity model can surface Capacity as E0800; no shared failure model covers those remaining edges, so the owner proof is withheld".into()
             });
         }
     }
@@ -12096,6 +12098,7 @@ fn eval_instruction(
             let type_matches = payload_type == expected_type;
             add_definedness(state, Bool::from_bool(type_matches), "E0800")?;
             let unpacked = if type_matches {
+                add_ordinary_map_owned_any_v2_unpack_capacity_failure(state, instruction_id)?;
                 if !symbolic_matches_type(catalog, &expected_type, &payload) {
                     return Err(format!(
                         "{instruction_id}: matching DynamicAny payload disagrees with its expected TypeDesc"
@@ -19456,6 +19459,19 @@ fn add_ordinary_map_owned_any_v2_get_any_capacity_failure(
     add_definedness(state, published, "E0800")
 }
 
+fn add_ordinary_map_owned_any_v2_unpack_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    // A fresh symbol per dynamic visit models failure of the typed payload
+    // clone after exact tag validation and before the destination is visible.
+    let unpacked = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.unpack_capacity.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, unpacked, "E0800")
+}
+
 fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
@@ -23493,6 +23509,117 @@ mod managed_any_verifier_tests {
     }
 
     #[test]
+    fn ordinary_map_owned_any_v2_unpack_has_its_own_capacity_trap_edge() {
+        let program = canonical(
+            r#"
+            type Label { text: string }
+
+            func observe() -> bool {
+                let label = Label { text: "owned" }
+                let empty = map_new()
+                let numbers = map_set(empty, "number", 42)
+                let one = map_set(numbers, "label", label)
+                let pair = map_get(one, "number")
+                let value = pair.1 as i32
+                drop(pair)
+                drop(empty)
+                drop(numbers)
+                drop(one)
+                drop(label)
+                false
+            }
+
+            func main() -> i32 { 0 }
+            "#,
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:observe".into()))
+            .expect("V2 Unpack observer");
+        let instruction = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+                )
+            })
+            .expect("Checker-lowered Unpack instruction");
+        let MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, pair, .. } =
+            &instruction.kind
+        else {
+            unreachable!();
+        };
+        let catalog = program.type_catalog();
+        assert!(ordinary_map_owned_any_v2_instruction_may_fail(
+            instruction,
+            function,
+            catalog
+        ));
+        assert!(ordinary_map_owned_any_v2_instruction_failure_is_modelled(
+            instruction,
+            function,
+            catalog
+        ));
+        assert!(
+            !function_has_unmodeled_ordinary_map_owned_any_v2_failure(function, &program),
+            "New, Set, GetAny, and typed Unpack now have explicit failure models"
+        );
+
+        // Seed only the exact GetAny pair so this assertion proves Unpack's
+        // own clone boundary, independent of New/Set/GetAny capacity edges.
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let mut state = SymbolicState {
+            values: BTreeMap::from([(
+                pair.clone(),
+                SymbolicValue::Tuple(vec![
+                    SymbolicValue::Bool(Bool::from_bool(true)),
+                    SymbolicValue::OrdinaryMapOwnedAnyV2Payload {
+                        payload_type: i32_type,
+                        payload: Box::new(SymbolicValue::Int(Int::from_i64(42))),
+                    },
+                ]),
+            )]),
+            constraints: Vec::new(),
+            callable_entry_values: None,
+            callable_entry_constraints: None,
+            traps: Vec::new(),
+            list_shapes: BTreeMap::new(),
+            known_ints: BTreeMap::new(),
+            known_strings: BTreeMap::new(),
+            ffi_checks: Vec::new(),
+            normal_path_terminated: false,
+        };
+        eval_instruction(
+            function,
+            &program,
+            catalog,
+            &mut state,
+            &instruction.id,
+            &instruction.kind,
+        )
+        .expect("Unpack symbolically stages its exact i32 payload");
+        assert!(state.values.contains_key(result));
+        assert_eq!(
+            state.traps.len(),
+            2,
+            "tag mismatch and capacity are distinct"
+        );
+        let capacity_trap = state
+            .traps
+            .iter()
+            .find(|trap| {
+                trap.condition
+                    .iter()
+                    .any(|condition| condition.to_string().contains("unpack_capacity"))
+            })
+            .expect("typed clone adds an independent capacity edge");
+        assert_eq!(capacity_trap.code, "E0800");
+    }
+
+    #[test]
     fn ordinary_map_owned_any_v2_get_any_preserves_hit_identity_and_miss_i32() {
         let program = canonical(
             r#"
@@ -23794,14 +23921,14 @@ mod managed_any_verifier_tests {
         let results = verify_program(&program, "v2-symbolic-key-map".into())
             .expect("symbolic-key contracts have owner-scoped results");
         for (name, expected) in [
-            ("dynamic_hit_or_miss", VerifStatus::NotInTrustedSubset),
+            ("dynamic_hit_or_miss", VerifStatus::Disproven),
             (
                 "dynamic_collision_replaces_previous",
-                VerifStatus::NotInTrustedSubset,
+                VerifStatus::Disproven,
             ),
-            ("dynamic_record_hit", VerifStatus::NotInTrustedSubset),
-            ("dynamic_wrong_tag", VerifStatus::NotInTrustedSubset),
-            ("dynamic_missing_tag", VerifStatus::NotInTrustedSubset),
+            ("dynamic_record_hit", VerifStatus::Disproven),
+            ("dynamic_wrong_tag", VerifStatus::Disproven),
+            ("dynamic_missing_tag", VerifStatus::Disproven),
             (
                 "dynamic_heterogeneous_lookup_is_fail_closed",
                 VerifStatus::NotInTrustedSubset,
@@ -23812,9 +23939,9 @@ mod managed_any_verifier_tests {
                 .find(|result| result.func_name.ends_with(name))
                 .unwrap_or_else(|| panic!("missing result for {name}"));
             assert_eq!(result.status, expected, "{}: {}", name, result.message);
-            assert_eq!(result.constraint_count, 0, "{}: {}", name, result.message);
-            assert!(result.artifact.is_none(), "{}: {}", name, result.message);
             if name == "dynamic_heterogeneous_lookup_is_fail_closed" {
+                assert!(result.artifact.is_none(), "{}: {}", name, result.message);
+                assert_eq!(result.constraint_count, 0, "{}: {}", name, result.message);
                 assert!(
                     result
                         .message
@@ -23824,17 +23951,8 @@ mod managed_any_verifier_tests {
                 );
             } else {
                 assert!(
-                    result.message.contains("Capacity as E0800")
-                        && result.message.contains("no shared failure model"),
-                    "V2 proof must be withheld at the remaining runtime-failure boundary: {}",
-                    result.message
-                );
-            }
-            if expected == VerifStatus::NotInTrustedSubset {
-                assert!(
-                    result.message.contains("E0800")
-                        || name == "dynamic_heterogeneous_lookup_is_fail_closed",
-                    "wrong-tag and miss unpack must retain the E0800 trap: {}",
+                    result.message.contains("E0800"),
+                    "the reachable V2 failure must remain a concrete E0800 counterexample: {}",
                     result.message
                 );
             }
@@ -23896,16 +24014,11 @@ mod managed_any_verifier_tests {
                     .ends_with("exact_unicode_key_uses_static_fast_path")
             })
             .expect("exact Unicode-key result");
-        assert_eq!(
-            result.status,
-            VerifStatus::NotInTrustedSubset,
-            "{}",
-            result.message
-        );
+        assert_eq!(result.status, VerifStatus::Disproven, "{}", result.message);
     }
 
     #[test]
-    fn ordinary_map_owned_any_v2_unpack_withholds_proof_for_hit_and_miss_edges() {
+    fn ordinary_map_owned_any_v2_unpack_reports_capacity_and_tag_traps() {
         let program = canonical(
             r#"
             type Label { text: string }
@@ -23963,9 +24076,9 @@ mod managed_any_verifier_tests {
         );
 
         for (name, expected) in [
-            ("unpack_hit", VerifStatus::NotInTrustedSubset),
-            ("unpack_miss", VerifStatus::NotInTrustedSubset),
-            ("unpack_wrong_tag", VerifStatus::NotInTrustedSubset),
+            ("unpack_hit", VerifStatus::Disproven),
+            ("unpack_miss", VerifStatus::Disproven),
+            ("unpack_wrong_tag", VerifStatus::Disproven),
         ] {
             assert_contract(&program, name, expected);
         }
@@ -24066,16 +24179,16 @@ mod managed_any_verifier_tests {
         let results = verify_program(&program, "v2-string-unpack".into())
             .expect("symbolically verify direct String unpack paths");
         for (name, expected) in [
-            ("unpack_string_hit", VerifStatus::NotInTrustedSubset),
-            ("unpack_string_miss", VerifStatus::NotInTrustedSubset),
-            ("unpack_string_wrong_tag", VerifStatus::NotInTrustedSubset),
+            ("unpack_string_hit", VerifStatus::Disproven),
+            ("unpack_string_miss", VerifStatus::Disproven),
+            ("unpack_string_wrong_tag", VerifStatus::Disproven),
         ] {
             let result = results
                 .iter()
                 .find(|result| result.func_name.ends_with(name))
                 .unwrap_or_else(|| panic!("missing String unpack result for {name}"));
             assert_eq!(result.status, expected, "{}", result.message);
-            if expected == VerifStatus::NotInTrustedSubset {
+            if expected == VerifStatus::Disproven {
                 assert!(
                     result.message.contains("E0800"),
                     "String miss/tag mismatch must retain its runtime trap: {}",
@@ -24169,10 +24282,10 @@ mod managed_any_verifier_tests {
         let results = verify_program(&program, "v2-label-unpack".into())
             .expect("symbolically execute receipt-authorized Label unpack paths");
         for (name, expected) in [
-            ("unpack_label_hit", VerifStatus::NotInTrustedSubset),
-            ("unpack_label_wrong_tag", VerifStatus::NotInTrustedSubset),
-            ("unpack_label_miss", VerifStatus::NotInTrustedSubset),
-            ("unpack_i32_miss", VerifStatus::NotInTrustedSubset),
+            ("unpack_label_hit", VerifStatus::Disproven),
+            ("unpack_label_wrong_tag", VerifStatus::Disproven),
+            ("unpack_label_miss", VerifStatus::Disproven),
+            ("unpack_i32_miss", VerifStatus::Disproven),
         ] {
             let result = results
                 .iter()

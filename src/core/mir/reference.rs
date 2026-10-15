@@ -261,6 +261,15 @@ fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), ()> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_unpack_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn try_copy_owned_get_query_string(value: &str, reserve_terminator: bool) -> Option<String> {
     #[cfg(test)]
     crate::runtime::ordinary_map_owned_get_allocation_checkpoint_for_test().ok()?;
@@ -10225,6 +10234,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 "ordinary Map/Any owner-v2 GetAny miss payload is not canonical i32 zero",
                             ));
                         }
+                        ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 unpack Capacity failure",
+                            )
+                        })?;
                         MirRuntimeValue::Int(i64::from(*value))
                     }
                     (ty, MirOrdinaryMapOwnedAnyV2Value::String { type_id, value })
@@ -10232,6 +10247,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                             && type_id == &receipt.conversion_to
                             && found =>
                     {
+                        ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 unpack Capacity failure",
+                            )
+                        })?;
                         let value = try_copy_owned_get_string(value, false).ok_or_else(|| {
                             self.error(
                                 &function.owner,
@@ -10267,6 +10288,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 "E0800: ordinary Map/Any owner-v2 Label layout differs from its exact TypeDesc",
                             ));
                         }
+                        ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 unpack Capacity failure",
+                            )
+                        })?;
                         let text = try_copy_owned_get_string(text, false).ok_or_else(|| {
                             self.error(
                                 &function.owner,
@@ -24741,6 +24768,114 @@ func main() -> i64 { println(foreign(1 as i64)); 0 }
             assert!(error.message().contains("E0800"), "{error}");
             assert_eq!(output, "", "the failed GetAny publishes no output");
             assert_eq!(attempts, 1);
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_capacity_matches_consumers_before_result_visibility() {
+        let cases = [
+            ("i32", "number", "let observed = unpacked == 42", "", 1),
+            ("i32", "missing", "let observed = unpacked == 0", "", 1),
+            (
+                "string",
+                "text",
+                "let observed = unpacked == \"selected string\"",
+                "drop(unpacked)",
+                1,
+            ),
+            (
+                "Label",
+                "label",
+                "let observed = unpacked.text == \"selected label\"",
+                "",
+                1,
+            ),
+            (
+                "Label",
+                "number",
+                "let observed = unpacked.text == \"selected label\"",
+                "",
+                0,
+            ),
+        ];
+        for (target, key, check, dispose, expected_attempts) in cases {
+            let source = format!(
+                r#"
+                    type Label {{ text: string }}
+                    func main() -> i32 {{
+                        let source = "selected string"
+                        let label = Label {{ text: "selected label" }}
+                        let empty = map_new()
+                        let numbers = map_set(empty, "number", 42)
+                        let strings = map_set(numbers, "text", source)
+                        let mixed = map_set(strings, "label", label)
+                        let pair = map_get(mixed, "{key}")
+                        println("before")
+                        let unpacked = pair.1 as {target}
+                        println("after")
+                        {check}
+                        {dispose}
+                        drop(pair)
+                        drop(empty)
+                        drop(numbers)
+                        drop(strings)
+                        drop(mixed)
+                        drop(source)
+                        drop(label)
+                        0
+                    }}
+                "#
+            );
+            let (owner, program) = direct_v2_program_with_main(&source);
+            let main = program.functions().get(&owner).expect("MIR main");
+            assert_eq!(
+                main.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+                    ))
+                    .count(),
+                1,
+                "fixture must contain exactly one V2 Unpack for {target}/{key}"
+            );
+
+            let (execution, output, attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_unpack_failure_for_test(0, || {
+                    let interpreter = MirReferenceInterpreter::new(&program);
+                    let execution = interpreter.execute_with_output(&owner, &[]);
+                    let output = interpreter.captured_output();
+                    let attempts =
+                        crate::runtime::ordinary_map_owned_any_v2_unpack_attempts_for_test();
+                    (execution, output, attempts)
+                });
+            let error = execution.expect_err("typed Unpack capacity must trap");
+            assert!(
+                error.to_string().contains("E0800"),
+                "{target}/{key}: {error}"
+            );
+            assert_eq!(output, "before\n", "failed Unpack exposes no result");
+            assert_eq!(attempts, expected_attempts, "reference {target}/{key}");
+
+            let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+                .expect("compile canonical V2 MIR into bytecode");
+            let (execution, output, attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_unpack_failure_for_test(0, || {
+                    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                    let execution = vm.run_value_for_component().map(|_| ());
+                    let output = vm.take_stdout();
+                    let attempts =
+                        crate::runtime::ordinary_map_owned_any_v2_unpack_attempts_for_test();
+                    (execution, output, attempts)
+                });
+            let error = execution.expect_err("bytecode typed Unpack capacity must trap");
+            assert!(
+                error.to_string().contains("E0800"),
+                "bytecode {target}/{key}: {error}"
+            );
+            assert_eq!(output, "before\n", "failed Unpack exposes no result");
+            assert_eq!(attempts, expected_attempts, "bytecode {target}/{key}");
         }
     }
 }

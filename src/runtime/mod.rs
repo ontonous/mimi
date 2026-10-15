@@ -91,11 +91,14 @@ pub(crate) use map_any_snapshot::{
     ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test,
     ordinary_map_owned_any_v2_root_publish_attempts_for_test,
     ordinary_map_owned_any_v2_root_publish_checkpoint_for_test,
+    ordinary_map_owned_any_v2_unpack_attempts_for_test,
+    ordinary_map_owned_any_v2_unpack_checkpoint_for_test,
     ordinary_map_owned_get_allocation_attempts_for_test,
     ordinary_map_owned_get_allocation_checkpoint_for_test,
     ordinary_map_owned_get_allocation_failure_triggered_for_test,
     with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_root_publish_failure_for_test,
+    with_ordinary_map_owned_any_v2_unpack_failure_for_test,
     with_ordinary_map_owned_get_allocation_failure_for_test,
 };
 pub use mir_map_root::{
