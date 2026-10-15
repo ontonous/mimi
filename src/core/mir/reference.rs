@@ -270,6 +270,18 @@ fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ()> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_string_copy_checkpoint(stage: i32) -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(stage);
+    }
+    #[cfg(not(test))]
+    {
+        let _ = stage;
+        Ok(())
+    }
+}
+
 fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
@@ -10289,10 +10301,28 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 "[E0800] ordinary Map/Any owner-v2 unpack Capacity failure",
                             )
                         })?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+                        )
+                        .map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 unpack String copy allocation failed",
+                            )
+                        })?;
                         let value = try_copy_owned_get_string(value, false).ok_or_else(|| {
                             self.error(
                                 &function.owner,
                                 "E0800: ordinary Map/Any owner-v2 unpack String copy exceeds capacity",
+                            )
+                        })?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+                        )
+                        .map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 unpack String publication failed",
                             )
                         })?;
                         MirRuntimeValue::String(value)
@@ -10330,10 +10360,28 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 "[E0800] ordinary Map/Any owner-v2 unpack Capacity failure",
                             )
                         })?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+                        )
+                        .map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 unpack Label text allocation failed",
+                            )
+                        })?;
                         let text = try_copy_owned_get_string(text, false).ok_or_else(|| {
                             self.error(
                                 &function.owner,
                                 "E0800: ordinary Map/Any owner-v2 unpack Label text copy exceeds capacity",
+                            )
+                        })?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+                        )
+                        .map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 unpack Label text publication failed",
                             )
                         })?;
                         MirRuntimeValue::Record {
@@ -24992,6 +25040,128 @@ func main() -> i64 { println(foreign(1 as i64)); 0 }
             );
             assert_eq!(output, "before\n", "failed Unpack exposes no result");
             assert_eq!(attempts, expected_attempts, "bytecode {target}/{key}");
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_string_copy_failures_match_consumers() {
+        for (target, key, clone_stage, publish_stage) in [
+            (
+                "string",
+                "text",
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+            ),
+            (
+                "Label",
+                "label",
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+            ),
+        ] {
+            for fail_stage in [clone_stage, publish_stage] {
+                let source = format!(
+                    r#"
+                        type Label {{ text: string }}
+                        func main() -> i32 {{
+                            let embedded = "nul\0雪"
+                            let text = ""
+                            let label = Label {{ text: text }}
+                            let empty = map_new()
+                            let with_text = map_set(empty, "text", embedded)
+                            let mixed = map_set(with_text, "label", label)
+                            let pair = map_get(mixed, "{key}")
+                            println("before")
+                            let unpacked = pair.1 as {target}
+                            println("after")
+                            drop(unpacked)
+                            drop(pair)
+                            drop(empty)
+                            drop(with_text)
+                            drop(mixed)
+                            drop(embedded)
+                            drop(text)
+                            drop(label)
+                            0
+                        }}
+                    "#
+                );
+                let (owner, program) = direct_v2_program_with_main(&source);
+                let main = program.functions().get(&owner).expect("MIR main");
+                assert_eq!(
+                    main.blocks
+                        .values()
+                        .flat_map(|block| &block.instructions)
+                        .filter(|instruction| matches!(
+                            instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+                        ))
+                        .count(),
+                    1,
+                    "fixture must contain one V2 Unpack for {target}/{key}"
+                );
+
+                let (execution, output, clone_attempts, publish_attempts) =
+                    crate::runtime::with_ordinary_map_owned_any_v2_string_copy_failure_for_test(
+                        fail_stage,
+                        || {
+                            let interpreter = MirReferenceInterpreter::new(&program);
+                            let execution = interpreter.execute_with_output(&owner, &[]);
+                            let output = interpreter.captured_output();
+                            let clone_attempts = crate::runtime::
+                                ordinary_map_owned_any_v2_string_copy_attempts_for_test(
+                                    clone_stage,
+                                );
+                            let publish_attempts = crate::runtime::
+                                ordinary_map_owned_any_v2_string_copy_attempts_for_test(
+                                    publish_stage,
+                                );
+                            (execution, output, clone_attempts, publish_attempts)
+                        },
+                    );
+                let error = execution.expect_err("String copy stage must trap");
+                assert!(error.to_string().contains("E0800"), "{target}: {error}");
+                assert_eq!(output, "before\n", "failed {target} copy exposes no result");
+                assert_eq!(clone_attempts, 1, "{target} clone-stage attempt");
+                assert_eq!(
+                    publish_attempts,
+                    usize::from(fail_stage == publish_stage),
+                    "{target} publication follows successful allocation"
+                );
+
+                let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+                    .expect("compile canonical V2 Unpack MIR into bytecode");
+                let (execution, output, clone_attempts, publish_attempts) =
+                    crate::runtime::with_ordinary_map_owned_any_v2_string_copy_failure_for_test(
+                        fail_stage,
+                        || {
+                            let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                            let execution = vm.run_value_for_component().map(|_| ());
+                            let output = vm.take_stdout();
+                            let clone_attempts = crate::runtime::
+                                ordinary_map_owned_any_v2_string_copy_attempts_for_test(
+                                    clone_stage,
+                                );
+                            let publish_attempts = crate::runtime::
+                                ordinary_map_owned_any_v2_string_copy_attempts_for_test(
+                                    publish_stage,
+                                );
+                            (execution, output, clone_attempts, publish_attempts)
+                        },
+                    );
+                let error = execution.expect_err("bytecode String copy stage must trap");
+                assert_eq!(error.code(), "E0800", "bytecode {target}: {error}");
+                assert_eq!(
+                    output, "before\n",
+                    "failed bytecode {target} exposes no result"
+                );
+                assert_eq!(clone_attempts, 1, "bytecode {target} clone-stage attempt");
+                assert_eq!(
+                    publish_attempts,
+                    usize::from(fail_stage == publish_stage),
+                    "bytecode {target} publication follows successful allocation"
+                );
+            }
         }
     }
 

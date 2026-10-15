@@ -22,6 +22,9 @@ use super::managed_any_payload_v2::{
     ManagedAnyPayloadV2, ManagedAnyPayloadV2Glue, ManagedAnyPayloadV2Identity,
 };
 
+pub(crate) const ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE: i32 = 0;
+pub(crate) const ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE: i32 = 1;
+
 /// A single owned `Any` value. The token is released exactly once on drop.
 ///
 /// This wrapper deliberately does not implement `Clone` or `Copy`; callers
@@ -889,8 +892,9 @@ thread_local! {
     static OWNED_ANY_V2_UNPACK_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static OWNED_ANY_V2_VALUES_UNPACK_OWNER_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static OWNED_ANY_V2_VALUES_UNPACK_OWNER_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
-    static OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL: Cell<bool> = const { Cell::new(false) };
-    static OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL: Cell<bool> = const { Cell::new(false) };
+    static OWNED_ANY_V2_STRING_COPY_FAIL_STAGE: Cell<Option<i32>> = const { Cell::new(None) };
+    static OWNED_ANY_V2_STRING_COPY_CLONE_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    static OWNED_ANY_V2_STRING_COPY_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static STRING_CONCAT_FAIL_STAGE: Cell<Option<i32>> = const { Cell::new(None) };
     static STRING_CONCAT_ALLOCATION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static STRING_CONCAT_PUBLICATION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
@@ -1275,13 +1279,24 @@ pub(crate) fn with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_tes
     operation()
 }
 
-/// Test-only failure at the final canonical String allocation for a V2
-/// ValuesUnpack. Reference and bytecode use this at their corresponding
-/// output-copy boundary; native calls the status-returning copy helper below.
+/// Shared test oracle for the final canonical String copy used by V2 Unpack
+/// and ValuesUnpack. Stage 0 is allocation; stage 1 is publication after the
+/// complete byte copy exists but before it becomes an owned language value.
 #[cfg(test)]
-pub(crate) fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test(
+pub(crate) fn ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(
+    stage: i32,
 ) -> Result<(), ()> {
-    if OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL.with(Cell::get) {
+    let attempts = match stage {
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE => {
+            &OWNED_ANY_V2_STRING_COPY_CLONE_ATTEMPTS
+        }
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE => {
+            &OWNED_ANY_V2_STRING_COPY_PUBLISH_ATTEMPTS
+        }
+        _ => return Ok(()),
+    };
+    attempts.with(|count| count.set(count.get().saturating_add(1)));
+    if OWNED_ANY_V2_STRING_COPY_FAIL_STAGE.with(Cell::get) == Some(stage) {
         Err(())
     } else {
         Ok(())
@@ -1289,45 +1304,78 @@ pub(crate) fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_fo
 }
 
 #[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_string_copy_attempts_for_test(stage: i32) -> usize {
+    match stage {
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE => {
+            OWNED_ANY_V2_STRING_COPY_CLONE_ATTEMPTS.with(Cell::get)
+        }
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE => {
+            OWNED_ANY_V2_STRING_COPY_PUBLISH_ATTEMPTS.with(Cell::get)
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_string_copy_failure_for_test<T>(
+    stage: i32,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore {
+        fail_stage: Option<i32>,
+        clone_attempts: usize,
+        publish_attempts: usize,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_STRING_COPY_FAIL_STAGE.with(|value| value.set(self.fail_stage));
+            OWNED_ANY_V2_STRING_COPY_CLONE_ATTEMPTS.with(|value| value.set(self.clone_attempts));
+            OWNED_ANY_V2_STRING_COPY_PUBLISH_ATTEMPTS
+                .with(|value| value.set(self.publish_attempts));
+        }
+    }
+    let _restore = Restore {
+        fail_stage: OWNED_ANY_V2_STRING_COPY_FAIL_STAGE.with(|value| value.replace(Some(stage))),
+        clone_attempts: OWNED_ANY_V2_STRING_COPY_CLONE_ATTEMPTS.with(|value| value.replace(0)),
+        publish_attempts: OWNED_ANY_V2_STRING_COPY_PUBLISH_ATTEMPTS.with(|value| value.replace(0)),
+    };
+    operation()
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test(
+) -> Result<(), ()> {
+    ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test(
 ) -> Result<(), ()> {
-    if OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL.with(Cell::get) {
-        Err(())
-    } else {
-        Ok(())
-    }
+    ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+    )
 }
 
 #[cfg(test)]
 pub(crate) fn with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test<T>(
     operation: impl FnOnce() -> T,
 ) -> T {
-    struct RestoreFailpoint(bool);
-    impl Drop for RestoreFailpoint {
-        fn drop(&mut self) {
-            OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL.with(|value| value.set(self.0));
-        }
-    }
-    let _restore = RestoreFailpoint(
-        OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL.with(|value| value.replace(true)),
-    );
-    operation()
+    with_ordinary_map_owned_any_v2_string_copy_failure_for_test(
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+        operation,
+    )
 }
 
 #[cfg(test)]
 pub(crate) fn with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test<T>(
     operation: impl FnOnce() -> T,
 ) -> T {
-    struct RestoreFailpoint(bool);
-    impl Drop for RestoreFailpoint {
-        fn drop(&mut self) {
-            OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL.with(|value| value.set(self.0));
-        }
-    }
-    let _restore = RestoreFailpoint(
-        OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL.with(|value| value.replace(true)),
-    );
-    operation()
+    with_ordinary_map_owned_any_v2_string_copy_failure_for_test(
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+        operation,
+    )
 }
 
 pub(super) fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), ()> {
@@ -1339,26 +1387,39 @@ pub(super) fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Resu
     Ok(())
 }
 
-fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint() -> Result<(), ManagedAnyStatus>
-{
+fn ordinary_map_owned_any_v2_string_copy_checkpoint(stage: i32) -> Result<(), ManagedAnyStatus> {
     #[cfg(test)]
     {
-        return ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test()
+        return ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(stage)
             .map_err(|_| ManagedAnyStatus::Capacity);
     }
     #[cfg(not(test))]
-    Ok(())
+    {
+        let _ = stage;
+        Ok(())
+    }
+}
+
+fn ordinary_map_owned_any_v2_unpack_string_clone_checkpoint() -> Result<(), ManagedAnyStatus> {
+    ordinary_map_owned_any_v2_string_copy_checkpoint(
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+    )
+}
+
+fn ordinary_map_owned_any_v2_unpack_string_publish_checkpoint() -> Result<(), ManagedAnyStatus> {
+    ordinary_map_owned_any_v2_string_copy_checkpoint(
+        ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+    )
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint() -> Result<(), ManagedAnyStatus>
+{
+    ordinary_map_owned_any_v2_unpack_string_clone_checkpoint()
 }
 
 fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint(
 ) -> Result<(), ManagedAnyStatus> {
-    #[cfg(test)]
-    {
-        return ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test()
-            .map_err(|_| ManagedAnyStatus::Capacity);
-    }
-    #[cfg(not(test))]
-    Ok(())
+    ordinary_map_owned_any_v2_unpack_string_publish_checkpoint()
 }
 
 fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ManagedAnyStatus> {
@@ -3212,8 +3273,8 @@ pub unsafe extern "C" fn mimi_any_payload_v2_unpack(
     }
 }
 
-/// Clone a V2 ValuesUnpack String/Label text into the canonical String domain
-/// and publish its pointer only after registration succeeds. Unlike
+/// Copy callback-owned V2 String/Label bytes into Mimi's canonical String
+/// domain and publish the pointer only after registration succeeds. Unlike
 /// `mimi_str_clone`, this status ABI distinguishes a failed empty-string
 /// allocation from the valid empty representation and has no artificial
 /// length cap.
@@ -3221,8 +3282,7 @@ pub unsafe extern "C" fn mimi_any_payload_v2_unpack(
 /// # Safety
 /// `source` points to `length` readable bytes when length is nonzero. Each
 /// non-null output points to one writable, non-overlapping value.
-#[no_mangle]
-pub unsafe extern "C" fn mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+unsafe fn copy_ordinary_map_owned_any_v2_string(
     source: *const std::ffi::c_char,
     length: i64,
     out_pointer: *mut *mut std::ffi::c_char,
@@ -3256,12 +3316,12 @@ pub unsafe extern "C" fn mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_s
         unsafe { std::slice::from_raw_parts(source.cast::<u8>(), length_usize) }
     };
     let result = (|| {
-        ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()?;
+        ordinary_map_owned_any_v2_unpack_string_clone_checkpoint()?;
         let pointer = super::alloc_c_string_from_bytes(bytes);
         if pointer.is_null() {
             return Err(ManagedAnyStatus::Capacity);
         }
-        ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint().map_err(|error| {
+        ordinary_map_owned_any_v2_unpack_string_publish_checkpoint().map_err(|error| {
             super::mimi_free(pointer.cast());
             error
         })?;
@@ -3292,6 +3352,40 @@ pub unsafe extern "C" fn mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_s
         }
         Err(status) => status_code(status),
     }
+}
+
+/// Final owned String copy for ordinary V2 Unpack. The typed callback
+/// temporary remains borrowed until the native emitter drops it after this
+/// status-returning bridge completes.
+///
+/// # Safety
+/// `source` points to `length` readable bytes when length is nonzero. Each
+/// non-null output points to one writable, non-overlapping value.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string(
+    source: *const std::ffi::c_char,
+    length: i64,
+    out_pointer: *mut *mut std::ffi::c_char,
+    out_length: *mut i64,
+) -> i32 {
+    // SAFETY: this is the same byte and output contract documented above.
+    unsafe { copy_ordinary_map_owned_any_v2_string(source, length, out_pointer, out_length) }
+}
+
+/// Final owned String copy for indexed ValuesUnpack.
+///
+/// # Safety
+/// `source` points to `length` readable bytes when length is nonzero. Each
+/// non-null output points to one writable, non-overlapping value.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+    source: *const std::ffi::c_char,
+    length: i64,
+    out_pointer: *mut *mut std::ffi::c_char,
+    out_length: *mut i64,
+) -> i32 {
+    // SAFETY: this is the same byte and output contract documented above.
+    unsafe { copy_ordinary_map_owned_any_v2_string(source, length, out_pointer, out_length) }
 }
 
 /// Create an empty V2 ordinary Map root with its exact profile.
@@ -4379,6 +4473,30 @@ mod tests {
             bytes
         );
         unsafe { super::super::mimi_string_free(pointer) };
+
+        pointer = std::ptr::null_mut();
+        length = -1;
+        let empty_publish_failure =
+            super::with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test(
+                || unsafe {
+                    super::mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+                        std::ptr::null(),
+                        0,
+                        &mut pointer,
+                        &mut length,
+                    )
+                },
+            );
+        assert_eq!(empty_publish_failure, ManagedAnyStatus::Capacity as i32);
+        assert!(pointer.is_null());
+        assert_eq!(length, 0);
+        assert_eq!(
+            crate::runtime::ordinary_map_domain_live_counts_for_test()
+                .expect("ownership domains after failed empty publication")
+                .owned_strings,
+            counts_before.owned_strings,
+            "failed empty publication retires its fresh allocation"
+        );
 
         pointer = std::ptr::null_mut();
         length = -1;

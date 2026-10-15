@@ -24,6 +24,9 @@ const V2_PAYLOAD_UNPACK: &str = "mimi_any_payload_v2_unpack";
 const V2_SET: &str = "mimi_ordinary_map_owned_any_v2_set";
 const V2_GET: &str = "mimi_ordinary_map_owned_any_v2_get";
 const V2_VALUES_LIST: &str = "mimi_ordinary_map_owned_any_v2_values_list";
+const V2_UNPACK_COPY_STRING: &str = "mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string";
+const V2_VALUES_UNPACK_COPY_STRING: &str =
+    "mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string";
 
 const V2_STATUS_CAPACITY: i32 = 3;
 const V2_STATUS_SIZE_OVERFLOW: i32 = 17;
@@ -3561,41 +3564,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_extract_value(string, 1, "mir_map_any_v2_unpack_string_len")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_int_value();
-            // V2 callback glue uses malloc/free for its private payload
-            // copies. A language String uses mimi_alloc/mimi_free, so bridge
-            // the callback result into the ordinary String allocator before
-            // exposing it and release the temporary through its exact glue.
-            let clone_fn = self
-                .generator
-                .get_runtime_fn("mimi_str_clone")
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            let handle = call_try_basic_value(
-                &self
-                    .generator
-                    .builder
-                    .build_call(
-                        clone_fn,
-                        &[
-                            BasicMetadataValueEnum::from(data),
-                            BasicMetadataValueEnum::from(len),
-                        ],
-                        "mir_map_any_v2_unpack_string_clone",
-                    )
-                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
-            )
-            .ok_or_else(|| {
-                NativeMirError::new(subject, "ordinary Map/Any V2 String clone returned void")
-            })?
-            .into_int_value();
-            self.generator
-                .builder
-                .build_call(
-                    payload_drop_glue,
-                    &[BasicMetadataValueEnum::from(output)],
-                    "mir_map_any_v2_unpack_string_temporary_drop",
-                )
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            return self.emit_owned_string_from_handle(handle, len, subject);
+            return self.emit_v2_copy_string(
+                data,
+                len,
+                output,
+                payload_drop_glue,
+                V2_UNPACK_COPY_STRING,
+                subject,
+            );
         }
         if target_is_label {
             let label = unpacked.into_struct_value();
@@ -3623,45 +3599,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_extract_value(text, 1, "mir_map_any_v2_unpack_label_text_len")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_int_value();
-            // The payload callback cloned this Label through native value glue,
-            // whose temporary String leaf uses malloc/free. Clone that leaf
-            // into Mimi's ordinary String allocator before releasing the
-            // callback-owned aggregate, so the returned Label has the exact
-            // ownership ABI expected by native aggregate Drop glue.
-            let clone_fn = self
-                .generator
-                .get_runtime_fn("mimi_str_clone")
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            let handle = call_try_basic_value(
-                &self
-                    .generator
-                    .builder
-                    .build_call(
-                        clone_fn,
-                        &[
-                            BasicMetadataValueEnum::from(data),
-                            BasicMetadataValueEnum::from(len),
-                        ],
-                        "mir_map_any_v2_unpack_label_text_clone",
-                    )
-                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
-            )
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    "ordinary Map/Any V2 Label String clone returned void",
-                )
-            })?
-            .into_int_value();
-            self.generator
-                .builder
-                .build_call(
-                    payload_drop_glue,
-                    &[BasicMetadataValueEnum::from(output)],
-                    "mir_map_any_v2_unpack_label_temporary_drop",
-                )
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            let owned_text = self.emit_owned_string_from_handle(handle, len, subject)?;
+            let owned_text = self.emit_v2_copy_string(
+                data,
+                len,
+                output,
+                payload_drop_glue,
+                V2_UNPACK_COPY_STRING,
+                subject,
+            )?;
             let label_type = payload_llvm_ty.into_struct_type();
             let owned_label = self
                 .generator
@@ -3678,16 +3623,17 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(unpacked.into())
     }
 
-    /// Read one selected payload from the immutable Values snapshot, exact-
-    /// check its runtime TypeDesc, and clone it into the ordinary Mimi owner
-    /// domain. The list snapshot retains its own token; the per-index token
-    /// is always released on both successful and failing unpack paths.
-    fn emit_v2_values_unpack_copy_string(
+    /// Bridge callback-owned String bytes into Mimi's canonical owned String
+    /// domain. The temporary payload is released on both successful and
+    /// failing Unpack paths, and the result becomes visible only after the
+    /// copy has been published.
+    fn emit_v2_copy_string(
         &mut self,
         source: inkwell::values::PointerValue<'ctx>,
         length: inkwell::values::IntValue<'ctx>,
         temporary_payload: inkwell::values::PointerValue<'ctx>,
         payload_drop_glue: inkwell::values::FunctionValue<'ctx>,
+        copy_function: &str,
         subject: &str,
     ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         let pointer_type = self
@@ -3724,7 +3670,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 
         let copy = self
             .generator
-            .get_runtime_fn("mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string")
+            .get_runtime_fn(copy_function)
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let status = call_try_basic_value(
             &self
@@ -3738,11 +3684,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         BasicMetadataValueEnum::from(output_pointer),
                         BasicMetadataValueEnum::from(output_length),
                     ],
-                    "mir_map_any_v2_values_unpack_string_copy_status",
+                    "mir_map_any_v2_unpack_string_copy_status",
                 )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
         )
-        .ok_or_else(|| NativeMirError::new(subject, "Values String copy helper returned void"))?
+        .ok_or_else(|| NativeMirError::new(subject, "V2 String copy helper returned void"))?
         .into_int_value();
 
         // The typed temporary is no longer needed regardless of whether the
@@ -3752,7 +3698,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_call(
                 payload_drop_glue,
                 &[BasicMetadataValueEnum::from(temporary_payload)],
-                "mir_map_any_v2_values_unpack_string_temporary_drop",
+                "mir_map_any_v2_unpack_string_temporary_drop",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
 
@@ -3763,16 +3709,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 IntPredicate::EQ,
                 status,
                 self.generator.context.i32_type().const_zero(),
-                "mir_map_any_v2_values_unpack_string_copy_ok",
+                "mir_map_any_v2_unpack_string_copy_ok",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let success = self.generator.context.append_basic_block(
             self.llvm_function,
-            "mir_map_any_v2_values_unpack_string_copy_success",
+            "mir_map_any_v2_unpack_string_copy_success",
         );
         let failure = self.generator.context.append_basic_block(
             self.llvm_function,
-            "mir_map_any_v2_values_unpack_string_copy_failure",
+            "mir_map_any_v2_unpack_string_copy_failure",
         );
         self.generator
             .builder
@@ -3780,7 +3726,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.generator.builder.position_at_end(failure);
         self.emit_abort_with_message(
-            "[E0800] ordinary Map/Any owner-v2 Values String allocation or publication failed",
+            "[E0800] ordinary Map/Any owner-v2 String allocation or publication failed",
             subject,
         )?;
 
@@ -3791,7 +3737,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_load(
                 pointer_type,
                 output_pointer,
-                "mir_map_any_v2_values_unpack_string_data",
+                "mir_map_any_v2_unpack_string_data",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_pointer_value();
@@ -3801,7 +3747,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_load(
                 self.generator.context.i64_type(),
                 output_length,
-                "mir_map_any_v2_values_unpack_string_length",
+                "mir_map_any_v2_unpack_string_length",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?
             .into_int_value();
@@ -4489,11 +4435,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_extract_value(string, 1, "mir_map_any_v2_values_unpack_string_len")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_int_value();
-            return self.emit_v2_values_unpack_copy_string(
+            return self.emit_v2_copy_string(
                 data,
                 len,
                 output,
                 payload_drop_glue,
+                V2_VALUES_UNPACK_COPY_STRING,
                 subject,
             );
         }
@@ -4523,11 +4470,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_extract_value(text, 1, "mir_map_any_v2_values_unpack_label_text_len")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_int_value();
-            let owned_text = self.emit_v2_values_unpack_copy_string(
+            let owned_text = self.emit_v2_copy_string(
                 data,
                 len,
                 output,
                 payload_drop_glue,
+                V2_VALUES_UNPACK_COPY_STRING,
                 subject,
             )?;
             let owned_label = self
@@ -5263,6 +5211,234 @@ mod tests {
             unsafe { native.call() }
         });
         panic!("native String concatenation survived failure stage {stage}: {value}");
+    }
+
+    static V2_UNPACK_STRING_COPY_EXPECTED_STAGE: AtomicI32 = AtomicI32::new(-1);
+
+    unsafe extern "C" fn v2_unpack_string_copy_error_handler(message: *const libc::c_char) {
+        let stage = V2_UNPACK_STRING_COPY_EXPECTED_STAGE.load(Ordering::SeqCst);
+        let clone_attempts =
+            crate::runtime::ordinary_map_owned_any_v2_string_copy_attempts_for_test(
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+            );
+        let publish_attempts =
+            crate::runtime::ordinary_map_owned_any_v2_string_copy_attempts_for_test(
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+            );
+        let injected = clone_attempts == 1 && publish_attempts == usize::from(stage == 1);
+        let counts = crate::runtime::ordinary_map_domain_live_counts_for_test();
+        let settled = counts
+            .as_ref()
+            .is_ok_and(|counts| *counts == crate::runtime::OrdinaryMapDomainLiveCounts::default());
+        let callback_allocations_settled =
+            DIRECT_CALLBACK_LIVE_ALLOCATIONS.load(Ordering::SeqCst) == 0;
+        let typed_diagnostic = !message.is_null()
+            && unsafe { std::ffi::CStr::from_ptr(message) }
+                .to_bytes()
+                .windows(b"[E0800]".len())
+                .any(|window| window == b"[E0800]");
+        eprintln!(
+            "generated-v2-unpack-string-copy stage={stage} injected={injected} settled={settled} callback_allocations_settled={callback_allocations_settled} typed={typed_diagnostic} clone_attempts={clone_attempts} publish_attempts={publish_attempts} counts={counts:?}"
+        );
+        let code = if !injected {
+            96
+        } else if !settled || !callback_allocations_settled {
+            97
+        } else if !typed_diagnostic {
+            98
+        } else {
+            0
+        };
+        // SAFETY: this isolated child records cleanup while the original
+        // runtime error callback is live, then exits without unwinding through
+        // generated native frames.
+        unsafe { libc::_exit(code) }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_string_copy_native_failures_settle_all_owners() {
+        for (target, stage) in [("string", 0), ("string", 1), ("Label", 0), ("Label", 1)] {
+            let mode = format!("{target}:{stage}");
+            let output = run_generated_callback_child(
+                "codegen::mir::ordinary_map_owned_any_v2::tests::ordinary_map_owned_any_v2_unpack_string_copy_native_failure_child",
+                "MIMI_V2_UNPACK_STRING_COPY_NATIVE_CHILD",
+                &mode,
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stdout.contains("running 1 test"),
+                "{target}/{stage}: {stdout}\n{stderr}"
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "native {target} String-copy stage {stage} must settle all owners before abort:\n{stdout}\n{stderr}"
+            );
+            assert!(
+                stderr.contains(&format!(
+                    "generated-v2-unpack-string-copy stage={stage} injected=true settled=true callback_allocations_settled=true typed=true"
+                )),
+                "native {target} failure did not observe the intended stage and cleanup: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated generated V2 Unpack String-copy failure subprocess helper"]
+    fn ordinary_map_owned_any_v2_unpack_string_copy_native_failure_child() {
+        let Ok(mode) = std::env::var("MIMI_V2_UNPACK_STRING_COPY_NATIVE_CHILD") else {
+            return;
+        };
+        let (target, stage) = mode.rsplit_once(':').expect("target:stage mode");
+        let stage = stage.parse::<i32>().expect("integer stage");
+        assert!(matches!(target, "string" | "Label"));
+        assert!(matches!(stage, 0 | 1));
+        assert_eq!(
+            crate::runtime::ordinary_map_domain_live_counts_for_test(),
+            Ok(crate::runtime::OrdinaryMapDomainLiveCounts::default())
+        );
+        assert_eq!(DIRECT_CALLBACK_LIVE_ALLOCATIONS.load(Ordering::SeqCst), 0);
+        DIRECT_CALLBACK_MALLOC_FAIL_AT.store(usize::MAX, Ordering::SeqCst);
+        DIRECT_CALLBACK_MALLOC_CALLS.store(0, Ordering::SeqCst);
+        DIRECT_CALLBACK_MALLOC_FAILURES.store(0, Ordering::SeqCst);
+
+        let key = if target == "string" {
+            "present"
+        } else {
+            "label"
+        };
+        let source = format!(
+            r#"
+                type Label {{ text: string }}
+                func main() -> i32 {{
+                    let source_text = "unpack output copy"
+                    let label = Label {{ text: "label output copy" }}
+                    let empty = map_new()
+                    let stored = map_set(empty, "present", source_text)
+                    drop(source_text)
+                    let with_label = map_set(stored, "label", label)
+                    let mixed = map_set(with_label, "number", 42)
+                    let pair = map_get(mixed, "{key}")
+                    let unpacked = pair.1 as {target}
+                    drop(unpacked)
+                    drop(pair)
+                    drop(empty)
+                    drop(stored)
+                    drop(with_label)
+                    drop(mixed)
+                    drop(label)
+                    0
+                }}
+            "#
+        );
+        let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let catalog = crate::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
+            .expect("checker-derived TypeDesc catalog");
+        let functions =
+            crate::core::mir::lower::lower_program_with_type_catalog(&checked, &catalog)
+                .expect("checker-receipted V2 MIR lowering");
+        let program = MirProgram::with_type_catalog(functions, catalog)
+            .expect("checker-receipted V2 MIR validation");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "generated_v2_unpack_string_copy_failure");
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("emit canonical V2 Unpack String copy");
+        generator.module.verify().expect("valid generated LLVM");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("mimi_any_payload_v2_unpack"));
+        assert!(native_ir.contains("mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string"));
+        assert!(native_ir.contains("call void @mimi_any_payload_v2_drop_glue__"));
+        let engine = generator
+            .module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("generated V2 Unpack execution engine");
+        for (symbol, address) in [
+            ("malloc", direct_callback_malloc as *const () as usize),
+            ("free", direct_callback_free as *const () as usize),
+            (
+                "mimi_ordinary_map_owned_any_v2_new",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_new as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_set",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_set as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_get",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_get as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_drop",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_drop as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_new",
+                crate::runtime::mimi_any_payload_v2_new as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_drop",
+                crate::runtime::mimi_any_payload_v2_drop as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_unpack",
+                crate::runtime::mimi_any_payload_v2_unpack as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string",
+                crate::runtime::mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string as *const ()
+                    as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_domain_own_string",
+                crate::runtime::mimi_mir_ordinary_map_domain_own_string as *const () as usize,
+            ),
+            (
+                "mimi_str_clone",
+                crate::runtime::mimi_str_clone as *const () as usize,
+            ),
+            (
+                "mimi_string_free",
+                crate::runtime::mimi_string_free as *const () as usize,
+            ),
+            (
+                "mimi_runtime_abort",
+                crate::runtime::mimi_runtime_abort as *const () as usize,
+            ),
+        ] {
+            let declaration = generator
+                .module
+                .get_function(symbol)
+                .unwrap_or_else(|| panic!("missing native import {symbol}"));
+            assert_eq!(
+                declaration.count_basic_blocks(),
+                0,
+                "{symbol} remains an import"
+            );
+            engine.add_global_mapping(&declaration, address);
+        }
+        let main = generator.module.get_function("main").expect("native main");
+        assert_eq!(main.count_params(), 0);
+        assert_eq!(
+            main.get_type().get_return_type(),
+            Some(context.i32_type().into())
+        );
+        V2_UNPACK_STRING_COPY_EXPECTED_STAGE.store(stage, Ordering::SeqCst);
+        crate::runtime::mimi_runtime_set_error_handler(Some(v2_unpack_string_copy_error_handler));
+        // SAFETY: the zero-argument i32 entry and every runtime import have
+        // been checked and mapped before this isolated failure call.
+        let native = unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("main") }
+            .expect("native main entry");
+        let value = crate::runtime::with_ordinary_map_owned_any_v2_string_copy_failure_for_test(
+            stage,
+            || unsafe { native.call() },
+        );
+        panic!("native {target} Unpack survived output-copy failure stage {stage}: {value}");
     }
 
     static DIRECT_CALLBACK_MALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);

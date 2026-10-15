@@ -211,6 +211,25 @@ fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), InterpError> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_string_copy_checkpoint(stage: i32) -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        let message = if stage == crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE
+        {
+            "[E0800] ordinary Map/Any owner-v2 String result allocation failed"
+        } else {
+            "[E0800] ordinary Map/Any owner-v2 String result publication failed"
+        };
+        return crate::runtime::ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(stage)
+            .map_err(|_| InterpError::new(message));
+    }
+    #[cfg(not(test))]
+    {
+        let _ = stage;
+        Ok(())
+    }
+}
+
 fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), InterpError> {
     #[cfg(test)]
     {
@@ -6852,9 +6871,15 @@ impl BytecodeVM {
                             ));
                         }
                         ordinary_map_owned_any_v2_unpack_checkpoint()?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+                        )?;
                         let owned = copy_ordinary_map_owned_any_v2_string_for_unpack(
                             owner,
                             &binding.target_type,
+                        )?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
                         )?;
                         self.set_reg(rd, Value::String(Arc::new(owned)));
                     } else {
@@ -6880,10 +6905,16 @@ impl BytecodeVM {
                             ));
                         }
                         ordinary_map_owned_any_v2_unpack_checkpoint()?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+                        )?;
                         let owned = copy_ordinary_map_owned_any_v2_record_for_unpack(
                             owner,
                             &binding.target_type,
                             &selected_nominal,
+                        )?;
+                        ordinary_map_owned_any_v2_string_copy_checkpoint(
+                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
                         )?;
                         self.set_reg(rd, owned);
                     }

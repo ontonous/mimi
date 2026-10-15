@@ -12144,6 +12144,19 @@ fn eval_instruction(
                 state.constraints.extend(constraints);
                 placeholder
             };
+            if expected_type != i32_ty {
+                // String and the admitted Label record each require a second,
+                // canonical String allocation after the typed Any clone, then
+                // a separate owner-domain publication before result visibility.
+                add_ordinary_map_owned_any_v2_unpack_string_clone_capacity_failure(
+                    state,
+                    instruction_id,
+                )?;
+                add_ordinary_map_owned_any_v2_unpack_string_publish_capacity_failure(
+                    state,
+                    instruction_id,
+                )?;
+            }
             ensure_result_shape(function, catalog, result, &unpacked)?;
             state.values.insert(result.clone(), unpacked);
             // The pair remains in `state.values`: the unpack borrows its
@@ -19498,6 +19511,28 @@ fn add_ordinary_map_owned_any_v2_unpack_capacity_failure(
     add_definedness(state, unpacked, "E0800")
 }
 
+fn add_ordinary_map_owned_any_v2_unpack_string_clone_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    let cloned = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.unpack.string_clone.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, cloned, "E0800")
+}
+
+fn add_ordinary_map_owned_any_v2_unpack_string_publish_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    let published = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.unpack.string_publish.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, published, "E0800")
+}
+
 fn add_ordinary_map_owned_any_v2_values_capacity_failure(
     state: &mut SymbolicState,
     instruction_id: &crate::core::mir::MirInstructionId,
@@ -23703,6 +23738,133 @@ mod managed_any_verifier_tests {
             })
             .expect("typed clone adds an independent capacity edge");
         assert_eq!(capacity_trap.code, "E0800");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_models_string_copy_and_publication_edges() {
+        let program = canonical(
+            r#"
+            type Label { text: string }
+
+            func observe() -> bool {
+                let text = "owned text"
+                let label = Label { text: "owned label" }
+                let empty = map_new()
+                let with_text = map_set(empty, "text", text)
+                let with_label = map_set(with_text, "label", label)
+                let text_pair = map_get(with_label, "text")
+                let unpacked_text = text_pair.1 as string
+                let label_pair = map_get(with_label, "label")
+                let unpacked_label = label_pair.1 as Label
+                drop(unpacked_text)
+                drop(unpacked_label)
+                drop(text_pair)
+                drop(label_pair)
+                drop(empty)
+                drop(with_text)
+                drop(with_label)
+                drop(text)
+                drop(label)
+                false
+            }
+
+            func main() -> i32 { 0 }
+            "#,
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:observe".into()))
+            .expect("V2 Unpack observer");
+        let catalog = program.type_catalog();
+        let instructions = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instructions.len(),
+            2,
+            "String and Label each have one Unpack"
+        );
+
+        for instruction in instructions {
+            let MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, pair, .. } =
+                &instruction.kind
+            else {
+                unreachable!();
+            };
+            let expected_type = function
+                .values
+                .get(result)
+                .expect("typed Unpack result")
+                .ty
+                .clone();
+            let (payload, constraints) = symbolic_value_for_type(
+                catalog,
+                &expected_type,
+                &format!("v2.unpack.output-copy.{}", instruction.id),
+            )
+            .expect("symbolic String or Label payload");
+            let mut state = SymbolicState {
+                values: BTreeMap::from([(
+                    pair.clone(),
+                    SymbolicValue::Tuple(vec![
+                        SymbolicValue::Bool(Bool::from_bool(true)),
+                        SymbolicValue::OrdinaryMapOwnedAnyV2Payload {
+                            payload_type: expected_type.clone(),
+                            payload: Box::new(payload),
+                        },
+                    ]),
+                )]),
+                constraints,
+                callable_entry_values: None,
+                callable_entry_constraints: None,
+                traps: Vec::new(),
+                list_shapes: BTreeMap::new(),
+                known_ints: BTreeMap::new(),
+                known_strings: BTreeMap::new(),
+                ffi_checks: Vec::new(),
+                normal_path_terminated: false,
+            };
+            eval_instruction(
+                function,
+                &program,
+                catalog,
+                &mut state,
+                &instruction.id,
+                &instruction.kind,
+            )
+            .expect("String/Label Unpack symbolic execution");
+            assert!(state.values.contains_key(result));
+            assert_eq!(
+                state.traps.len(),
+                4,
+                "tag, typed clone, String copy, publish"
+            );
+            let trap_markers = [
+                "unpack_capacity",
+                "unpack.string_clone",
+                "unpack.string_publish",
+            ];
+            for marker in trap_markers {
+                let trap = state
+                    .traps
+                    .iter()
+                    .find(|trap| {
+                        trap.condition
+                            .iter()
+                            .any(|condition| condition.to_string().contains(marker))
+                    })
+                    .unwrap_or_else(|| panic!("missing {marker} trap for {expected_type:?}"));
+                assert_eq!(trap.code, "E0800");
+            }
+        }
     }
 
     #[test]

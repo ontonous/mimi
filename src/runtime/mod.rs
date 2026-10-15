@@ -55,6 +55,7 @@ pub use map_any_snapshot::{
     mimi_mir_ordinary_map_any_owner_v2_record_set_label,
     mimi_mir_ordinary_map_any_owner_v2_record_size, mimi_mir_ordinary_map_any_owner_v2_set_i32,
     mimi_mir_ordinary_map_any_owner_v2_set_label,
+    mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string,
     mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_clone,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_contains,
@@ -93,6 +94,8 @@ pub(crate) use map_any_snapshot::{
     ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test,
     ordinary_map_owned_any_v2_root_publish_attempts_for_test,
     ordinary_map_owned_any_v2_root_publish_checkpoint_for_test,
+    ordinary_map_owned_any_v2_string_copy_attempts_for_test,
+    ordinary_map_owned_any_v2_string_copy_checkpoint_for_test,
     ordinary_map_owned_any_v2_unpack_attempts_for_test,
     ordinary_map_owned_any_v2_unpack_checkpoint_for_test,
     ordinary_map_owned_any_v2_values_publish_attempts_for_test,
@@ -107,6 +110,7 @@ pub(crate) use map_any_snapshot::{
     ordinary_map_string_concat_attempts_for_test,
     with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_root_publish_failure_for_test,
+    with_ordinary_map_owned_any_v2_string_copy_failure_for_test,
     with_ordinary_map_owned_any_v2_unpack_failure_for_test,
     with_ordinary_map_owned_any_v2_values_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_test,
@@ -114,6 +118,10 @@ pub(crate) use map_any_snapshot::{
     with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test,
     with_ordinary_map_owned_get_allocation_failure_for_test,
     with_ordinary_map_string_concat_failure_for_test,
+};
+pub(crate) use map_any_snapshot::{
+    ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
+    ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
 };
 pub use mir_map_root::{
     mimi_mir_map_any_owner_v1_contains, mimi_mir_map_any_owner_v1_drop,
