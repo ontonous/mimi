@@ -16175,12 +16175,34 @@ fn evaluate_binary(
                     .ok_or_else(|| execution_error(function, "integer remainder overflow"))
             }
         }
-        // String concatenation is a pure canonical MIR value operation. The
-        // bytecode/native consumers expose the same `+` face through their
-        // ConcatStr/runtime glue, so computed String keys stay executable in
-        // the independent reference oracle as well.
+        // String concatenation is a canonical MIR value operation. The
+        // bytecode/native consumers expose the same fallible `+` face. Model
+        // capacity before exposing the completed value so every backend keeps
+        // the same allocation and publication boundaries.
         (ResolvedBinaryOp::Add, MirRuntimeValue::String(left), MirRuntimeValue::String(right)) => {
-            Ok(MirRuntimeValue::String(format!("{left}{right}")))
+            let total_len = left.len().checked_add(right.len()).ok_or_else(|| {
+                execution_error(function, "[E0800] String concatenation capacity")
+            })?;
+            let _allocation_len = total_len
+                .checked_add(1)
+                .filter(|length| *length <= isize::MAX as usize)
+                .filter(|_| i64::try_from(total_len).is_ok())
+                .ok_or_else(|| {
+                    execution_error(function, "[E0800] String concatenation capacity")
+                })?;
+            crate::runtime::ordinary_map_string_concat_checkpoint(0).map_err(|_| {
+                execution_error(function, "[E0800] String concatenation allocation failed")
+            })?;
+            let mut result = String::new();
+            result.try_reserve_exact(total_len).map_err(|_| {
+                execution_error(function, "[E0800] String concatenation allocation failed")
+            })?;
+            result.push_str(&left);
+            result.push_str(&right);
+            crate::runtime::ordinary_map_string_concat_checkpoint(1).map_err(|_| {
+                execution_error(function, "[E0800] String concatenation publication failed")
+            })?;
+            Ok(MirRuntimeValue::String(result))
         }
         (ResolvedBinaryOp::Add, Int(left), Int(right)) => left
             .checked_add(right)
@@ -25225,5 +25247,72 @@ func main() -> i64 { println(foreign(1 as i64)); 0 }
             crate::runtime::with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test,
             "Label text publication"
         );
+    }
+
+    #[test]
+    fn canonical_mir_string_concat_capacity_edges_match_reference_and_bytecode() {
+        let source = r#"
+            type Label { text: string }
+
+            func main() -> i32 {
+                let label = Label { text: "seed payload" }
+                let empty = map_new()
+                let seeded = map_set(empty, "seed", label)
+                println("before")
+                let key = "nul\0" + "雪"
+                let populated = map_set(seeded, key, 7)
+                println("after")
+                drop(empty)
+                drop(seeded)
+                drop(populated)
+                drop(label)
+                drop(key)
+                0
+            }
+        "#;
+        let (_, program) = direct_v2_program_with_main(source);
+        let owner = NodeId("function:main".into());
+
+        for (stage, expected_publication_attempts) in [(0, 0), (1, 1)] {
+            let (reference, output, allocation_attempts, publication_attempts) =
+                crate::runtime::with_ordinary_map_string_concat_failure_for_test(stage, || {
+                    let interpreter = MirReferenceInterpreter::new(&program);
+                    let execution = interpreter.execute_with_output(&owner, &[]);
+                    (
+                        execution,
+                        interpreter.captured_output(),
+                        crate::runtime::ordinary_map_string_concat_attempts_for_test(0),
+                        crate::runtime::ordinary_map_string_concat_attempts_for_test(1),
+                    )
+                });
+            assert!(reference
+                .expect_err("reference String concatenation capacity edge must trap")
+                .message
+                .contains("E0800"));
+            assert_eq!(output, "before\n", "a failed result is never visible");
+            assert_eq!(allocation_attempts, 1);
+            assert_eq!(publication_attempts, expected_publication_attempts);
+
+            let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+                .expect("compile String concatenation MIR");
+            let (bytecode_result, output, allocation_attempts, publication_attempts) =
+                crate::runtime::with_ordinary_map_string_concat_failure_for_test(stage, || {
+                    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                    let execution = vm.run_value_for_component().map(|_| ());
+                    (
+                        execution,
+                        vm.take_stdout(),
+                        crate::runtime::ordinary_map_string_concat_attempts_for_test(0),
+                        crate::runtime::ordinary_map_string_concat_attempts_for_test(1),
+                    )
+                });
+            assert!(bytecode_result
+                .expect_err("bytecode String concatenation capacity edge must trap")
+                .message()
+                .contains("E0800"));
+            assert_eq!(output, "before\n", "a failed result is never visible");
+            assert_eq!(allocation_attempts, 1);
+            assert_eq!(publication_attempts, expected_publication_attempts);
+        }
     }
 }

@@ -279,6 +279,30 @@ fn try_copy_ordinary_map_owned_get_string(value: &str, reserve_terminator: bool)
     Some(copy)
 }
 
+fn try_concatenate_canonical_strings(left: &str, right: &str) -> Result<Arc<String>, InterpError> {
+    let total_len = left
+        .len()
+        .checked_add(right.len())
+        .ok_or_else(|| InterpError::new("[E0800] String concatenation capacity"))?;
+    let _allocation_len = total_len
+        .checked_add(1)
+        .filter(|length| *length <= isize::MAX as usize)
+        .filter(|_| i64::try_from(total_len).is_ok())
+        .ok_or_else(|| InterpError::new("[E0800] String concatenation capacity"))?;
+    crate::runtime::ordinary_map_string_concat_checkpoint(0)
+        .map_err(|_| InterpError::new("[E0800] String concatenation allocation failed"))?;
+    let mut concatenated = String::new();
+    concatenated
+        .try_reserve_exact(total_len)
+        .map_err(|_| InterpError::new("[E0800] String concatenation allocation failed"))?;
+    concatenated.push_str(left);
+    concatenated.push_str(right);
+    let concatenated = Arc::new(concatenated);
+    crate::runtime::ordinary_map_string_concat_checkpoint(1)
+        .map_err(|_| InterpError::new("[E0800] String concatenation publication failed"))?;
+    Ok(concatenated)
+}
+
 fn clone_ordinary_map_owned_any_v2_entries(
     root: &BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value>,
 ) -> Result<BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value>, InterpError>
@@ -2640,7 +2664,7 @@ impl BytecodeVM {
                             })?)
                         }
                         (Value::String(x), Value::String(y)) => {
-                            Value::String(Arc::new(format!("{x}{y}")))
+                            Value::String(try_concatenate_canonical_strings(x, y)?)
                         }
                         _ => {
                             let af = value_to_f64(&a)?;
@@ -3401,9 +3425,23 @@ impl BytecodeVM {
                 // ── String ─────────────────────────────────────
                 Op::ConcatStr { rd, ra, rb } => {
                     self.ensure_binary_regs(rd, ra, rb, "concat-str")?;
-                    let frame = self.cur_frame_mut();
-                    let result = format!("{}{}", frame.regs[ra as usize], frame.regs[rb as usize]);
-                    frame.regs[rd as usize] = Value::String(Arc::new(result));
+                    let (left, right) = {
+                        let frame = self.cur_frame();
+                        (
+                            frame.regs[ra as usize].clone(),
+                            frame.regs[rb as usize].clone(),
+                        )
+                    };
+                    let concatenated = match (&left, &right) {
+                        (Value::String(left), Value::String(right)) => {
+                            try_concatenate_canonical_strings(left, right)?
+                        }
+                        _ => try_concatenate_canonical_strings(
+                            &left.to_string(),
+                            &right.to_string(),
+                        )?,
+                    };
+                    self.cur_frame_mut().regs[rd as usize] = Value::String(concatenated);
                 }
                 Op::StrAppend { ra, rb } => {
                     self.ensure_source_pair(ra, rb, "str-append")?;

@@ -599,7 +599,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         }
-        self.emit_abort_with_message("String concatenation allocation failed", subject)?;
+        self.emit_abort_with_message("[E0800] String concatenation allocation failed", subject)?;
         self.generator.builder.position_at_end(success);
 
         let length = self
@@ -608,6 +608,82 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_int_add(left_len, right_len, "mir_string_concat_length")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.emit_ordinary_map_domain_own_string(data, length, subject)?;
+
+        let checkpoint = self
+            .generator
+            .get_runtime_fn("mimi_mir_string_concat_checkpoint")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let publication_status = self
+            .generator
+            .builder
+            .build_call(
+                checkpoint,
+                &[BasicMetadataValueEnum::from(
+                    self.generator.context.i32_type().const_int(1, false),
+                )],
+                "mir_string_concat_publication_status",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| {
+                NativeMirError::new(subject, "String concatenation checkpoint returned void")
+            })?
+            .into_int_value();
+        let publication_failed = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                publication_status,
+                self.generator.context.i32_type().const_zero(),
+                "mir_string_concat_publication_failed",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let publication_failure = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_string_concat_publication_failure");
+        let publication_success = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_string_concat_publication_success");
+        self.generator
+            .builder
+            .build_conditional_branch(publication_failed, publication_failure, publication_success)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(publication_failure);
+        let free = self
+            .generator
+            .get_runtime_fn("mimi_string_free")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        for (pointer, name) in [
+            (data, "mir_string_concat_drop_result_on_publication_failure"),
+            (
+                left_data,
+                "mir_string_concat_drop_left_on_publication_failure",
+            ),
+        ] {
+            self.generator
+                .builder
+                .build_call(free, &[BasicMetadataValueEnum::from(pointer)], name)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        }
+        if left != right {
+            self.generator
+                .builder
+                .build_call(
+                    free,
+                    &[BasicMetadataValueEnum::from(right_data)],
+                    "mir_string_concat_drop_right_on_publication_failure",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        }
+        self.emit_abort_with_message(
+            "[E0800] String concatenation result publication failed",
+            subject,
+        )?;
+        self.generator.builder.position_at_end(publication_success);
+
         let string_llvm_type = self.generator.context.struct_type(
             &[
                 self.generator

@@ -40,6 +40,7 @@ pub use list_string::{
     mimi_str_split_ll, mimi_str_unbox, LIST_STRING_ABI_CSTR, LIST_STRING_ABI_FAT,
     LIST_STRING_ABI_VERSION, MIMI_ERR_OLD_STRING_ABI, MIMI_STR_MAGIC,
 };
+pub(crate) use map_any_snapshot::ordinary_map_string_concat_checkpoint;
 pub use map_any_snapshot::{
     mimi_any_payload_v2_clone, mimi_any_payload_v2_drop, mimi_any_payload_v2_new,
     mimi_any_payload_v2_unpack, mimi_mir_managed_any_i32_string_v1_clone,
@@ -103,6 +104,7 @@ pub(crate) use map_any_snapshot::{
     ordinary_map_owned_get_allocation_attempts_for_test,
     ordinary_map_owned_get_allocation_checkpoint_for_test,
     ordinary_map_owned_get_allocation_failure_triggered_for_test,
+    ordinary_map_string_concat_attempts_for_test,
     with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_root_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_unpack_failure_for_test,
@@ -111,6 +113,7 @@ pub(crate) use map_any_snapshot::{
     with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test,
     with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test,
     with_ordinary_map_owned_get_allocation_failure_for_test,
+    with_ordinary_map_string_concat_failure_for_test,
 };
 pub use mir_map_root::{
     mimi_mir_map_any_owner_v1_contains, mimi_mir_map_any_owner_v1_drop,
@@ -5079,11 +5082,28 @@ pub unsafe extern "C" fn mimi_str_concat_ll(
     b: *const std::ffi::c_char,
     b_len: i64,
 ) -> *mut std::ffi::c_char {
-    if a_len < 0 || b_len < 0 {
-        return alloc_c_string("");
+    let Ok(a_len) = usize::try_from(a_len) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(b_len) = usize::try_from(b_len) else {
+        return std::ptr::null_mut();
+    };
+    let Some(total_len) = a_len.checked_add(b_len) else {
+        return std::ptr::null_mut();
+    };
+    let Some(allocation_len) = total_len.checked_add(1) else {
+        return std::ptr::null_mut();
+    };
+    if i64::try_from(total_len).is_err()
+        || allocation_len > isize::MAX as usize - std::mem::size_of::<usize>()
+        || (a_len > 0 && a.is_null())
+        || (b_len > 0 && b.is_null())
+    {
+        return std::ptr::null_mut();
     }
-    let a_len = a_len as usize;
-    let b_len = b_len as usize;
+    if ordinary_map_string_concat_checkpoint(0).is_err() {
+        return std::ptr::null_mut();
+    }
     let a_bytes = if a.is_null() || a_len == 0 {
         &[][..]
     } else {
@@ -5096,10 +5116,39 @@ pub unsafe extern "C" fn mimi_str_concat_ll(
         // SAFETY: caller guarantees `b` is valid for `b_len` bytes.
         unsafe { std::slice::from_raw_parts(b as *const u8, b_len) }
     };
-    let mut result = Vec::with_capacity(a_len + b_len);
-    result.extend_from_slice(a_bytes);
-    result.extend_from_slice(b_bytes);
-    alloc_c_string_from_bytes(&result)
+    let result = mimi_alloc(allocation_len) as *mut u8;
+    if result.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `result` points to `allocation_len` writable bytes, and the
+    // slices are valid for their explicit lengths. Their destinations do not
+    // overlap the input allocations, which remain owned by the caller.
+    unsafe {
+        if !a_bytes.is_empty() {
+            std::ptr::copy_nonoverlapping(a_bytes.as_ptr(), result, a_bytes.len());
+        }
+        if !b_bytes.is_empty() {
+            std::ptr::copy_nonoverlapping(
+                b_bytes.as_ptr(),
+                result.add(a_bytes.len()),
+                b_bytes.len(),
+            );
+        }
+        *result.add(total_len) = 0;
+    }
+    result.cast()
+}
+
+/// Canonical MIR String concatenation publication checkpoint. The native
+/// emitter calls this after the owned result has been registered and before
+/// making the new String visible to later MIR instructions.
+#[no_mangle]
+pub extern "C" fn mimi_mir_string_concat_checkpoint(stage: i32) -> i32 {
+    if ordinary_map_string_concat_checkpoint(stage).is_ok() {
+        0
+    } else {
+        3 // Capacity / E0800
+    }
 }
 
 /// Deep-eval 2026-08-09 (test_result_match parity): the current OS error as
@@ -27843,5 +27892,51 @@ mod runtime_ptr_readable_tests {
                 "push_grow must reject negative list length"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod string_concat_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn length_aware_concat_preserves_embedded_nul_and_checks_capacity() {
+        let left = b"nul\0";
+        let right = "雪".as_bytes();
+        let result = unsafe {
+            mimi_str_concat_ll(
+                left.as_ptr().cast(),
+                left.len() as i64,
+                right.as_ptr().cast(),
+                right.len() as i64,
+            )
+        };
+        assert!(!result.is_null());
+        let bytes = unsafe { std::slice::from_raw_parts(result.cast::<u8>(), 8) };
+        assert_eq!(bytes, "nul\0雪\0".as_bytes());
+        unsafe { mimi_string_free(result) };
+
+        assert!(unsafe { mimi_str_concat_ll(std::ptr::null(), -1, std::ptr::null(), 0) }.is_null());
+        assert!(
+            unsafe { mimi_str_concat_ll(std::ptr::null(), i64::MAX, std::ptr::null(), 1) }
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn allocation_checkpoint_returns_null_before_publishing_a_buffer() {
+        let (result, allocation_attempts, publication_attempts) =
+            with_ordinary_map_string_concat_failure_for_test(0, || {
+                let result =
+                    unsafe { mimi_str_concat_ll(std::ptr::null(), 0, std::ptr::null(), 0) };
+                (
+                    result,
+                    ordinary_map_string_concat_attempts_for_test(0),
+                    ordinary_map_string_concat_attempts_for_test(1),
+                )
+            });
+        assert!(result.is_null());
+        assert_eq!(allocation_attempts, 1);
+        assert_eq!(publication_attempts, 0);
     }
 }

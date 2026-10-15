@@ -4814,7 +4814,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
     fn run_generated_callback_child(
         test: &str,
@@ -5081,6 +5081,193 @@ mod tests {
         // intended path exits from the genuine runtime error handler above.
         let value = unsafe { native.call() };
         panic!("the generated Map clone unexpectedly survived its injected OOM: {value}");
+    }
+
+    static STRING_CONCAT_EXPECTED_STAGE: AtomicI32 = AtomicI32::new(-1);
+
+    unsafe extern "C" fn string_concat_capacity_error_handler(message: *const libc::c_char) {
+        let stage = STRING_CONCAT_EXPECTED_STAGE.load(Ordering::SeqCst);
+        let allocation_attempts = crate::runtime::ordinary_map_string_concat_attempts_for_test(0);
+        let publication_attempts = crate::runtime::ordinary_map_string_concat_attempts_for_test(1);
+        let expected_publication_attempts = usize::from(stage == 1);
+        let injected =
+            allocation_attempts == 1 && publication_attempts == expected_publication_attempts;
+        let counts = crate::runtime::ordinary_map_domain_live_counts_for_test();
+        let settled = counts
+            .as_ref()
+            .is_ok_and(|counts| *counts == crate::runtime::OrdinaryMapDomainLiveCounts::default());
+        let typed_diagnostic = !message.is_null()
+            // SAFETY: mimi_runtime_abort keeps its owned diagnostic readable
+            // throughout the synchronous host error callback.
+            && unsafe { std::ffi::CStr::from_ptr(message) }
+                .to_bytes()
+                .windows(b"[E0800]".len())
+                .any(|window| window == b"[E0800]");
+        eprintln!(
+            "generated-v2-string-concat stage={stage} injected={injected} settled={settled} typed={typed_diagnostic} allocation_attempts={allocation_attempts} publication_attempts={publication_attempts} counts={counts:?}"
+        );
+        let code = if !injected {
+            96
+        } else if !settled {
+            97
+        } else if !typed_diagnostic {
+            98
+        } else {
+            0
+        };
+        // SAFETY: this dedicated child must capture post-cleanup state without
+        // unwinding through the generated runtime callback ABI.
+        unsafe { libc::_exit(code) }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_string_concat_native_failures_settle_all_owners() {
+        for stage in [0, 1] {
+            let mode = stage.to_string();
+            let output = run_generated_callback_child(
+                "codegen::mir::ordinary_map_owned_any_v2::tests::ordinary_map_owned_any_v2_string_concat_native_failure_child",
+                "MIMI_V2_STRING_CONCAT_NATIVE_CHILD",
+                &mode,
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stdout.contains("running 1 test"), "{stdout}\n{stderr}");
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "native String concat stage {stage} must settle all live roots before abort:\n{stdout}\n{stderr}"
+            );
+            assert!(
+                stderr.contains(&format!(
+                    "generated-v2-string-concat stage={stage} injected=true settled=true typed=true"
+                )),
+                "native failure did not observe the intended stage and cleanup: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated generated String concatenation failure subprocess helper"]
+    fn ordinary_map_owned_any_v2_string_concat_native_failure_child() {
+        let Ok(mode) = std::env::var("MIMI_V2_STRING_CONCAT_NATIVE_CHILD") else {
+            return;
+        };
+        let stage = mode.parse::<i32>().expect("stage mode");
+        assert!(matches!(stage, 0 | 1));
+        assert_eq!(
+            crate::runtime::ordinary_map_domain_live_counts_for_test(),
+            Ok(crate::runtime::OrdinaryMapDomainLiveCounts::default())
+        );
+        let source = r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let label = Label { text: "seed payload" }
+                let empty = map_new()
+                let seeded = map_set(empty, "seed", label)
+                let key = "nul\0" + "雪"
+                let populated = map_set(seeded, key, 7)
+                drop(empty)
+                drop(seeded)
+                drop(populated)
+                drop(label)
+                drop(key)
+                0
+            }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "generated_v2_string_concat_failure");
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("emit canonical native String concatenation");
+        generator.module.verify().expect("valid generated LLVM");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("mimi_str_concat_ll"));
+        assert!(native_ir.contains("mimi_mir_string_concat_checkpoint"));
+        let engine = generator
+            .module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("generated String concatenation execution engine");
+        for (symbol, address) in [
+            (
+                "mimi_ordinary_map_owned_any_v2_new",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_new as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_set",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_set as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_drop",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_drop as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_new",
+                crate::runtime::mimi_any_payload_v2_new as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_drop",
+                crate::runtime::mimi_any_payload_v2_drop as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_domain_own_string",
+                crate::runtime::mimi_mir_ordinary_map_domain_own_string as *const () as usize,
+            ),
+            (
+                "mimi_str_concat_ll",
+                crate::runtime::mimi_str_concat_ll as *const () as usize,
+            ),
+            (
+                "mimi_mir_string_concat_checkpoint",
+                crate::runtime::mimi_mir_string_concat_checkpoint as *const () as usize,
+            ),
+            (
+                "mimi_str_clone",
+                crate::runtime::mimi_str_clone as *const () as usize,
+            ),
+            (
+                "mimi_string_free",
+                crate::runtime::mimi_string_free as *const () as usize,
+            ),
+            (
+                "mimi_runtime_abort",
+                crate::runtime::mimi_runtime_abort as *const () as usize,
+            ),
+        ] {
+            let declaration = generator
+                .module
+                .get_function(symbol)
+                .unwrap_or_else(|| panic!("missing native import {symbol}"));
+            assert_eq!(
+                declaration.count_basic_blocks(),
+                0,
+                "{symbol} remains an import"
+            );
+            engine.add_global_mapping(&declaration, address);
+        }
+        let main = generator.module.get_function("main").expect("native main");
+        assert_eq!(main.count_params(), 0);
+        assert_eq!(
+            main.get_type().get_return_type(),
+            Some(context.i32_type().into())
+        );
+        STRING_CONCAT_EXPECTED_STAGE.store(stage, Ordering::SeqCst);
+        crate::runtime::mimi_runtime_set_error_handler(Some(string_concat_capacity_error_handler));
+        // SAFETY: the checked signature is a zero-argument i32 main and all
+        // external runtime symbols used by this generated program are mapped.
+        let native = unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("main") }
+            .expect("native main entry");
+        let value = crate::runtime::with_ordinary_map_string_concat_failure_for_test(stage, || {
+            // SAFETY: call the just-validated native entry; the expected error
+            // handler terminates this isolated child after cleanup assertions.
+            unsafe { native.call() }
+        });
+        panic!("native String concatenation survived failure stage {stage}: {value}");
     }
 
     static DIRECT_CALLBACK_MALLOC_CALLS: AtomicUsize = AtomicUsize::new(0);

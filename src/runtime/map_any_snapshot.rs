@@ -891,6 +891,71 @@ thread_local! {
     static OWNED_ANY_V2_VALUES_UNPACK_OWNER_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL: Cell<bool> = const { Cell::new(false) };
     static OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL: Cell<bool> = const { Cell::new(false) };
+    static STRING_CONCAT_FAIL_STAGE: Cell<Option<i32>> = const { Cell::new(None) };
+    static STRING_CONCAT_ALLOCATION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    static STRING_CONCAT_PUBLICATION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Shared logical fault points for canonical MIR String concatenation. Stage
+/// 0 is allocation; stage 1 is publication after the complete result exists.
+#[cfg(test)]
+pub(crate) fn ordinary_map_string_concat_checkpoint_for_test(stage: i32) -> Result<(), ()> {
+    let attempts = match stage {
+        0 => &STRING_CONCAT_ALLOCATION_ATTEMPTS,
+        1 => &STRING_CONCAT_PUBLICATION_ATTEMPTS,
+        _ => return Ok(()),
+    };
+    attempts.with(|count| count.set(count.get().saturating_add(1)));
+    if STRING_CONCAT_FAIL_STAGE.with(Cell::get) == Some(stage) {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_string_concat_checkpoint(stage: i32) -> Result<(), ()> {
+    ordinary_map_string_concat_checkpoint_for_test(stage)
+}
+
+#[cfg(not(test))]
+pub(crate) fn ordinary_map_string_concat_checkpoint(_stage: i32) -> Result<(), ()> {
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_string_concat_attempts_for_test(stage: i32) -> usize {
+    match stage {
+        0 => STRING_CONCAT_ALLOCATION_ATTEMPTS.with(Cell::get),
+        1 => STRING_CONCAT_PUBLICATION_ATTEMPTS.with(Cell::get),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_string_concat_failure_for_test<T>(
+    stage: i32,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore {
+        stage: Option<i32>,
+        allocation_attempts: usize,
+        publication_attempts: usize,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STRING_CONCAT_FAIL_STAGE.with(|value| value.set(self.stage));
+            STRING_CONCAT_ALLOCATION_ATTEMPTS.with(|value| value.set(self.allocation_attempts));
+            STRING_CONCAT_PUBLICATION_ATTEMPTS.with(|value| value.set(self.publication_attempts));
+        }
+    }
+
+    let _restore = Restore {
+        stage: STRING_CONCAT_FAIL_STAGE.with(|value| value.replace(Some(stage))),
+        allocation_attempts: STRING_CONCAT_ALLOCATION_ATTEMPTS.with(|value| value.replace(0)),
+        publication_attempts: STRING_CONCAT_PUBLICATION_ATTEMPTS.with(|value| value.replace(0)),
+    };
+    operation()
 }
 
 /// Test-only allocation oracle shared by the independent owned-Get consumers.

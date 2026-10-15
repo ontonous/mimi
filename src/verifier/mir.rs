@@ -13174,6 +13174,7 @@ fn eval_instruction(
                 let right_text = state.known_strings.get(right).cloned().ok_or_else(|| {
                     format!("{instruction_id}: String concatenation right value is not modeled")
                 })?;
+                add_string_concat_capacity_failure(state, instruction_id)?;
                 state.known_strings.insert(
                     result.clone(),
                     SymbolicString::Concat(Box::new(left_text), Box::new(right_text)),
@@ -19543,6 +19544,20 @@ fn add_ordinary_map_owned_any_v2_values_unpack_string_publish_capacity_failure(
     add_definedness(state, published, "E0800")
 }
 
+fn add_string_concat_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    // Native String `+` can fail while allocating or publishing the fresh
+    // result. A fresh outcome per dynamic visit keeps loop executions
+    // independent, and the value is added only on the success path.
+    let published = Bool::fresh_const(&format!(
+        "mir.string_concat.capacity.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, published, "E0800")
+}
+
 fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
@@ -23913,7 +23928,7 @@ mod managed_any_verifier_tests {
     }
 
     #[test]
-    fn ordinary_map_owned_any_v2_proves_computed_nul_unicode_keys_on_primitive_profile() {
+    fn ordinary_map_owned_any_v2_computed_nul_unicode_key_reports_concat_capacity_edge() {
         let program = canonical(
             r#"
             func computed_key_round_trip() -> i32 {
@@ -23946,7 +23961,20 @@ mod managed_any_verifier_tests {
         "#,
         );
 
-        assert_contract(&program, "computed_key_round_trip", VerifStatus::Proven);
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("computed String key operations remain capability-valid");
+        let results = verify_program(&program, "computed-key-concat-capacity-boundary".into())
+            .expect("String concatenation capacity remains an owner-scoped result");
+        let result = results
+            .iter()
+            .find(|result| result.func_name.ends_with("computed_key_round_trip"))
+            .expect("computed-key contract result");
+        assert_eq!(result.status, VerifStatus::Disproven, "{}", result.message);
+        assert!(
+            result.message.contains("can reach trap 'E0800'"),
+            "the concatenation allocation edge must remain visible: {}",
+            result.message
+        );
     }
 
     #[test]
@@ -26196,5 +26224,134 @@ mod managed_any_println_verifier_tests {
             assert!(state.known_strings.is_empty());
             assert!(state.ffi_checks.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod string_concat_capacity_verifier_tests {
+    use super::*;
+    use crate::core::mir::reference::MirProgram;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn canonical(source: &str) -> MirProgram {
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex String concat program");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse String concat program");
+        let checked = crate::core::check_program(&file).expect("check String concat program");
+        MirProgram::from_checked_program(&checked).expect("canonical String concat MIR")
+    }
+
+    #[test]
+    fn string_concat_capacity_is_an_explicit_trap_before_result_visibility() {
+        if !crate::verifier::is_z3_available() {
+            return;
+        }
+        let program = canonical(
+            r#"
+                func concat_values(left: string, right: string) -> i32 {
+                    let joined = left + right
+                    drop(joined)
+                    0
+                }
+                func main() -> i32 { 0 }
+            "#,
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:concat_values".into()))
+            .expect("String concatenation MIR owner");
+        let instruction = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .find(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::Binary {
+                        op: crate::core::ir::ResolvedBinaryOp::Add,
+                        ..
+                    }
+                )
+            })
+            .expect("canonical String Add");
+        let MirInstructionKind::Binary {
+            result,
+            left,
+            right,
+            ..
+        } = &instruction.kind
+        else {
+            unreachable!();
+        };
+        let left_text = SymbolicString::Literal("left".into());
+        let right_text = SymbolicString::Literal("right".into());
+        let mut state = SymbolicState {
+            values: BTreeMap::from([
+                (left.clone(), SymbolicValue::String(left_text.clone())),
+                (right.clone(), SymbolicValue::String(right_text.clone())),
+            ]),
+            constraints: Vec::new(),
+            callable_entry_values: None,
+            callable_entry_constraints: None,
+            traps: Vec::new(),
+            list_shapes: BTreeMap::new(),
+            known_ints: BTreeMap::new(),
+            known_strings: BTreeMap::from([(left.clone(), left_text), (right.clone(), right_text)]),
+            ffi_checks: Vec::new(),
+            normal_path_terminated: false,
+        };
+        eval_instruction(
+            function,
+            &program,
+            program.type_catalog(),
+            &mut state,
+            &instruction.id,
+            &instruction.kind,
+        )
+        .expect("String Add is modeled with an allocation boundary");
+        assert!(state.values.contains_key(result));
+        assert!(state.known_strings.contains_key(result));
+        let [trap] = state.traps.as_slice() else {
+            panic!("String Add must add one capacity trap edge");
+        };
+        assert_eq!(trap.code, "E0800");
+        assert!(trap
+            .condition
+            .iter()
+            .any(|condition| { condition.to_string().contains("mir.string_concat.capacity") }));
+
+        let program = canonical(
+            r#"
+                func checked(left: string, right: string) -> i32 {
+                    requires: true
+                    ensures: result == 0
+                    let joined = left + right
+                    drop(joined)
+                    0
+                }
+                func independent() -> i32 {
+                    ensures: result == 0
+                    0
+                }
+                func main() -> i32 { 0 }
+            "#,
+        );
+        let results = verify_program(&program, "string-concat-capacity-boundary".into())
+            .expect("verify String concatenation contracts");
+        let concat = results
+            .iter()
+            .find(|result| result.func_name.ends_with("checked"))
+            .expect("String concatenation contract result");
+        assert_eq!(concat.status, crate::verifier::VerifStatus::Disproven);
+        assert!(concat.message.contains("E0800"), "{}", concat.message);
+        let independent = results
+            .iter()
+            .find(|result| result.func_name.ends_with("independent"))
+            .expect("independent scalar contract result");
+        assert_eq!(independent.status, crate::verifier::VerifStatus::Proven);
     }
 }

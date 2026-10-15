@@ -330,6 +330,41 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         let i64 = self.generator.context.i64_type();
         let i32 = self.generator.context.i32_type();
         let void = self.generator.context.void_type();
+        let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let has_canonical_string_concat = self.program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    let crate::core::mir::MirInstructionKind::Binary {
+                        result,
+                        op: crate::core::ir::ResolvedBinaryOp::Add,
+                        left,
+                        right,
+                    } = &instruction.kind
+                    else {
+                        return false;
+                    };
+                    [result, left, right].iter().all(|value| {
+                        function
+                            .values
+                            .get(*value)
+                            .is_some_and(|value| value.ty == string_ty)
+                    })
+                })
+            })
+        });
+        if has_canonical_string_concat
+            && self
+                .generator
+                .module
+                .get_function("mimi_mir_string_concat_checkpoint")
+                .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_string_concat_checkpoint",
+                i32.fn_type(&[BasicMetadataTypeEnum::IntType(i32)], false),
+                Some(Linkage::External),
+            );
+        }
         if self
             .generator
             .module
@@ -2776,6 +2811,7 @@ func main() -> i32 {
             "mimi_ordinary_map_owned_any_v2_contains",
             "mimi_ordinary_map_owned_any_v2_get",
             "mimi_str_concat_ll",
+            "mimi_mir_string_concat_checkpoint",
             "mimi_mir_ordinary_map_domain_own_string",
         ] {
             assert!(native_ir.contains(runtime), "native IR omits {runtime}");
