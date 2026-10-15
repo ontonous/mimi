@@ -356,38 +356,6 @@ fn flatten_items_prefixed(items: &[Item], prefix: &str, queue: &mut Vec<StepKind
     }
 }
 
-/// Verify FFI call sites using the Flow wrapper.
-/// One-shot operation (no per-func stepping).
-pub fn flow_verify_ffi_call_sites(file: &File) -> Result<Vec<VerificationResult>, String> {
-    let mut session = SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)?;
-    let mut ctx = VerifierCtx::default();
-    Ok(ctx.verify_ffi_call_sites(&mut session, file))
-}
-
-/// Verify FFI call sites, falling back to mock if Z3 is unavailable.
-pub fn flow_verify_ffi_call_sites_or_mock(file: &File) -> Result<Vec<VerificationResult>, String> {
-    match SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS) {
-        Ok(mut session) => {
-            let mut ctx = VerifierCtx::default();
-            Ok(ctx.verify_ffi_call_sites(&mut session, file))
-        }
-        Err(_) => Ok(helpers::mock_verify_file(file)),
-    }
-}
-
-pub(crate) fn flow_verify_ffi_call_sites_with_externs_or_mock(
-    file: &File,
-    externs: &std::collections::HashMap<String, crate::ast::ExternFunc>,
-) -> Result<Vec<VerificationResult>, String> {
-    match SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS) {
-        Ok(mut session) => {
-            let mut ctx = VerifierCtx::default();
-            Ok(ctx.verify_ffi_call_sites_with_externs(&mut session, file, externs))
-        }
-        Err(_) => Ok(helpers::mock_verify_file(file)),
-    }
-}
-
 /// Entry for external callers that already have a file (e.g. build pipeline).
 /// Falls back to mock verification if Z3 is unavailable.
 ///

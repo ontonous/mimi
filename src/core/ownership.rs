@@ -239,6 +239,20 @@ pub struct ResourceAnalysis {
     /// consumer may rely on the flat per-operation receipt.
     pub(crate) ordinary_map_owned_get_i32_string_v1_cfg_receipt:
         Option<OrdinaryMapOwnedGetI32StringV1CfgReceipt>,
+    /// Independent Checker receipt for the ordinary Map/Any owner-v2 slice.
+    /// This profile admits concrete nominal record payloads in addition to
+    /// the primitive i32 payload.  It is deliberately separate from the
+    /// older i32/String lifecycle so a legacy receipt cannot authorize a v2
+    /// Map root.
+    pub(crate) ordinary_map_owned_any_v2_actions: Vec<OrdinaryMapOwnedAnyV2Action>,
+    /// Every Map/Any operation attempt seen by the v2 source scan, including
+    /// unsupported keys/to_list/map literals and temporary roots. A complete
+    /// action list without a matching attempt census is not an admissible
+    /// receipt.
+    pub(crate) ordinary_map_owned_any_v2_operation_attempts: BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+    /// Versioned source receipt for the v2 profile.  The MIR route may bind
+    /// its own graph digest to this snapshot without re-reading surface AST.
+    pub(crate) ordinary_map_owned_any_v2_cfg_receipt: Option<OrdinaryMapOwnedAnyV2CfgReceipt>,
     /// Checker-owned source-CFG snapshot shared by ownership-sensitive MIR
     /// validators. Unlike operation-specific Map receipts, this only commits
     /// the exact reachable source blocks, points, terminators, and edges.
@@ -779,6 +793,453 @@ pub(crate) struct OrdinaryMapOwnerLifecycleAttempt {
     /// Bound result local for a direct Map root-producing call, when present.
     /// It ties New/Set/Remove receipts to the exact destination root.
     pub(crate) result_local: Option<ResolvedLocalId>,
+}
+
+/// Schema/profile version for the first ordinary Map/Any owner-v2 slice.
+/// Unlike the older i32/String profile, this profile admits one concrete
+/// nominal record payload (for example `Label { text: string }`) and records
+/// the payload as a persistent clone on `map_set`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2ProfileVersion {
+    V2,
+}
+
+impl OrdinaryMapOwnedAnyV2ProfileVersion {
+    pub(crate) const fn canonical_text(self) -> &'static str {
+        match self {
+            Self::V2 => "ordinary-map-owned-any-v2",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2ActionKind {
+    New,
+    /// Create an independently owned Map root by cloning a live direct local
+    /// root. The source remains live and the action keeps its exact type/root
+    /// edge so payload-selection lineage can cross the clone.
+    Clone,
+    Set,
+    Remove,
+    Size,
+    HasKey,
+    IsEmpty,
+    /// Borrow a live Map root and produce the exact `(bool, DynamicAny)`
+    /// result for one key. The result has its own owner/settlement receipt;
+    /// this action only proves the source Map and key edge.
+    GetAny,
+    /// Borrow a live Map root and produce the exact `List<DynamicAny>`
+    /// snapshot. The Map root remains live and the result is settled
+    /// independently from the root lifecycle.
+    Values,
+    Drop,
+}
+
+impl OrdinaryMapOwnedAnyV2ActionKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Clone => "clone",
+            Self::Set => "set",
+            Self::Remove => "remove",
+            Self::Size => "size",
+            Self::HasKey => "has_key",
+            Self::IsEmpty => "is_empty",
+            Self::GetAny => "get_any",
+            Self::Values => "values",
+            Self::Drop => "drop",
+        }
+    }
+}
+
+/// One exact source operation admitted by the v2 checker receipt. `source`
+/// and `source_local` retain the persistent root chain (`empty -> one -> two`
+/// in the record fixture), including an independent Clone edge.
+/// `payload_clone` is true for every Set: the
+/// persistent update copies the payload and therefore never consumes a user
+/// binding such as `label`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedAnyV2Action {
+    pub(crate) profile_version: OrdinaryMapOwnedAnyV2ProfileVersion,
+    pub(crate) kind: OrdinaryMapOwnedAnyV2ActionKind,
+    pub(crate) point: NodeId,
+    pub(crate) local: ResolvedLocalId,
+    pub(crate) root: ResourceId,
+    pub(crate) key: Option<NodeId>,
+    pub(crate) key_type: Option<ResolvedTypeId>,
+    pub(crate) key_local: Option<ResolvedLocalId>,
+    /// Checker classification of the exact String key expression. A local
+    /// key is borrowed for the operation; literals and computed expressions
+    /// are owned temporaries whose MIR lifetime must be settled at this use.
+    pub(crate) key_provenance: Option<OrdinaryMapOwnedAnyV2KeyProvenance>,
+    pub(crate) value: Option<NodeId>,
+    pub(crate) value_type: Option<ResolvedTypeId>,
+    pub(crate) payload_clone: bool,
+    pub(crate) source_local: Option<ResolvedLocalId>,
+    pub(crate) source: Option<ResourceId>,
+    /// Exact source operand node and type for Clone/GetAny/Values actions.
+    /// For Clone, this is the source expression and its resolved Map-root
+    /// type; `local`/`root` identify the destination obligation while
+    /// `source_local`/`source` identify the still-live source obligation.
+    /// For GetAny/Values, `local` and `root` identify the observed root.
+    pub(crate) source_node: Option<NodeId>,
+    pub(crate) source_type: Option<ResolvedTypeId>,
+    /// Exact result type and direct binding for GetAny/Values. These fields
+    /// remain empty on root lifecycle actions, including Clone.
+    pub(crate) result_type: Option<ResolvedTypeId>,
+    pub(crate) result_local: Option<ResolvedLocalId>,
+}
+
+/// Source-certified origin class for an ordinary Map/Any V2 String key.
+/// The action's `key` NodeId and `key_type` remain the exact expression and
+/// type identities; this small tag tells consumers how to treat its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2KeyProvenance {
+    DirectLocal,
+    StringLiteral,
+    ComputedString,
+}
+
+/// The attempt vocabulary is intentionally wider than the admitted v2
+/// actions. Unsupported operations remain in this set and poison the receipt
+/// instead of disappearing behind a valid-looking subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2AttemptKind {
+    New,
+    Clone,
+    Set,
+    Remove,
+    Size,
+    HasKey,
+    Drop,
+    /// `is_empty` is a staged API in the OPEN_CONTRACT, but this narrow
+    /// owner-v2 slice has no action/ABI receipt for it yet.  Keep the source
+    /// attempt visible so admission fails closed instead of treating the call
+    /// as an unrelated scalar builtin (or silently routing to legacy).
+    IsEmpty,
+    GetAny,
+    Keys,
+    Values,
+    /// The tuple-valued `to_list` API is deliberately distinct from the
+    /// owned `values` snapshot admitted by this slice.
+    ToList,
+    FromList,
+    MapLiteral,
+    ScopeDrop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct OrdinaryMapOwnedAnyV2Attempt {
+    pub(crate) kind: OrdinaryMapOwnedAnyV2AttemptKind,
+    pub(crate) point: NodeId,
+    pub(crate) arguments: Vec<NodeId>,
+    pub(crate) receiver_local: Option<ResolvedLocalId>,
+    pub(crate) result_local: Option<ResolvedLocalId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedAnyV2CfgReceipt {
+    pub(crate) profile_version: OrdinaryMapOwnedAnyV2ProfileVersion,
+    pub(crate) owner: NodeId,
+    pub(crate) actions: Vec<OrdinaryMapOwnedAnyV2Action>,
+    pub(crate) attempts: BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+    /// Exact source-level settlement for each owned GetAny/Values result.
+    /// This is disjoint from the Map-root actions, so a synthetic scope drop
+    /// cannot discharge an aggregate result owner.
+    pub(crate) result_receipts: Vec<OrdinaryMapOwnedAnyV2ResultReceipt>,
+    /// Exact source evidence for the one supported DynamicAny unpack shape:
+    /// the field-1 projection of a directly-bound GetAny tuple, unpacked by
+    /// a checked conversion while the original tuple remains explicitly
+    /// settled as a whole.
+    pub(crate) unpack_receipts: Vec<OrdinaryMapOwnedAnyV2UnpackReceipt>,
+    /// Exact source evidence for direct indexed casts from a directly-bound
+    /// Values snapshot. This remains separate from GetAny's tuple receipt:
+    /// each indexed cast observes the List<DynamicAny>, while the snapshot
+    /// itself is settled once by its exact explicit Drop.
+    pub(crate) values_unpack_receipts: Vec<OrdinaryMapOwnedAnyV2ValuesUnpackReceipt>,
+    /// Compiler-owned root identities for the one admitted temporary shape:
+    /// `map_get(map_new(), string_key)`. The root is settled by a dedicated
+    /// Drop immediately after GetAny, never by scope cleanup.
+    pub(crate) temporary_root_receipts: Vec<OrdinaryMapOwnedAnyV2TemporaryRootReceipt>,
+    /// A V2-owned source-CFG and live-owner proof for one restricted,
+    /// acyclic two-arm diamond. It is intentionally independent of the V1
+    /// Map receipt: every live root and GetAny/Values result owner is carried
+    /// on each edge and replayed by MIR validation.
+    pub(crate) flow: Option<OrdinaryMapOwnedAnyV2CfgFlowReceipt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2LiveOwner {
+    Root {
+        local: ResolvedLocalId,
+        resource: ResourceId,
+    },
+    Result {
+        operation: NodeId,
+        kind: OrdinaryMapOwnedAnyV2ActionKind,
+        binding: ResolvedLocalId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedAnyV2CfgBlock {
+    pub(crate) source: crate::core::cfg::CfgSource,
+    pub(crate) points: Vec<(NodeId, crate::core::cfg::CfgPointKind)>,
+    pub(crate) terminator: crate::core::cfg::Terminator,
+}
+
+/// Exact topology and owner-state receipt for the V2 single-diamond slice.
+/// The branch arms may contain read-only scalar Map observations, but root
+/// creation/update/drop and result creation/settlement are confined to the
+/// entry and common join respectively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedAnyV2CfgFlowReceipt {
+    pub(crate) entry: crate::core::cfg::BasicBlockId,
+    pub(crate) split: crate::core::cfg::BasicBlockId,
+    pub(crate) join: crate::core::cfg::BasicBlockId,
+    pub(crate) arm_edges: BTreeSet<crate::core::cfg::EdgeId>,
+    pub(crate) reachable_blocks:
+        BTreeMap<crate::core::cfg::BasicBlockId, OrdinaryMapOwnedAnyV2CfgBlock>,
+    pub(crate) reachable_edges: BTreeMap<crate::core::cfg::EdgeId, crate::core::cfg::CfgEdge>,
+    pub(crate) live_owners_in:
+        BTreeMap<crate::core::cfg::BasicBlockId, BTreeSet<OrdinaryMapOwnedAnyV2LiveOwner>>,
+    pub(crate) live_owners_out:
+        BTreeMap<crate::core::cfg::BasicBlockId, BTreeSet<OrdinaryMapOwnedAnyV2LiveOwner>>,
+    pub(crate) live_owners_on_edge:
+        BTreeMap<crate::core::cfg::EdgeId, BTreeSet<OrdinaryMapOwnedAnyV2LiveOwner>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2RootSettlementKind {
+    ImmediateGetAnyDrop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct OrdinaryMapOwnedAnyV2TemporaryRootReceipt {
+    pub(crate) profile_version: OrdinaryMapOwnedAnyV2ProfileVersion,
+    /// Synthetic Checker local used only as an opaque MIR identity. It is
+    /// deterministically derived from `construction` and is not source-visible.
+    pub(crate) local: ResolvedLocalId,
+    pub(crate) root: ResourceId,
+    pub(crate) construction: NodeId,
+    pub(crate) root_type: ResolvedTypeId,
+    pub(crate) get_any: NodeId,
+    pub(crate) source_node: NodeId,
+    pub(crate) source_type: ResolvedTypeId,
+    pub(crate) settlement: OrdinaryMapOwnedAnyV2RootSettlementKind,
+    pub(crate) settlement_point: NodeId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2ResultSettlementKind {
+    ExplicitDrop,
+    Transfer,
+    Escape,
+    ScopeDrop,
+    Unsettled,
+    DoubleSettlement,
+}
+
+impl OrdinaryMapOwnedAnyV2ResultSettlementKind {
+    pub(crate) const fn is_receipted(self) -> bool {
+        matches!(self, Self::ExplicitDrop)
+    }
+}
+
+/// V2-specific result ownership evidence for GetAny and Values. The source
+/// Map/key edge is duplicated here intentionally: consumers can validate the
+/// result owner without borrowing a V1 receipt or reconstructing the call.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct OrdinaryMapOwnedAnyV2ResultReceipt {
+    pub(crate) profile_version: OrdinaryMapOwnedAnyV2ProfileVersion,
+    pub(crate) operation: NodeId,
+    pub(crate) kind: OrdinaryMapOwnedAnyV2ActionKind,
+    pub(crate) source_local: ResolvedLocalId,
+    pub(crate) source: ResourceId,
+    pub(crate) source_node: NodeId,
+    pub(crate) source_type: ResolvedTypeId,
+    pub(crate) key: Option<NodeId>,
+    pub(crate) key_type: Option<ResolvedTypeId>,
+    pub(crate) key_local: Option<ResolvedLocalId>,
+    pub(crate) result: NodeId,
+    pub(crate) result_type: ResolvedTypeId,
+    pub(crate) binding: ResolvedLocalId,
+    /// CFG point for the direct result binding statement. Keeping this point
+    /// beside the operation and settlement lets MIR materialization verify
+    /// the complete source ownership sequence rather than trusting a local
+    /// name alone.
+    pub(crate) binding_point: NodeId,
+    pub(crate) settlement: OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    pub(crate) settlement_point: Option<NodeId>,
+}
+
+/// A Checker-owned source receipt for one precisely sourced GetAny payload
+/// unpack. The projection is observational: the pair binding remains the
+/// owner and must still be explicitly dropped after this conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedAnyV2UnpackReceipt {
+    pub(crate) profile_version: OrdinaryMapOwnedAnyV2ProfileVersion,
+    /// The exact `map_get` call which produced the pair.
+    pub(crate) operation: NodeId,
+    /// Statement and local for the direct `let pair = map_get(...)` binding.
+    pub(crate) pair_binding_point: NodeId,
+    pub(crate) pair_binding: ResolvedLocalId,
+    /// Statement and local receiving the exact checked cast.
+    pub(crate) unpack_binding_point: NodeId,
+    pub(crate) unpack_binding: ResolvedLocalId,
+    /// Node IDs for `pair.1` and `pair.1 as T`, respectively.
+    pub(crate) projection: NodeId,
+    pub(crate) cast: NodeId,
+    pub(crate) conversion_kind: crate::core::ir::CheckedConversionKind,
+    pub(crate) conversion_from: ResolvedTypeId,
+    pub(crate) conversion_to: ResolvedTypeId,
+    /// Explicit whole-pair settlement point, tied to the result receipt.
+    pub(crate) settlement: OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    pub(crate) settlement_point: NodeId,
+}
+
+/// Checker classification of the owner obligation created by one Values
+/// element unpack. Copy payloads need no owner settlement, Strings are
+/// settled by compiler-owned binding cleanup, and aggregate payloads require
+/// a source-visible whole-binding Drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind {
+    NoOwnedPayload,
+    CompilerOwnedStringDrop,
+    ExplicitWholeDrop,
+}
+
+/// A Checker-owned receipt for one directly-bound cast from a Values
+/// snapshot element. The projection and cast are observations; the exact
+/// Values snapshot remains the owner and must be explicitly dropped after
+/// every receipted unpack. `payload_selection` records the same-root action
+/// lineage through the Set which selected `conversion_to`. The result-owner
+/// fields separately describe how the unpacked value itself is settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedAnyV2ValuesUnpackReceipt {
+    pub(crate) profile_version: OrdinaryMapOwnedAnyV2ProfileVersion,
+    /// The exact `values(root)` action and its Map-root authority.
+    pub(crate) operation: NodeId,
+    pub(crate) source_local: ResolvedLocalId,
+    pub(crate) source: ResourceId,
+    pub(crate) source_node: NodeId,
+    pub(crate) source_type: ResolvedTypeId,
+    /// The direct `let snapshot = values(root)` binding and its exact type.
+    pub(crate) snapshot_binding_point: NodeId,
+    pub(crate) snapshot_binding: ResolvedLocalId,
+    pub(crate) snapshot_type: ResolvedTypeId,
+    /// The direct `let item = snapshot[index] as T` binding.
+    pub(crate) unpack_binding_point: NodeId,
+    pub(crate) unpack_binding: ResolvedLocalId,
+    /// Exact index projection, index expression, and resolved index type.
+    pub(crate) index_projection: NodeId,
+    pub(crate) index_expression: NodeId,
+    pub(crate) index_type: ResolvedTypeId,
+    /// Present only when the exact index expression is a direct local Load.
+    pub(crate) index_local: Option<ResolvedLocalId>,
+    /// The exact checked cast from the Values list's DynamicAny element.
+    pub(crate) cast: NodeId,
+    pub(crate) conversion_kind: crate::core::ir::CheckedConversionKind,
+    pub(crate) conversion_from: ResolvedTypeId,
+    pub(crate) conversion_to: ResolvedTypeId,
+    /// Ordered same-root Set/Remove lineage ending at the selecting Set.
+    pub(crate) payload_selection: Vec<NodeId>,
+    /// Owner disposition of the unpacked payload, independent of the Values
+    /// snapshot settlement below.
+    pub(crate) result_owner_settlement: OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind,
+    /// Exact source point for `ExplicitWholeDrop`, or the root tail-expression
+    /// anchor for compiler-owned String cleanup; absent for Copy payloads.
+    pub(crate) result_owner_settlement_point: Option<NodeId>,
+    /// Index of the exact root-level place in the Drop statement's places
+    /// array. Present only for `ExplicitWholeDrop`.
+    pub(crate) result_owner_settlement_index: Option<usize>,
+    /// Exact explicit settlement of the entire Values snapshot.
+    pub(crate) settlement: OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    pub(crate) settlement_point: NodeId,
+}
+
+impl PartialOrd for OrdinaryMapOwnedAnyV2ValuesUnpackReceipt {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrdinaryMapOwnedAnyV2ValuesUnpackReceipt {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // CheckedConversionKind is intentionally not Ord in the public IR
+        // schema. Its fieldless declaration order supplies a deterministic
+        // local sort key while all receipt identities remain compared too.
+        (
+            (
+                &self.profile_version,
+                &self.operation,
+                &self.source_local,
+                &self.source,
+                &self.source_node,
+                &self.source_type,
+            ),
+            (
+                &self.snapshot_binding_point,
+                &self.snapshot_binding,
+                &self.snapshot_type,
+                &self.unpack_binding_point,
+                &self.unpack_binding,
+                &self.index_projection,
+                &self.index_expression,
+                &self.index_type,
+            ),
+            (
+                &self.index_local,
+                &self.cast,
+                self.conversion_kind as u8,
+                &self.conversion_from,
+                &self.conversion_to,
+                &self.payload_selection,
+            ),
+            (
+                self.result_owner_settlement,
+                &self.result_owner_settlement_point,
+                &self.result_owner_settlement_index,
+                &self.settlement,
+                &self.settlement_point,
+            ),
+        )
+            .cmp(&(
+                (
+                    &other.profile_version,
+                    &other.operation,
+                    &other.source_local,
+                    &other.source,
+                    &other.source_node,
+                    &other.source_type,
+                ),
+                (
+                    &other.snapshot_binding_point,
+                    &other.snapshot_binding,
+                    &other.snapshot_type,
+                    &other.unpack_binding_point,
+                    &other.unpack_binding,
+                    &other.index_projection,
+                    &other.index_expression,
+                    &other.index_type,
+                ),
+                (
+                    &other.index_local,
+                    &other.cast,
+                    other.conversion_kind as u8,
+                    &other.conversion_from,
+                    &other.conversion_to,
+                    &other.payload_selection,
+                ),
+                (
+                    other.result_owner_settlement,
+                    &other.result_owner_settlement_point,
+                    &other.result_owner_settlement_index,
+                    &other.settlement,
+                    &other.settlement_point,
+                ),
+            ))
+    }
 }
 
 /// Schema/profile version for the owned-result typed getters over ordinary
@@ -1324,6 +1785,23 @@ impl ResourceAnalysis {
                 action.profile_version == OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1
                     && action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::New
             })
+    }
+
+    /// Whether this callable contains a sealed ordinary Map/Any owner-v2
+    /// construction receipt.  Consumers must pair this with the operation
+    /// census and the profile marker; a v1 New action is never sufficient.
+    pub(crate) fn has_ordinary_map_owned_any_v2_receipt(&self) -> bool {
+        self.ordinary_map_owned_any_v2_actions.iter().any(|action| {
+            action.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                && action.kind == OrdinaryMapOwnedAnyV2ActionKind::New
+        })
+    }
+
+    /// The v2 operation census is intentionally exposed through a helper so
+    /// route admission cannot accidentally inspect only the admitted action
+    /// subset and hide an unsupported keys/to_list/dynamic-key attempt.
+    pub(crate) fn has_ordinary_map_owned_any_v2_attempts(&self) -> bool {
+        !self.ordinary_map_owned_any_v2_operation_attempts.is_empty()
     }
 
     /// Whether the older MapAnyOwner v1 receipt independently covers every

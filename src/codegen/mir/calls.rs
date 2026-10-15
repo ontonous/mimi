@@ -904,6 +904,166 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         })
     }
 
+    /// Compare two canonical Mimi String handles without relying on NUL
+    /// termination. The String TypeDesc stores `{ptr, len}` and may contain
+    /// embedded NUL bytes, so length and `memcmp` are both part of the ABI.
+    pub(super) fn emit_string_equality(
+        &mut self,
+        left: inkwell::values::StructValue<'ctx>,
+        right: inkwell::values::StructValue<'ctx>,
+        subject: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, NativeMirError> {
+        let left_data = self
+            .generator
+            .builder
+            .build_extract_value(left, 0, "mir_assert_left_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let left_len = self
+            .generator
+            .builder
+            .build_extract_value(left, 1, "mir_assert_left_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let right_data = self
+            .generator
+            .builder
+            .build_extract_value(right, 0, "mir_assert_right_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let right_len = self
+            .generator
+            .builder
+            .build_extract_value(right, 1, "mir_assert_right_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let same_length = self
+            .generator
+            .builder
+            .build_int_compare(IntPredicate::EQ, left_len, right_len, "mir_assert_same_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let compare = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_assert_compare_bytes");
+        let merge = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_assert_compare_merge");
+        self.generator
+            .builder
+            .build_conditional_branch(same_length, compare, merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let length_mismatch = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(subject, "assert length block has no insertion point")
+        })?;
+        self.generator.builder.position_at_end(compare);
+        let is_empty = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                left_len,
+                left_len.get_type().const_zero(),
+                "mir_assert_empty",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let empty = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_assert_empty_equal");
+        let nonempty = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_assert_memcmp");
+        self.generator
+            .builder
+            .build_conditional_branch(is_empty, empty, nonempty)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(empty);
+        let empty_value = self.generator.context.bool_type().const_int(1, false);
+        let empty_end = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(subject, "assert empty block has no insertion point")
+        })?;
+        self.generator
+            .builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(nonempty);
+        let memcmp = self
+            .generator
+            .module
+            .get_function("memcmp")
+            .unwrap_or_else(|| {
+                let ptr = self
+                    .generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default());
+                self.generator.module.add_function(
+                    "memcmp",
+                    self.generator.context.i32_type().fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(ptr),
+                            BasicMetadataTypeEnum::PointerType(ptr),
+                            BasicMetadataTypeEnum::IntType(self.generator.context.i64_type()),
+                        ],
+                        false,
+                    ),
+                    Some(Linkage::External),
+                )
+            });
+        let compared = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    memcmp,
+                    &[
+                        BasicMetadataValueEnum::PointerValue(left_data),
+                        BasicMetadataValueEnum::PointerValue(right_data),
+                        BasicMetadataValueEnum::IntValue(left_len),
+                    ],
+                    "mir_assert_memcmp_call",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "memcmp returned void"))?
+        .into_int_value();
+        let bytes_equal = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                compared,
+                compared.get_type().const_zero(),
+                "mir_assert_bytes_equal",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let bytes_end = self.generator.builder.get_insert_block().ok_or_else(|| {
+            NativeMirError::new(subject, "assert memcmp block has no insertion point")
+        })?;
+        self.generator
+            .builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(merge);
+        let phi = self
+            .generator
+            .builder
+            .build_phi(
+                self.generator.context.bool_type(),
+                "mir_assert_string_equal",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let different_length = self.generator.context.bool_type().const_zero();
+        phi.add_incoming(&[
+            (&different_length, length_mismatch),
+            (&empty_value, empty_end),
+            (&bytes_equal, bytes_end),
+        ]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
     pub(super) fn emit_session_call(
         &mut self,
         result: &MirValueId,

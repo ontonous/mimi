@@ -711,6 +711,41 @@ pub(super) fn ordinary_map_owned_get_i32_string_v1_drop(handle: i64) -> Result<(
     Ok(())
 }
 
+/// Retire one ordinary Map/Any V2 concrete-record root.  The record owner
+/// payload is dropped only after the generational Map slot has been
+/// invalidated and the table lock has been released.
+pub(super) fn ordinary_map_any_owner_v2_record_drop(handle: i64) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut table = lock_maps();
+    let slot = table
+        .slots
+        .get(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::OrdinaryMapAnyOwnerV2Record)?;
+    let retired_map = finish_map_free(&mut table, index);
+    drop(table);
+    drop(retired_map);
+    Ok(())
+}
+
+/// Retire the distinct descriptor-selected ManagedAny V2 ordinary-map root.
+/// Payload callbacks run only after MAP_TABLE has been released.
+pub(super) fn ordinary_map_owned_any_v2_drop(handle: i64) -> Result<(), HandleError> {
+    let (index, gen) = unpack(handle)?;
+    let mut table = lock_maps();
+    let slot = table
+        .slots
+        .get(index as usize)
+        .ok_or(HandleError::Invalid)?;
+    validate_map_root_slot(slot, gen)?;
+    validate_map_slot_mode(slot, super::MapStorageMode::OrdinaryMapOwnedAnyV2)?;
+    let retired_map = finish_map_free(&mut table, index);
+    drop(table);
+    drop(retired_map);
+    Ok(())
+}
+
 /// Raw cleanup for an unpublished or trapping-thread lifecycle-profile
 /// root. It never allocates a free-list entry or invokes the trapping ABI.
 pub(super) fn ordinary_map_owner_lifecycle_i32_string_v1_drop_for_trap(
@@ -731,6 +766,18 @@ pub(super) fn ordinary_map_owned_get_i32_string_v1_drop_for_trap(
         handle,
         super::MapStorageMode::OrdinaryMapOwnedGetI32StringV1,
     )
+}
+
+/// Allocation-free trap cleanup for a V2 concrete-record root.
+pub(super) fn ordinary_map_any_owner_v2_record_drop_for_trap(
+    handle: i64,
+) -> Result<(), HandleError> {
+    ordinary_map_profile_drop_for_trap(handle, super::MapStorageMode::OrdinaryMapAnyOwnerV2Record)
+}
+
+/// Allocation-free trap cleanup for a descriptor-selected ManagedAny V2 root.
+pub(super) fn ordinary_map_owned_any_v2_drop_for_trap(handle: i64) -> Result<(), HandleError> {
+    ordinary_map_profile_drop_for_trap(handle, super::MapStorageMode::OrdinaryMapOwnedAnyV2)
 }
 
 fn ordinary_map_profile_drop_for_trap(
@@ -858,6 +905,20 @@ pub(super) fn ordinary_map_owned_get_i32_string_v1_acquire(
         handle,
         super::MapStorageMode::OrdinaryMapOwnedGetI32StringV1,
     )
+}
+
+/// Lease a persistent ordinary Map/Any V2 record root.  Its dedicated mode
+/// keeps the concrete Label owner table out of all legacy ValueHandle and v1
+/// AnyOwner entry points.
+pub(super) fn ordinary_map_any_owner_v2_record_acquire(
+    handle: i64,
+) -> Result<MapLease, HandleError> {
+    map_acquire_mode(handle, super::MapStorageMode::OrdinaryMapAnyOwnerV2Record)
+}
+
+/// Lease a persistent descriptor-selected ManagedAny V2 ordinary Map root.
+pub(super) fn ordinary_map_owned_any_v2_acquire(handle: i64) -> Result<MapLease, HandleError> {
+    map_acquire_mode(handle, super::MapStorageMode::OrdinaryMapOwnedAnyV2)
 }
 
 fn map_acquire_mode(handle: i64, expected: super::MapStorageMode) -> Result<MapLease, HandleError> {

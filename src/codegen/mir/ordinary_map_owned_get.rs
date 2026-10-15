@@ -1296,8 +1296,16 @@ func main() -> i32 {
 
             // SAFETY: The JIT function has the verified no-argument i32 C ABI,
             // and its owning engine remains live throughout the failpoint call.
+            let native_domain_before = crate::runtime::ordinary_map_domain_live_counts_for_test()
+                .expect("ordinary-Map ownership registries are observable in tests");
             let observed = with_owned_get_failure(stage, || unsafe { native.call() });
             assert_eq!(observed, 3, "native stage {stage}");
+            assert_eq!(
+                crate::runtime::ordinary_map_domain_live_counts_for_test()
+                    .expect("ordinary-Map ownership registries remain healthy"),
+                native_domain_before,
+                "native stage {stage} must drain roots, domain receipts, and AnyOwner tokens"
+            );
             assert_eq!(
                 program.canonical_digest(),
                 digest,
@@ -1317,7 +1325,15 @@ func main() -> i32 {
         assert_eq!(vm.take_stdout(), "");
         // SAFETY: The same checked main ABI and live engine apply after the
         // failpoint is reset; this invocation passes no pointers or arguments.
+        let native_domain_before = crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .expect("ordinary-Map ownership registries are observable in tests");
         assert_eq!(unsafe { native.call() }, 7, "native recovery");
+        assert_eq!(
+            crate::runtime::ordinary_map_domain_live_counts_for_test()
+                .expect("ordinary-Map ownership registries remain healthy"),
+            native_domain_before,
+            "successful native owned-Get execution must return every tracked count to baseline"
+        );
         assert_eq!(program.canonical_digest(), digest);
     }
 

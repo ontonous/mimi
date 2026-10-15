@@ -49,6 +49,7 @@ use abi::{
     validate_native_non_copy_record_type, validate_native_product_type,
     validate_native_recursive_tuple_type, NativeVariantAbi,
 };
+pub(crate) use eligibility::checked_managed_any_unpack_coverage;
 pub use eligibility::validate_mir_native;
 use eligibility::{instruction_kind, mir_symbol, native_symbol_fragment, NativeMirError};
 use validate::NativeMirValidator;
@@ -69,6 +70,7 @@ mod ffi_contract;
 mod map_root;
 mod ordinary_map;
 mod ordinary_map_any_get;
+mod ordinary_map_owned_any_v2;
 mod ordinary_map_owned_get;
 mod ownership;
 mod runtime_glue;
@@ -532,6 +534,11 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 .program
                 .type_catalog()
                 .get(&crate::core::mir::types::managed_any_i32_string_v1_type_id())
+                .is_some()
+            || self
+                .program
+                .type_catalog()
+                .get(&crate::core::mir::types::ordinary_map_owned_any_v2_type_id())
                 .is_some())
             && self
                 .generator
@@ -753,11 +760,242 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             }
         }
 
-        // Values snapshots are move-owned lists of generation-bearing
-        // ManagedAny tokens.  Their list storage has dedicated clone/drop
-        // glue; never route these i64 token slots through the copy-scalar
-        // helpers.  Keep declarations local to the canonical MIR module so
-        // legacy LLVM modules do not gain this ABI merely by construction.
+        // The ordinary Map/Any owner-v2 island has a deliberately small ABI:
+        // roots are opaque i64 handles, keys are borrowed `(ptr,len)` byte
+        // ranges, and the one supported aggregate payload is passed as a
+        // borrowed `Label { text: *const u8, text_len: i64 }` descriptor.
+        // Keep these declarations conditional on the canonical V2 TypeDesc
+        // so unrelated MIR/legacy modules do not acquire the reserved V2
+        // runtime namespace merely because this adapter is linked.
+        if self
+            .program
+            .type_catalog()
+            .get(&crate::core::mir::types::ordinary_map_owned_any_v2_type_id())
+            .is_some()
+        {
+            let i64_ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            let i32_ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            let opaque_ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
+            let ordinary_map_owned_any_v2_helpers = [
+                (
+                    "mimi_any_payload_v2_new",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i32),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_any_payload_v2_drop",
+                    i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
+                    "mimi_any_payload_v2_unpack",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i32),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_new",
+                    i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i64_ptr)], false),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_clone",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_remove",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_size",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i32_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_contains",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i32_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_get",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i32_ptr),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
+                            BasicMetadataTypeEnum::IntType(i32),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_is_empty",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i32_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_drop",
+                    i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_set",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+            ];
+            for (name, function_type) in ordinary_map_owned_any_v2_helpers {
+                if self.generator.module.get_function(name).is_none() {
+                    self.generator.module.add_function(
+                        name,
+                        function_type,
+                        Some(Linkage::External),
+                    );
+                }
+            }
+
+            if self
+                .program
+                .type_catalog()
+                .get(&crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id())
+                .is_some()
+            {
+                let values_list_helpers = [
+                    (
+                        "mimi_ordinary_map_owned_any_v2_values_list",
+                        i32.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                                BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            ],
+                            false,
+                        ),
+                    ),
+                    (
+                        "mimi_mir_list_len_managed_any_v2",
+                        i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+                    ),
+                    (
+                        "mimi_mir_list_get_managed_any_v2",
+                        i32.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i32_ptr),
+                                BasicMetadataTypeEnum::PointerType(i64_ptr),
+                            ],
+                            false,
+                        ),
+                    ),
+                    (
+                        "mimi_mir_list_clone_managed_any_v2",
+                        i8_ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+                    ),
+                    (
+                        "mimi_mir_list_drop_managed_any_v2",
+                        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+                    ),
+                ];
+                for (name, function_type) in values_list_helpers {
+                    if self.generator.module.get_function(name).is_none() {
+                        self.generator.module.add_function(
+                            name,
+                            function_type,
+                            Some(Linkage::External),
+                        );
+                    }
+                }
+            }
+        }
+
+        // V1 and V2 Values snapshots are move-owned lists of generation-
+        // bearing owner tokens. Their list storage has dedicated glue; never
+        // route these i64 token slots through the copy-scalar helpers. Keep
+        // declarations local to the canonical MIR module so legacy LLVM
+        // modules do not gain this ABI merely by construction.
         let managed_any_list_helpers = [
             ("mimi_mir_list_new_managed_any", i8_ptr.fn_type(&[], false)),
             (
@@ -1472,6 +1710,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
                 {
                     self.emit_ordinary_map_owned_get_clone(result, source, subject)?
+                } else if source_ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+                {
+                    self.emit_ordinary_map_owned_any_v2_clone(result, source, subject)?
                 } else if is_list {
                     self.emit_list_clone(source, subject)?
                 } else if is_set {
@@ -1697,14 +1938,26 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 argument,
                 list_operation_contract,
             } => {
-                let value = self.emit_list_op(
-                    result,
-                    *operation,
-                    list,
-                    argument.as_ref(),
-                    list_operation_contract.as_ref(),
-                    subject,
-                )?;
+                let value = if self.value_type(list, subject)?
+                    == crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
+                {
+                    if *operation != MirListOperation::Len || argument.is_some() {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "ordinary Map/Any owner-v2 Values supports only receipted borrow-only Len",
+                        ));
+                    }
+                    self.emit_ordinary_map_owned_any_v2_values_len(result, list, subject)?
+                } else {
+                    self.emit_list_op(
+                        result,
+                        *operation,
+                        list,
+                        argument.as_ref(),
+                        list_operation_contract.as_ref(),
+                        subject,
+                    )?
+                };
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::VariantPredicate {
@@ -1865,6 +2118,74 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
                 self.emit_ordinary_map_owned_get_drop(root, subject)?;
             }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
+                let value = self.emit_ordinary_map_owned_any_v2_new(result, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_set(result, source, key, value, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
+                result,
+                source,
+                key,
+            } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_remove(result, source, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, root } => {
+                let value = self.emit_ordinary_map_owned_any_v2_size(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, root, key } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_contains(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, root, key } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_get_any(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection,
+            } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_unpack(result, pair, projection, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                result,
+                values,
+                index,
+                projection,
+            } => {
+                let value = self.emit_ordinary_map_owned_any_v2_values_unpack(
+                    result, values, index, projection, subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, root } => {
+                let value = self.emit_ordinary_map_owned_any_v2_values(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
+                let value = self.emit_ordinary_map_owned_any_v2_is_empty(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => {
+                self.emit_ordinary_map_owned_any_v2_drop(root, subject)?;
+            }
             MirInstructionKind::Drop { value } => {
                 self.emit_drop(value, subject)?;
             }
@@ -1969,7 +2290,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 return Err(NativeMirError::new(
                     subject,
                     "unvalidated instruction reached native emitter",
-                ))
+                ));
             }
         }
         Ok(())
@@ -2027,7 +2348,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
 #[cfg(test)]
 mod tests {
     use super::CodeGenerator;
-    use crate::core::ir::ResolvedLiteral;
+    use crate::core::ir::{ResolvedBinaryOp, ResolvedLiteral};
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::types::{MirBuiltinKind, MirGlueKind, MirLayout, MirTypeKind};
     use crate::core::mir::MirInstructionKind;
@@ -2042,6 +2363,95 @@ mod tests {
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
+    }
+
+    #[test]
+    fn owner_v2_public_native_and_bytecode_execution_boundaries_require_readiness() {
+        assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    println("must not execute before V2 readiness")
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        assert!(program.functions().values().any(|function| {
+            function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
+        }));
+
+        let receipt = program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let manifest = receipt.manifest_text().expect("V2 route manifest");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "owner_v2_public_native_gate");
+        let assert_native_gate = |result: Result<(), Vec<crate::diagnostic::Diagnostic>>| {
+            let errors =
+                result.expect_err("public native emission stays closed until V2 readiness");
+            assert!(errors.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                    && diagnostic
+                        .message
+                        .contains("diagnostic-only while V2 production readiness is disabled")
+            }));
+        };
+        assert_native_gate(generator.compile_mir_native(&program));
+        assert_native_gate(generator.compile_mir_native_with_route_receipt(&program, &receipt));
+        assert_native_gate(generator.compile_mir_native_with_route_manifest(&program, &manifest));
+        assert_native_gate(
+            generator.compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt),
+        );
+
+        fn assert_vm_gate<T: std::fmt::Debug>(result: Result<T, crate::interp::InterpError>) {
+            let error =
+                result.expect_err("public bytecode execution stays closed until V2 readiness");
+            assert_eq!(
+                error.diagnostic_code(),
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            );
+            assert!(error
+                .to_string()
+                .contains("diagnostic-only while V2 production readiness is disabled"));
+        }
+
+        let bytecode = compile_mir_program(&program).expect("L1/L2 bytecode artifact");
+        let entry = bytecode.entry;
+        let mut vm = BytecodeVM::new(bytecode.clone());
+        assert_vm_gate(vm.run_value());
+        assert!(
+            vm.take_stdout().is_empty(),
+            "gate precedes source side effects"
+        );
+        assert_vm_gate(vm.run());
+        assert!(
+            vm.take_stdout().is_empty(),
+            "gate precedes source side effects"
+        );
+        assert_vm_gate(vm.call_named("main", Vec::new()));
+        assert!(
+            vm.take_stdout().is_empty(),
+            "gate precedes source side effects"
+        );
+        assert_vm_gate(vm.call_function(entry, &[]));
+        assert!(
+            vm.take_stdout().is_empty(),
+            "gate precedes source side effects"
+        );
+        assert_vm_gate(vm.call_function_wrap_ok(entry, &[], Value::Unit));
+        assert!(
+            vm.take_stdout().is_empty(),
+            "gate precedes source side effects"
+        );
     }
 
     const MAP_ANY_OWNER_V1_NATIVE_SOURCE: &str = r#"
@@ -2196,6 +2606,1002 @@ func main() -> i32 {
     0
 }
 "#;
+
+    #[test]
+    fn ordinary_map_owned_any_v2_borrows_locals_and_settles_computed_string_keys() {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi"
+        ));
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference V2 dynamic String keys");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "true\ntrue\nfalse\n");
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free V2 dynamic String key bytecode"),
+        );
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode V2 dynamic String keys"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let receipts = program
+            .ordinary_map_owned_any_v2_get_any_result_receipts()
+            .expect("Core derives exact V2 GetAny result receipt");
+        let [get_receipt] = receipts.as_slice() else {
+            panic!("expected one GetAny receipt, got {receipts:#?}");
+        };
+        assert!(get_receipt.checker_key_local.is_none());
+        let computed_key =
+            crate::core::mir::MirValueId::new(format!("expr:{}", get_receipt.key_node.0))
+                .expect("MIR computed key identity");
+        assert_eq!(get_receipt.key, computed_key);
+
+        let main_function = program.functions().get(&main).expect("main MIR");
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        assert!(
+            main_function
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Const {
+                        literal: ResolvedLiteral::String(value),
+                        ..
+                    } if value.as_bytes() == "nul\0雪".as_bytes()
+                )),
+            "fixture key seed contains both an embedded NUL and non-ASCII UTF-8"
+        );
+        let key_operations = main_function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter_map(|instruction| match &instruction.kind {
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Set { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { key, .. } => {
+                    Some((instruction, key))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(key_operations.len(), 6);
+        assert_eq!(
+            key_operations
+                .iter()
+                .filter(|(_, key)| key.as_str().starts_with("local:"))
+                .count(),
+            2,
+            "existing String values should remain borrowed"
+        );
+        let temporary_keys = key_operations
+            .iter()
+            .filter(|(_, key)| key.as_str().starts_with("expr:"))
+            .collect::<Vec<_>>();
+        assert_eq!(temporary_keys.len(), 4);
+        for (block, instruction) in main_function.blocks.values().flat_map(|block| {
+            block
+                .instructions
+                .iter()
+                .map(move |instruction| (block, instruction))
+        }) {
+            if let MirInstructionKind::OrdinaryMapOwnedAnyV2Set { key, .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { key, .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { key, .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { key, .. } = &instruction.kind
+            {
+                if key.as_str().starts_with("expr:") {
+                    let operation_index = block
+                        .instructions
+                        .iter()
+                        .position(|candidate| candidate.id == instruction.id)
+                        .expect("key operation position");
+                    assert!(matches!(
+                        block.instructions.get(operation_index + 1).map(|next| &next.kind),
+                        Some(MirInstructionKind::Drop { value }) if value == key
+                    ));
+                }
+            }
+            if let MirInstructionKind::Binary {
+                result,
+                op: ResolvedBinaryOp::Add,
+                left,
+                right,
+            } = &instruction.kind
+            {
+                if main_function
+                    .values
+                    .get(result)
+                    .is_some_and(|value| value.ty == string_type)
+                {
+                    let index = block
+                        .instructions
+                        .iter()
+                        .position(|candidate| candidate.id == instruction.id)
+                        .expect("String Add operation position");
+                    assert!(matches!(
+                        block.instructions.get(index + 1).map(|next| &next.kind),
+                        Some(MirInstructionKind::Drop { value }) if value == left
+                    ));
+                    assert!(matches!(
+                        block.instructions.get(index + 2).map(|next| &next.kind),
+                        Some(MirInstructionKind::Drop { value }) if value == right
+                    ));
+                }
+            }
+        }
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_dynamic_keys");
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("native V2 dynamic String key lowering");
+        generator.module.verify().expect("valid native LLVM module");
+        let native_ir = generator.module.print_to_string().to_string();
+        for runtime in [
+            "mimi_ordinary_map_owned_any_v2_set",
+            "mimi_ordinary_map_owned_any_v2_remove",
+            "mimi_ordinary_map_owned_any_v2_contains",
+            "mimi_ordinary_map_owned_any_v2_get",
+            "mimi_str_concat_ll",
+            "mimi_mir_ordinary_map_domain_own_string",
+        ] {
+            assert!(native_ir.contains(runtime), "native IR omits {runtime}");
+        }
+        let has_temporary_key_trap_cleanup = {
+            let mut in_v2_invalid_block = false;
+            let mut invalid_block_frees_key = false;
+            let mut found_cleanup = false;
+            for line in native_ir.lines() {
+                let trimmed = line.trim();
+                if line == trimmed && trimmed.contains(':') {
+                    if in_v2_invalid_block && invalid_block_frees_key {
+                        found_cleanup = true;
+                        break;
+                    }
+                    let label = trimmed.split(':').next().unwrap_or_default();
+                    in_v2_invalid_block = label.starts_with("mir_map_any_v2_invalid");
+                    invalid_block_frees_key = false;
+                } else if in_v2_invalid_block && trimmed.starts_with("call void @mimi_string_free(")
+                {
+                    // LLVM does not print an SSA name for void calls, so
+                    // verify the free in the invalid edge block itself.
+                    invalid_block_frees_key = true;
+                }
+            }
+            found_cleanup || (in_v2_invalid_block && invalid_block_frees_key)
+        };
+        assert!(
+            has_temporary_key_trap_cleanup,
+            "temporary key is freed on a native Map/Any invalid edge"
+        );
+        assert!(
+            native_ir.contains("call i32 @mimi_mir_ordinary_map_domain_own_string"),
+            "native String concatenation registers its result for Map trap cleanup"
+        );
+    }
+
+    fn ordinary_map_owned_any_v2_values_unpack_native_source(unpack_body: &str) -> String {
+        format!(
+            r#"
+            type Label {{ text: string }}
+            func main() -> i32 {{
+                let label = Label {{ text: "Values Label payload" }}
+                let text = "Values String payload"
+                let empty = map_new()
+                let numbers = map_set(empty, "number", 42)
+                let labels = map_set(numbers, "label", label)
+                let mixed = map_set(labels, "string", text)
+                let snapshot = values(mixed)
+                {unpack_body}
+                drop(snapshot)
+                drop(empty)
+                drop(numbers)
+                drop(labels)
+                drop(mixed)
+                drop(label)
+                drop(text)
+                0
+            }}
+            "#
+        )
+    }
+
+    fn strict_map_any_memcheck_config() -> crate::tests::E2EConfig {
+        crate::tests::E2EConfig {
+            use_valgrind: true,
+            valgrind_args: vec![
+                "--tool=memcheck".into(),
+                "--leak-check=full".into(),
+                "--show-leak-kinds=all".into(),
+                "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                "--error-exitcode=97".into(),
+            ],
+            ..crate::tests::E2EConfig::default()
+        }
+    }
+
+    fn assert_clean_map_any_memcheck(
+        observed: &crate::tests::NativeRunObservation,
+        expected_exit: i32,
+        expected_stdout: &str,
+        expected_trap: Option<&str>,
+    ) {
+        assert_eq!(
+            observed.exit_code,
+            Some(expected_exit),
+            "{}",
+            observed.stderr
+        );
+        assert_eq!(observed.stdout, expected_stdout);
+        if let Some(code) = expected_trap {
+            assert!(observed.stderr.contains(code), "{}", observed.stderr);
+        }
+        assert!(
+            observed.stderr.contains("ERROR SUMMARY: 0 errors"),
+            "strict Map/Any Memcheck reported memory errors: {}",
+            observed.stderr
+        );
+        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+            assert!(
+                observed
+                    .stderr
+                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                "strict Map/Any Memcheck reported {kind}: {}",
+                observed.stderr
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_clone_uses_one_mir_across_verifier_reference_bytecode_native_and_memcheck(
+    ) {
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_clone.mimi"
+        ));
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("Clone and payload-selection receipts pass the whole-program capability gate");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native admission revalidates the same Clone and GetAny receipts");
+
+        let verification = crate::verifier::verify_mir(&program, String::new())
+            .expect("public verifier consumes the same Clone MIR");
+        let main_proof = verification
+            .iter()
+            .find(|result| result.func_name == "function:main")
+            .expect("main's explicit postcondition has a verifier result");
+        assert_eq!(
+            main_proof.status,
+            crate::verifier::VerifStatus::NotInTrustedSubset,
+            "V2 must stay fail-closed until its production gate opens: {}",
+            main_proof.message
+        );
+        assert!(main_proof
+            .message
+            .contains("diagnostic-only while V2 production readiness is disabled"));
+        assert!(
+            main_proof.artifact.is_none(),
+            "a diagnostic-only V2 result must not emit a proof artifact"
+        );
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("Reference executes the same cloned-root MIR");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "true\ntrue\n");
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free bytecode compiles the same Clone MIR"),
+        );
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode executes the same Clone MIR"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_clone");
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("native compiler consumes the exact Clone MIR");
+        generator
+            .module
+            .verify()
+            .expect("native Clone module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native executes the same cloned-root lifecycle");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &strict_map_any_memcheck_config(),
+            )
+            .expect("native cloned-root lifecycle runs under strict Memcheck");
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_clones_selected_payloads_and_traps_cleanly() {
+        let hit = canonical_program(&ordinary_map_owned_any_v2_values_unpack_native_source(
+            r#"
+            let first_from_end: i64 = -3
+            let picked_label = snapshot[first_from_end] as Label
+            let middle = 1
+            let picked_number = snapshot[middle] as i32
+            let picked_text = snapshot[2] as string
+            let text_matches = picked_text == "Values String payload"
+            println(text_matches)
+            println(picked_number)
+            drop(picked_label)
+            "#,
+        ));
+        crate::verifier::validate_mir_capabilities(&hit)
+            .expect("all Values unpack and snapshot Drop receipts pass capability validation");
+        crate::codegen::mir::validate_mir_native(&hit)
+            .expect("native admission validates every Values unpack receipt before emission");
+        let receipts = hit
+            .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            .expect("exact indexed Values unpack receipts");
+        assert_eq!(receipts.len(), 3);
+        assert!(receipts.iter().all(|receipt| {
+            receipt.validate_against_program(&hit).is_ok()
+                && receipt.conversion_to == receipt.result_type
+        }));
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&hit)
+            .execute_with_output(&main, &[])
+            .expect("Reference Values unpack execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "true\n42\n");
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&hit).expect("AST-free bytecode Values unpack program"),
+        );
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode Values unpack"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), "true\n42\n");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_values_unpack");
+        generator
+            .compile_mir_native_for_component(&hit)
+            .expect("native V2 Values unpack emitter");
+        generator
+            .module
+            .verify()
+            .expect("native V2 Values unpack LLVM module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert_eq!(
+            native_ir
+                .matches("call i32 @mimi_any_payload_v2_unpack")
+                .count(),
+            3,
+            "each index read uses the typed V2 payload unpack ABI"
+        );
+        assert_eq!(
+            native_ir
+                .matches("call i32 @mimi_mir_list_get_managed_any_v2")
+                .count(),
+            3,
+            "each index read retains its own selected element token"
+        );
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("run native V2 Values unpack executable");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, "true\n42\n");
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &strict_map_any_memcheck_config(),
+            )
+            .expect("run successful native Values unpack under strict Memcheck");
+            assert_clean_map_any_memcheck(&memcheck, 0, "true\n42\n", None);
+        }
+
+        for (name, body, code) in [
+            (
+                "wrong-tag",
+                "let rejected = snapshot[1] as string\nprintln(rejected)",
+                "E0800",
+            ),
+            (
+                "out-of-bounds",
+                "let rejected = snapshot[3] as i32\nprintln(rejected)",
+                "E0803",
+            ),
+        ] {
+            let rejected =
+                canonical_program(&ordinary_map_owned_any_v2_values_unpack_native_source(body));
+            let reference_error = MirReferenceInterpreter::new(&rejected)
+                .execute_with_output(&main, &[])
+                .expect_err("Reference rejects an invalid Values index/type selection");
+            assert!(
+                reference_error.message.contains(code),
+                "{reference_error:?}"
+            );
+            let mut rejected_vm = BytecodeVM::new(
+                compile_mir_program(&rejected).expect("AST-free bytecode invalid Values case"),
+            );
+            let bytecode_error = rejected_vm
+                .run_value_for_component()
+                .expect_err("bytecode rejects an invalid Values index/type selection");
+            assert_eq!(bytecode_error.code(), code);
+
+            let context = Context::create();
+            let mut rejected_generator = CodeGenerator::new(
+                &context,
+                &format!("mir_native_map_any_v2_values_unpack_{name}"),
+            );
+            rejected_generator
+                .compile_mir_native_for_component(&rejected)
+                .expect("native invalid Values case emits a checked trap");
+            let native = crate::tests::link_and_observe_canonical_mir(&rejected_generator)
+                .expect("run native invalid Values case");
+            assert_eq!(native.exit_code, Some(1), "{}", native.stderr);
+            assert!(native.stderr.contains(code), "{}", native.stderr);
+            assert!(native.stdout.is_empty(), "{}", native.stdout);
+
+            if std::process::Command::new("valgrind")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+            {
+                let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                    &rejected_generator,
+                    &strict_map_any_memcheck_config(),
+                )
+                .expect("run invalid native Values case under strict Memcheck");
+                assert_clean_map_any_memcheck(&memcheck, 1, "", Some(code));
+            }
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_unpack_native_source(key: &str) -> String {
+        format!(
+            r#"
+            type Label {{ text: string }}
+            func main() -> i32 {{
+                let label = Label {{ text: "native unpack fixture" }}
+                let empty = map_new()
+                let numbers = map_set(empty, "number", 42)
+                let mixed = map_set(numbers, "label", label)
+                let pair = map_get(mixed, "{key}")
+                let value = pair.1 as i32
+                drop(pair)
+                drop(empty)
+                drop(numbers)
+                drop(mixed)
+                drop(label)
+                println(value)
+                0
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_executes_in_native_and_traps_on_wrong_tag() {
+        for (key, expected_output) in [("number", "42\n"), ("absent", "0\n")] {
+            let program = canonical_program(&ordinary_map_owned_any_v2_unpack_native_source(key));
+            crate::verifier::validate_mir_capabilities(&program)
+                .expect("exact V2 GetAny/unpack/Drop receipts pass capability validation");
+            crate::codegen::mir::validate_mir_native(&program)
+                .expect("native V2 unpack consumes the same exact Checker receipt");
+            let main = crate::core::NodeId("function:main".into());
+            let reference = MirReferenceInterpreter::new(&program)
+                .execute_with_output(&main, &[])
+                .expect("Reference V2 unpack");
+            assert_eq!(reference.value, MirRuntimeValue::Int(0));
+            assert_eq!(reference.output, expected_output);
+            let mut vm = BytecodeVM::new(
+                compile_mir_program(&program).expect("AST-free bytecode V2 unpack"),
+            );
+            assert!(matches!(
+                vm.run_value_for_component().expect("bytecode V2 unpack"),
+                Value::Int(0)
+            ));
+            assert_eq!(vm.take_stdout(), expected_output);
+
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_unpack");
+            generator
+                .compile_mir_native_for_component(&program)
+                .expect("native V2 unpack emitter");
+            generator
+                .module
+                .verify()
+                .expect("native V2 unpack LLVM module verifies");
+            let native_ir = generator.module.print_to_string().to_string();
+            assert!(
+                native_ir.contains("mimi_any_payload_v2_unpack"),
+                "native MIR must call the typed V2 payload unpack ABI"
+            );
+            let native = crate::tests::link_and_observe_canonical_mir(&generator)
+                .expect("run the native V2 unpack executable");
+            assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+            assert_eq!(native.stdout, expected_output);
+            assert_eq!(native.stderr, "");
+
+            if std::process::Command::new("valgrind")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+            {
+                let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                    &generator,
+                    &crate::tests::E2EConfig {
+                        use_valgrind: true,
+                        valgrind_args: vec![
+                            "--tool=memcheck".into(),
+                            "--leak-check=full".into(),
+                            "--show-leak-kinds=all".into(),
+                            "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                            "--error-exitcode=97".into(),
+                        ],
+                        ..crate::tests::E2EConfig::default()
+                    },
+                )
+                .expect("strict Memcheck for the native V2 unpack success path");
+                assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
+                assert_eq!(memcheck.stdout, expected_output);
+                assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+                for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+                    assert!(
+                        memcheck
+                            .stderr
+                            .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                        "native V2 unpack reported {kind}: {}",
+                        memcheck.stderr
+                    );
+                }
+            }
+        }
+
+        let mismatch = canonical_program(&ordinary_map_owned_any_v2_unpack_native_source("label"));
+        let main = crate::core::NodeId("function:main".into());
+        let reference_error = MirReferenceInterpreter::new(&mismatch)
+            .execute_with_output(&main, &[])
+            .expect_err("Reference traps on a selected Label/i32 mismatch");
+        assert!(reference_error.message.contains("E0800"));
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&mismatch).expect("AST-free bytecode wrong-tag case"),
+        );
+        let bytecode_error = vm
+            .run_value_for_component()
+            .expect_err("bytecode traps on a selected Label/i32 mismatch");
+        assert_eq!(bytecode_error.code(), "E0800");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_unpack_mismatch");
+        generator
+            .compile_mir_native_for_component(&mismatch)
+            .expect("native V2 mismatch path emits its runtime type check");
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let mismatch_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                        "--error-exitcode=97".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("run wrong-tag trap under Memcheck");
+            assert_eq!(
+                mismatch_memcheck.exit_code,
+                Some(1),
+                "{}",
+                mismatch_memcheck.stderr
+            );
+            assert!(mismatch_memcheck.stderr.contains("E0800"));
+            assert!(
+                mismatch_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"),
+                "wrong-tag trap must clean up without memory errors: {}",
+                mismatch_memcheck.stderr
+            );
+            for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+                assert!(
+                    mismatch_memcheck
+                        .stderr
+                        .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                    "wrong-tag trap reported {kind}: {}",
+                    mismatch_memcheck.stderr
+                );
+            }
+        }
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("run the native V2 wrong-tag executable");
+        assert_eq!(native.exit_code, Some(1), "{}", native.stderr);
+        assert!(native.stderr.contains("E0800"), "{}", native.stderr);
+        assert!(
+            native.stdout.is_empty(),
+            "the post-unpack print must not run"
+        );
+    }
+
+    fn ordinary_map_owned_any_v2_string_unpack_native_source(key: &str) -> String {
+        format!(
+            r#"
+            type Label {{ text: string }}
+            func main() -> i32 {{
+                let source = "detached String payload"
+                let label = Label {{ text: "record marker" }}
+                let empty = map_new()
+                let stored = map_set(empty, "present", source)
+                drop(source)
+                let with_label = map_set(stored, "label", label)
+                let mixed = map_set(with_label, "number", 42)
+                let pair = map_get(mixed, "{key}")
+                let value = pair.1 as string
+                drop(pair)
+                drop(empty)
+                drop(stored)
+                drop(with_label)
+                drop(mixed)
+                let matches = value == "detached String payload"
+                println(value)
+                println(matches)
+                drop(value)
+                drop(label)
+                0
+            }}
+            "#
+        )
+    }
+
+    fn ordinary_map_owned_any_v2_record_unpack_native_source(key: &str) -> String {
+        format!(
+            r#"
+            type Label {{ text: string }}
+            func main() -> i32 {{
+                let label = Label {{ text: "native record unpack fixture" }}
+                let empty = map_new()
+                let labels = map_set(empty, "label", label)
+                let mixed = map_set(labels, "number", 73)
+                let pair = map_get(mixed, "{key}")
+                let value = pair.1 as Label
+                drop(pair)
+                drop(empty)
+                drop(labels)
+                drop(mixed)
+                drop(label)
+                let matches = value.text == "native record unpack fixture"
+                println(matches)
+                0
+            }}
+            "#
+        )
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_record_unpack_returns_owned_label_and_traps_on_miss_or_mismatch() {
+        let hit = canonical_program(&ordinary_map_owned_any_v2_record_unpack_native_source(
+            "label",
+        ));
+        crate::codegen::mir::validate_mir_native(&hit)
+            .expect("native Label unpack consumes the exact Core result and selection receipts");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_record_unpack");
+        generator
+            .compile_mir_native_for_component(&hit)
+            .expect("native V2 Label unpack emitter");
+        generator
+            .module
+            .verify()
+            .expect("native V2 Label unpack LLVM module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("mimi_any_payload_v2_unpack"));
+        assert!(native_ir.contains("mir_map_any_v2_unpack_label_text_clone"));
+        assert!(
+            native_ir.contains("call void @mimi_any_payload_v2_drop_glue__"),
+            "the void-returning temporary Label cleanup call is present in LLVM IR"
+        );
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("run the native V2 Label unpack executable");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, "true\n");
+        assert_eq!(native.stderr, "");
+
+        let hit_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+            &generator,
+            &crate::tests::E2EConfig {
+                use_valgrind: true,
+                valgrind_args: vec![
+                    "--tool=memcheck".into(),
+                    "--leak-check=full".into(),
+                    "--show-leak-kinds=all".into(),
+                    "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                    "--error-exitcode=97".into(),
+                ],
+                ..crate::tests::E2EConfig::default()
+            },
+        )
+        .expect("run native V2 Label unpack under strict Memcheck");
+        assert_eq!(hit_memcheck.exit_code, Some(0), "{}", hit_memcheck.stderr);
+        assert_eq!(hit_memcheck.stdout, "true\n");
+        assert!(hit_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+            assert!(
+                hit_memcheck
+                    .stderr
+                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                "native V2 Label unpack reported {kind}: {}",
+                hit_memcheck.stderr
+            );
+        }
+
+        let main = crate::core::NodeId("function:main".into());
+        for key in ["absent", "number"] {
+            let rejected =
+                canonical_program(&ordinary_map_owned_any_v2_record_unpack_native_source(key));
+            crate::codegen::mir::validate_mir_native(&rejected)
+                .expect("selected Label unpack receipt remains admissible on a miss/mismatch path");
+            let context = Context::create();
+            let mut rejected_generator =
+                CodeGenerator::new(&context, "mir_native_map_any_v2_record_unpack_rejected");
+            rejected_generator
+                .compile_mir_native_for_component(&rejected)
+                .expect("native V2 Label miss/mismatch path emits the exact runtime type check");
+            let native = crate::tests::link_and_observe_canonical_mir(&rejected_generator)
+                .expect("run native V2 Label miss/mismatch executable");
+            assert_eq!(native.exit_code, Some(1), "{}", native.stderr);
+            assert!(native.stderr.contains("E0800"), "{}", native.stderr);
+            assert!(native.stdout.is_empty());
+
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &rejected_generator,
+                &crate::tests::E2EConfig {
+                    use_valgrind: true,
+                    valgrind_args: vec![
+                        "--tool=memcheck".into(),
+                        "--leak-check=full".into(),
+                        "--show-leak-kinds=all".into(),
+                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                        "--error-exitcode=97".into(),
+                    ],
+                    ..crate::tests::E2EConfig::default()
+                },
+            )
+            .expect("run native V2 Label miss/mismatch under strict Memcheck");
+            assert_eq!(memcheck.exit_code, Some(1), "{}", memcheck.stderr);
+            assert!(memcheck.stderr.contains("E0800"));
+            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+            for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+                assert!(
+                    memcheck
+                        .stderr
+                        .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                    "native V2 Label miss/mismatch reported {kind}: {}",
+                    memcheck.stderr
+                );
+            }
+            let reference_error = MirReferenceInterpreter::new(&rejected)
+                .execute_with_output(&main, &[])
+                .expect_err("Reference traps on a Label miss or wrong payload tag");
+            assert!(reference_error.message.contains("E0800"));
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_string_unpack_clones_on_hit_and_traps_on_miss() {
+        let hit = canonical_program(&ordinary_map_owned_any_v2_string_unpack_native_source(
+            "present",
+        ));
+        crate::verifier::validate_mir_capabilities(&hit)
+            .expect("exact String V2 GetAny/unpack/Drop receipts pass capability validation");
+        crate::codegen::mir::validate_mir_native(&hit)
+            .expect("native V2 String unpack consumes the exact Checker receipt");
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&hit)
+            .execute_with_output(&main, &[])
+            .expect("Reference V2 String unpack");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "detached String payload\ntrue\n");
+
+        let mut vm =
+            BytecodeVM::new(compile_mir_program(&hit).expect("AST-free bytecode V2 String unpack"));
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode V2 String unpack"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), "detached String payload\ntrue\n");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_string_unpack");
+        generator
+            .compile_mir_native_for_component(&hit)
+            .expect("native V2 String unpack emitter");
+        generator
+            .module
+            .verify()
+            .expect("native V2 String unpack LLVM module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(native_ir.contains("mimi_any_payload_v2_unpack"));
+        assert!(native_ir.contains("mimi_mir_ordinary_map_domain_own_string"));
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("run native V2 String unpack executable");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, "detached String payload\ntrue\n");
+        assert_eq!(native.stderr, "");
+
+        let hit_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+            &generator,
+            &crate::tests::E2EConfig {
+                use_valgrind: true,
+                valgrind_args: vec![
+                    "--tool=memcheck".into(),
+                    "--leak-check=full".into(),
+                    "--show-leak-kinds=all".into(),
+                    "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                    "--error-exitcode=97".into(),
+                ],
+                ..crate::tests::E2EConfig::default()
+            },
+        )
+        .expect("strict Memcheck for native V2 String unpack success");
+        assert_eq!(hit_memcheck.exit_code, Some(0), "{}", hit_memcheck.stderr);
+        assert_eq!(hit_memcheck.stdout, "detached String payload\ntrue\n");
+        assert!(hit_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+            assert!(
+                hit_memcheck
+                    .stderr
+                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                "native V2 String unpack reported {kind}: {}",
+                hit_memcheck.stderr
+            );
+        }
+
+        let miss = canonical_program(&ordinary_map_owned_any_v2_string_unpack_native_source(
+            "absent",
+        ));
+        let reference_error = MirReferenceInterpreter::new(&miss)
+            .execute_with_output(&main, &[])
+            .expect_err("Reference traps when the canonical i32 miss is unpacked as String");
+        assert!(reference_error.message.contains("E0800"));
+        let mut miss_vm =
+            BytecodeVM::new(compile_mir_program(&miss).expect("AST-free bytecode V2 String miss"));
+        let bytecode_error = miss_vm
+            .run_value_for_component()
+            .expect_err("bytecode traps when the canonical i32 miss is unpacked as String");
+        assert_eq!(bytecode_error.code(), "E0800");
+
+        let context = Context::create();
+        let mut miss_generator = CodeGenerator::new(&context, "mir_native_map_any_v2_string_miss");
+        miss_generator
+            .compile_mir_native_for_component(&miss)
+            .expect("native V2 String miss path emits its exact type check");
+        let miss_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+            &miss_generator,
+            &crate::tests::E2EConfig {
+                use_valgrind: true,
+                valgrind_args: vec![
+                    "--tool=memcheck".into(),
+                    "--leak-check=full".into(),
+                    "--show-leak-kinds=all".into(),
+                    "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                    "--error-exitcode=97".into(),
+                ],
+                ..crate::tests::E2EConfig::default()
+            },
+        )
+        .expect("run native V2 String miss trap under strict Memcheck");
+        assert_eq!(miss_memcheck.exit_code, Some(1), "{}", miss_memcheck.stderr);
+        assert!(miss_memcheck.stderr.contains("E0800"));
+        assert!(miss_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
+        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+            assert!(
+                miss_memcheck
+                    .stderr
+                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                "native V2 String miss reported {kind}: {}",
+                miss_memcheck.stderr
+            );
+        }
+
+        let wrong_tag = canonical_program(&ordinary_map_owned_any_v2_string_unpack_native_source(
+            "number",
+        ));
+        let reference_error = MirReferenceInterpreter::new(&wrong_tag)
+            .execute_with_output(&main, &[])
+            .expect_err("Reference traps when the selected payload is i32, not String");
+        assert!(reference_error.message.contains("E0800"));
+        let mut wrong_tag_vm = BytecodeVM::new(
+            compile_mir_program(&wrong_tag).expect("AST-free bytecode V2 String wrong-tag"),
+        );
+        let bytecode_error = wrong_tag_vm
+            .run_value_for_component()
+            .expect_err("bytecode traps when the selected payload is i32, not String");
+        assert_eq!(bytecode_error.code(), "E0800");
+
+        let context = Context::create();
+        let mut wrong_tag_generator =
+            CodeGenerator::new(&context, "mir_native_map_any_v2_string_wrong_tag");
+        wrong_tag_generator
+            .compile_mir_native_for_component(&wrong_tag)
+            .expect("native V2 String wrong-tag path emits its exact type check");
+        let wrong_tag_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+            &wrong_tag_generator,
+            &crate::tests::E2EConfig {
+                use_valgrind: true,
+                valgrind_args: vec![
+                    "--tool=memcheck".into(),
+                    "--leak-check=full".into(),
+                    "--show-leak-kinds=all".into(),
+                    "--errors-for-leak-kinds=definite,indirect,possible".into(),
+                    "--error-exitcode=97".into(),
+                ],
+                ..crate::tests::E2EConfig::default()
+            },
+        )
+        .expect("run native V2 String wrong-tag trap under strict Memcheck");
+        assert_eq!(
+            wrong_tag_memcheck.exit_code,
+            Some(1),
+            "{}",
+            wrong_tag_memcheck.stderr
+        );
+        assert!(wrong_tag_memcheck.stderr.contains("E0800"));
+        assert!(wrong_tag_memcheck
+            .stderr
+            .contains("ERROR SUMMARY: 0 errors"));
+        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
+            assert!(
+                wrong_tag_memcheck
+                    .stderr
+                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
+                "native V2 String wrong-tag reported {kind}: {}",
+                wrong_tag_memcheck.stderr
+            );
+        }
+        let wrong_tag_native = crate::tests::link_and_observe_canonical_mir(&wrong_tag_generator)
+            .expect("run native V2 String wrong-tag executable");
+        assert_eq!(
+            wrong_tag_native.exit_code,
+            Some(1),
+            "{}",
+            wrong_tag_native.stderr
+        );
+        assert!(wrong_tag_native.stderr.contains("E0800"));
+        assert!(wrong_tag_native.stdout.is_empty());
+    }
 
     #[test]
     fn receipt_backed_map_any_owner_v1_is_one_mir_across_reference_bytecode_native_and_verifier() {
@@ -2498,8 +3904,10 @@ func main() -> i32 {
             normal_drop_operations, 14,
             "the normal MIR graph settles every persistent root once"
         );
-        assert!(final_drop_calls >= normal_drop_operations,
-            "native lowering includes every normal root Drop and additional trap-only cleanup calls");
+        assert!(
+            final_drop_calls >= normal_drop_operations,
+            "native lowering includes every normal root Drop and additional trap-only cleanup calls"
+        );
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
             .expect("same MIR native ordinary Map lifecycle process");
         assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
@@ -2878,9 +4286,11 @@ func main() -> i32 {
             missing_string_drop.type_catalog().clone(),
         )
         .expect_err("the public MIR constructor must reject a missing MapAnyOwner v1 String Drop");
-        assert!(missing_drop_construction.iter().any(|error| error
-            .message
-            .contains("MapRoot operation disagrees with its private Checker")));
+        assert!(missing_drop_construction.iter().any(|error| {
+            error
+                .message
+                .contains("MapRoot operation disagrees with its private Checker")
+        }));
         let missing_drop_route = crate::verifier::verify_mir_with_route_receipt(
             &missing_string_drop,
             &verifier_receipt,
@@ -3829,10 +5239,11 @@ func main() -> i32 {
             .expect("String-bearing Flow state TypeDesc");
         assert!(matches!(state_desc.layout, MirLayout::Record { .. }));
         assert_eq!(state_desc.glue.move_out, MirGlueKind::Aggregate);
-        assert!(state_desc.drop_plan.as_ref().is_some_and(|plan| plan
-            .fields
-            .iter()
-            .any(|field| { field.glue == MirGlueKind::OwnedString })));
+        assert!(state_desc.drop_plan.as_ref().is_some_and(|plan| {
+            plan.fields
+                .iter()
+                .any(|field| field.glue == MirGlueKind::OwnedString)
+        }));
         let println_string_calls = program
             .functions()
             .values()
@@ -7915,7 +9326,10 @@ func main() -> i32 {
             else {
                 unreachable!("filtered above");
             };
-            assert_eq!(contract.projection.move_out_glue, crate::core::mir::types::MirGlueKind::OwnedString);
+            assert_eq!(
+                contract.projection.move_out_glue,
+                crate::core::mir::types::MirGlueKind::OwnedString
+            );
             let owner = crate::core::NodeId("function:main".into());
             let reference = MirReferenceInterpreter::new(&program)
                 .execute(&owner, &[])
@@ -8020,7 +9434,10 @@ func main() -> i32 {
             else {
                 unreachable!("filtered above");
             };
-            assert_eq!(contract.projection.move_out_glue, crate::core::mir::types::MirGlueKind::List);
+            assert_eq!(
+                contract.projection.move_out_glue,
+                crate::core::mir::types::MirGlueKind::List
+            );
             let owner = crate::core::NodeId("function:main".into());
             let reference = MirReferenceInterpreter::new(&program)
                 .execute(&owner, &[])
@@ -10376,9 +11793,11 @@ func main() -> i32 {
         let diagnostics = generator
             .compile_mir_native(&fixture.program)
             .expect_err("user enum must remain outside the native union ABI slice");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("checker-materialized user enum has no native tagged-union ABI contract")));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("checker-materialized user enum has no native tagged-union ABI contract")
+        }));
         assert!(
             generator.module.get_function("take").is_none(),
             "L2 requires an unsupported user enum to be rejected before LLVM declarations"
@@ -10508,9 +11927,11 @@ func main() -> i32 {
         let diagnostics = generator
             .compile_mir_native(&program)
             .expect_err("mixed Copy user enum must fail the single-slot ABI gate");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("mixed payload ABI is outside the flat Copy variant contract")));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("mixed payload ABI is outside the flat Copy variant contract")
+        }));
         assert!(
             generator.module.get_function("inspect").is_none(),
             "L2 requires mixed user-enum ABI rejection before LLVM declarations"
@@ -10527,9 +11948,11 @@ func main() -> i32 {
         let diagnostics = generator
             .compile_mir_native(&program)
             .expect_err("tuple with List child must fail closed in native tuple slice");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("outside the scalar/String/tuple ABI")));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("outside the scalar/String/tuple ABI")
+        }));
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message.contains("recursive tuple contract")));

@@ -7,11 +7,10 @@
 //! sidecar and is pinned there by `Arc`, so replacing a current descriptor
 //! version cannot change the meaning or destructor of an existing owner.
 //!
-//! The initial descriptor set is intentionally closed to `I32` and owned
-//! `String` version 1. Aggregate layouts, borrowed pointers, and general ABI
-//! erasure need separate canonical representations and must not be added here
-//! by guessing at a payload layout. New descriptor versions must preserve the
-//! shape contract and provide explicit clone and drop glue.
+//! Version 1 remains closed to `I32` and owned `String`. Version 2 payloads
+//! enter this same generation-bearing token table as a distinct owner kind;
+//! their actual `(tag, type-id, hash, size, align)` and glue are pinned by the
+//! V2 payload descriptor registry. No second token table is permitted.
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
@@ -82,13 +81,16 @@ fn decode_token(bits: u64) -> Result<TokenFields, AnyOwnerError> {
 pub(crate) enum AnyOwnerKind {
     I32,
     OwnedString,
+    /// V2 has a dynamic payload tag; the exact descriptor lives on its payload.
+    ManagedV2,
 }
 
 impl AnyOwnerKind {
-    const fn descriptor_index(self) -> usize {
+    const fn descriptor_index(self) -> Option<usize> {
         match self {
-            Self::I32 => 0,
-            Self::OwnedString => 1,
+            Self::I32 => Some(0),
+            Self::OwnedString => Some(1),
+            Self::ManagedV2 => None,
         }
     }
 }
@@ -101,6 +103,9 @@ pub(crate) enum AnyOwnerError {
     DescriptorMismatch,
     Capacity,
     Poisoned,
+    UnsupportedAggregate,
+    CallbackConflict,
+    CloneFailed(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +117,7 @@ pub(crate) struct DescriptorIdentity {
 enum AnyOwnerPayload {
     I32(i32),
     OwnedString(String),
+    ManagedV2(super::managed_any_payload_v2::ManagedAnyPayloadV2),
 }
 
 impl AnyOwnerPayload {
@@ -119,6 +125,7 @@ impl AnyOwnerPayload {
         match self {
             Self::I32(_) => AnyOwnerKind::I32,
             Self::OwnedString(_) => AnyOwnerKind::OwnedString,
+            Self::ManagedV2(_) => AnyOwnerKind::ManagedV2,
         }
     }
 }
@@ -215,7 +222,7 @@ impl Registry {
     }
 
     fn current_descriptor(&self, kind: AnyOwnerKind) -> &Arc<DescriptorVersion> {
-        &self.current_descriptors[kind.descriptor_index()]
+        &self.current_descriptors[kind.descriptor_index().expect("V2 has no v1 descriptor")]
     }
 
     fn allocate(&mut self, owner: Arc<StoredOwner>) -> Result<AnyOwnerToken, AnyOwnerError> {
@@ -309,7 +316,9 @@ impl Registry {
         &mut self,
         descriptor: Arc<DescriptorVersion>,
     ) -> Result<Arc<DescriptorVersion>, AnyOwnerError> {
-        let index = descriptor.identity.kind.descriptor_index();
+        let Some(index) = descriptor.identity.kind.descriptor_index() else {
+            return Err(AnyOwnerError::DescriptorMismatch);
+        };
         if descriptor.identity.version == 0
             || descriptor.identity.version <= self.current_descriptors[index].identity.version
         {
@@ -325,7 +334,9 @@ impl Registry {
 fn clone_i32(payload: &AnyOwnerPayload) -> Result<AnyOwnerPayload, AnyOwnerError> {
     match payload {
         AnyOwnerPayload::I32(value) => Ok(AnyOwnerPayload::I32(*value)),
-        AnyOwnerPayload::OwnedString(_) => Err(AnyOwnerError::DescriptorMismatch),
+        AnyOwnerPayload::OwnedString(_) | AnyOwnerPayload::ManagedV2(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
     }
 }
 
@@ -334,8 +345,55 @@ fn clone_owned_string(payload: &AnyOwnerPayload) -> Result<AnyOwnerPayload, AnyO
         AnyOwnerPayload::OwnedString(value) => {
             Ok(AnyOwnerPayload::OwnedString(copy_string_fallibly(value)?))
         }
-        AnyOwnerPayload::I32(_) => Err(AnyOwnerError::DescriptorMismatch),
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::ManagedV2(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
     }
+}
+
+fn clone_managed_v2(payload: &AnyOwnerPayload) -> Result<AnyOwnerPayload, AnyOwnerError> {
+    match payload {
+        AnyOwnerPayload::ManagedV2(value) => value
+            .try_clone()
+            .map(AnyOwnerPayload::ManagedV2)
+            .map_err(map_managed_v2_error),
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::OwnedString(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
+    }
+}
+
+fn map_managed_v2_error(
+    error: super::managed_any_payload_v2::ManagedAnyPayloadV2Error,
+) -> AnyOwnerError {
+    use super::managed_any_payload_v2::ManagedAnyPayloadV2Error as V2;
+    match error {
+        V2::Capacity => AnyOwnerError::Capacity,
+        V2::Poisoned => AnyOwnerError::Poisoned,
+        V2::UnsupportedAggregate => AnyOwnerError::UnsupportedAggregate,
+        V2::CallbackConflict => AnyOwnerError::CallbackConflict,
+        V2::CloneFailed(status) => AnyOwnerError::CloneFailed(status),
+        V2::InvalidTag
+        | V2::InvalidTypeId
+        | V2::InvalidLayout
+        | V2::InvalidPayloadPointer
+        | V2::InvalidOutputPointer
+        | V2::LayoutMismatch
+        | V2::VersionMismatch
+        | V2::TypeMismatch => AnyOwnerError::DescriptorMismatch,
+    }
+}
+
+fn managed_v2_descriptor() -> Arc<DescriptorVersion> {
+    static DESCRIPTOR: OnceLock<Arc<DescriptorVersion>> = OnceLock::new();
+    Arc::clone(DESCRIPTOR.get_or_init(|| {
+        Arc::new(DescriptorVersion::new(
+            AnyOwnerKind::ManagedV2,
+            super::managed_any_payload_v2::MANAGED_ANY_PAYLOAD_V2_VERSION,
+            Arc::new(clone_managed_v2),
+            Arc::new(drop_payload),
+        ))
+    }))
 }
 
 fn drop_payload(payload: AnyOwnerPayload) {
@@ -403,6 +461,31 @@ fn allocate_string_on(
     )
 }
 
+/// Install a newly private V2 payload in the one generation-bearing owner
+/// table. The payload's actual descriptor and callbacks remain pinned by its
+/// own Arc receipt; this wrapper descriptor marks only the schema version.
+pub(crate) fn allocate_managed_v2(
+    payload: super::managed_any_payload_v2::ManagedAnyPayloadV2,
+) -> Result<AnyOwnerToken, AnyOwnerError> {
+    allocate_managed_v2_on(owner_registry(), payload)
+}
+
+fn allocate_managed_v2_on(
+    table: &Mutex<Registry>,
+    payload: super::managed_any_payload_v2::ManagedAnyPayloadV2,
+) -> Result<AnyOwnerToken, AnyOwnerError> {
+    let owner = Arc::new(StoredOwner {
+        descriptor: managed_v2_descriptor(),
+        payload: Some(AnyOwnerPayload::ManagedV2(payload)),
+    });
+    let result = {
+        let mut registry = lock_registry(table)?;
+        registry.allocate(Arc::clone(&owner))
+    };
+    drop(owner);
+    result
+}
+
 fn allocate_with_descriptor_on(
     table: &Mutex<Registry>,
     descriptor: Arc<DescriptorVersion>,
@@ -431,6 +514,101 @@ fn snapshot_owner_on(
         return Err(AnyOwnerError::DescriptorMismatch);
     }
     Ok(Arc::clone(owner))
+}
+
+fn snapshot_owner_v2_on(
+    table: &Mutex<Registry>,
+    token: AnyOwnerToken,
+) -> Result<Arc<StoredOwner>, AnyOwnerError> {
+    let registry = lock_registry(table)?;
+    let owner = registry.live_owner(token)?;
+    if owner.descriptor.identity
+        != (DescriptorIdentity {
+            kind: AnyOwnerKind::ManagedV2,
+            version: super::managed_any_payload_v2::MANAGED_ANY_PAYLOAD_V2_VERSION,
+        })
+    {
+        return Err(AnyOwnerError::DescriptorMismatch);
+    }
+    if !matches!(owner.payload(), AnyOwnerPayload::ManagedV2(_)) {
+        return Err(AnyOwnerError::DescriptorMismatch);
+    }
+    Ok(Arc::clone(owner))
+}
+
+/// The runtime-selected exact V2 descriptor on this live token. The returned
+/// key is copied while the owner is pinned; no raw payload pointer escapes.
+pub(crate) fn managed_v2_identity(
+    token: AnyOwnerToken,
+) -> Result<super::managed_any_payload_v2::ManagedAnyPayloadV2Identity, AnyOwnerError> {
+    let owner = snapshot_owner_v2_on(owner_registry(), token)?;
+    match owner.payload() {
+        AnyOwnerPayload::ManagedV2(payload) => Ok(payload.identity()),
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::OwnedString(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
+    }
+}
+
+/// Clone a V2 owner according to its pinned actual descriptor. No requested
+/// static type or caller-supplied callback participates in this operation.
+pub(crate) fn clone_managed_v2_owner(token: AnyOwnerToken) -> Result<AnyOwnerToken, AnyOwnerError> {
+    let source = snapshot_owner_v2_on(owner_registry(), token)?;
+    let payload = match source.payload() {
+        AnyOwnerPayload::ManagedV2(payload) => payload.try_clone().map_err(map_managed_v2_error)?,
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::OwnedString(_) => {
+            return Err(AnyOwnerError::DescriptorMismatch)
+        }
+    };
+    allocate_managed_v2(payload)
+}
+
+/// Unpack only the exact requested descriptor, recursively cloning to caller
+/// storage. The Arc snapshot protects the payload if another thread releases
+/// the source token while the callback is running.
+pub(crate) unsafe fn unpack_managed_v2_owner(
+    token: AnyOwnerToken,
+    expected: super::managed_any_payload_v2::ManagedAnyPayloadV2Identity,
+    output: *mut u8,
+    output_size: usize,
+    output_align: usize,
+) -> Result<(), AnyOwnerError> {
+    let owner = snapshot_owner_v2_on(owner_registry(), token)?;
+    match owner.payload() {
+        AnyOwnerPayload::ManagedV2(payload) => unsafe {
+            payload
+                .unpack_clone_to(expected, output, output_size, output_align)
+                .map_err(map_managed_v2_error)
+        },
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::OwnedString(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
+    }
+}
+
+/// Release a V2 token while validating schema version and payload variant
+/// under the same registry lock that detaches its generational slot.
+pub(crate) fn release_managed_v2_owner(
+    token: AnyOwnerToken,
+    expected: super::managed_any_payload_v2::ManagedAnyPayloadV2Identity,
+) -> Result<(), AnyOwnerError> {
+    let owner = {
+        let mut registry = lock_registry(owner_registry())?;
+        let owner = registry.live_owner(token)?;
+        if owner.descriptor.identity
+            != (DescriptorIdentity {
+                kind: AnyOwnerKind::ManagedV2,
+                version: super::managed_any_payload_v2::MANAGED_ANY_PAYLOAD_V2_VERSION,
+            })
+            || !matches!(owner.payload(), AnyOwnerPayload::ManagedV2(payload) if payload.identity() == expected)
+        {
+            return Err(AnyOwnerError::DescriptorMismatch);
+        }
+        registry.detach(token)?
+    };
+    // The pinned callback runs after the owner-table mutex is released.
+    drop(owner);
+    Ok(())
 }
 
 /// Validate token shape, class, generation, liveness, and descriptor sidecar.
@@ -463,7 +641,9 @@ fn read_i32_on(table: &Mutex<Registry>, token: AnyOwnerToken) -> Result<i32, Any
     let owner = snapshot_owner_on(table, token, Some(AnyOwnerKind::I32))?;
     match owner.payload() {
         AnyOwnerPayload::I32(value) => Ok(*value),
-        AnyOwnerPayload::OwnedString(_) => Err(AnyOwnerError::DescriptorMismatch),
+        AnyOwnerPayload::OwnedString(_) | AnyOwnerPayload::ManagedV2(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
     }
 }
 
@@ -477,7 +657,9 @@ fn copy_string_on(table: &Mutex<Registry>, token: AnyOwnerToken) -> Result<Strin
     let clone = (owner.descriptor.clone_glue)(owner.payload())?;
     match clone {
         AnyOwnerPayload::OwnedString(value) => Ok(value),
-        AnyOwnerPayload::I32(_) => Err(AnyOwnerError::DescriptorMismatch),
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::ManagedV2(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
     }
 }
 
@@ -574,7 +756,9 @@ fn read_i32_v1_on(
     )?;
     match owner.payload() {
         AnyOwnerPayload::I32(value) => Ok(*value),
-        AnyOwnerPayload::OwnedString(_) => Err(AnyOwnerReceiptError::KindMismatch),
+        AnyOwnerPayload::OwnedString(_) | AnyOwnerPayload::ManagedV2(_) => {
+            Err(AnyOwnerReceiptError::KindMismatch)
+        }
     }
 }
 
@@ -648,7 +832,9 @@ fn copy_string_v1_on_with_checkpoint(
     checkpoint()?;
     match (owner.descriptor.clone_glue)(owner.payload())? {
         AnyOwnerPayload::OwnedString(value) => Ok(value),
-        AnyOwnerPayload::I32(_) => Err(AnyOwnerError::DescriptorMismatch.into()),
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::ManagedV2(_) => {
+            Err(AnyOwnerError::DescriptorMismatch.into())
+        }
     }
 }
 
@@ -749,7 +935,9 @@ pub(crate) fn string_payload_pointer_for_test(
     let owner = snapshot_owner_on(owner_registry(), token, Some(AnyOwnerKind::OwnedString))?;
     match owner.payload() {
         AnyOwnerPayload::OwnedString(value) => Ok(value.as_ptr().cast()),
-        AnyOwnerPayload::I32(_) => Err(AnyOwnerError::DescriptorMismatch),
+        AnyOwnerPayload::I32(_) | AnyOwnerPayload::ManagedV2(_) => {
+            Err(AnyOwnerError::DescriptorMismatch)
+        }
     }
 }
 
@@ -799,7 +987,64 @@ mod tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Weak;
+    use std::sync::{Barrier, Weak};
+
+    static V2_BLOCK_NEXT_CLONE: AtomicBool = AtomicBool::new(false);
+    static V2_CLONE_GATE: OnceLock<Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>> = OnceLock::new();
+
+    unsafe extern "C" fn clone_v2_byte(dst: *mut u8, src: *const u8) -> i32 {
+        unsafe { *dst = *src };
+        0
+    }
+
+    unsafe extern "C" fn drop_v2_byte(_payload: *mut u8) {}
+
+    unsafe extern "C" fn clone_v2_with_release_gate(dst: *mut u8, src: *const u8) -> i32 {
+        if V2_BLOCK_NEXT_CLONE.swap(false, Ordering::SeqCst) {
+            let gates = V2_CLONE_GATE
+                .get()
+                .expect("clone gate installed")
+                .lock()
+                .unwrap()
+                .as_ref()
+                .cloned()
+                .expect("clone gate configured");
+            gates.0.wait();
+            gates.1.wait();
+        }
+        unsafe { *dst = *src };
+        0
+    }
+
+    fn v2_byte_payload(
+        tag: crate::runtime::managed_any_payload_v2::ManagedAnyPayloadV2Tag,
+        hash: u8,
+        byte: u8,
+    ) -> crate::runtime::managed_any_payload_v2::ManagedAnyPayloadV2 {
+        use crate::runtime::managed_any_payload_v2::{
+            ManagedAnyPayloadV2, ManagedAnyPayloadV2Glue, ManagedAnyPayloadV2Identity,
+            ManagedAnyPayloadV2Tag, ManagedAnyPayloadV2TypeId,
+        };
+        let identity = ManagedAnyPayloadV2Identity {
+            tag,
+            type_id: ManagedAnyPayloadV2TypeId::parse(b"rt:0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            descriptor_hash: [hash; 32],
+            size: 1,
+            align: 1,
+        };
+        unsafe {
+            ManagedAnyPayloadV2::clone_from_borrowed(
+                identity,
+                ManagedAnyPayloadV2Glue {
+                    clone: clone_v2_byte,
+                    drop: drop_v2_byte,
+                },
+                &byte,
+            )
+        }
+        .unwrap()
+    }
 
     fn local_table(max_slots: u32) -> Mutex<Registry> {
         Mutex::new(Registry::with_slot_limit(max_slots).expect("test slot limit is valid"))
@@ -886,6 +1131,124 @@ mod tests {
             Err(AnyOwnerError::StaleToken)
         );
         release_owner_on(&table, reused).expect("clean up test owner");
+        assert_eq!(live_count_on(&table), Ok(0));
+    }
+
+    #[test]
+    fn v2_owner_uses_existing_generation_table_and_pins_actual_descriptor() {
+        use super::super::managed_any_payload_v2::ManagedAnyPayloadV2Tag;
+
+        let table = local_table(2);
+        let source =
+            allocate_managed_v2_on(&table, v2_byte_payload(ManagedAnyPayloadV2Tag::Bool, 93, 0))
+                .unwrap();
+        let source_identity = {
+            let owner = snapshot_owner_v2_on(&table, source).unwrap();
+            match owner.payload() {
+                AnyOwnerPayload::ManagedV2(payload) => payload.identity(),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(source_identity.tag, ManagedAnyPayloadV2Tag::Bool);
+        assert_eq!(validate_on(&table, source), Ok(AnyOwnerKind::ManagedV2));
+        assert_eq!(descriptor_identity_on(&table, source).unwrap().version, 2);
+
+        let cloned = clone_owner_on(&table, source).unwrap();
+        assert_ne!(source, cloned);
+        {
+            let clone = snapshot_owner_v2_on(&table, cloned).unwrap();
+            match clone.payload() {
+                AnyOwnerPayload::ManagedV2(payload) => {
+                    assert_eq!(payload.identity(), source_identity);
+                    assert_eq!(unsafe { *payload.payload_ptr() }, 0);
+                }
+                _ => unreachable!(),
+            }
+        }
+        release_owner_on(&table, source).unwrap();
+        assert_eq!(
+            snapshot_owner_v2_on(&table, source).err(),
+            Some(AnyOwnerError::StaleToken)
+        );
+        assert_eq!(
+            snapshot_owner_v2_on(&table, cloned)
+                .unwrap()
+                .payload()
+                .kind(),
+            AnyOwnerKind::ManagedV2
+        );
+        release_owner_on(&table, cloned).unwrap();
+
+        let reused = allocate_i32_on(&table, 1).unwrap();
+        assert_eq!(reused.wire_bits() as u32, source.wire_bits() as u32);
+        assert_ne!(reused.wire_bits(), source.wire_bits());
+        release_owner_on(&table, reused).unwrap();
+        assert_eq!(live_count_on(&table), Ok(0));
+    }
+
+    #[test]
+    fn v2_clone_snapshot_survives_source_release_while_callback_is_running() {
+        use super::super::managed_any_payload_v2::{
+            ManagedAnyPayloadV2, ManagedAnyPayloadV2Glue, ManagedAnyPayloadV2Identity,
+            ManagedAnyPayloadV2Tag, ManagedAnyPayloadV2TypeId,
+        };
+
+        let table = Arc::new(local_table(1));
+        let identity = ManagedAnyPayloadV2Identity {
+            tag: ManagedAnyPayloadV2Tag::Bool,
+            type_id: ManagedAnyPayloadV2TypeId::parse(b"rt:0123456789abcdef0123456789abcdef")
+                .unwrap(),
+            descriptor_hash: [94; 32],
+            size: 1,
+            align: 1,
+        };
+        let payload = unsafe {
+            ManagedAnyPayloadV2::clone_from_borrowed(
+                identity,
+                ManagedAnyPayloadV2Glue {
+                    clone: clone_v2_with_release_gate,
+                    drop: drop_v2_byte,
+                },
+                &77u8,
+            )
+        }
+        .unwrap();
+        let source = allocate_managed_v2_on(&table, payload).unwrap();
+        let started = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        *V2_CLONE_GATE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some((Arc::clone(&started), Arc::clone(&resume)));
+        V2_BLOCK_NEXT_CLONE.store(true, Ordering::SeqCst);
+
+        let cloned = std::thread::scope(|scope| {
+            let worker_table = Arc::clone(&table);
+            let worker = scope.spawn(move || clone_owner_on(&worker_table, source));
+            started.wait();
+            release_owner_on(&table, source).unwrap();
+            assert_eq!(
+                snapshot_owner_v2_on(&table, source).err(),
+                Some(AnyOwnerError::StaleToken)
+            );
+            resume.wait();
+            worker.join().unwrap().unwrap()
+        });
+
+        *V2_CLONE_GATE
+            .get()
+            .expect("clone gate installed")
+            .lock()
+            .unwrap() = None;
+        let clone = snapshot_owner_v2_on(&table, cloned).unwrap();
+        match clone.payload() {
+            AnyOwnerPayload::ManagedV2(payload) => {
+                assert_eq!(payload.identity(), identity);
+                assert_eq!(unsafe { *payload.payload_ptr() }, 77);
+            }
+            AnyOwnerPayload::I32(_) | AnyOwnerPayload::OwnedString(_) => unreachable!(),
+        }
+        release_owner_on(&table, cloned).unwrap();
         assert_eq!(live_count_on(&table), Ok(0));
     }
 
@@ -1035,6 +1398,7 @@ mod tests {
                 let clone: Arc<CloneGlue> = match kind {
                     AnyOwnerKind::I32 => Arc::new(clone_i32),
                     AnyOwnerKind::OwnedString => Arc::new(clone_owned_string),
+                    AnyOwnerKind::ManagedV2 => unreachable!("v1 descriptor test"),
                 };
                 let v2 = custom_descriptor(kind, 2, clone, Arc::new(drop_payload));
                 register_descriptor_version_on(&table, v2).unwrap();
@@ -1104,6 +1468,7 @@ mod tests {
             let source = match kind {
                 AnyOwnerKind::I32 => allocate_i32_on(&table, -17),
                 AnyOwnerKind::OwnedString => allocate_string_on(&table, "值\0🌿"),
+                AnyOwnerKind::ManagedV2 => unreachable!("v1 owner test"),
             }
             .unwrap();
             let descriptor = descriptor_identity_on(&table, source).unwrap();

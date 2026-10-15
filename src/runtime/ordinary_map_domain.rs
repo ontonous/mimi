@@ -14,11 +14,14 @@ use std::sync::{Mutex, MutexGuard};
 
 use super::any_owner::{self, AnyOwnerToken, DescriptorIdentity};
 use super::handle::{self, LeaseThreadId};
+use super::managed_any_payload_v2::ManagedAnyPayloadV2Identity;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OrdinaryMapProfile {
     OwnerLifecycleI32StringV1,
     OwnedGetI32StringV1,
+    AnyOwnerV2Record,
+    OwnedAnyV2,
 }
 
 impl OrdinaryMapProfile {
@@ -32,6 +35,8 @@ impl OrdinaryMapProfile {
             Self::OwnedGetI32StringV1 => {
                 handle::ordinary_map_owned_get_i32_string_v1_drop_for_trap(root)
             }
+            Self::AnyOwnerV2Record => handle::ordinary_map_any_owner_v2_record_drop_for_trap(root),
+            Self::OwnedAnyV2 => handle::ordinary_map_owned_any_v2_drop_for_trap(root),
         };
         // Stale, already-dropped, or busy roots must not raise a second trap
         // and replace the diagnostic that initiated orderly shutdown.
@@ -131,16 +136,82 @@ pub(super) fn register_fresh_owned_string(
     )
 }
 
-/// Separate from Map entry owners: only snapshots accepted by the ManagedAny
-/// ABI appear here. Registration does not expose or reinterpret ValueHandle.
+/// Separate from Map entry owners: only snapshots accepted by a ManagedAny
+/// ABI appear here. Records carry the exact v1 or v2 descriptor receipt and
+/// never expose/reinterpret the token as a ValueHandle.
+#[derive(Clone, Copy)]
+enum RegisteredAnyDescriptor {
+    V1(DescriptorIdentity),
+    V2(ManagedAnyPayloadV2Identity),
+}
+
 #[derive(Clone, Copy)]
 struct RegisteredAny {
     creator: LeaseThreadId,
     token: AnyOwnerToken,
-    descriptor: DescriptorIdentity,
+    descriptor: RegisteredAnyDescriptor,
 }
 
 static OWNED_ANY: Mutex<Vec<RegisteredAny>> = Mutex::new(Vec::new());
+
+/// Snapshot of the ownership records used by ordinary-Map native execution.
+/// This is test-only and deliberately exposes counts, never handles or owner
+/// tokens. This runtime has no separate `VALUES_SHELLS` counter; the
+/// underlying AnyOwner token count is reported independently.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapDomainLiveCounts {
+    /// Active execution-domain root records, one per published profile handle.
+    pub(crate) roots: usize,
+    /// The exact number of dedicated ordinary-Map handles represented by the
+    /// root registry (including both supported ordinary-Map profiles).
+    pub(crate) ordinary_map_handles: usize,
+    /// All live Map-table slots, across profiles. This is the exact runtime
+    /// handle count, though the current test hook does not partition by profile.
+    pub(crate) runtime_map_handles: usize,
+    /// Roots belonging specifically to the owned-Get profile under test.
+    pub(crate) owned_get_handles: usize,
+    /// ManagedAny receipt records in the execution-domain registry.
+    pub(crate) managed_any: usize,
+    /// Canonical owned String receipt records in the execution-domain registry.
+    pub(crate) owned_strings: usize,
+    /// Live generation-bearing tokens in the underlying AnyOwner table.
+    pub(crate) any_owner_tokens: usize,
+}
+
+/// Read a stable test snapshot of ordinary-Map ownership domains. Callers
+/// compare before/after values around serial native execution; unrelated
+/// runtime registrations may already exist in the process.
+#[cfg(test)]
+pub(crate) fn ordinary_map_domain_live_counts_for_test(
+) -> Result<OrdinaryMapDomainLiveCounts, &'static str> {
+    // Copy identities and release ROOTS before observing other registries.
+    // The test call sites sample only between synchronous operations, so this
+    // avoids lock-order coupling while retaining delta-based assertions.
+    let roots = lock_roots().clone();
+    let managed_any = OWNED_ANY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len();
+    let owned_strings = lock_owned_strings().len();
+    let any_owner_tokens = any_owner::live_count().map_err(|_| "AnyOwner registry is unhealthy")?;
+    let runtime_map_handles = usize::try_from(handle::mimi_test_map_live_count())
+        .map_err(|_| "Map handle count is negative")?;
+    let owned_get_handles = roots
+        .iter()
+        .filter(|root| root.profile == OrdinaryMapProfile::OwnedGetI32StringV1)
+        .count();
+
+    Ok(OrdinaryMapDomainLiveCounts {
+        roots: roots.len(),
+        ordinary_map_handles: roots.len(),
+        runtime_map_handles,
+        owned_get_handles,
+        managed_any,
+        owned_strings,
+        any_owner_tokens,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ManagedAnyDomainError {
@@ -172,7 +243,35 @@ pub(super) fn register_fresh_managed_any(
     owners.push(RegisteredAny {
         creator,
         token,
-        descriptor,
+        descriptor: RegisteredAnyDescriptor::V1(descriptor),
+    });
+    Ok(())
+}
+
+/// Register a fresh V2 token for creator-thread trap cleanup. The identity is
+/// copied from the owner before this call and no destructor runs under lock.
+pub(super) fn register_fresh_managed_any_v2(
+    token: AnyOwnerToken,
+    descriptor: ManagedAnyPayloadV2Identity,
+) -> Result<(), ManagedAnyDomainError> {
+    let creator = handle::current_lease_thread_id();
+    let mut owners = OWNED_ANY
+        .lock()
+        .map_err(|_| ManagedAnyDomainError::Poisoned)?;
+    if owners.iter().any(|owner| owner.token == token) {
+        return Err(ManagedAnyDomainError::ConflictingReceipt);
+    }
+    #[cfg(test)]
+    if REGISTRATION_FAIL.with(std::cell::Cell::get) {
+        return Err(ManagedAnyDomainError::Capacity);
+    }
+    owners
+        .try_reserve(1)
+        .map_err(|_| ManagedAnyDomainError::Capacity)?;
+    owners.push(RegisteredAny {
+        creator,
+        token,
+        descriptor: RegisteredAnyDescriptor::V2(descriptor),
     });
     Ok(())
 }
@@ -185,10 +284,32 @@ pub(super) fn managed_any_descriptor(
     let owners = OWNED_ANY
         .lock()
         .map_err(|_| ManagedAnyDomainError::Poisoned)?;
-    Ok(owners
-        .iter()
-        .find(|owner| owner.token == token)
-        .map(|owner| owner.descriptor))
+    Ok(owners.iter().find_map(|owner| {
+        if owner.token != token {
+            return None;
+        }
+        match owner.descriptor {
+            RegisteredAnyDescriptor::V1(descriptor) => Some(descriptor),
+            RegisteredAnyDescriptor::V2(_) => None,
+        }
+    }))
+}
+
+pub(super) fn managed_any_v2_identity(
+    token: AnyOwnerToken,
+) -> Result<Option<ManagedAnyPayloadV2Identity>, ManagedAnyDomainError> {
+    let owners = OWNED_ANY
+        .lock()
+        .map_err(|_| ManagedAnyDomainError::Poisoned)?;
+    Ok(owners.iter().find_map(|owner| {
+        if owner.token != token {
+            return None;
+        }
+        match owner.descriptor {
+            RegisteredAnyDescriptor::V1(_) => None,
+            RegisteredAnyDescriptor::V2(descriptor) => Some(descriptor),
+        }
+    }))
 }
 
 /// After successful owner-table release, remove the exact token's original
@@ -397,10 +518,26 @@ pub(super) fn drain_current_thread_roots() {
     while let Some(root) = extract_root_for(creator) {
         root.profile.retire_for_cleanup(root.handle);
     }
+    // A Values result is published as an ordinary MimiList whose slots own
+    // independent V2 tokens. Drop these Lists first so their normal list glue
+    // releases element owners and their Boxes/backing buffers before the
+    // registry sweeps any unrelated standalone V2 results below.
+    super::map_any_snapshot::drain_current_thread_managed_any_v2_lists();
+    // V2 `values` results are independent owners, not Map roots or V1
+    // ManagedAny Lists. Retire their creator-owned snapshot graphs outside the
+    // list registry lock before draining separately published Any snapshots.
+    super::map_any_snapshot::drain_current_thread_v2_values_snapshots();
     while let Some(owner) = extract_managed_any_for(creator) {
         // Detach first; stale/poisoned/descriptor errors are secondary cleanup
         // failures and must not recurse into the original trap path.
-        let _ = any_owner::release_owner_v1(owner.token, owner.descriptor, 1);
+        let _ = match owner.descriptor {
+            RegisteredAnyDescriptor::V1(descriptor) => {
+                any_owner::release_owner_v1(owner.token, descriptor, 1).map_err(|_| ())
+            }
+            RegisteredAnyDescriptor::V2(descriptor) => {
+                any_owner::release_managed_v2_owner(owner.token, descriptor).map_err(|_| ())
+            }
+        };
     }
     while let Some(string) = extract_owned_string_for(creator) {
         if string.descriptor_version == CANONICAL_STRING_DESCRIPTOR_VERSION {
@@ -450,6 +587,14 @@ mod tests {
             OrdinaryMapProfile::OwnedGetI32StringV1 => {
                 super::super::MimiMap::ordinary_map_owned_get_i32_string_v1(snapshot)
             }
+            OrdinaryMapProfile::AnyOwnerV2Record => {
+                super::super::MimiMap::ordinary_map_any_owner_v2_record(
+                    super::super::map_any_snapshot::OrdinaryMapAnyOwnerV2Snapshot::new(),
+                )
+            }
+            OrdinaryMapProfile::OwnedAnyV2 => {
+                unreachable!("V2 tests install their own descriptor snapshot")
+            }
         };
         match handle::map_new_handle_fallible(map) {
             Ok(root) => root,
@@ -477,6 +622,10 @@ mod tests {
             OrdinaryMapProfile::OwnedGetI32StringV1 => {
                 handle::ordinary_map_owned_get_i32_string_v1_acquire(root)
             }
+            OrdinaryMapProfile::AnyOwnerV2Record => {
+                handle::ordinary_map_any_owner_v2_record_acquire(root)
+            }
+            OrdinaryMapProfile::OwnedAnyV2 => handle::ordinary_map_owned_any_v2_acquire(root),
         }
     }
 
@@ -500,6 +649,10 @@ mod tests {
             OrdinaryMapProfile::OwnedGetI32StringV1 => {
                 handle::ordinary_map_owned_get_i32_string_v1_drop(root)
             }
+            OrdinaryMapProfile::AnyOwnerV2Record => {
+                handle::ordinary_map_any_owner_v2_record_drop(root)
+            }
+            OrdinaryMapProfile::OwnedAnyV2 => handle::ordinary_map_owned_any_v2_drop(root),
         }
         .unwrap();
         forget_root(profile, root);
@@ -1101,7 +1254,13 @@ mod tests {
                 && (mode == 0
                     || mode == 3
                     || (registered_string(diagnostic).is_none()
-                        && !string_allocation_live(diagnostic)));
+                        && !string_allocation_live(diagnostic)))
+                && ordinary_map_domain_live_counts_for_test().is_ok_and(|counts| {
+                    // This callback runs in a purpose-built one-test child,
+                    // so unlike the in-process JIT assertions its complete
+                    // runtime ownership domain must be empty after trap drain.
+                    counts == OrdinaryMapDomainLiveCounts::default()
+                });
             // Exit from the real callback before trap_exit can run. Success
             // therefore proves that mimi_runtime_abort settled ownership
             // before invoking a callback that transfers control permanently.

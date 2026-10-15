@@ -311,6 +311,9 @@ pub(super) fn analyze_canonical(
         ordinary_map_owned_get_i32_string_v1_new_attempts: BTreeSet::new(),
         ordinary_map_owned_get_i32_string_v1_operation_attempts: BTreeSet::new(),
         ordinary_map_owned_get_i32_string_v1_cfg_receipt: None,
+        ordinary_map_owned_any_v2_actions: Vec::new(),
+        ordinary_map_owned_any_v2_operation_attempts: BTreeSet::new(),
+        ordinary_map_owned_any_v2_cfg_receipt: None,
         managed_any_cfg_receipt: None,
         in_states: in_flow
             .into_iter()

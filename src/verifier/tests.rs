@@ -281,6 +281,324 @@ macro_rules! require_z3 {
 }
 
 #[test]
+fn legacy_verifier_marks_nonready_v2_owners_not_in_trusted_subset() {
+    require_z3!();
+    use crate::core::mir::OrdinaryMapOwnedAnyV2Admission as Admission;
+
+    let cases = [
+        (
+            Admission::StagedGetValues,
+            r#"
+type Label { text: string }
+func v2_owner() -> i32 {
+    ensures: result == 0
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let pair = map_get(root, "label")
+    let _found = pair.0
+    drop(pair)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+func unrelated(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result > x
+    x + 1
+}
+func main() -> i32 { 0 }
+"#,
+            "v2_owner",
+        ),
+        (
+            Admission::CompleteCoverage,
+            r#"
+type Label { text: string }
+func v2_owner() -> i32 {
+    ensures: result == 0
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+func unrelated(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result > x
+    x + 1
+}
+func main() -> i32 { 0 }
+"#,
+            "v2_owner",
+        ),
+        (
+            Admission::IncompleteCoverage,
+            r#"
+type Label { text: string }
+func v2_owner() -> i32 {
+    ensures: result == 0
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let unsupported = keys(root)
+    drop(unsupported)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+func unrelated(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result > x
+    x + 1
+}
+func main() -> i32 { 0 }
+"#,
+            "v2_owner",
+        ),
+    ];
+
+    for (expected_admission, source, owner_name) in cases {
+        let file = parse_memory_source(source, "legacy-v2-coverage").expect("parse");
+        let checked = crate::core::check_program(&file).expect("typecheck");
+        assert_eq!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_any_v2,
+            expected_admission
+        );
+
+        let mut verifier = Verifier::new().expect("Z3 verifier");
+        let results = verifier.verify_checked(&checked);
+        let owner = results
+            .iter()
+            .find(|result| result.func_name == owner_name)
+            .unwrap_or_else(|| panic!("missing owner-scoped V2 coverage result: {results:#?}"));
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.func_name == owner_name)
+                .count(),
+            1,
+            "the V2 owner should receive exactly one coverage row: {results:#?}"
+        );
+        assert_eq!(owner.status, VerifStatus::NotInTrustedSubset, "{owner:#?}");
+        assert!(
+            owner.artifact.is_none(),
+            "downgraded owner kept a proof artifact: {owner:#?}"
+        );
+        assert!(owner.message.contains("owner-v2"), "{owner:#?}");
+        assert!(
+            owner.diagnostic.as_ref().is_some_and(|diagnostic| {
+                diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            }),
+            "owner result must carry the route-coverage diagnostic: {owner:#?}"
+        );
+
+        let unrelated = results
+            .iter()
+            .find(|result| result.func_name == "unrelated")
+            .expect("unrelated callable result remains in the batch");
+        assert_eq!(unrelated.status, VerifStatus::Proven, "{unrelated:#?}");
+        assert!(
+            unrelated.artifact.is_some(),
+            "unrelated proof artifact was lost"
+        );
+    }
+}
+
+#[test]
+fn complete_v2_mir_analysis_cannot_be_composed_into_production_ready_route() {
+    require_z3!();
+    assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+
+    let source = r#"
+type Label { text: string }
+func v2_owner() -> i32 {
+    ensures: result == 0
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+func unrelated(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result > x
+    x + 1
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse_memory_source(source, "complete-v2-ready-boundary").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked)
+            .ordinary_map_owned_any_v2,
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+    );
+
+    let public_error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect_err("public canonical route stays closed while V2 readiness is false");
+    assert!(public_error
+        .to_string()
+        .contains("production-readiness gate is closed"));
+
+    // This low-level MIR constructor is available for analysis and evidence.
+    // The public proof API must still mark its V2 owner NITS so its result
+    // cannot satisfy the production execution-readiness predicate.
+    let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+        .expect("low-level MIR analyzer input");
+    let mismatched_receipt = canonical.route_receipt("verifier-mir-v1");
+    let profile_error = verify_mir_with_route_receipt(
+        &canonical,
+        &mismatched_receipt,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect_err("a generic profile cannot hide a V2 MIR program");
+    assert!(
+        profile_error.contains("MIR-COVERAGE-001"),
+        "{profile_error}"
+    );
+
+    let receipt = canonical.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+    let results = verify_mir_with_route_receipt(
+        &canonical,
+        &receipt,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("low-level analyzer returns diagnostic observations");
+
+    let v2_owner_id = canonical
+        .functions()
+        .values()
+        .find(|function| {
+            function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
+        })
+        .expect("complete V2 owner in materialized MIR")
+        .owner
+        .0
+        .clone();
+    let owner = results
+        .iter()
+        .find(|result| result.func_name == v2_owner_id)
+        .expect("V2 owner remains visible in diagnostic results");
+    assert_eq!(owner.status, VerifStatus::NotInTrustedSubset, "{owner:#?}");
+    assert!(owner.artifact.is_none(), "{owner:#?}");
+    assert!(owner.message.contains("diagnostic-only"), "{owner:#?}");
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.func_name == v2_owner_id)
+            .count(),
+        1,
+        "public MIR verification must emit exactly one V2 owner boundary"
+    );
+    assert!(!canonical_execution_route_verifier_ready(
+        &results, false, false
+    ));
+    let v2_receipt_proofs = results
+        .iter()
+        .filter(|result| result.func_name != v2_owner_id && result.artifact.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        !v2_receipt_proofs.is_empty(),
+        "unrelated proof rows retain their V2 route receipt"
+    );
+    assert!(!canonical_execution_route_verifier_ready(
+        &v2_receipt_proofs,
+        false,
+        false
+    ));
+
+    let default_profile_results = verify_mir(
+        &canonical,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("default MIR verifier binds V2 to its V2 receipt profile");
+    let default_profile_owner = default_profile_results
+        .iter()
+        .find(|result| result.func_name == v2_owner_id)
+        .expect("default MIR verifier keeps the V2 owner visible");
+    assert_eq!(
+        default_profile_owner.status,
+        VerifStatus::NotInTrustedSubset,
+        "{default_profile_owner:#?}"
+    );
+    assert!(default_profile_owner.artifact.is_none());
+    assert!(!canonical_execution_route_verifier_ready(
+        &default_profile_results,
+        false,
+        false
+    ));
+
+    let dual_results = verify_checked_dual(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("dual checked verifier uses the internal diagnostic route");
+    let dual_owner = dual_results
+        .iter()
+        .find(|result| result.func_name == "v2_owner")
+        .expect("dual checked verifier keeps the source-level V2 owner visible");
+    assert_eq!(dual_owner.status, VerifStatus::NotInTrustedSubset);
+    assert!(dual_owner.artifact.is_none());
+    assert!(!canonical_execution_route_verifier_ready(
+        &dual_results,
+        false,
+        false
+    ));
+
+    let unrelated = results
+        .iter()
+        .find(|result| result.func_name.ends_with("unrelated"))
+        .expect("unrelated contract remains visible");
+    assert_eq!(unrelated.status, VerifStatus::Proven, "{unrelated:#?}");
+    assert!(unrelated.artifact.is_some());
+
+    let ordinary_source = r#"
+func ordinary(x: i32) -> i32 {
+    requires: x >= 0
+    ensures: result > x
+    x + 1
+}
+func main() -> i32 { 0 }
+"#;
+    let ordinary_file = parse_memory_source(ordinary_source, "ordinary-ready-boundary")
+        .expect("parse ordinary source");
+    let ordinary_checked = crate::core::check_program(&ordinary_file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&ordinary_checked)
+            .ordinary_map_owned_any_v2,
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::OutsideProfile
+    );
+    let ordinary_route = crate::core::mir::materialize_canonical_mir_route(&ordinary_checked, None)
+        .expect("ordinary canonical MIR route remains materializable");
+    let ordinary_results = verify_mir(
+        &ordinary_route.program,
+        blake3::hash(ordinary_source.as_bytes())
+            .to_hex()
+            .to_string(),
+    )
+    .expect("ordinary MIR remains verifiable");
+    assert!(canonical_execution_route_verifier_ready(
+        &ordinary_results,
+        false,
+        false
+    ));
+    assert!(ordinary_results.iter().any(|result| {
+        result.func_name.ends_with("ordinary") && result.status == VerifStatus::Proven
+    }));
+}
+
+#[test]
 fn exported_body_dual_verifier_fails_closed_without_legacy_access_for_map_any_owner_v1_candidate() {
     require_z3!();
     let source = r#"
@@ -3257,6 +3575,69 @@ fn scalar_collection_route_receipt_is_shared_by_all_consumers() {
 
     let after_consumers = canonical.route_receipt(crate::core::mir::SCALAR_COLLECTION_ISLAND);
     assert_eq!(receipt, after_consumers);
+}
+
+#[test]
+fn public_checked_verifier_keeps_complete_owner_v2_diagnostic_until_readiness() {
+    require_z3!();
+    assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+
+    let source = r#"
+type Label { text: string }
+func v2_owner() -> i32 {
+    ensures: result == 0
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+func unrelated(value: i32) -> i32 {
+    requires: value >= 0
+    ensures: result == value
+    value
+}
+func main() -> i32 { 0 }
+"#;
+    let file = parse_memory_source(source, "owner-v2-public-single-verifier").expect("parse");
+    let checked = crate::core::check_program(&file).expect("typecheck");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&checked)
+            .ordinary_map_owned_any_v2,
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+    );
+
+    let results = super::verify_checked(
+        &checked,
+        blake3::hash(source.as_bytes()).to_hex().to_string(),
+    )
+    .expect("single checked verifier returns its diagnostic batch");
+    let owner = results
+        .iter()
+        .find(|result| result.func_name == "v2_owner")
+        .expect("V2 proof owner remains visible");
+    assert_eq!(owner.status, VerifStatus::NotInTrustedSubset);
+    assert_eq!(owner.constraint_count, 0);
+    assert!(owner.artifact.is_none());
+    assert!(owner.message.contains("MIR-COVERAGE-001"), "{owner:#?}");
+    assert_eq!(
+        owner
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_deref()),
+        Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    );
+    let unrelated = results
+        .iter()
+        .find(|result| result.func_name == "unrelated")
+        .expect("unrelated proof owner remains visible");
+    assert_eq!(unrelated.status, VerifStatus::Proven, "{unrelated:#?}");
+    assert!(unrelated.artifact.is_some());
+    assert!(!super::canonical_execution_route_verifier_ready(
+        &results, false, false
+    ));
 }
 
 #[test]

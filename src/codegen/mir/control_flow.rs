@@ -105,7 +105,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 return Err(NativeMirError::new(
                     subject.to_string(),
                     "unvalidated terminator reached native emitter",
-                ))
+                ));
             }
         }
         Ok(())
@@ -883,6 +883,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .function
                 .ownership
                 .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+            && !self
+                .function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
         {
             return Ok(());
         }
@@ -918,6 +922,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
                     || value.ty
                         == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                    || value.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
                 })
             {
                 live_roots.push(parameter.value.clone());
@@ -934,19 +940,24 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { result, .. }
                 | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result }
                 | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { result, .. }
-                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { result, .. } => {
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { result, .. }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { result, .. }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { result, .. } => {
                     live_roots.push(result.clone());
                 }
                 MirInstructionKind::Clone { result, .. }
                     if self.function.values.get(result).is_some_and(|value| {
                         value.ty == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
                             || value.ty == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                            || value.ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
                     }) =>
                 {
                     live_roots.push(result.clone());
                 }
                 MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root }
-                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root } => {
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { root }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => {
                     live_roots.retain(|live| live != root);
                 }
                 _ => {}
@@ -964,8 +975,11 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
             {
                 "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop"
-            } else {
+            } else if ty == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+            {
                 "mimi_mir_ordinary_map_owned_get_i32_string_v1_drop"
+            } else {
+                "mimi_ordinary_map_owned_any_v2_drop"
             };
             let drop_fn = self
                 .generator

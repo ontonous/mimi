@@ -1,0 +1,34 @@
+use std::testing;
+
+type Label { text: string }
+
+func main() -> i32 {
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let one = map_set(empty, "answer", 42)
+    let two = map_set(one, "label", label)
+    let overwritten = map_set(two, "label", 99)
+    let removed = map_remove(two, "label")
+
+    assert_eq_int(map_size(empty), 0)
+    assert_eq_int(map_size(one), 1)
+    assert_eq_int(map_size(two), 2)
+    assert_eq_int(map_size(overwritten), 2)
+    assert_eq_int(map_size(removed), 1)
+    assert_true(is_empty(empty))
+    assert_false(is_empty(two))
+    assert_false(is_empty(removed))
+    assert_true(has_key(two, "label"))
+    assert_true(has_key(overwritten, "label"))
+    assert_false(has_key(removed, "label"))
+
+    println(label.text)
+
+    drop(empty)
+    drop(one)
+    drop(two)
+    drop(overwritten)
+    drop(removed)
+    drop(label)
+    0
+}

@@ -9,9 +9,13 @@
 
 pub mod actor_domain;
 mod any_owner;
+mod blake3;
 mod epoch;
+pub mod flow_domain;
 mod handle;
 pub(crate) mod list_string;
+#[allow(dead_code)]
+mod managed_any_payload_v2;
 #[cfg(test)]
 mod map_any_owner_prototype;
 mod map_any_snapshot;
@@ -37,9 +41,19 @@ pub use list_string::{
     LIST_STRING_ABI_VERSION, MIMI_ERR_OLD_STRING_ABI, MIMI_STR_MAGIC,
 };
 pub use map_any_snapshot::{
-    mimi_mir_managed_any_i32_string_v1_clone, mimi_mir_managed_any_i32_string_v1_copy_string,
-    mimi_mir_managed_any_i32_string_v1_drop, mimi_mir_managed_any_i32_string_v1_pack_i32,
-    mimi_mir_managed_any_i32_string_v1_read_i32,
+    mimi_any_payload_v2_clone, mimi_any_payload_v2_drop, mimi_any_payload_v2_new,
+    mimi_any_payload_v2_unpack, mimi_mir_managed_any_i32_string_v1_clone,
+    mimi_mir_managed_any_i32_string_v1_copy_string, mimi_mir_managed_any_i32_string_v1_drop,
+    mimi_mir_managed_any_i32_string_v1_pack_i32, mimi_mir_managed_any_i32_string_v1_read_i32,
+    mimi_mir_ordinary_map_any_owner_v2_record_clone,
+    mimi_mir_ordinary_map_any_owner_v2_record_contains,
+    mimi_mir_ordinary_map_any_owner_v2_record_drop, mimi_mir_ordinary_map_any_owner_v2_record_new,
+    mimi_mir_ordinary_map_any_owner_v2_record_remove,
+    mimi_mir_ordinary_map_any_owner_v2_record_set,
+    mimi_mir_ordinary_map_any_owner_v2_record_set_i32,
+    mimi_mir_ordinary_map_any_owner_v2_record_set_label,
+    mimi_mir_ordinary_map_any_owner_v2_record_size, mimi_mir_ordinary_map_any_owner_v2_set_i32,
+    mimi_mir_ordinary_map_any_owner_v2_set_label,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_clone,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_contains,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_drop,
@@ -59,15 +73,26 @@ pub use map_any_snapshot::{
     mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_remove,
     mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_i32,
     mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_string,
-    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size, ORDINARY_MAP_OWNED_GET_CAPACITY,
-    ORDINARY_MAP_OWNED_GET_MISSING, ORDINARY_MAP_OWNED_GET_OK,
-    ORDINARY_MAP_OWNED_GET_TYPE_MISMATCH,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size, mimi_ordinary_map_owned_any_v2_clone,
+    mimi_ordinary_map_owned_any_v2_contains, mimi_ordinary_map_owned_any_v2_drop,
+    mimi_ordinary_map_owned_any_v2_get, mimi_ordinary_map_owned_any_v2_is_empty,
+    mimi_ordinary_map_owned_any_v2_new, mimi_ordinary_map_owned_any_v2_remove,
+    mimi_ordinary_map_owned_any_v2_set, mimi_ordinary_map_owned_any_v2_size,
+    mimi_ordinary_map_owned_any_v2_values_list, MimiMapAnyOwnerV2Label,
+    MIMI_MAP_ANY_OWNER_V2_CAPACITY, MIMI_MAP_ANY_OWNER_V2_DESTROYED,
+    MIMI_MAP_ANY_OWNER_V2_INVALID_HANDLE, MIMI_MAP_ANY_OWNER_V2_INVALID_INPUT,
+    MIMI_MAP_ANY_OWNER_V2_OK, MIMI_MAP_ANY_OWNER_V2_REENTRANT, MIMI_MAP_ANY_OWNER_V2_STALE,
+    ORDINARY_MAP_OWNED_ANY_V2_OK, ORDINARY_MAP_OWNED_GET_CAPACITY, ORDINARY_MAP_OWNED_GET_MISSING,
+    ORDINARY_MAP_OWNED_GET_OK, ORDINARY_MAP_OWNED_GET_TYPE_MISMATCH,
 };
 #[cfg(test)]
 pub(crate) use map_any_snapshot::{
+    ordinary_map_owned_any_v2_root_publish_attempts_for_test,
+    ordinary_map_owned_any_v2_root_publish_checkpoint_for_test,
     ordinary_map_owned_get_allocation_attempts_for_test,
     ordinary_map_owned_get_allocation_checkpoint_for_test,
     ordinary_map_owned_get_allocation_failure_triggered_for_test,
+    with_ordinary_map_owned_any_v2_root_publish_failure_for_test,
     with_ordinary_map_owned_get_allocation_failure_for_test,
 };
 pub use mir_map_root::{
@@ -79,6 +104,10 @@ pub use mir_map_root::{
     mimi_mir_map_root_set_string, mimi_mir_map_root_size,
 };
 pub use ordinary_map_domain::mimi_mir_ordinary_map_domain_own_string;
+#[cfg(test)]
+pub(crate) use ordinary_map_domain::{
+    ordinary_map_domain_live_counts_for_test, OrdinaryMapDomainLiveCounts,
+};
 //
 // Items 1/4/6/9 from the C runtime audit are eliminated:
 //   - Item 1: Thread pool TOCTOU — use Rust `Mutex` + `Condvar` (already fixed in ffi/runtime.rs)
@@ -246,6 +275,10 @@ pub enum ListElementKind {
     /// the ManagedAny drop ABI; it is never a borrowed Map entry or a legacy
     /// ValueHandle.
     ManagedAny = 9,
+    /// ManagedAny v2 owner tokens stored as i64 wire bits. Each slot is
+    /// authorized by the exact v2 descriptor receipt and released through
+    /// the dedicated ManagedAnyPayloadV2 owner ABI.
+    ManagedAnyV2 = 10,
 }
 
 impl ListElementKind {
@@ -262,6 +295,7 @@ impl ListElementKind {
             ListElementKind::List => std::mem::size_of::<*mut MimiList>(),
             ListElementKind::Record => std::mem::size_of::<*mut std::ffi::c_void>(),
             ListElementKind::ManagedAny => std::mem::size_of::<i64>(),
+            ListElementKind::ManagedAnyV2 => std::mem::size_of::<i64>(),
         }
     }
 
@@ -1467,6 +1501,13 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
         let list_len = (*list).len;
         let element_kind = (*list).element_kind;
         let string_abi = (*list).string_abi;
+        let registered_v2_list = map_any_snapshot::managed_any_v2_list_is_registered(
+            list,
+            map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
+        );
+        if registered_v2_list != (element_kind == ListElementKind::ManagedAnyV2) {
+            mir_list_abort(b"[E0800] MimiList ownership domain does not match its receipt\0");
+        }
         // MEM-C10 (deep audit): bound iteration against a corrupt/negative `len`
         // so a hostile or buggy `len` cannot drive an out-of-bounds read or an
         // unbounded `libc::free` loop. When a capacity header is present we also
@@ -1498,6 +1539,9 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
             // from which a later cleanup could recover.
             mir_list_abort(b"[E0800] canonical ManagedAny List drop omitted owner release\0");
         }
+        if element_kind == ListElementKind::ManagedAnyV2 && !free_elements {
+            mir_list_abort(b"[E0800] canonical ManagedAny V2 List drop omitted owner release\0");
+        }
         let should_free_elements =
             free_elements && element_kind.is_pointer_kind() && string_elements_match_abi;
         // ManagedAny slots are opaque generation-bearing i64 tokens rather
@@ -1508,11 +1552,30 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
         if element_kind == ListElementKind::ManagedAny && !managed_any_list_is_valid(&*list) {
             mir_list_abort(b"[E0800] canonical ManagedAny List ownership is invalid\0");
         }
+        if element_kind == ListElementKind::ManagedAnyV2 && !managed_any_v2_list_is_valid(&*list) {
+            mir_list_abort(b"[E0800] canonical ManagedAny V2 List ownership is invalid\0");
+        }
+        if element_kind == ListElementKind::ManagedAnyV2
+            && !map_any_snapshot::forget_managed_any_v2_list(
+                list,
+                map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
+            )
+        {
+            mir_list_abort(b"[E0800] canonical ManagedAny V2 List receipt is invalid\0");
+        }
         if free_elements && element_kind == ListElementKind::ManagedAny {
             for i in 0..safe_count {
                 let owner = *data_ptr.cast::<i64>().add(i);
                 if !drop_managed_any_list_owner(owner) {
                     mir_list_abort(b"[E0800] canonical ManagedAny List owner is stale\0");
+                }
+            }
+        }
+        if free_elements && element_kind == ListElementKind::ManagedAnyV2 {
+            for i in 0..safe_count {
+                let owner = *data_ptr.cast::<i64>().add(i);
+                if !drop_managed_any_v2_list_owner(owner) {
+                    mir_list_abort(b"[E0800] canonical ManagedAny V2 List owner is stale\0");
                 }
             }
         }
@@ -1586,7 +1649,9 @@ fn managed_any_list_owner_is_live(owner: i64) -> bool {
     // list element merely because it happens to reuse version 1.
     matches!(
         descriptor.kind,
-        any_owner::AnyOwnerKind::I32 | any_owner::AnyOwnerKind::OwnedString
+        any_owner::AnyOwnerKind::I32
+            | any_owner::AnyOwnerKind::OwnedString
+            | any_owner::AnyOwnerKind::ManagedV2
     ) && descriptor.version == 1
         && any_owner::validate(token).is_ok()
 }
@@ -1624,6 +1689,56 @@ fn managed_any_list_is_valid(list: &MimiList) -> bool {
         // identities before any token is released.  Values lists are small;
         // this O(n²) audit is a deliberate fail-closed boundary check.
         for prior in 0..index {
+            let previous = unsafe { *(list.data as *const i64).add(prior) };
+            if previous == owner {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// A V2 owner list accepts only tokens whose creator-domain receipt and
+/// descriptor-pinned payload identity agree. This helper intentionally never
+/// consults the ManagedAny v1 descriptor or drop tables.
+fn managed_any_v2_list_owner_is_live(owner: i64) -> bool {
+    map_any_snapshot::managed_v2_owner_is_valid_for_list(owner)
+}
+
+fn drop_managed_any_v2_list_owner(owner: i64) -> bool {
+    map_any_snapshot::mimi_any_payload_v2_drop(owner) == 0
+}
+
+/// Validate all V2 owner slots before any list mutation or release. In
+/// addition to exact descriptor receipt checks, duplicate token identities
+/// are rejected so list destruction cannot double-release one owner.
+fn managed_any_v2_list_is_valid(list: &MimiList) -> bool {
+    if !map_any_snapshot::managed_any_v2_list_is_registered(
+        list,
+        map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
+    ) || list.element_kind != ListElementKind::ManagedAnyV2
+        || !list.owns_data
+        || list.len < 0
+        || list.len > 1_000_000_000
+    {
+        return false;
+    }
+    if list.data.is_null() {
+        return list.len == 0;
+    }
+    let cap = list_cap(list);
+    if !list.has_header || cap <= 0 || cap < list.len {
+        return false;
+    }
+    let count = list.len as usize;
+    for index in 0..count {
+        // SAFETY: a valid header and cap prove `count` i64 slots fit.
+        let owner = unsafe { *(list.data as *const i64).add(index) };
+        if !managed_any_v2_list_owner_is_live(owner) {
+            return false;
+        }
+        for prior in 0..index {
+            // SAFETY: the same capacity check proves every prior slot fits.
             let previous = unsafe { *(list.data as *const i64).add(prior) };
             if previous == owner {
                 return false;
@@ -1750,6 +1865,216 @@ pub unsafe extern "C" fn mimi_mir_list_drop_managed_any(list: *mut MimiList) {
         mir_list_abort(b"[E0800] canonical ManagedAny List shape is invalid\0");
     }
     unsafe { mimi_list_free(list, true) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static MANAGED_ANY_V2_LIST_PUSH_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_managed_any_v2_list_push_fail_after_for_test(fail_after: Option<usize>) {
+    MANAGED_ANY_V2_LIST_PUSH_FAIL_AFTER.with(|value| value.set(fail_after));
+}
+
+#[cfg(test)]
+fn managed_any_v2_list_push_checkpoint() -> bool {
+    MANAGED_ANY_V2_LIST_PUSH_FAIL_AFTER.with(|fail_after| match fail_after.get() {
+        Some(0) => false,
+        Some(remaining) => {
+            fail_after.set(Some(remaining - 1));
+            true
+        }
+        None => true,
+    })
+}
+
+#[cfg(not(test))]
+fn managed_any_v2_list_push_checkpoint() -> bool {
+    true
+}
+
+/// Allocate an empty dedicated `List<ManagedAnyV2>` owner.
+#[no_mangle]
+pub extern "C" fn mimi_mir_list_new_managed_any_v2() -> *mut MimiList {
+    let list = Box::into_raw(Box::new(MimiList::new_with_kind(
+        ListElementKind::ManagedAnyV2,
+    )));
+    if !map_any_snapshot::register_managed_any_v2_list(list) {
+        // Registration failure cannot be represented as an empty list: callers
+        // must observe null and take their existing fail-closed path. The new
+        // header has no backing buffer yet, so dropping the Box reclaims the
+        // complete allocation without touching any element owner.
+        unsafe { drop(Box::from_raw(list)) };
+        return std::ptr::null_mut();
+    }
+    list
+}
+
+/// Append one published V2 owner. Success transfers the owner obligation to
+/// this list; failure leaves it with the caller. V1 owner tokens are rejected.
+///
+/// # Safety
+/// `list` must be a live, exclusively owned canonical ManagedAnyV2 list.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_push_managed_any_v2(list: *mut MimiList, owner: i64) -> i8 {
+    if list.is_null()
+        || !managed_any_v2_list_push_checkpoint()
+        || !managed_any_v2_list_owner_is_live(owner)
+    {
+        return 0;
+    }
+    // SAFETY: null was checked and the caller owns the list exclusively.
+    if !managed_any_v2_list_is_valid(unsafe { &*list }) {
+        return 0;
+    }
+    // SAFETY: validated list has exactly `len` initialized i64 slots.
+    let old_len = unsafe { (*list).len };
+    for index in 0..old_len as usize {
+        if unsafe { *((*list).data as *const i64).add(index) } == owner {
+            return 0;
+        }
+    }
+
+    // The shared append path temporarily tags its storage as I64. Restore the
+    // dedicated V2 kind whether growth succeeds or fails.
+    unsafe { mimi_list_push_i64(list, owner) };
+    let appended = unsafe { (*list).len == old_len.saturating_add(1) };
+    unsafe { (*list).element_kind = ListElementKind::ManagedAnyV2 };
+    appended as i8
+}
+
+/// Deep-clone a V2 owner list using only the descriptor-pinned V2 clone ABI.
+/// A partially cloned prefix and any clone not appended are both released on
+/// failure; the source list remains unchanged.
+///
+/// # Safety
+/// `list` must be a live, immutable canonical ManagedAnyV2 list for this call.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_clone_managed_any_v2(
+    list: *const MimiList,
+) -> *mut MimiList {
+    if list.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: caller guarantees a live list; null was checked above.
+    let source = unsafe { &*list };
+    if !managed_any_v2_list_is_valid(source) {
+        return std::ptr::null_mut();
+    }
+    let clone = mimi_mir_list_new_managed_any_v2();
+    if clone.is_null() {
+        return std::ptr::null_mut();
+    }
+    for index in 0..source.len as usize {
+        // SAFETY: the source contract supplies `len` initialized i64 slots.
+        let owner = unsafe { *(source.data as *const i64).add(index) };
+        let mut cloned_owner = 0i64;
+        let status =
+            unsafe { map_any_snapshot::mimi_any_payload_v2_clone(owner, &mut cloned_owner) };
+        if status != 0
+            || cloned_owner == 0
+            || unsafe { mimi_mir_list_push_managed_any_v2(clone, cloned_owner) } == 0
+        {
+            if cloned_owner != 0 && managed_any_v2_list_owner_is_live(cloned_owner) {
+                let _ = drop_managed_any_v2_list_owner(cloned_owner);
+            }
+            unsafe { mimi_mir_list_drop_managed_any_v2(clone) };
+            return std::ptr::null_mut();
+        }
+    }
+    clone
+}
+
+/// Consume a V2 owner list and release each element through the exact V2
+/// descriptor receipt before freeing its backing storage.
+///
+/// # Safety
+/// `list` must be the unique live list produced by this V2 list ABI.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_drop_managed_any_v2(list: *mut MimiList) {
+    if list.is_null() {
+        return;
+    }
+    // SAFETY: caller owns the list; validate every element before the common
+    // deallocator starts consuming any descriptor-pinned owner.
+    if !managed_any_v2_list_is_valid(unsafe { &*list }) {
+        mir_list_abort(b"[E0800] canonical ManagedAny V2 List shape is invalid\0");
+    }
+    unsafe { mimi_list_free(list, true) };
+}
+
+/// Read the number of live V2 owners in a canonical owner list.
+///
+/// # Safety
+/// `list` must be a live, immutable canonical ManagedAnyV2 list.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_len_managed_any_v2(list: *const MimiList) -> i32 {
+    if list.is_null() {
+        mir_list_abort(b"[E0800] canonical ManagedAny V2 List handle is null\0");
+    }
+    // SAFETY: caller guarantees a live list; null was checked above.
+    let source = unsafe { &*list };
+    if !managed_any_v2_list_is_valid(source) {
+        mir_list_abort(b"[E0800] canonical ManagedAny V2 List ownership is invalid\0");
+    }
+    i32::try_from(source.len).unwrap_or_else(|_| {
+        mir_list_abort(b"[E0802] canonical ManagedAny V2 List.len result overflows i32\0")
+    })
+}
+
+/// Clone one V2 list element into a separately published V2 owner. Out of
+/// range indices succeed with `found=0`; negative indices address from the
+/// end, matching canonical List indexing. The clone status is returned
+/// unchanged and failure leaves both outputs zero.
+///
+/// # Safety
+/// `out_found` and `out_owner` point to writable, non-overlapping outputs.
+/// `list` is null or a live immutable canonical ManagedAnyV2 list.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_list_get_managed_any_v2(
+    list: *const MimiList,
+    raw_index: i64,
+    out_found: *mut i32,
+    out_owner: *mut i64,
+) -> i32 {
+    if !out_found.is_null() {
+        unsafe { *out_found = 0 };
+    }
+    if !out_owner.is_null() {
+        unsafe { *out_owner = 0 };
+    }
+    if list.is_null() || out_found.is_null() || out_owner.is_null() {
+        return map_any_snapshot::MIMI_MAP_ANY_OWNER_V2_INVALID_INPUT;
+    }
+    // SAFETY: caller guarantees a live list; null was checked above.
+    let source = unsafe { &*list };
+    if !managed_any_v2_list_is_valid(source) {
+        return map_any_snapshot::MIMI_MAP_ANY_OWNER_V2_INVALID_INPUT;
+    }
+    let index = if raw_index < 0 {
+        let distance = raw_index.unsigned_abs();
+        if distance > source.len as u64 {
+            return map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_OK;
+        }
+        source.len - distance as i64
+    } else if raw_index >= source.len {
+        return map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_OK;
+    } else {
+        raw_index
+    };
+    // For an empty list, every possible index is out of range.
+    if source.len == 0 {
+        return map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_OK;
+    }
+    // SAFETY: normalized index is in [0, len), and list validation proved its
+    // i64 storage and owner receipt are valid.
+    let owner = unsafe { *((*list).data as *const i64).add(index as usize) };
+    let status = unsafe { map_any_snapshot::mimi_any_payload_v2_clone(owner, out_owner) };
+    if status == map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_OK {
+        unsafe { *out_found = 1 };
+    }
+    status
 }
 
 fn mir_list_abort(message: &'static [u8]) -> ! {
@@ -2401,6 +2726,7 @@ unsafe fn mimi_mir_list_clone_any(list: *const MimiList) -> *mut MimiList {
         ListElementKind::I64 => unsafe { mimi_mir_list_clone_scalar(list, kind as i8) },
         ListElementKind::Bool => unsafe { mimi_mir_list_clone_scalar(list, kind as i8) },
         ListElementKind::ManagedAny => unsafe { mimi_mir_list_clone_managed_any(list) },
+        ListElementKind::ManagedAnyV2 => unsafe { mimi_mir_list_clone_managed_any_v2(list) },
         ListElementKind::List => unsafe { mimi_mir_list_clone_nested(list) },
         _ => std::ptr::null_mut(),
     }
@@ -2423,6 +2749,7 @@ unsafe fn mimi_mir_list_drop_any(list: *mut MimiList) {
             mimi_mir_list_drop_scalar(list, kind as i8)
         },
         ListElementKind::ManagedAny => unsafe { mimi_mir_list_drop_managed_any(list) },
+        ListElementKind::ManagedAnyV2 => unsafe { mimi_mir_list_drop_managed_any_v2(list) },
         ListElementKind::List => unsafe { mimi_mir_list_drop_nested(list) },
         _ => {}
     }
@@ -3573,6 +3900,12 @@ pub(super) enum MapStorageMode {
     /// independent Mimi String allocations. Its dedicated root ABI is
     /// `ordinary-map-owned-get-i32-string-v1`.
     OrdinaryMapOwnedGetI32StringV1,
+    /// Persistent ordinary Map/Any owner profile for concrete record payloads.
+    /// The V2 record root owns its fields directly and never stores a legacy
+    /// `ValueHandle` or a v1 `AnyOwnerToken`.
+    OrdinaryMapAnyOwnerV2Record,
+    /// Unified descriptor-selected ManagedAny V2 ordinary Map snapshot.
+    OrdinaryMapOwnedAnyV2,
 }
 
 pub(super) struct MimiMap {
@@ -3592,6 +3925,14 @@ pub(super) struct MimiMap {
     /// Persistent ordinary-Map roots keep their immutable snapshot in a
     /// profile-specific representation, never in legacy ValueHandle slots.
     pub(super) ordinary_map_snapshot: Option<map_any_snapshot::OrdinaryMapSnapshot>,
+    /// Concrete record owners used by the independent ordinary Map/Any V2
+    /// profile.  This field is intentionally separate from the v1 snapshot
+    /// and legacy `inner`/`owned` tables.
+    pub(super) ordinary_map_any_owner_v2_record:
+        Option<map_any_snapshot::OrdinaryMapAnyOwnerV2Snapshot>,
+    /// Descriptor-selected V2 roots keep their shared generation-bearing
+    /// owners in a separate immutable snapshot, never in raw ValueHandles.
+    pub(super) ordinary_map_any_v2_snapshot: Option<map_any_snapshot::OrdinaryMapAnyV2Snapshot>,
 }
 
 impl MimiMap {
@@ -3603,6 +3944,8 @@ impl MimiMap {
             any_owner_entries: HashMap::new(),
             any_owner_kind: None,
             ordinary_map_snapshot: None,
+            ordinary_map_any_owner_v2_record: None,
+            ordinary_map_any_v2_snapshot: None,
         }
     }
 
@@ -3614,6 +3957,8 @@ impl MimiMap {
             any_owner_entries: HashMap::new(),
             any_owner_kind: None,
             ordinary_map_snapshot: None,
+            ordinary_map_any_owner_v2_record: None,
+            ordinary_map_any_v2_snapshot: None,
         }
     }
 
@@ -3627,6 +3972,8 @@ impl MimiMap {
             any_owner_entries: HashMap::new(),
             any_owner_kind: None,
             ordinary_map_snapshot: Some(snapshot),
+            ordinary_map_any_owner_v2_record: None,
+            ordinary_map_any_v2_snapshot: None,
         }
     }
 
@@ -3640,6 +3987,38 @@ impl MimiMap {
             any_owner_entries: HashMap::new(),
             any_owner_kind: None,
             ordinary_map_snapshot: Some(snapshot),
+            ordinary_map_any_owner_v2_record: None,
+            ordinary_map_any_v2_snapshot: None,
+        }
+    }
+
+    pub(super) fn ordinary_map_any_owner_v2_record(
+        snapshot: map_any_snapshot::OrdinaryMapAnyOwnerV2Snapshot,
+    ) -> Self {
+        Self {
+            mode: MapStorageMode::OrdinaryMapAnyOwnerV2Record,
+            inner: HashMap::new(),
+            owned: HashMap::new(),
+            any_owner_entries: HashMap::new(),
+            any_owner_kind: None,
+            ordinary_map_snapshot: None,
+            ordinary_map_any_owner_v2_record: Some(snapshot),
+            ordinary_map_any_v2_snapshot: None,
+        }
+    }
+
+    pub(super) fn ordinary_map_owned_any_v2(
+        snapshot: map_any_snapshot::OrdinaryMapAnyV2Snapshot,
+    ) -> Self {
+        Self {
+            mode: MapStorageMode::OrdinaryMapOwnedAnyV2,
+            inner: HashMap::new(),
+            owned: HashMap::new(),
+            any_owner_entries: HashMap::new(),
+            any_owner_kind: None,
+            ordinary_map_snapshot: None,
+            ordinary_map_any_owner_v2_record: None,
+            ordinary_map_any_v2_snapshot: Some(snapshot),
         }
     }
 }
@@ -3759,6 +4138,8 @@ pub unsafe extern "C" fn mimi_map_clone(handle: MapHandle) -> MapHandle {
         any_owner_entries: HashMap::new(),
         any_owner_kind: None,
         ordinary_map_snapshot: None,
+        ordinary_map_any_owner_v2_record: None,
+        ordinary_map_any_v2_snapshot: None,
     })
 }
 
@@ -25216,6 +25597,10 @@ fn trap_exit() -> ! {
         fn _exit(status: i32) -> !;
     }
     ordinary_map_domain::drain_current_thread_roots();
+    // `_exit` deliberately bypasses C `atexit` handlers. Release the
+    // descriptor registry after every current-thread root and token has run
+    // its pinned Drop glue so an orderly typed trap remains Memcheck-clean.
+    managed_any_payload_v2::clear_descriptors_at_exit();
     // SAFETY: NULL requests flushing every output stream; all root cleanup
     // and registry guards have completed before immediate process exit.
     unsafe {

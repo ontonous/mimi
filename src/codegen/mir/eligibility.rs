@@ -164,7 +164,41 @@ fn export_kind_matches(
 /// `build` path until the wider MIR shape and differential gates are closed.
 impl<'ctx> CodeGenerator<'ctx> {
     pub fn compile_mir_native(&mut self, program: &MirProgram) -> Result<(), Vec<Diagnostic>> {
+        self.compile_mir_native_inner(program, true)
+    }
+
+    /// Diagnostic component entry for L1/L2 tests. It still validates the
+    /// complete MIR and runs the native backend, but deliberately does not
+    /// claim that an owner-v2 candidate has crossed production readiness.
+    #[cfg(test)]
+    pub(crate) fn compile_mir_native_for_component(
+        &mut self,
+        program: &MirProgram,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.compile_mir_native_inner(program, false)
+    }
+
+    fn compile_mir_native_inner(
+        &mut self,
+        program: &MirProgram,
+        enforce_production_readiness: bool,
+    ) -> Result<(), Vec<Diagnostic>> {
         self.shared_dynamic_any_preflight_passed = false;
+        if enforce_production_readiness
+            && !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+            && program.functions().values().any(|function| {
+                function
+                    .ownership
+                    .has_checker_ordinary_map_owned_any_v2_actions()
+            })
+        {
+            return Err(vec![NativeMirError::new(
+                "mir-program",
+                "ordinary Map/Any owner-v2 native emission is diagnostic-only while V2 production readiness is disabled",
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            .diagnostic()]);
+        }
         let mir_digest = program.canonical_digest();
         if let Some(compiled_digest) = self.mir_native_compiled_digest.as_deref() {
             if compiled_digest == mir_digest {
@@ -594,7 +628,7 @@ impl CheckedManagedAnyUnpackScan {
     }
 }
 
-fn checked_managed_any_unpack_coverage(
+pub(crate) fn checked_managed_any_unpack_coverage(
     checked: &crate::core::CheckedProgram,
     program: &MirProgram,
 ) -> Result<(), String> {
@@ -695,6 +729,24 @@ fn checked_managed_any_unpack_coverage(
                     "one checked Any conversion is claimed by multiple owner receipts".into(),
                 );
             }
+        }
+    }
+    for receipt in program.ordinary_map_owned_any_v2_unpack_result_receipts()? {
+        receipt.validate_against_program(program)?;
+        let key = (
+            receipt.owner.clone(),
+            receipt.cast.clone(),
+            receipt.conversion_from.clone(),
+            receipt.conversion_to.clone(),
+        );
+        if !expected.contains_key(&key) {
+            return Err(
+                "AnyOwner-v2 unpack receipt has no exact checked (owner,origin,from,to) conversion"
+                    .into(),
+            );
+        }
+        if !actual.insert(key) {
+            return Err("one checked Any conversion is claimed by multiple owner receipts".into());
         }
     }
     if actual.len() != expected.len() {

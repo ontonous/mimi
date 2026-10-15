@@ -170,6 +170,23 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirOrdinaryMapOwnedGetI32StringV1Drop { .. } => {
             "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_DROP"
         }
+        Op::MirOrdinaryMapOwnedAnyV2New { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_NEW",
+        Op::MirOrdinaryMapOwnedAnyV2Clone { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_CLONE",
+        Op::MirOrdinaryMapOwnedAnyV2Set { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_SET",
+        Op::MirOrdinaryMapOwnedAnyV2Remove { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_REMOVE",
+        Op::MirOrdinaryMapOwnedAnyV2Size { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_SIZE",
+        Op::MirOrdinaryMapOwnedAnyV2Contains { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_CONTAINS",
+        Op::MirOrdinaryMapOwnedAnyV2GetAny { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_ANY",
+        Op::MirOrdinaryMapOwnedAnyV2Unpack { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_UNPACK",
+        Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES_UNPACK"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2Values { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES",
+        Op::MirOrdinaryMapOwnedAnyV2IsEmpty { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY",
+        Op::MirOrdinaryMapOwnedAnyV2Drop { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_DROP",
+        Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES_DROP"
+        }
         Op::MirVariantPredicate { .. } => "MIR_VARIANT_PREDICATE",
         Op::MirVariantProjectOr { .. } => "MIR_VARIANT_PROJECT_OR",
         Op::NewVariant { .. } => "NEW_VARIANT",
@@ -1106,6 +1123,58 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} drop mir_ordinary_map_owned_get_i32_string_v1(r{})",
             pc, name, ra
         ),
+        Op::MirOrdinaryMapOwnedAnyV2New { rd } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_new()",
+            pc, name, rd
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Clone { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_clone(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Set { rd, ra, key, value } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_set(r{}, r{}, r{})",
+            pc, name, rd, ra, key, value
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Remove { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_remove(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Size { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_size(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Contains { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_contains(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2GetAny { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_get_any(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_unpack(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, ra, index } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_values_unpack(r{}, r{})",
+            pc, name, rd, ra, index
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_values(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2IsEmpty { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_is_empty(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Drop { ra } => format!(
+            "{:04}  {:<16} drop mir_ordinary_map_owned_any_v2(r{})",
+            pc, name, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra } => format!(
+            "{:04}  {:<16} drop mir_ordinary_map_owned_any_v2_values(r{})",
+            pc, name, ra
+        ),
         Op::MirVariantPredicate {
             rd,
             ra,
@@ -1527,4 +1596,69 @@ pub fn disassemble_program(program: &BytecodeProgram) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_op, op_name};
+    use crate::interp::bytecode::instr::{FunctionProto, Op};
+
+    #[test]
+    fn ordinary_map_owned_any_v2_get_any_has_a_distinct_name_and_exact_operands() {
+        let proto = FunctionProto::new("function:get_any".into(), 0);
+        let op = Op::MirOrdinaryMapOwnedAnyV2GetAny {
+            rd: 7,
+            ra: 3,
+            key: 5,
+        };
+
+        assert_eq!(op_name(&op), "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_ANY");
+        assert_eq!(
+            format_op(&op, &proto, 12),
+            "0012  MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_ANY r7 = mir_ordinary_map_owned_any_v2_get_any(r3, r5)"
+        );
+    }
+
+    #[test]
+    fn v1_get_any_disassembly_does_not_claim_the_v2_contract() {
+        let proto = FunctionProto::new("function:get_any_v1".into(), 0);
+        let op = Op::MirOrdinaryMapOwnedGetI32StringV1GetAny {
+            rd: 7,
+            ra: 3,
+            key: 5,
+        };
+
+        assert_eq!(op_name(&op), "MIR_OMAP_GET_ANY");
+        let rendered = format_op(&op, &proto, 12);
+        assert!(rendered.contains("i32_string_v1_get_any"));
+        assert!(!rendered.contains("owned_any_v2"));
+    }
+
+    #[test]
+    fn v2_unpack_disassembly_is_target_type_agnostic() {
+        let proto = FunctionProto::new("function:unpack_v2".into(), 0);
+        let op = Op::MirOrdinaryMapOwnedAnyV2Unpack { rd: 7, ra: 3 };
+
+        assert_eq!(op_name(&op), "MIR_ORDINARY_MAP_OWNED_ANY_V2_UNPACK");
+        assert_eq!(
+            format_op(&op, &proto, 12),
+            "0012  MIR_ORDINARY_MAP_OWNED_ANY_V2_UNPACK r7 = mir_ordinary_map_owned_any_v2_unpack(r3)"
+        );
+    }
+
+    #[test]
+    fn v2_values_unpack_disassembly_shows_snapshot_and_index_operands() {
+        let proto = FunctionProto::new("function:values_unpack_v2".into(), 0);
+        let op = Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack {
+            rd: 7,
+            ra: 3,
+            index: 5,
+        };
+
+        assert_eq!(op_name(&op), "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES_UNPACK");
+        assert_eq!(
+            format_op(&op, &proto, 12),
+            "0012  MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES_UNPACK r7 = mir_ordinary_map_owned_any_v2_values_unpack(r3, r5)"
+        );
+    }
 }

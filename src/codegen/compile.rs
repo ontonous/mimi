@@ -129,7 +129,19 @@ impl<'ctx> CodeGenerator<'ctx> {
         // stored runtime value actually matches the concrete generic type.
         // Treat every reachable instance as a hard native boundary before
         // MIR selection or per-function fallback can choose either emitter.
-        self.preflight_native_dynamic_any_unpack(program)?;
+        let checked_v2_unpack_candidate = match self.preflight_native_dynamic_any_unpack(program) {
+            Ok(()) => false,
+            Err(original_error) => {
+                let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+                if !admission.ordinary_map_owned_any_v2_complete() {
+                    return Err(original_error);
+                }
+                // Defer the exception until canonical MIR materialization
+                // below. A complete source profile alone cannot authorize an
+                // erased Any cast or a compatibility emitter.
+                true
+            }
+        };
         // S12/S15/S25/S30/R6-15/R6-1163g: the scalar FFI, S8 Flow, scalar
         // collection, flat Copy-record, MapRoot, exact non-Copy Option<string>,
         // exact nested Option-tuple, generic Option/Result projections and
@@ -212,6 +224,19 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !ordinary_map_compatibility
         {
             if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)? {
+                if checked_v2_unpack_candidate {
+                    if let Err(message) =
+                        super::mir::checked_managed_any_unpack_coverage(program, &canonical)
+                    {
+                        return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                            format!(
+                                "ordinary Map/Any owner-v2 unpack lacks complete checked MIR coverage: {message}"
+                            ),
+                            program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                        )]);
+                    }
+                }
                 self.install_checked_actor_metadata(program);
                 let receipt =
                     canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
@@ -787,6 +812,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             || admission.flow_failure_retry
             || admission.flow_complete()
             || admission.map_any_owner_complete()
+            || admission.ordinary_map_owned_any_v2_complete()
             || admission.ordinary_map_owned_get_i32_string_v1_complete()
             || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
             // R6-1048 parity: a complete flat Copy-record admission must see
@@ -881,6 +907,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ) => (
                         "MIR-COVERAGE-001",
                         format!("ordinary Map owned-get MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 MIR island materialization failed: {message}"),
                     ),
                     (crate::core::mir::CanonicalMirRouteProfile::ScalarFfi, stage) => (
                         "MIR-FFI-COVERAGE-001",

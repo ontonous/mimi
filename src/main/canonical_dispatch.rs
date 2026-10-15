@@ -98,10 +98,24 @@ pub(crate) fn build_canonical_program(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> Result<MirProgram, String> {
+    let v2_admission =
+        mimi::core::mir::classify_canonical_mir_route_admission(checked).ordinary_map_owned_any_v2;
+    if v2_admission.has_profile_signal()
+        && (!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+            || !v2_admission.is_complete())
+    {
+        return Err(format!(
+            "{}: ordinary Map/Any owner-v2 route is not production-ready for explicit canonical execution or verification ({v2_admission:?}); use `mimi mir --receipt` for read-only inspection",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
     // Explicit `--mir` is a construction/inspection request rather than a
     // default-route admission. Preserve the canonical builder's detailed
     // lowering/validation diagnostics here; the default selector uses the
     // shared route envelope above for Complete-vs-Compatibility disposition.
+    // The V2 production-readiness boundary above is shared by explicit run,
+    // build, and verify requests; `mimi mir` uses the diagnostics builder
+    // directly and remains available for read-only receipts.
     build_canonical_program_for_sources(checked, merged_file, None)
 }
 
@@ -376,6 +390,7 @@ fn select_default_route_for_purpose(
         let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
         let is_map_root = admission.map_root.is_candidate();
         let is_map_any_owner = admission.map_any_owner.is_candidate();
+        let is_ordinary_map_owned_any_v2 = admission.ordinary_map_owned_any_v2.is_candidate();
         let is_ordinary_map_owner = admission
             .ordinary_map_owner_lifecycle_i32_string_v1
             .is_candidate();
@@ -393,6 +408,7 @@ fn select_default_route_for_purpose(
             || (verbose
                 && (is_map_root
                     || is_map_any_owner
+                    || is_ordinary_map_owned_any_v2
                     || is_ordinary_map_owner
                     || is_ordinary_map_owned_get
                     || is_scalar_export
@@ -400,6 +416,8 @@ fn select_default_route_for_purpose(
         {
             let profile = if is_map_any_owner {
                 mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND
+            } else if is_ordinary_map_owned_any_v2 {
+                mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND
             } else if is_ordinary_map_owned_get {
                 mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
             } else if is_ordinary_map_owner {
@@ -448,7 +466,10 @@ fn select_default_route_inner(
     // though the same checked graph can be materialized as Canonical MIR.
     let module_alias_call_hint = checked.call_sites().values().any(|site| {
         matches!(site.kind, mimi::core::ResolvedCallKind::Function)
-            && site.target_function.is_some()
+            && matches!(
+                site.resolved_callee.as_ref(),
+                Some(mimi::core::ir::ResolvedCallee::Function(_))
+            )
             && site.callee.contains("::")
     });
     // Map owner receipts and scalar FFI currently have no combined route.
@@ -497,6 +518,7 @@ fn select_default_route_inner(
         // closed before any consumer can select legacy.
         let map_owner_candidate = admission.map_root.is_candidate()
             || admission.map_any_owner.is_candidate()
+            || admission.ordinary_map_owned_any_v2.is_candidate()
             || admission
                 .ordinary_map_owner_lifecycle_i32_string_v1
                 .has_profile_signal()
@@ -578,6 +600,24 @@ fn select_default_route_inner(
             }
             Ok(_) => DefaultMirRoute::Rejected(format!(
                 "{}: complete ordinary Map owned-get admission did not materialize its operation receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+        };
+    }
+    if admission.ordinary_map_owned_any_v2.has_profile_signal() {
+        if !admission.ordinary_map_owned_any_v2_complete() {
+            return DefaultMirRoute::Rejected(format!(
+                "{}: Checker recognized an ordinary Map/Any owner-v2 candidate without complete operation-attempt coverage",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        return match materialize_canonical_route(checked, merged_file) {
+            Ok(route) if route.materialized_ordinary_map_owned_any_v2_candidate => {
+                select_ordinary_map_owned_any_v2_route(route.program)
+            }
+            Ok(_) => DefaultMirRoute::Rejected(format!(
+                "{}: complete ordinary Map/Any owner-v2 admission did not materialize its operation receipt",
                 mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
             )),
             Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
@@ -2268,6 +2308,65 @@ fn select_ordinary_map_owner_lifecycle_i32_string_v1_route(program: MirProgram) 
     }
 }
 
+/// Consumer preflight for the concrete-record ordinary Map/Any owner-v2
+/// profile.  The profile owns its TypeDesc and receipt; no older MapRoot or
+/// MapAnyOwner adapter may claim the same graph after a consumer failure.
+fn select_ordinary_map_owned_any_v2_route(program: MirProgram) -> DefaultMirRoute {
+    // This remains a scoped development profile: GetAny accepts only an
+    // exact source-known String key (including known literal concatenations),
+    // requires a receipted Set on the same root in the same function, and
+    // permits only direct explicit-drop settlement. Runtime-symbolic keys
+    // remain outside the trusted subset.
+    // Values has a real List<DynamicAny> MIR layout and consumer slices. A
+    // directly bound snapshot with receipted indexed unpack and exact snapshot
+    // and result-owner settlement can reach CompleteCoverage for verifier
+    // diagnostics; other Values uses remain staged. Empty Maps,
+    // cross-function roots, general payload/key coverage, automatic cleanup,
+    // and complete L1/L2/L3 evidence remain open. Runtime symbols and partial
+    // consumers do not imply production readiness.
+    if let Err(errors) = mimi::core::mir::validate_ordinary_map_owned_any_v2_island(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 whole-program island: {errors:?}"
+        ));
+    }
+    if !mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY {
+        return DefaultMirRoute::Rejected(
+            "ordinary Map/Any owner-v2 route is not production-ready: GetAny/Values settlement, empty and cross-function roots, payload/key coverage, automatic cleanup, and end-to-end L1/L2/L3 evidence remain incomplete".into(),
+        );
+    }
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 MIR verifier capability: {errors:?}"
+        ));
+    }
+    let receipt = program.route_receipt(mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 MIR bytecode capability: {errors:?}"
+        ));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 MIR native capability: {errors:?}"
+        ));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(Box::new(program))
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 MIR verifier pass: {error}"
+        )),
+    }
+}
+
 /// Consumer preflight for the distinct typed owned-get profile. Its getter
 /// authority is not inherited from the old ordinary lifecycle receipt.
 fn select_ordinary_map_owned_get_i32_string_v1_route(program: MirProgram) -> DefaultMirRoute {
@@ -2684,7 +2783,10 @@ mod tests {
         assert!(
             checked.call_sites().values().any(|site| {
                 matches!(site.kind, mimi::core::ResolvedCallKind::Function)
-                    && site.target_function.is_some()
+                    && matches!(
+                        site.resolved_callee.as_ref(),
+                        Some(mimi::core::ir::ResolvedCallee::Function(_))
+                    )
                     && site.callee.contains("::")
             }),
             "fixture must contain a resolved module alias call"
@@ -3430,6 +3532,107 @@ func main() -> i32 {
         }
     }
 
+    #[test]
+    fn explicit_v2_execution_builder_rejects_while_read_only_inspection_remains_available() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+"#;
+        let (checked, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked)
+            .ordinary_map_owned_any_v2;
+        assert_eq!(
+            admission,
+            mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+
+        let error = build_canonical_program(&checked, &file)
+            .expect_err("explicit execution/build/verify builder must keep V2 readiness closed");
+        assert!(
+            error.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
+            "{error}"
+        );
+        assert!(error.contains("not production-ready"), "{error}");
+
+        let inspected = build_canonical_program_for_sources_with_diagnostics(&checked, &file, None)
+            .expect("read-only MIR inspection remains available for V2 evidence");
+        assert!(inspected
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .is_ok_and(|receipt| receipt.is_some()));
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_route_runs_whole_graph_preflight_before_readiness_gate() {
+        let supported = checked(
+            r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let label = Label { text: "route preflight" }
+                let empty = map_new()
+                let root = map_set(empty, "label", label)
+                drop(empty)
+                drop(root)
+                drop(label)
+                0
+            }
+            "#,
+        )
+        .0;
+        let supported_mir = MirProgram::from_checked_program(&supported)
+            .expect("supported V2 source lowers to MIR");
+        assert!(mimi::core::mir::validate_ordinary_map_owned_any_v2_island(&supported_mir).is_ok());
+        let DefaultMirRoute::Rejected(supported_reason) =
+            select_ordinary_map_owned_any_v2_route(supported_mir)
+        else {
+            panic!("V2 execution must remain closed while production readiness is false");
+        };
+        assert!(
+            supported_reason.contains("not production-ready"),
+            "{supported_reason}"
+        );
+        assert!(
+            !supported_reason.contains("whole-program island"),
+            "{supported_reason}"
+        );
+
+        let unsupported = checked(
+            r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let label = Label { text: "route preflight" }
+                let empty = map_new()
+                let root = map_set(empty, "label", label)
+                drop(empty)
+                drop(root)
+                drop(label)
+                0
+            }
+            func hidden() -> i32 { 1 * 2 }
+            "#,
+        )
+        .0;
+        let unsupported_mir = MirProgram::from_checked_program(&unsupported)
+            .expect("unsupported helper still lowers to structurally valid MIR");
+        let DefaultMirRoute::Rejected(unsupported_reason) =
+            select_ordinary_map_owned_any_v2_route(unsupported_mir)
+        else {
+            panic!("whole-program V2 preflight must reject the hidden unsupported function");
+        };
+        assert!(
+            unsupported_reason.contains("whole-program island")
+                && !unsupported_reason.contains("not production-ready"),
+            "the graph-closure gate must run before the closed readiness gate: {unsupported_reason}"
+        );
+    }
     #[test]
     fn ordinary_map_direct_mir_boundary_rejects_incomplete_operation_coverage() {
         let source = r#"

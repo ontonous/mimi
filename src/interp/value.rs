@@ -273,6 +273,170 @@ pub enum CanonicalOrdinaryMapOwnedGetI32StringV1Value {
     String(Arc<String>),
 }
 
+/// Values admitted by the independent ordinary Map/Any owner-v2 profile.
+///
+/// Payloads preserve their selected TypeDesc identity. Direct Strings and
+/// concrete `Label { text: string }` records each receive owner-private
+/// storage when a Set operation stages a new root; neither may alias a
+/// source String allocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalOrdinaryMapOwnedAnyV2Value {
+    I32 {
+        type_id: crate::core::ResolvedTypeId,
+        value: i32,
+    },
+    String {
+        type_id: crate::core::ResolvedTypeId,
+        text: Arc<String>,
+    },
+    /// A one-String-field nominal payload keeps its concrete nominal identity
+    /// in the VM snapshot. Shape alone is not an Any descriptor: two nominal
+    /// records with the same fields must remain distinct values.
+    Record {
+        type_id: crate::core::ResolvedTypeId,
+        nominal: String,
+        text: Arc<String>,
+    },
+}
+
+/// Independently owned dynamic payload returned by the ordinary Map/Any V2
+/// `GetAny` operation.  Its opaque TypeId is preserved from the selected Set
+/// site, and its payload storage is detached from the source Map entry.
+///
+/// This is deliberately not the V1 managed Any representation: V2 records
+/// retain their nominal identity while direct Strings retain the exact
+/// selected String TypeDesc.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CanonicalManagedAnyV2 {
+    type_id: crate::core::ResolvedTypeId,
+    payload: CanonicalManagedAnyV2Payload,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CanonicalManagedAnyV2Payload {
+    I32(i32),
+    String(String),
+    Record { nominal: String, text: String },
+}
+
+impl CanonicalManagedAnyV2 {
+    pub(crate) fn from_i32(type_id: crate::core::ResolvedTypeId, value: i32) -> Self {
+        Self {
+            type_id,
+            payload: CanonicalManagedAnyV2Payload::I32(value),
+        }
+    }
+
+    pub(crate) fn from_string(type_id: crate::core::ResolvedTypeId, text: String) -> Self {
+        Self {
+            type_id,
+            payload: CanonicalManagedAnyV2Payload::String(text),
+        }
+    }
+
+    pub(crate) fn from_record(
+        type_id: crate::core::ResolvedTypeId,
+        nominal: String,
+        text: String,
+    ) -> Self {
+        Self {
+            type_id,
+            payload: CanonicalManagedAnyV2Payload::Record { nominal, text },
+        }
+    }
+
+    pub(crate) fn type_id(&self) -> &crate::core::ResolvedTypeId {
+        &self.type_id
+    }
+
+    /// Borrow a direct String payload only when the complete selected
+    /// TypeDesc identity matches. The bytecode VM performs its own fallible
+    /// copy into the result owner before the GetAny pair can be dropped.
+    pub(crate) fn string_for_type_id(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<&str> {
+        if &self.type_id != expected_type_id {
+            return None;
+        }
+        match &self.payload {
+            CanonicalManagedAnyV2Payload::String(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Borrow the single String field of a concrete record payload only when
+    /// both its complete TypeDesc identity and nominal record identity match.
+    /// The bytecode VM must copy this text into a fresh `Value::Record` before
+    /// the GetAny pair is settled.
+    pub(crate) fn record_text_for_type_id(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+        expected_nominal: &str,
+    ) -> Option<&str> {
+        if &self.type_id != expected_type_id {
+            return None;
+        }
+        match &self.payload {
+            CanonicalManagedAnyV2Payload::Record { nominal, text }
+                if nominal == expected_nominal =>
+            {
+                Some(text)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matches_i32_value(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+        expected_value: i32,
+    ) -> bool {
+        self.type_id == *expected_type_id
+            && matches!(self.payload, CanonicalManagedAnyV2Payload::I32(value) if value == expected_value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matches_string(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+        expected_text: &str,
+    ) -> bool {
+        self.type_id == *expected_type_id
+            && matches!(&self.payload, CanonicalManagedAnyV2Payload::String(text) if text == expected_text)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matches_record(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+        expected_nominal: &str,
+    ) -> bool {
+        self.type_id == *expected_type_id
+            && matches!(
+                &self.payload,
+                CanonicalManagedAnyV2Payload::Record { nominal, .. }
+                    if nominal == expected_nominal
+            )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matches_record_text(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+        expected_nominal: &str,
+        expected_text: &str,
+    ) -> bool {
+        self.type_id == *expected_type_id
+            && matches!(
+                &self.payload,
+                CanonicalManagedAnyV2Payload::Record { nominal, text }
+                    if nominal == expected_nominal && text == expected_text
+            )
+    }
+}
+
 /// Private-payload owned Any for the checker-receipted i32/String v1 slice.
 /// This VM oracle contains no native handle, raw token, or shared Map entry.
 /// Every clone recursively creates its own String owner.
@@ -383,8 +547,15 @@ pub enum Value {
     CanonicalOrdinaryMapOwnedGetI32StringV1(
         Arc<BTreeMap<String, CanonicalOrdinaryMapOwnedGetI32StringV1Value>>,
     ),
+    /// Opaque root for the independent concrete-record ordinary Map/Any
+    /// owner-v2 profile.  This runtime identity is separate from all v1 and
+    /// legacy Map values; its payloads are deep-copied snapshots.
+    CanonicalOrdinaryMapOwnedAnyV2(Arc<BTreeMap<String, CanonicalOrdinaryMapOwnedAnyV2Value>>),
     /// Dedicated owned Any; construction and extraction require canonical MIR receipts.
     CanonicalManagedAnyI32StringV1(CanonicalManagedAnyI32StringV1),
+    /// Dedicated owned dynamic Any for the independently receipted
+    /// ordinary Map/Any owner-v2 profile.
+    CanonicalManagedAnyV2(Arc<CanonicalManagedAnyV2>),
     Record(Option<String>, HashMap<String, Value>),
     /// Poll-based future. Can be Ready (result available) or Pending (waiting on channel).
     Future(std::sync::Arc<std::sync::Mutex<crate::interp::PollFuture>>),
@@ -512,9 +683,13 @@ impl Clone for Value {
             Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
                 Value::CanonicalOrdinaryMapOwnedGetI32StringV1(Arc::clone(root))
             }
+            Value::CanonicalOrdinaryMapOwnedAnyV2(root) => {
+                Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::clone(root))
+            }
             Value::CanonicalManagedAnyI32StringV1(value) => {
                 Value::CanonicalManagedAnyI32StringV1(value.clone())
             }
+            Value::CanonicalManagedAnyV2(value) => Value::CanonicalManagedAnyV2(Arc::clone(value)),
             Value::Record(name, fields) => Value::Record(name.clone(), fields.clone()),
             Value::Future(v) => Value::Future(Arc::clone(v)),
             Value::Error(v) => Value::Error(v.clone()),
@@ -1922,8 +2097,14 @@ impl std::fmt::Display for Value {
             Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => {
                 write!(f, "<canonical ordinary Map owned-Get v1>")
             }
+            Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
+                write!(f, "<canonical ordinary Map/Any owner-v2>")
+            }
             Value::CanonicalManagedAnyI32StringV1(_) => {
                 write!(f, "<canonical managed Any i32/String v1>")
+            }
+            Value::CanonicalManagedAnyV2(_) => {
+                write!(f, "<canonical managed Any v2>")
             }
             Value::Record(type_name, fields) => {
                 // Untyped records (JSON/Map) print as JSON objects for dual
@@ -2314,9 +2495,13 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
             Value::CanonicalOrdinaryMapOwnedGetI32StringV1(a),
             Value::CanonicalOrdinaryMapOwnedGetI32StringV1(b),
         ) => a == b,
+        (Value::CanonicalOrdinaryMapOwnedAnyV2(a), Value::CanonicalOrdinaryMapOwnedAnyV2(b)) => {
+            a == b
+        }
         (Value::CanonicalManagedAnyI32StringV1(a), Value::CanonicalManagedAnyI32StringV1(b)) => {
             a == b
         }
+        (Value::CanonicalManagedAnyV2(a), Value::CanonicalManagedAnyV2(b)) => a == b,
         (Value::Record(_, a), Value::Record(_, b)) => {
             a.len() == b.len()
                 && a.iter().all(|(k, v)| {
@@ -2448,7 +2633,9 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
             "ordinary-map-owner-lifecycle-i32-string-v1"
         }
         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => "ordinary-map-owned-get-i32-string-v1",
+        Value::CanonicalOrdinaryMapOwnedAnyV2(_) => "ordinary-map-owned-any-v2",
         Value::CanonicalManagedAnyI32StringV1(_) => "managed-any-i32-string-v1",
+        Value::CanonicalManagedAnyV2(_) => "managed-any-v2",
         Value::Record(Some(_), _) => "record",
         Value::Record(None, _) => "record",
         Value::Error(_) => "error",

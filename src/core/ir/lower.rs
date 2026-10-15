@@ -7358,6 +7358,18 @@ impl BodyLowerer<'_> {
         if from == to {
             return self.identity_conversion(node_id, from, to);
         }
+        // DynamicAny's checked source conversion is finalized by the
+        // Checker. Preserve that exact identity in the typed body so MIR can
+        // require a matching owner/descriptor receipt before emitting any
+        // runtime unpack. This is not an ABI reinterpretation: consumers
+        // without that receipt must continue to fail closed.
+        if matches!(self.types.get(from), Some(ResolvedType::DynamicAny { .. })) {
+            return Ok(CheckedConversion {
+                kind: CheckedConversionKind::DynamicAnyUnpack,
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
         let numeric = |ty: &ResolvedTypeId| match self.types.get(ty) {
             Some(ResolvedType::Primitive(primitive)) => numeric_width(*primitive),
             _ => None,
@@ -8280,6 +8292,41 @@ mod tests {
             };
             assert_eq!(conversion.kind, expected);
         }
+    }
+
+    #[test]
+    fn explicit_dynamic_any_cast_preserves_checker_unpack_identity() {
+        let file = parse(
+            r#"
+func main() -> i32 {
+    let empty = map_new()
+    let pair = map_get(empty, "missing")
+    let value = pair.1 as i32
+    drop(pair)
+    drop(empty)
+    value
+}
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check Any unpack");
+        let body = program
+            .resolved_body(&NodeId("function:main".into()))
+            .expect("resolved main body");
+        let ResolvedStmtKind::Bind {
+            initializer: Some(initializer),
+            ..
+        } = &body.root.statements[2].kind
+        else {
+            panic!("explicit unpack binding expected");
+        };
+        let ResolvedExprKind::Cast { conversion, value } = &initializer.kind else {
+            panic!("checked Any cast expected");
+        };
+        assert_eq!(conversion.kind, CheckedConversionKind::DynamicAnyUnpack);
+        assert_eq!(conversion.from, value.ty);
+        assert_eq!(conversion.to, initializer.ty);
+        body.validate(program.resolved_types(), program.resolved_type_targets())
+            .expect("typed Any unpack remains checker-consistent");
     }
 
     #[test]

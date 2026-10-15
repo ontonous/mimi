@@ -193,6 +193,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let managed_any_ty = crate::core::mir::types::managed_any_i32_string_v1_type_id();
         let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
         let bool_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+        if op == ResolvedBinaryOp::Add
+            && result_ty == string_ty
+            && left_ty == string_ty
+            && right_ty == string_ty
+        {
+            return self.emit_owned_string_concat(left, right, &string_ty, subject);
+        }
         if matches!(op, ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual)
             && result_ty == bool_ty
             && ((left_ty == managed_any_ty && right_ty == string_ty)
@@ -211,6 +218,28 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 &string_ty,
                 subject,
             );
+        }
+        if matches!(op, ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual)
+            && result_ty == bool_ty
+            && left_ty == string_ty
+            && right_ty == string_ty
+        {
+            self.program
+                .type_catalog()
+                .validate_owned_string(&string_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let left_value = self.value(left, subject)?.into_struct_value();
+            let right_value = self.value(right, subject)?.into_struct_value();
+            let equal = self.emit_string_equality(left_value, right_value, subject)?;
+            let compared = if op == ResolvedBinaryOp::Equal {
+                equal
+            } else {
+                self.generator
+                    .builder
+                    .build_not(equal, "mir_string_not_equal")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            };
+            return Ok(compared.into());
         }
         if matches!(left_desc.abi, MirAbiClass::Float { bits: 32 | 64 }) {
             self.program
@@ -260,7 +289,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     return Err(NativeMirError::new(
                         subject,
                         format!("float binary operator {op:?} is outside the finite-only contract"),
-                    ))
+                    ));
                 }
             };
             let result = match op {
@@ -288,7 +317,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     return Err(NativeMirError::new(
                         subject,
                         format!("float binary operator {op:?} is outside the finite-only contract"),
-                    ))
+                    ));
                 }
             }
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
@@ -469,6 +498,144 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         .inspect(|_| {
             let _ = result;
         })
+    }
+
+    fn emit_owned_string_concat(
+        &mut self,
+        left: &MirValueId,
+        right: &MirValueId,
+        string_ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        self.program
+            .type_catalog()
+            .validate_owned_string(string_ty)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let left_value = self.value(left, subject)?.into_struct_value();
+        let right_value = self.value(right, subject)?.into_struct_value();
+        let left_data = self
+            .generator
+            .builder
+            .build_extract_value(left_value, 0, "mir_string_concat_left_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let left_len = self
+            .generator
+            .builder
+            .build_extract_value(left_value, 1, "mir_string_concat_left_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let right_data = self
+            .generator
+            .builder
+            .build_extract_value(right_value, 0, "mir_string_concat_right_data")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let right_len = self
+            .generator
+            .builder
+            .build_extract_value(right_value, 1, "mir_string_concat_right_len")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let concat = self
+            .generator
+            .get_runtime_fn("mimi_str_concat_ll")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let data = self
+            .generator
+            .builder
+            .build_call(
+                concat,
+                &[
+                    BasicMetadataValueEnum::from(left_data),
+                    BasicMetadataValueEnum::from(left_len),
+                    BasicMetadataValueEnum::from(right_data),
+                    BasicMetadataValueEnum::from(right_len),
+                ],
+                "mir_string_concat_data",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| NativeMirError::new(subject, "String concatenation returned void"))?
+            .into_pointer_value();
+
+        let failed = self
+            .generator
+            .builder
+            .build_is_null(data, "mir_string_concat_failed")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let failure = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_string_concat_failure");
+        let success = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_string_concat_success");
+        self.generator
+            .builder
+            .build_conditional_branch(failed, failure, success)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(failure);
+        let free = self
+            .generator
+            .get_runtime_fn("mimi_string_free")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                free,
+                &[BasicMetadataValueEnum::from(left_data)],
+                "mir_string_concat_drop_left_on_failure",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        if left != right {
+            self.generator
+                .builder
+                .build_call(
+                    free,
+                    &[BasicMetadataValueEnum::from(right_data)],
+                    "mir_string_concat_drop_right_on_failure",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        }
+        self.emit_abort_with_message("String concatenation allocation failed", subject)?;
+        self.generator.builder.position_at_end(success);
+
+        let length = self
+            .generator
+            .builder
+            .build_int_add(left_len, right_len, "mir_string_concat_length")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_domain_own_string(data, length, subject)?;
+        let string_llvm_type = self.generator.context.struct_type(
+            &[
+                self.generator
+                    .context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+                self.generator.context.i64_type().into(),
+            ],
+            false,
+        );
+        let string = self
+            .generator
+            .builder
+            .build_insert_value(
+                string_llvm_type.get_undef(),
+                data,
+                0,
+                "mir_string_concat_result_data",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_struct_value();
+        let string = self
+            .generator
+            .builder
+            .build_insert_value(string, length, 1, "mir_string_concat_result_length")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_struct_value();
+        Ok(string.into())
     }
 
     /// Compare the exact ManagedAny-i32/String profile by borrowing a fresh

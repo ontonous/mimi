@@ -5888,6 +5888,554 @@ pub fn validate_scalar_collection_graph(program: &MirProgram) -> Result<(), Vec<
     validate_scalar_collection_graph_inner(program, false)
 }
 
+/// Validate the complete executable MIR graph for the currently materialized
+/// ordinary Map/Any owner-v2 consumer slice.
+///
+/// This is intentionally independent from `ScalarCollectionValidator`: V2
+/// roots, GetAny results, and Values snapshots have dedicated TypeDesc and
+/// instruction contracts and must not be routed through the older List/Set
+/// island.  The validator admits only the small scalar/String/record and V2
+/// instruction envelope below.  `MirFunction::validate` remains the authority
+/// for local SSA structure and checker receipts; this gate closes the whole
+/// materialized executable graph over that finite envelope.
+pub fn validate_ordinary_map_owned_any_v2_island(program: &MirProgram) -> Result<(), Vec<String>> {
+    let mut validator = OrdinaryMapOwnedAnyV2IslandValidator {
+        program,
+        errors: BTreeSet::new(),
+        checked_types: BTreeSet::new(),
+        saw_v2_instruction: false,
+    };
+    validator.validate();
+    if validator.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(validator.errors.into_iter().collect())
+    }
+}
+
+struct OrdinaryMapOwnedAnyV2IslandValidator<'a> {
+    program: &'a MirProgram,
+    errors: BTreeSet<String>,
+    checked_types: BTreeSet<ResolvedTypeId>,
+    saw_v2_instruction: bool,
+}
+
+impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
+    fn validate(&mut self) {
+        let main = NodeId("function:main".into());
+        if !self.program.functions().contains_key(&main) {
+            self.error("ordinary Map/Any owner-v2 graph has no canonical function:main".into());
+        }
+        if !self.program.transitions().is_empty() {
+            self.error("ordinary Map/Any owner-v2 graph contains Flow transitions".into());
+        }
+        if !self.program.ffi_calls().is_empty() {
+            self.error("ordinary Map/Any owner-v2 graph contains FFI calls".into());
+        }
+        if !self.program.instances().is_empty() {
+            self.error("ordinary Map/Any owner-v2 graph contains generic instances".into());
+        }
+        if !self.program.nested_callable_scopes().is_empty()
+            || !self.program.closure_callable_receipts().is_empty()
+        {
+            self.error(
+                "ordinary Map/Any owner-v2 graph contains nested or closure callables".into(),
+            );
+        }
+        if !self.program.actors().is_empty()
+            || self.program.actor_execution_plan().is_some()
+            || !self.program.actor_environments().is_empty()
+        {
+            self.error("ordinary Map/Any owner-v2 graph contains Actor execution".into());
+        }
+        if !self.program.export_declarations().is_empty() {
+            self.error("ordinary Map/Any owner-v2 graph contains exported ABI wrappers".into());
+        }
+
+        // A consumer receives all materialized callables, including functions
+        // that happen to be unreachable from `main`.  Scan every one: a hidden
+        // helper is still part of the executable graph and may not smuggle an
+        // unsupported operation or TypeDesc past this route boundary.
+        for (owner, function) in self.program.functions() {
+            if owner != &function.owner {
+                self.error(format!(
+                    "function table key '{}' disagrees with MIR owner '{}'",
+                    owner.0, function.owner.0
+                ));
+            }
+            if let Err(errors) = function.validate() {
+                for error in errors {
+                    self.error(format!("function '{}' MIR validation: {error}", owner.0));
+                }
+            }
+            if !function.contracts.is_empty() || function.proof_worklist.is_some() {
+                self.error(format!(
+                    "function '{}' contains contracts or proof work outside the V2 island",
+                    owner.0
+                ));
+            }
+            for event in &function.ownership.events {
+                if !matches!(
+                    event.kind,
+                    super::MirOwnershipEventKind::Read
+                        | super::MirOwnershipEventKind::Write
+                        | super::MirOwnershipEventKind::Introduce
+                        | super::MirOwnershipEventKind::Move
+                        | super::MirOwnershipEventKind::Drop
+                        | super::MirOwnershipEventKind::Return
+                ) {
+                    self.error(format!(
+                        "function '{}' ownership effect '{}' is outside the V2 island",
+                        owner.0,
+                        event.kind.as_str()
+                    ));
+                }
+            }
+            for value in function.values.values() {
+                self.validate_type(&value.ty, &format!("function '{}' value", function.owner.0));
+            }
+            self.validate_type(
+                &function.result,
+                &format!("function '{}' result", function.owner.0),
+            );
+            for block in function.blocks.values() {
+                for instruction in &block.instructions {
+                    self.validate_instruction(function, &instruction.kind, instruction.id.as_str());
+                }
+                self.validate_terminator(function, &block.terminator, block.id.as_str());
+            }
+        }
+        if !self.saw_v2_instruction {
+            self.error("ordinary Map/Any owner-v2 island contains no V2 operation".into());
+        }
+    }
+
+    fn validate_type(&mut self, ty: &ResolvedTypeId, subject: &str) {
+        if !self.checked_types.insert(ty.clone()) {
+            return;
+        }
+        let Some(descriptor) = self.program.type_catalog().get(ty).cloned() else {
+            self.error(format!("{subject} TypeDesc '{}' is absent", ty.as_str()));
+            return;
+        };
+        let catalog = self.program.type_catalog();
+
+        if catalog.validate_copy_scalar(ty).is_ok() || catalog.validate_owned_string(ty).is_ok() {
+            return;
+        }
+        if descriptor.is_canonical_ffi_unit() {
+            return;
+        }
+
+        let v2_operation_type = ty == &super::types::ordinary_map_owned_any_v2_type_id()
+            || ty == &super::types::ordinary_map_owned_any_v2_payload_type_id()
+            || ty == &super::types::ordinary_map_owned_any_v2_get_result_type_id()
+            || ty == &super::types::ordinary_map_owned_any_v2_values_type_id()
+            || ty == &super::types::ordinary_map_owned_any_v2_values_element_type_id();
+        if v2_operation_type {
+            for operation in [
+                MirGlueOperation::MoveOut,
+                MirGlueOperation::Clone,
+                MirGlueOperation::Drop,
+            ] {
+                if let Err(message) = catalog.validate_glue(ty, operation) {
+                    self.error(format!(
+                        "{subject} V2 TypeDesc '{}' rejected: {message}",
+                        ty.as_str()
+                    ));
+                }
+            }
+            match descriptor.layout {
+                MirLayout::Tuple(elements) => {
+                    for element in elements {
+                        self.validate_type(&element, subject);
+                    }
+                }
+                MirLayout::List { element } => self.validate_type(&element, subject),
+                MirLayout::OrdinaryMapOwnedAnyV2
+                | MirLayout::OrdinaryMapOwnedAnyV2Payload
+                | MirLayout::OrdinaryMapOwnedAnyV2ValuesElement => {}
+                layout => self.error(format!(
+                    "{subject} V2 TypeDesc '{}' has unexpected layout {layout:?}",
+                    ty.as_str()
+                )),
+            }
+            return;
+        }
+
+        if descriptor.kind == super::types::MirTypeKind::Nominal
+            && matches!(&descriptor.layout, MirLayout::Record { .. })
+        {
+            for operation in [
+                MirGlueOperation::MoveOut,
+                MirGlueOperation::Clone,
+                MirGlueOperation::Drop,
+            ] {
+                if let Err(message) = catalog.validate_aggregate_glue(ty, operation) {
+                    self.error(format!(
+                        "{subject} record TypeDesc '{}' rejected: {message}",
+                        ty.as_str()
+                    ));
+                }
+            }
+            if let MirLayout::Record { fields, .. } = &descriptor.layout {
+                for field in fields {
+                    self.validate_type(&field.ty, subject);
+                }
+            }
+            return;
+        }
+
+        self.error(format!(
+            "{subject} TypeDesc '{}' with layout {:?} is outside the ordinary Map/Any owner-v2 island",
+            ty.as_str(), descriptor.layout
+        ));
+    }
+
+    fn validate_instruction(
+        &mut self,
+        function: &MirFunction,
+        instruction: &MirInstructionKind,
+        subject: &str,
+    ) {
+        use MirInstructionKind as I;
+        if matches!(
+            instruction,
+            I::OrdinaryMapOwnedAnyV2New { .. }
+                | I::OrdinaryMapOwnedAnyV2Set { .. }
+                | I::OrdinaryMapOwnedAnyV2Remove { .. }
+                | I::OrdinaryMapOwnedAnyV2Size { .. }
+                | I::OrdinaryMapOwnedAnyV2Contains { .. }
+                | I::OrdinaryMapOwnedAnyV2GetAny { .. }
+                | I::OrdinaryMapOwnedAnyV2Unpack { .. }
+                | I::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                | I::OrdinaryMapOwnedAnyV2Values { .. }
+                | I::OrdinaryMapOwnedAnyV2IsEmpty { .. }
+                | I::OrdinaryMapOwnedAnyV2Drop { .. }
+        ) {
+            self.saw_v2_instruction = true;
+        }
+        match instruction {
+            I::OrdinaryMapOwnedAnyV2New { result } => {
+                self.require_type(function, result, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+            }
+            I::OrdinaryMapOwnedAnyV2Set { result, source, key, value } => {
+                self.require_type(function, result, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+                self.require_type(function, source, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+                self.require_string(function, key, subject);
+                self.value_type(function, value, subject);
+            }
+            I::OrdinaryMapOwnedAnyV2Remove { result, source, key } => {
+                self.require_type(function, result, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+                self.require_type(function, source, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+                self.require_string(function, key, subject);
+            }
+            I::OrdinaryMapOwnedAnyV2Size { result, root } => {
+                self.require_type(function, result, &crate::core::ir::primitive_type_id(PrimitiveType::I32), subject);
+                self.require_type(function, root, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+            }
+            I::OrdinaryMapOwnedAnyV2Contains { result, root, key } => {
+                self.require_type(function, result, &crate::core::ir::primitive_type_id(PrimitiveType::Bool), subject);
+                self.require_type(function, root, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+                self.require_string(function, key, subject);
+            }
+            I::OrdinaryMapOwnedAnyV2GetAny { result, root, key } => {
+                self.require_type(function, result, &super::types::ordinary_map_owned_any_v2_get_result_type_id(), subject);
+                self.require_type(function, root, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+                self.require_string(function, key, subject);
+            }
+            I::OrdinaryMapOwnedAnyV2Unpack { result, pair, .. } => {
+                self.value_type(function, result, subject);
+                self.require_type(function, pair, &super::types::ordinary_map_owned_any_v2_get_result_type_id(), subject);
+            }
+            I::OrdinaryMapOwnedAnyV2ValuesUnpack { result, values, index, .. } => {
+                self.value_type(function, result, subject);
+                self.require_type(function, values, &super::types::ordinary_map_owned_any_v2_values_type_id(), subject);
+                self.require_type(function, index, &crate::core::ir::primitive_type_id(PrimitiveType::I32), subject);
+            }
+            I::OrdinaryMapOwnedAnyV2Values { result, root } => {
+                self.require_type(function, result, &super::types::ordinary_map_owned_any_v2_values_type_id(), subject);
+                self.require_type(function, root, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+            }
+            I::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
+                self.require_type(function, result, &crate::core::ir::primitive_type_id(PrimitiveType::Bool), subject);
+                self.require_type(function, root, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+            }
+            I::OrdinaryMapOwnedAnyV2Drop { root } => {
+                self.require_type(function, root, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+            }
+            I::Const { literal, result } => {
+                self.value_type(function, result, subject);
+                if !matches!(
+                    literal,
+                    ResolvedLiteral::Int(_)
+                        | ResolvedLiteral::Bool(_)
+                        | ResolvedLiteral::Unit
+                        | ResolvedLiteral::String(_)
+                ) {
+                    self.error(format!("{subject} literal {literal:?} is outside the V2 island"));
+                }
+            }
+            I::Copy { result, source } | I::Move { result, source } | I::Clone { result, source } => {
+                let result_ty = self.value_type(function, result, subject);
+                let source_ty = self.value_type(function, source, subject);
+                if result_ty.is_some() && result_ty != source_ty {
+                    self.error(format!("{subject} transfer result/source TypeDesc identities disagree"));
+                }
+                if matches!(instruction, I::Copy { .. }) {
+                    if let Some(ty) = source_ty {
+                        if self.program.type_catalog().validate_copy_scalar(&ty).is_err() {
+                            self.error(format!("{subject} Copy source is outside the V2 scalar contract"));
+                        }
+                    }
+                } else if matches!(instruction, I::Clone { .. }) {
+                    if let Some(ty) = source_ty {
+                        if let Err(message) = self.program.type_catalog().validate_glue(&ty, MirGlueOperation::Clone) {
+                            self.error(format!("{subject} Clone glue rejected: {message}"));
+                        }
+                    }
+                }
+            }
+            I::Drop { value } => {
+                if let Some(ty) = self.value_type(function, value, subject) {
+                    if let Err(message) = self.program.type_catalog().validate_glue(&ty, MirGlueOperation::Drop) {
+                        self.error(format!("{subject} Drop glue rejected: {message}"));
+                    }
+                }
+            }
+            I::Construct { result, kind, fields } => {
+                let Some(result_ty) = self.value_type(function, result, subject) else { return; };
+                let Some(descriptor) = self.program.type_catalog().get(&result_ty) else { return; };
+                match (kind, &descriptor.layout) {
+                    (super::MirAggregateKind::Record { nominal, fields: field_ids }, MirLayout::Record { nominal: layout_nominal, fields: layout_fields })
+                        if nominal == layout_nominal
+                            && field_ids == &layout_fields.iter().map(|field| field.id.clone()).collect::<Vec<_>>()
+                            && fields.len() == field_ids.len() => {}
+                    _ => self.error(format!("{subject} aggregate construction is outside the V2 record contract")),
+                }
+            }
+            I::Binary { result, op, left, right } => {
+                let (Some(result_ty), Some(left_ty), Some(right_ty)) = (
+                    self.value_type(function, result, subject),
+                    self.value_type(function, left, subject),
+                    self.value_type(function, right, subject),
+                ) else { return; };
+                let string_add = *op == ResolvedBinaryOp::Add
+                    && left_ty == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                    && right_ty == left_ty
+                    && result_ty == left_ty;
+                let integer_arithmetic = matches!(op, ResolvedBinaryOp::Add | ResolvedBinaryOp::Subtract)
+                    && left_ty == right_ty
+                    && result_ty == left_ty
+                    && self.program.type_catalog().validate_copy_scalar(&left_ty).is_ok()
+                    && self.program.type_catalog().get(&left_ty).is_some_and(|ty| matches!(ty.abi, MirAbiClass::Integer { signed: true, .. }));
+                if !string_add && !integer_arithmetic {
+                    self.error(format!("{subject} binary operator {op:?} is outside the V2 island"));
+                }
+            }
+            I::BuiltinCall { result, kind, arguments, string_field_contract } => {
+                self.validate_builtin(function, result, *kind, arguments, string_field_contract.as_ref(), subject);
+            }
+            I::Call { result, callee, type_arguments, arguments, effect_receipts, variant_call_contract } => {
+                if !type_arguments.is_empty() || !effect_receipts.is_empty() || variant_call_contract.is_some() {
+                    self.error(format!("{subject} generic/effectful/variant call is outside the V2 island"));
+                }
+                let ResolvedCallee::Function(owner) = callee else {
+                    self.error(format!("{subject} indirect call is outside the V2 island"));
+                    return;
+                };
+                let Some(target) = self.program.functions().get(owner) else {
+                    self.error(format!("{subject} direct callee '{}' is absent from the executable graph", owner.0));
+                    return;
+                };
+                let target_parameters = target
+                    .parameters
+                    .iter()
+                    .filter_map(|parameter| target.values.get(parameter).map(|value| value.ty.clone()))
+                    .collect::<Vec<_>>();
+                let target_result = target.result.clone();
+                if target_parameters.len() != target.parameters.len() {
+                    self.error(format!("{subject} direct callee has a missing parameter value"));
+                }
+                if arguments.len() != target_parameters.len() {
+                    self.error(format!("{subject} call argument count disagrees with callee signature"));
+                }
+                for (actual, parameter_ty) in arguments.iter().zip(&target_parameters) {
+                    if self.value_type(function, actual, subject).as_ref() != Some(parameter_ty) {
+                        self.error(format!("{subject} call argument TypeDesc disagrees with callee signature"));
+                    }
+                }
+                match result {
+                    Some(value) if self.value_type(function, value, subject).as_ref() == Some(&target_result) => {}
+                    None if target_result == crate::core::ir::primitive_type_id(PrimitiveType::Unit) => {}
+                    _ => self.error(format!("{subject} call result disagrees with callee signature")),
+                }
+            }
+            I::Nop => {}
+            _ => self.error(format!("{subject} instruction {instruction:?} is outside the ordinary Map/Any owner-v2 island")),
+        }
+    }
+
+    fn validate_builtin(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        kind: super::types::MirBuiltinKind,
+        arguments: &[MirValueId],
+        string_field_contract: Option<&super::types::MirStringFieldBorrowContract>,
+        subject: &str,
+    ) {
+        use super::types::MirBuiltinKind as B;
+        if !matches!(kind, B::PrintlnBool | B::PrintlnInt | B::PrintlnString) {
+            self.error(format!(
+                "{subject} builtin {kind:?} is outside the V2 island"
+            ));
+            return;
+        }
+        if self.value_type(function, result, subject)
+            != Some(crate::core::ir::primitive_type_id(PrimitiveType::Unit))
+            || arguments.len() != 1
+        {
+            self.error(format!(
+                "{subject} println result/arity disagrees with its canonical contract"
+            ));
+            return;
+        }
+        let Some(argument_ty) = arguments
+            .first()
+            .and_then(|argument| self.value_type(function, argument, subject))
+        else {
+            return;
+        };
+        match (kind, string_field_contract) {
+            (B::PrintlnBool, None) => {
+                if argument_ty != crate::core::ir::primitive_type_id(PrimitiveType::Bool) {
+                    self.error(format!("{subject} println(bool) argument is not bool"));
+                }
+            }
+            (B::PrintlnInt, None) => {
+                if !self
+                    .program
+                    .type_catalog()
+                    .get(&argument_ty)
+                    .is_some_and(|ty| {
+                        matches!(
+                            ty.abi,
+                            MirAbiClass::Integer {
+                                signed: true,
+                                bits: 32 | 64
+                            }
+                        )
+                    })
+                {
+                    self.error(format!(
+                        "{subject} println(int) argument is outside signed i32/i64"
+                    ));
+                }
+            }
+            (B::PrintlnString, None) => {
+                if self
+                    .program
+                    .type_catalog()
+                    .validate_owned_string(&argument_ty)
+                    .is_err()
+                {
+                    self.error(format!(
+                        "{subject} println(string) argument is not owned String"
+                    ));
+                }
+            }
+            (B::PrintlnString, Some(receipt)) => {
+                if let Err(message) = self
+                    .program
+                    .type_catalog()
+                    .validate_string_field_borrow_receipt(&argument_ty, receipt)
+                {
+                    self.error(format!(
+                        "{subject} println String-field receipt rejected: {message}"
+                    ));
+                }
+            }
+            _ => self.error(format!("{subject} println kind and field receipt disagree")),
+        }
+    }
+
+    fn validate_terminator(
+        &mut self,
+        function: &MirFunction,
+        terminator: &MirTerminator,
+        subject: &str,
+    ) {
+        match terminator {
+            MirTerminator::Goto { .. } | MirTerminator::Trap { .. } => {}
+            MirTerminator::Branch { condition, .. } => {
+                self.require_type(function, condition, &crate::core::ir::primitive_type_id(PrimitiveType::Bool), subject);
+            }
+            MirTerminator::Return { value } => match value {
+                Some(value) => {
+                    if self.value_type(function, value, subject).as_ref() != Some(&function.result) {
+                        self.error(format!("{subject} return TypeDesc disagrees with function result"));
+                    }
+                }
+                None if function.result != crate::core::ir::primitive_type_id(PrimitiveType::Unit) => {
+                    self.error(format!("{subject} missing non-unit return value"));
+                }
+                None => {}
+            },
+            MirTerminator::Switch { scrutinee, arms } => {
+                if let Some(ty) = self.value_type(function, scrutinee, subject) {
+                    if let Err(message) = self.program.type_catalog().validate_scalar_switch(&ty, arms) {
+                        self.error(format!("{subject} switch is outside the V2 scalar control-flow contract: {message}"));
+                    }
+                }
+            }
+            _ => self.error(format!("{subject} terminator {terminator:?} is outside the ordinary Map/Any owner-v2 island")),
+        }
+    }
+
+    fn require_string(&mut self, function: &MirFunction, value: &MirValueId, subject: &str) {
+        self.require_type(
+            function,
+            value,
+            &crate::core::ir::primitive_type_id(PrimitiveType::String),
+            subject,
+        );
+    }
+
+    fn require_type(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        expected: &ResolvedTypeId,
+        subject: &str,
+    ) {
+        if self.value_type(function, value, subject).as_ref() != Some(expected) {
+            self.error(format!(
+                "{subject} value '{value}' has a TypeDesc outside its V2 instruction contract"
+            ));
+        }
+    }
+
+    fn value_type(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+    ) -> Option<ResolvedTypeId> {
+        function
+            .values
+            .get(value)
+            .map(|value| value.ty.clone())
+            .or_else(|| {
+                self.error(format!("{subject} value '{}' is absent", value));
+                None
+            })
+    }
+
+    fn error(&mut self, message: String) {
+        self.errors.insert(message);
+    }
+}
 fn validate_scalar_collection_graph_inner(
     program: &MirProgram,
     require_main: bool,
@@ -6259,6 +6807,21 @@ impl<'a> ScalarCollectionValidator<'a> {
             | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. } => {
                 self.error(format!(
                     "{subject} OrdinaryMapOwnerLifecycle operation is outside this MIR island"
+                ));
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. } => {
+                self.error(format!(
+                    "{subject} OrdinaryMapOwnedAnyV2 operation is outside this MIR island"
                 ));
             }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
@@ -7302,7 +7865,8 @@ fn binary_supported(
 mod tests {
     use super::{
         classify_scalar_collection_admission, contains_scalar_collection_candidate,
-        validate_scalar_collection_island, ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
+        validate_ordinary_map_owned_any_v2_island, validate_scalar_collection_island,
+        ScalarCollectionAdmission, SCALAR_COLLECTION_ISLAND,
     };
     use crate::core::mir::reference::MirProgram;
     use crate::lexer::Lexer;
@@ -7315,6 +7879,77 @@ mod tests {
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
     }
 
+    #[test]
+    fn ordinary_map_owned_any_v2_island_accepts_current_record_and_values_graphs() {
+        for source in [
+            include_str!("../../../tests/fixtures/mir_ordinary_map_any_owner_v2_record_unit.mimi"),
+            include_str!(
+                "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_unpack.mimi"
+            ),
+            include_str!(
+                "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi"
+            ),
+        ] {
+            let program = canonical(source);
+            validate_ordinary_map_owned_any_v2_island(&program)
+                .expect("the current V2 executable graph belongs to its dedicated island");
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_island_rejects_hidden_unsupported_function() {
+        let program = canonical(
+            r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let label = Label { text: "island fixture" }
+                let empty = map_new()
+                let root = map_set(empty, "label", label)
+                drop(empty)
+                drop(root)
+                drop(label)
+                0
+            }
+            func hidden() -> i32 { 1 * 2 }
+            "#,
+        );
+        let errors = validate_ordinary_map_owned_any_v2_island(&program).expect_err(
+            "an unreferenced materialized function is still part of the executable graph",
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("Binary") || error.contains("outside")),
+            "unsupported helper instruction must be named: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_island_rejects_hidden_unsupported_type() {
+        let program = canonical(
+            r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let label = Label { text: "island fixture" }
+                let empty = map_new()
+                let root = map_set(empty, "label", label)
+                drop(empty)
+                drop(root)
+                drop(label)
+                0
+            }
+            func hidden() -> f64 { 1.5 }
+            "#,
+        );
+        let errors = validate_ordinary_map_owned_any_v2_island(&program)
+            .expect_err("an unreferenced materialized TypeDesc is outside the V2 graph envelope");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("TypeDesc") && error.contains("outside")),
+            "unsupported helper type must be named: {errors:?}"
+        );
+    }
     #[test]
     fn accepts_the_complete_scalar_list_set_graph() {
         let program = canonical(include_str!(

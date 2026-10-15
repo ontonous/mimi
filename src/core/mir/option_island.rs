@@ -690,6 +690,21 @@ impl<'a> OptionStringVariantValidator<'a> {
                     "{subject} OrdinaryMapOwnerLifecycle operation is outside the Option island"
                 ));
             }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. } => {
+                self.error(format!(
+                    "{subject} OrdinaryMapOwnedAnyV2 operation is outside the Option island"
+                ));
+            }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }

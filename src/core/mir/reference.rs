@@ -42,6 +42,20 @@ pub enum MirRuntimeValue {
         BTreeMap<String, MirOrdinaryMapOwnerLifecycleI32StringValue>,
     ),
     OrdinaryMapOwnedGetI32StringV1(BTreeMap<String, MirOrdinaryMapOwnedGetI32StringV1Value>),
+    /// Persistent ordinary Map/Any owner-v2 root. The reference value keeps
+    /// the same narrow payload boundary as the runtime/native island: Copy
+    /// `i32`, owned `String`, or a concrete one-field `Label { text: string }`
+    /// record. Owned strings and Label fields are copied into this map value,
+    /// so their source values and every derived root have independent owners.
+    OrdinaryMapOwnedAnyV2(BTreeMap<String, MirOrdinaryMapOwnedAnyV2Value>),
+    /// A separately owned payload token returned by AnyOwner-v2 GetAny.
+    /// This is distinct from the V1 ManagedAny runtime owner and carries the
+    /// concrete selected payload identity so reference execution cannot infer
+    /// an unpack type from the erased surface `DynamicAny`.
+    OrdinaryMapOwnedAnyV2Payload(MirOrdinaryMapOwnedAnyV2Value),
+    /// One selected DynamicAny payload owned as an element of the V2 Values
+    /// List. This owner identity is separate from the GetAny result token.
+    OrdinaryMapOwnedAnyV2ValuesElement(MirOrdinaryMapOwnedAnyV2Value),
     ManagedAnyI32StringV1(MirManagedAnyValue),
     Tuple(Vec<MirRuntimeValue>),
     List(Vec<MirRuntimeValue>),
@@ -76,11 +90,98 @@ pub enum MirOrdinaryMapOwnedGetI32StringV1Value {
     String(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirOrdinaryMapOwnedAnyV2Value {
+    I32 {
+        type_id: ResolvedTypeId,
+        value: i32,
+    },
+    String {
+        type_id: ResolvedTypeId,
+        value: String,
+    },
+    Label {
+        type_id: ResolvedTypeId,
+        text: String,
+    },
+}
+
 fn is_canonical_i32_type(type_catalog: &MirTypeCatalog, ty: &crate::core::ResolvedTypeId) -> bool {
     type_catalog.get(ty).is_some_and(|descriptor| {
         descriptor.kind == super::types::MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
             && type_catalog.validate_copy_scalar(ty).is_ok()
     })
+}
+
+fn is_canonical_v2_string_type(
+    type_catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    type_catalog.validate_owned_string(ty).is_ok()
+}
+
+fn is_canonical_bool_type(type_catalog: &MirTypeCatalog, ty: &crate::core::ResolvedTypeId) -> bool {
+    type_catalog.get(ty).is_some_and(|descriptor| {
+        descriptor.kind == super::types::MirTypeKind::Primitive(crate::core::PrimitiveType::Bool)
+            && type_catalog.validate_copy_scalar(ty).is_ok()
+    })
+}
+
+/// The first V2 record payload is deliberately exact.  A record layout that
+/// merely happens to have one pointer-shaped field is not enough authority to
+/// cross the runtime ABI: it must be a move-owned concrete nominal record
+/// with one owned String field named `text`.
+pub(super) fn is_canonical_v2_label_type(
+    type_catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    let Some(descriptor) = type_catalog.get(ty) else {
+        return false;
+    };
+    if descriptor.kind != super::types::MirTypeKind::Nominal
+        || descriptor.ownership != super::types::MirOwnership::Move
+        || descriptor.abi != super::types::MirAbiClass::Aggregate
+        || descriptor.needs_drop_glue == false
+        || descriptor.needs_clone_glue == false
+        || descriptor.glue
+            != (super::types::MirGlueContract {
+                move_out: super::types::MirGlueKind::Aggregate,
+                clone: super::types::MirGlueKind::Aggregate,
+                drop: super::types::MirGlueKind::Aggregate,
+            })
+        || descriptor.drop_plan.is_none()
+    {
+        return false;
+    }
+    let super::types::MirLayout::Record { fields, .. } = &descriptor.layout else {
+        return false;
+    };
+    if fields.len() != 1 || fields[0].name != "text" {
+        return false;
+    }
+    let Some(text) = type_catalog.get(&fields[0].ty) else {
+        return false;
+    };
+    text.kind == super::types::MirTypeKind::Primitive(crate::core::PrimitiveType::String)
+        && type_catalog.validate_owned_string(&fields[0].ty).is_ok()
+        && type_catalog
+            .validate_glue(ty, MirGlueOperation::MoveOut)
+            .is_ok()
+        && type_catalog
+            .validate_glue(ty, MirGlueOperation::Clone)
+            .is_ok()
+        && type_catalog
+            .validate_glue(ty, MirGlueOperation::Drop)
+            .is_ok()
+}
+
+pub(super) fn is_canonical_v2_payload_type(
+    type_catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    is_canonical_i32_type(type_catalog, ty)
+        || is_canonical_v2_string_type(type_catalog, ty)
+        || is_canonical_v2_label_type(type_catalog, ty)
 }
 
 fn is_canonical_owned_get_result_type(
@@ -142,6 +243,15 @@ fn try_copy_owned_get_string(value: &str, reserve_terminator: bool) -> Option<St
     Some(copy)
 }
 
+fn ordinary_map_owned_any_v2_root_publish_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_root_publish_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn try_copy_owned_get_query_string(value: &str, reserve_terminator: bool) -> Option<String> {
     #[cfg(test)]
     crate::runtime::ordinary_map_owned_get_allocation_checkpoint_for_test().ok()?;
@@ -176,6 +286,72 @@ fn try_copy_owned_get_map(
             try_copy_owned_get_string(key, false)?,
             try_copy_owned_get_value(value)?,
         );
+    }
+    Some(copied)
+}
+
+fn try_copy_owned_any_v2_value(
+    value: &MirOrdinaryMapOwnedAnyV2Value,
+) -> Option<MirOrdinaryMapOwnedAnyV2Value> {
+    match value {
+        MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, value } => {
+            Some(MirOrdinaryMapOwnedAnyV2Value::I32 {
+                type_id: type_id.clone(),
+                value: *value,
+            })
+        }
+        MirOrdinaryMapOwnedAnyV2Value::String { type_id, value } => {
+            Some(MirOrdinaryMapOwnedAnyV2Value::String {
+                type_id: type_id.clone(),
+                value: try_copy_owned_get_string(value, false)?,
+            })
+        }
+        MirOrdinaryMapOwnedAnyV2Value::Label { type_id, text } => {
+            Some(MirOrdinaryMapOwnedAnyV2Value::Label {
+                type_id: type_id.clone(),
+                text: try_copy_owned_get_string(text, false)?,
+            })
+        }
+    }
+}
+
+fn try_copy_owned_any_v2_map(
+    source: &BTreeMap<String, MirOrdinaryMapOwnedAnyV2Value>,
+) -> Option<BTreeMap<String, MirOrdinaryMapOwnedAnyV2Value>> {
+    let mut copied = BTreeMap::new();
+    for (key, value) in source {
+        copied.insert(
+            try_copy_owned_get_string(key, false)?,
+            try_copy_owned_any_v2_value(value)?,
+        );
+    }
+    Some(copied)
+}
+
+fn try_copy_owned_any_v2_values(
+    type_catalog: &MirTypeCatalog,
+    elements: &[MirRuntimeValue],
+) -> Option<Vec<MirRuntimeValue>> {
+    let mut copied = Vec::new();
+    copied.try_reserve_exact(elements.len()).ok()?;
+    for element in elements {
+        let MirRuntimeValue::OrdinaryMapOwnedAnyV2ValuesElement(payload) = element else {
+            return None;
+        };
+        let payload_type = match payload {
+            MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
+            | MirOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
+            | MirOrdinaryMapOwnedAnyV2Value::Label { type_id, .. } => type_id,
+        };
+        if !is_canonical_v2_payload_type(type_catalog, payload_type) {
+            return None;
+        }
+        type_catalog
+            .validate_glue(payload_type, MirGlueOperation::Clone)
+            .ok()?;
+        copied.push(MirRuntimeValue::OrdinaryMapOwnedAnyV2ValuesElement(
+            try_copy_owned_any_v2_value(payload)?,
+        ));
     }
     Some(copied)
 }
@@ -430,6 +606,290 @@ fn validate_ordinary_map_owned_get_instruction_types(
                         "ordinary Map owned-Get result '{}' is not canonical Result<{}, i32>",
                         id,
                         if ok_is_string { "String" } else { "i32" }
+                    ),
+                });
+            }
+        }
+    }
+    errors
+}
+
+fn validate_ordinary_map_owned_any_v2_instruction_types(
+    function: &MirFunction,
+    type_catalog: &MirTypeCatalog,
+) -> Vec<super::MirValidationError> {
+    use super::MirInstructionKind as I;
+
+    let mut errors = Vec::new();
+    let owner_type = super::types::ordinary_map_owned_any_v2_type_id();
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        if let I::OrdinaryMapOwnedAnyV2Values { result, root } = &instruction.kind {
+            let result_type = super::types::ordinary_map_owned_any_v2_values_type_id();
+            if function
+                .values
+                .get(root)
+                .is_none_or(|value| value.ty != owner_type)
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 Values root '{}' does not use its canonical root TypeDesc",
+                        root
+                    ),
+                });
+            }
+            if function
+                .values
+                .get(result)
+                .is_none_or(|value| value.ty != result_type)
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 Values result '{}' does not use its dedicated List<DynamicAny> TypeDesc",
+                        result
+                    ),
+                });
+            } else {
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    if let Err(message) = type_catalog.validate_list_glue(&result_type, operation) {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        if let I::OrdinaryMapOwnedAnyV2GetAny { result, root, key } = &instruction.kind {
+            let result_type = super::types::ordinary_map_owned_any_v2_get_result_type_id();
+            if function
+                .values
+                .get(root)
+                .is_none_or(|value| value.ty != owner_type)
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 GetAny root '{}' does not use its canonical root TypeDesc",
+                        root
+                    ),
+                });
+            }
+            if function
+                .values
+                .get(key)
+                .is_none_or(|value| type_catalog.validate_owned_string(&value.ty).is_err())
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 GetAny key '{}' is not a canonical owned String",
+                        key
+                    ),
+                });
+            }
+            if function
+                .values
+                .get(result)
+                .is_none_or(|value| value.ty != result_type)
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 GetAny result '{}' does not use its independent payload-token tuple TypeDesc",
+                        result
+                    ),
+                });
+            } else {
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    if let Err(message) = type_catalog.validate_glue(&result_type, operation) {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
+                }
+                let payload_type = super::types::ordinary_map_owned_any_v2_payload_type_id();
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    if let Err(message) = type_catalog.validate_glue(&payload_type, operation) {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        if let I::OrdinaryMapOwnedAnyV2Unpack { result, pair, .. } = &instruction.kind {
+            let pair_type = super::types::ordinary_map_owned_any_v2_get_result_type_id();
+            if function
+                .values
+                .get(pair)
+                .is_none_or(|value| value.ty != pair_type)
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 unpack pair '{}' does not use its canonical GetAny TypeDesc",
+                        pair
+                    ),
+                });
+            }
+            let supported_target = function
+                .values
+                .get(result)
+                .is_some_and(|value| is_canonical_v2_payload_type(type_catalog, &value.ty));
+            if !supported_target {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 unpack result '{}' is outside the i32/String/Label TypeDesc profile",
+                        result
+                    ),
+                });
+            } else if let Some(value) = function.values.get(result) {
+                for operation in [MirGlueOperation::Clone, MirGlueOperation::Drop] {
+                    if let Err(message) = type_catalog.validate_glue(&value.ty, operation) {
+                        errors.push(super::MirValidationError {
+                            subject: instruction.id.to_string(),
+                            message,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        let (roots, keys, payload, i32_result, bool_result): (
+            Vec<&MirValueId>,
+            Vec<&MirValueId>,
+            Option<&MirValueId>,
+            Option<&MirValueId>,
+            Option<&MirValueId>,
+        ) = match &instruction.kind {
+            I::OrdinaryMapOwnedAnyV2New { result } => (vec![result], vec![], None, None, None),
+            I::OrdinaryMapOwnedAnyV2Set {
+                result,
+                source,
+                key,
+                value,
+            } => (vec![result, source], vec![key], Some(value), None, None),
+            I::OrdinaryMapOwnedAnyV2Remove {
+                result,
+                source,
+                key,
+            } => (vec![result, source], vec![key], None, None, None),
+            I::OrdinaryMapOwnedAnyV2Size { result, root } => {
+                (vec![root], vec![], None, Some(result), None)
+            }
+            I::OrdinaryMapOwnedAnyV2Contains { result, root, key } => {
+                (vec![root], vec![key], None, None, Some(result))
+            }
+            I::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
+                (vec![root], vec![], None, None, Some(result))
+            }
+            I::OrdinaryMapOwnedAnyV2Drop { root } => (vec![root], vec![], None, None, None),
+            I::Clone { result, source }
+                if [result, source].iter().any(|id| {
+                    function
+                        .values
+                        .get(*id)
+                        .is_some_and(|value| value.ty == owner_type)
+                }) =>
+            {
+                (vec![result, source], vec![], None, None, None)
+            }
+            _ => continue,
+        };
+        for id in roots {
+            if function
+                .values
+                .get(id)
+                .is_none_or(|value| value.ty != owner_type)
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 operand/result '{}' does not use its canonical TypeDesc",
+                        id
+                    ),
+                });
+            }
+        }
+        for id in keys {
+            if function
+                .values
+                .get(id)
+                .is_none_or(|value| type_catalog.validate_owned_string(&value.ty).is_err())
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 key '{}' is not a canonical owned String",
+                        id
+                    ),
+                });
+            }
+        }
+        if let Some(id) = payload {
+            if function
+                .values
+                .get(id)
+                .is_none_or(|value| !is_canonical_v2_payload_type(type_catalog, &value.ty))
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 Set payload '{}' is outside the i32/String/Label profile",
+                        id
+                    ),
+                });
+            }
+        }
+        if let Some(id) = i32_result {
+            if function
+                .values
+                .get(id)
+                .is_none_or(|value| !is_canonical_i32_type(type_catalog, &value.ty))
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 Size result '{}' is not canonical i32",
+                        id
+                    ),
+                });
+            }
+        }
+        if let Some(id) = bool_result {
+            if function
+                .values
+                .get(id)
+                .is_none_or(|value| !is_canonical_bool_type(type_catalog, &value.ty))
+            {
+                errors.push(super::MirValidationError {
+                    subject: instruction.id.to_string(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 observation result '{}' is not canonical bool",
+                        id
                     ),
                 });
             }
@@ -1406,12 +1866,112 @@ impl MirProgram {
                 message: "ordinary Map owned-Get TypeDesc presence must match a Checker-owned profile receipt".into(),
             });
         }
+        let has_owned_any_v2_descriptor = type_catalog.iter().any(|(_, descriptor)| {
+            descriptor.kind == super::types::MirTypeKind::OrdinaryMapOwnedAnyV2
+        });
+        let has_owned_any_v2_receipt = functions.values().any(|function| {
+            function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
+        });
+        if has_owned_any_v2_descriptor != has_owned_any_v2_receipt {
+            errors.push(super::MirValidationError {
+                subject: "mir-type-catalog".into(),
+                message: "ordinary Map/Any owner-v2 TypeDesc presence must match its independent Checker receipt".into(),
+            });
+        }
+        let has_values_descriptor = type_catalog.iter().any(|(_, descriptor)| {
+            descriptor.kind == super::types::MirTypeKind::OrdinaryMapOwnedAnyV2Values
+        });
+        let has_values_element_descriptor = type_catalog.iter().any(|(_, descriptor)| {
+            descriptor.kind == super::types::MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement
+        });
+        let has_values_receipt = functions.values().any(|function| {
+            function
+                .ownership
+                .checker_ordinary_map_owned_any_v2
+                .iter()
+                .any(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values)
+        });
+        if has_values_descriptor != has_values_receipt
+            || has_values_element_descriptor != has_values_receipt
+        {
+            errors.push(super::MirValidationError {
+                subject: "mir-type-catalog".into(),
+                message: "ordinary Map/Any owner-v2 Values result/element TypeDesc presence must match its exact Checker receipt".into(),
+            });
+        }
         for (id, descriptor) in type_catalog.iter() {
             if descriptor.kind == super::types::MirTypeKind::OrdinaryMapOwnedGetI32StringV1 {
                 if id != &super::types::ordinary_map_owned_get_i32_string_v1_type_id() {
                     errors.push(super::MirValidationError {
                         subject: id.as_str().into(),
                         message: "non-canonical ordinary Map owned-Get TypeDesc identity is present in MIR catalog".into(),
+                    });
+                } else {
+                    for operation in [
+                        MirGlueOperation::MoveOut,
+                        MirGlueOperation::Clone,
+                        MirGlueOperation::Drop,
+                    ] {
+                        if let Err(message) = type_catalog.validate_glue(id, operation) {
+                            errors.push(super::MirValidationError {
+                                subject: id.as_str().into(),
+                                message,
+                            });
+                        }
+                    }
+                }
+            }
+            if descriptor.kind == super::types::MirTypeKind::OrdinaryMapOwnedAnyV2 {
+                let expected = super::types::MirGlueContract {
+                    move_out: super::types::MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    clone: super::types::MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    drop: super::types::MirGlueKind::OrdinaryMapOwnedAnyV2,
+                };
+                if id != &super::types::ordinary_map_owned_any_v2_type_id()
+                    || descriptor.layout != super::types::MirLayout::OrdinaryMapOwnedAnyV2
+                    || descriptor.abi != super::types::MirAbiClass::OpaqueHandle
+                    || descriptor.ownership != super::types::MirOwnership::Move
+                    || !descriptor.needs_drop_glue
+                    || !descriptor.needs_clone_glue
+                    || descriptor.glue != expected
+                    || descriptor.session_protocol.is_some()
+                    || descriptor.drop_plan.is_some()
+                    || descriptor.variant_drop_plan.is_some()
+                {
+                    errors.push(super::MirValidationError {
+                        subject: id.as_str().into(),
+                        message: "ordinary Map/Any owner-v2 TypeDesc has an inconsistent ABI/ownership/glue contract".into(),
+                    });
+                }
+            }
+            if descriptor.kind == super::types::MirTypeKind::OrdinaryMapOwnedAnyV2Values {
+                if id != &super::types::ordinary_map_owned_any_v2_values_type_id() {
+                    errors.push(super::MirValidationError {
+                        subject: id.as_str().into(),
+                        message: "non-canonical ordinary Map/Any owner-v2 Values TypeDesc identity is present in MIR catalog".into(),
+                    });
+                } else {
+                    for operation in [
+                        MirGlueOperation::MoveOut,
+                        MirGlueOperation::Clone,
+                        MirGlueOperation::Drop,
+                    ] {
+                        if let Err(message) = type_catalog.validate_list_glue(id, operation) {
+                            errors.push(super::MirValidationError {
+                                subject: id.as_str().into(),
+                                message,
+                            });
+                        }
+                    }
+                }
+            }
+            if descriptor.kind == super::types::MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement {
+                if id != &super::types::ordinary_map_owned_any_v2_values_element_type_id() {
+                    errors.push(super::MirValidationError {
+                        subject: id.as_str().into(),
+                        message: "non-canonical ordinary Map/Any owner-v2 Values element TypeDesc identity is present in MIR catalog".into(),
                     });
                 } else {
                     for operation in [
@@ -1599,6 +2159,10 @@ impl MirProgram {
                 }
             }
             errors.extend(validate_ordinary_map_owned_get_instruction_types(
+                function,
+                &type_catalog,
+            ));
+            errors.extend(validate_ordinary_map_owned_any_v2_instruction_types(
                 function,
                 &type_catalog,
             ));
@@ -2809,6 +3373,31 @@ impl MirProgram {
                             message,
                         }),
                 );
+            }
+            if let Err(message) = program.ordinary_map_owned_any_v2_get_any_result_receipts() {
+                errors.push(super::MirValidationError {
+                    subject: "ordinary-map-owned-any-v2-get-any-result".into(),
+                    message,
+                });
+            }
+            if let Err(message) = program.ordinary_map_owned_any_v2_unpack_result_receipts() {
+                errors.push(super::MirValidationError {
+                    subject: "ordinary-map-owned-any-v2-unpack-result".into(),
+                    message,
+                });
+            }
+            if let Err(message) = program.ordinary_map_owned_any_v2_values_result_receipts() {
+                errors.push(super::MirValidationError {
+                    subject: "ordinary-map-owned-any-v2-values-result".into(),
+                    message,
+                });
+            }
+            if let Err(message) = program.ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            {
+                errors.push(super::MirValidationError {
+                    subject: "ordinary-map-owned-any-v2-values-unpack-result".into(),
+                    message,
+                });
             }
             if errors.is_empty() {
                 Ok(program)
@@ -6100,6 +6689,20 @@ fn validate_call_argument_directions(
                     | super::MirInstructionKind::MapRootContains { result, .. } => {
                         (result, Producer::Fresh)
                     }
+                    super::MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Set { result, .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { result, .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                        result, ..
+                    }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, .. } => {
+                        (result, Producer::Fresh)
+                    }
                     super::MirInstructionKind::OrdinaryMapOwnerLifecycleNew { result }
                     | super::MirInstructionKind::OrdinaryMapOwnerLifecycleSet { result, .. }
                     | super::MirInstructionKind::OrdinaryMapOwnerLifecycleRemove {
@@ -6179,6 +6782,7 @@ fn validate_call_argument_directions(
                     | super::MirInstructionKind::EndBorrow { .. }
                     | super::MirInstructionKind::SessionPairBind { .. }
                     | super::MirInstructionKind::MapRootDrop { .. }
+                    | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
                     | super::MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
                     | super::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
                     | super::MirInstructionKind::Nop => return None,
@@ -7411,6 +8015,25 @@ fn instruction_uses_value(kind: &super::MirInstructionKind, needle: &MirValueId)
         super::MirInstructionKind::MapRootSize { root, .. }
         | super::MirInstructionKind::MapRootContains { root, .. }
         | super::MirInstructionKind::MapRootDrop { root } => root == needle,
+        super::MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. } => false,
+        super::MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+            source, key, value, ..
+        } => source == needle || key == needle || value == needle,
+        super::MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { source, key, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Contains {
+            root: source, key, ..
+        }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+            root: source, key, ..
+        } => source == needle || key == needle,
+        super::MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { pair, .. } => pair == needle,
+        super::MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { values, index, .. } => {
+            values == needle || index == needle
+        }
+        super::MirInstructionKind::OrdinaryMapOwnedAnyV2Values { root, .. } => root == needle,
+        super::MirInstructionKind::OrdinaryMapOwnedAnyV2Size { root, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { root, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => root == needle,
         super::MirInstructionKind::OrdinaryMapOwnerLifecycleNew { .. } => false,
         super::MirInstructionKind::OrdinaryMapOwnerLifecycleSet {
             source, key, value, ..
@@ -7561,6 +8184,16 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { result, .. }
         | super::MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, .. }
         | super::MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Set { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, .. }
         | super::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result }
         | super::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { result, .. }
         | super::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { result, .. }
@@ -7604,6 +8237,7 @@ fn produced_value(kind: &super::MirInstructionKind) -> Option<&MirValueId> {
         | super::MirInstructionKind::Drop { .. }
         | super::MirInstructionKind::SessionPairBind { .. }
         | super::MirInstructionKind::MapRootDrop { .. }
+        | super::MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
         | super::MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
         | super::MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
         | super::MirInstructionKind::Nop => None,
@@ -8273,6 +8907,9 @@ impl<'a> MirReferenceInterpreter<'a> {
         self.program
             .validate_ffi_source_census()
             .map_err(|messages| self.error(owner, messages.join("; ")))?;
+        self.program
+            .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            .map_err(|message| self.error(owner, message))?;
         // Validate every source-dependent Any and ordinary Map function receipt
         // before opening the Actor root. The root guard allocates execution-domain
         // identity, so malformed Any CFG/value-flow must be rejected first.
@@ -8846,6 +9483,1164 @@ impl<'a> MirReferenceInterpreter<'a> {
                             )
                             .map_err(|message| self.error(&function.owner, message))?;
                     }
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 New result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let value = function.values.get(result).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 New result is absent from MIR values",
+                    )
+                })?;
+                if value.ty != super::types::ordinary_map_owned_any_v2_type_id() {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 New result has another TypeDesc",
+                    ));
+                }
+                ordinary_map_owned_any_v2_root_publish_checkpoint().map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 New root publication failed",
+                    )
+                })?;
+                values.insert(
+                    result.clone(),
+                    MirRuntimeValue::OrdinaryMapOwnedAnyV2(BTreeMap::new()),
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 Set result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let source_map = match values.get(source) {
+                    Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) => map,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Set expected its profile root",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 Set source '{}' is unavailable",
+                                source
+                            ),
+                        ));
+                    }
+                };
+                let key_ty = function.values.get(key).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Set key is absent from MIR values",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_owned_string(&key_ty.ty)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let key_value = match values.get(key) {
+                    Some(MirRuntimeValue::String(key)) => try_copy_owned_get_string(key, false)
+                        .ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 Set key snapshot exceeds capacity",
+                            )
+                        })?,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Set key is not a String runtime value",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!("ordinary Map/Any owner-v2 Set key '{}' is unavailable", key),
+                        ));
+                    }
+                };
+                let payload_ty = function.values.get(value).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Set payload is absent from MIR values",
+                    )
+                })?;
+                let payload = if is_canonical_i32_type(self.program.type_catalog(), &payload_ty.ty)
+                {
+                    let Some(MirRuntimeValue::Int(value)) = values.get(value) else {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Set i32 payload is unavailable or not Int",
+                        ));
+                    };
+                    MirOrdinaryMapOwnedAnyV2Value::I32 {
+                        type_id: payload_ty.ty.clone(),
+                        value: i32::try_from(*value).map_err(|_| {
+                            self.error(
+                                &function.owner,
+                                "E0802: ordinary Map/Any owner-v2 Set value overflows i32",
+                            )
+                        })?,
+                    }
+                } else if is_canonical_v2_string_type(self.program.type_catalog(), &payload_ty.ty) {
+                    let Some(MirRuntimeValue::String(value)) = values.get(value) else {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Set String payload is unavailable or not String",
+                        ));
+                    };
+                    MirOrdinaryMapOwnedAnyV2Value::String {
+                        type_id: payload_ty.ty.clone(),
+                        value: try_copy_owned_get_string(value, false).ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 Set String snapshot exceeds capacity",
+                            )
+                        })?,
+                    }
+                } else if is_canonical_v2_label_type(self.program.type_catalog(), &payload_ty.ty) {
+                    let Some(MirRuntimeValue::Record { nominal, fields }) = values.get(value)
+                    else {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Set Label payload is unavailable or not a Record",
+                        ));
+                    };
+                    let super::types::MirLayout::Record {
+                        nominal: expected_nominal,
+                        fields: layout_fields,
+                    } = &self
+                        .program
+                        .type_catalog()
+                        .get(&payload_ty.ty)
+                        .expect("validated V2 Label TypeDesc")
+                        .layout
+                    else {
+                        unreachable!("validated V2 Label TypeDesc is a record")
+                    };
+                    if nominal != expected_nominal || fields.len() != 1 || layout_fields.len() != 1
+                    {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Set Label payload disagrees with its TypeDesc",
+                        ));
+                    }
+                    let Some(MirRuntimeValue::String(text)) = fields.first() else {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Set Label text field is not a String",
+                        ));
+                    };
+                    MirOrdinaryMapOwnedAnyV2Value::Label {
+                        type_id: payload_ty.ty.clone(),
+                        text: try_copy_owned_get_string(text, false).ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 Set Label snapshot exceeds capacity",
+                            )
+                        })?,
+                    }
+                } else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Set payload is outside the i32/String/Label profile",
+                    ));
+                };
+                let mut result_map = try_copy_owned_any_v2_map(source_map).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Set root snapshot exceeds capacity",
+                    )
+                })?;
+                result_map.insert(key_value, payload);
+                ordinary_map_owned_any_v2_root_publish_checkpoint().map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 Set root publication failed",
+                    )
+                })?;
+                values.insert(
+                    result.clone(),
+                    MirRuntimeValue::OrdinaryMapOwnedAnyV2(result_map),
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
+                result,
+                source,
+                key,
+            } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 Remove result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let source_map = match values.get(source) {
+                    Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) => map,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Remove expected its profile root",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 Remove source '{}' is unavailable",
+                                source
+                            ),
+                        ));
+                    }
+                };
+                let key_ty = function.values.get(key).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Remove key is absent from MIR values",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_owned_string(&key_ty.ty)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let key_value = match values.get(key) {
+                    Some(MirRuntimeValue::String(key)) => try_copy_owned_get_string(key, false)
+                        .ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 Remove key snapshot exceeds capacity",
+                            )
+                        })?,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Remove key is not a String runtime value",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 Remove key '{}' is unavailable",
+                                key
+                            ),
+                        ));
+                    }
+                };
+                let mut result_map = try_copy_owned_any_v2_map(source_map).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Remove root snapshot exceeds capacity",
+                    )
+                })?;
+                result_map.remove(&key_value);
+                ordinary_map_owned_any_v2_root_publish_checkpoint().map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 Remove root publication failed",
+                    )
+                })?;
+                values.insert(
+                    result.clone(),
+                    MirRuntimeValue::OrdinaryMapOwnedAnyV2(result_map),
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, root } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 Size result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let size = match values.get(root) {
+                    Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) => i32::try_from(map.len())
+                        .map_err(|_| {
+                        self.error(
+                            &function.owner,
+                            "E0802: ordinary Map/Any owner-v2 Size result overflows i32",
+                        )
+                    })?,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Size expected its profile root",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 Size root '{}' is unavailable",
+                                root
+                            ),
+                        ));
+                    }
+                };
+                values.insert(result.clone(), MirRuntimeValue::Int(i64::from(size)));
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, root, key } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 Contains result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let map = match values.get(root) {
+                    Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) => map,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Contains expected its profile root",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 Contains root '{}' is unavailable",
+                                root
+                            ),
+                        ));
+                    }
+                };
+                let key_ty = function.values.get(key).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Contains key is absent from MIR values",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_owned_string(&key_ty.ty)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let Some(MirRuntimeValue::String(key_value)) = values.get(key) else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Contains key is unavailable or not String",
+                    ));
+                };
+                values.insert(
+                    result.clone(),
+                    MirRuntimeValue::Bool(map.contains_key(key_value)),
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 IsEmpty result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let map = match values.get(root) {
+                    Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) => map,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 IsEmpty expected its profile root",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 IsEmpty root '{}' is unavailable",
+                                root
+                            ),
+                        ));
+                    }
+                };
+                values.insert(result.clone(), MirRuntimeValue::Bool(map.is_empty()));
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, root, key } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 GetAny result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let receipt = self
+                    .program
+                    .ordinary_map_owned_any_v2_get_any_result_receipts()
+                    .map_err(|message| self.error(&function.owner, message))?
+                    .into_iter()
+                    .filter(|receipt| {
+                        receipt.owner == function.owner && receipt.instruction == instruction.id
+                    })
+                    .collect::<Vec<_>>();
+                let [receipt] = receipt.as_slice() else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 GetAny has no unique validated Checker result receipt",
+                    ));
+                };
+                receipt
+                    .validate_against_program(self.program)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                if receipt.result != *result || receipt.root != *root || receipt.key != *key {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 GetAny operands disagree with its validated result receipt",
+                    ));
+                }
+                let selection = self
+                    .program
+                    .ordinary_map_owned_any_v2_payload_selection_receipt()
+                    .map_err(|message| self.error(&function.owner, message))?
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 GetAny has no Checker-owned payload-selection receipt",
+                        )
+                    })?;
+                selection
+                    .validate_against_program(self.program)
+                    .map_err(|message| self.error(&function.owner, message))?;
+
+                let root_type = function.values.get(root).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 GetAny root is absent from MIR values",
+                    )
+                })?;
+                if root_type.ty != super::types::ordinary_map_owned_any_v2_type_id() {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 GetAny root has another TypeDesc",
+                    ));
+                }
+                let key_type = function.values.get(key).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 GetAny key is absent from MIR values",
+                    )
+                })?;
+                self.program
+                    .type_catalog()
+                    .validate_owned_string(&key_type.ty)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let result_type = function.values.get(result).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 GetAny result is absent from MIR values",
+                    )
+                })?;
+                if result_type.ty != receipt.mir_result_type
+                    || result_type.ty
+                        != super::types::ordinary_map_owned_any_v2_get_result_type_id()
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 GetAny result has another TypeDesc",
+                    ));
+                }
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    self.program
+                        .type_catalog()
+                        .validate_glue(&result_type.ty, operation)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                }
+                let map = match values.get(root) {
+                    Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) => map,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 GetAny expected its profile root",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 GetAny root '{}' is unavailable",
+                                root
+                            ),
+                        ));
+                    }
+                };
+                let key_text = match values.get(key) {
+                    Some(MirRuntimeValue::String(key)) => key,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 GetAny key is not a String runtime value",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 GetAny key '{}' is unavailable",
+                                key
+                            ),
+                        ));
+                    }
+                };
+                let payload = if let Some(payload) = map.get(key_text) {
+                    let payload_type = match payload {
+                        MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
+                        | MirOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
+                        | MirOrdinaryMapOwnedAnyV2Value::Label { type_id, .. } => type_id,
+                    };
+                    let selected = selection
+                        .selected_types
+                        .iter()
+                        .find(|selected| &selected.type_id == payload_type)
+                        .ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 GetAny stored payload TypeDesc is outside the Checker-selected Set closure",
+                            )
+                        })?;
+                    if self.program.type_catalog().get(payload_type).is_none() {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 GetAny stored payload TypeDesc is absent",
+                        ));
+                    }
+                    if !is_canonical_v2_payload_type(self.program.type_catalog(), payload_type) {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 GetAny stored payload TypeDesc is not a canonical i32/String/Label profile member",
+                        ));
+                    }
+                    let _selected_type_desc_digest = &selected.type_desc_digest;
+                    let payload = try_copy_owned_any_v2_value(payload).ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 GetAny payload snapshot exceeds capacity",
+                        )
+                    })?;
+                    (true, payload)
+                } else {
+                    // The miss token is deliberately a real independently
+                    // owned payload with the separately receipted canonical
+                    // i32 identity and zero value.
+                    (
+                        false,
+                        MirOrdinaryMapOwnedAnyV2Value::I32 {
+                            type_id: receipt.miss_payload_type.clone(),
+                            value: 0,
+                        },
+                    )
+                };
+                values.insert(
+                    result.clone(),
+                    MirRuntimeValue::Tuple(vec![
+                        MirRuntimeValue::Bool(payload.0),
+                        MirRuntimeValue::OrdinaryMapOwnedAnyV2Payload(payload.1),
+                    ]),
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection,
+            } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 unpack result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let receipts = self
+                    .program
+                    .ordinary_map_owned_any_v2_unpack_result_receipts()
+                    .map_err(|message| self.error(&function.owner, message))?
+                    .into_iter()
+                    .filter(|receipt| {
+                        receipt.owner == function.owner && receipt.instruction == instruction.id
+                    })
+                    .collect::<Vec<_>>();
+                let [receipt] = receipts.as_slice() else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 unpack has no unique validated Checker receipt",
+                    ));
+                };
+                receipt
+                    .validate_against_program(self.program)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                if receipt.result != *result
+                    || receipt.pair != *pair
+                    || receipt.projection != *projection
+                    || receipt.conversion_kind
+                        != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 unpack operands differ from its exact Checker receipt",
+                    ));
+                }
+                let result_type = function.values.get(result).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 unpack result is absent from MIR values",
+                    )
+                })?;
+                if result_type.ty != receipt.result_type {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 unpack result TypeDesc differs from its checked target",
+                    ));
+                }
+                let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+                let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                if result_type.ty == i32_type {
+                    self.program
+                        .type_catalog()
+                        .validate_copy_scalar(&result_type.ty)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                } else if result_type.ty == string_type {
+                    self.program
+                        .type_catalog()
+                        .validate_owned_string(&result_type.ty)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                } else if is_canonical_v2_label_type(self.program.type_catalog(), &result_type.ty) {
+                    for operation in [MirGlueOperation::Clone, MirGlueOperation::Drop] {
+                        self.program
+                            .type_catalog()
+                            .validate_glue(&result_type.ty, operation)
+                            .map_err(|message| self.error(&function.owner, message))?;
+                    }
+                } else {
+                    return Err(self.error(
+                        &function.owner,
+                        "E0800: ordinary Map/Any owner-v2 unpack target has no supported i32/String/Label runtime tag",
+                    ));
+                }
+                let (found, payload) = match values.get(pair) {
+                    Some(MirRuntimeValue::Tuple(fields)) if fields.len() == 2 => {
+                        let found = match fields.first() {
+                            Some(MirRuntimeValue::Bool(found)) => *found,
+                            _ => {
+                                return Err(self.error(
+                                    &function.owner,
+                                    "ordinary Map/Any owner-v2 GetAny pair has a malformed found flag",
+                                ));
+                            }
+                        };
+                        let payload = match fields.get(1) {
+                            Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2Payload(payload)) => payload,
+                            _ => {
+                                return Err(self.error(
+                                    &function.owner,
+                                    "ordinary Map/Any owner-v2 GetAny pair has a malformed payload owner",
+                                ));
+                            }
+                        };
+                        (found, payload)
+                    }
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 unpack expected the receipted GetAny tuple",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 unpack pair '{}' is unavailable",
+                                pair
+                            ),
+                        ));
+                    }
+                };
+                if receipt.payload_source
+                    == super::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+                    && found
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "E0800: canonical i32 miss receipt cannot authorize a present payload",
+                    ));
+                }
+                let unpacked = match (result_type.ty.as_str(), payload) {
+                    (ty, MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, value })
+                        if ty == i32_type.as_str() && type_id == &receipt.conversion_to =>
+                    {
+                        if !found && *value != 0 {
+                            return Err(self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 GetAny miss payload is not canonical i32 zero",
+                            ));
+                        }
+                        MirRuntimeValue::Int(i64::from(*value))
+                    }
+                    (ty, MirOrdinaryMapOwnedAnyV2Value::String { type_id, value })
+                        if ty == string_type.as_str()
+                            && type_id == &receipt.conversion_to
+                            && found =>
+                    {
+                        let value = try_copy_owned_get_string(value, false).ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "E0800: ordinary Map/Any owner-v2 unpack String copy exceeds capacity",
+                            )
+                        })?;
+                        MirRuntimeValue::String(value)
+                    }
+                    (ty, MirOrdinaryMapOwnedAnyV2Value::Label { type_id, text })
+                        if ty == receipt.conversion_to.as_str()
+                            && type_id == &receipt.conversion_to
+                            && found
+                            && is_canonical_v2_label_type(
+                                self.program.type_catalog(),
+                                &receipt.conversion_to,
+                            ) =>
+                    {
+                        let descriptor = self
+                            .program
+                            .type_catalog()
+                            .get(&receipt.conversion_to)
+                            .expect("validated Label TypeDesc");
+                        let MirLayout::Record {
+                            nominal,
+                            fields: layout_fields,
+                        } = &descriptor.layout
+                        else {
+                            unreachable!("validated Label TypeDesc is a record")
+                        };
+                        if layout_fields.len() != 1 || layout_fields[0].name != "text" {
+                            return Err(self.error(
+                                &function.owner,
+                                "E0800: ordinary Map/Any owner-v2 Label layout differs from its exact TypeDesc",
+                            ));
+                        }
+                        let text = try_copy_owned_get_string(text, false).ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "E0800: ordinary Map/Any owner-v2 unpack Label text copy exceeds capacity",
+                            )
+                        })?;
+                        MirRuntimeValue::Record {
+                            nominal: nominal.clone(),
+                            fields: vec![MirRuntimeValue::String(text)],
+                        }
+                    }
+                    _ => {
+                        return Err(self.error(
+                            &function.owner,
+                            "E0800: ordinary Map/Any owner-v2 payload tag/type does not match the checked cast",
+                        ));
+                    }
+                };
+                values.insert(result.clone(), unpacked);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                result,
+                values: snapshot,
+                index,
+                projection,
+            } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 Values unpack result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let receipts = self
+                    .program
+                    .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+                    .map_err(|message| self.error(&function.owner, message))?
+                    .into_iter()
+                    .filter(|receipt| {
+                        receipt.owner == function.owner && receipt.instruction == instruction.id
+                    })
+                    .collect::<Vec<_>>();
+                let [receipt] = receipts.as_slice() else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack has no unique validated Checker receipt",
+                    ));
+                };
+                receipt
+                    .validate_against_program(self.program)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                if receipt.result != *result
+                    || receipt.values != *snapshot
+                    || receipt.index != *index
+                    || receipt.projection != *projection
+                    || receipt.conversion_kind
+                        != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack operands differ from its exact Checker receipt",
+                    ));
+                }
+                let values_type = function.values.get(snapshot).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack snapshot is absent from MIR values",
+                    )
+                })?;
+                let index_type = function.values.get(index).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack index is absent from MIR values",
+                    )
+                })?;
+                let result_type = function.values.get(result).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack result is absent from MIR values",
+                    )
+                })?;
+                if values_type.ty != super::types::ordinary_map_owned_any_v2_values_type_id()
+                    || index_type.ty != receipt.index_type
+                    || result_type.ty != receipt.result_type
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack TypeDescs differ from its exact Checker receipt",
+                    ));
+                }
+                let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+                let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                if result_type.ty == i32_type {
+                    self.program
+                        .type_catalog()
+                        .validate_copy_scalar(&result_type.ty)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                } else if result_type.ty == string_type {
+                    self.program
+                        .type_catalog()
+                        .validate_owned_string(&result_type.ty)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                } else if is_canonical_v2_label_type(self.program.type_catalog(), &result_type.ty) {
+                    for operation in [MirGlueOperation::Clone, MirGlueOperation::Drop] {
+                        self.program
+                            .type_catalog()
+                            .validate_glue(&result_type.ty, operation)
+                            .map_err(|message| self.error(&function.owner, message))?;
+                    }
+                } else {
+                    return Err(self.error(
+                        &function.owner,
+                        "E0800: ordinary Map/Any owner-v2 Values unpack target has no supported i32/String/Label runtime tag",
+                    ));
+                }
+                let raw_index = match values.get(index) {
+                    Some(MirRuntimeValue::Int(index)) => *index,
+                    _ => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Values unpack index is not a signed integer",
+                        ));
+                    }
+                };
+                let list = match values.get(snapshot) {
+                    Some(MirRuntimeValue::List(elements)) => elements,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Values unpack snapshot is not its dedicated List",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 Values unpack snapshot '{}' is unavailable",
+                                snapshot
+                            ),
+                        ));
+                    }
+                };
+                let selected_index = canonical_list_index(&function.owner, raw_index, list.len())?;
+                let selected = list.get(selected_index).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack E0803 bounds check lost selected element",
+                    )
+                })?;
+                let MirRuntimeValue::OrdinaryMapOwnedAnyV2ValuesElement(payload) = selected else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values unpack selected element has another owner shape",
+                    ));
+                };
+                let payload_type = match payload {
+                    MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
+                    | MirOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
+                    | MirOrdinaryMapOwnedAnyV2Value::Label { type_id, .. } => type_id,
+                };
+                if payload_type != &receipt.conversion_to
+                    || !is_canonical_v2_payload_type(self.program.type_catalog(), payload_type)
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "E0800: ordinary Map/Any owner-v2 Values payload tag/type does not match the checked cast",
+                    ));
+                }
+                self.program
+                    .type_catalog()
+                    .validate_glue(payload_type, MirGlueOperation::Clone)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                let copied = try_copy_owned_any_v2_value(payload).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "E0800: ordinary Map/Any owner-v2 Values unpack clone exceeds capacity",
+                    )
+                })?;
+                let unpacked = match copied {
+                    MirOrdinaryMapOwnedAnyV2Value::I32 { value, .. }
+                        if result_type.ty == i32_type =>
+                    {
+                        MirRuntimeValue::Int(i64::from(value))
+                    }
+                    MirOrdinaryMapOwnedAnyV2Value::String { value, .. }
+                        if result_type.ty == string_type =>
+                    {
+                        MirRuntimeValue::String(value)
+                    }
+                    MirOrdinaryMapOwnedAnyV2Value::Label { type_id, text }
+                        if type_id == result_type.ty
+                            && is_canonical_v2_label_type(
+                                self.program.type_catalog(),
+                                &result_type.ty,
+                            ) =>
+                    {
+                        let descriptor = self
+                            .program
+                            .type_catalog()
+                            .get(&result_type.ty)
+                            .expect("validated Label TypeDesc");
+                        let MirLayout::Record { nominal, fields } = &descriptor.layout else {
+                            unreachable!("validated Label TypeDesc is a record")
+                        };
+                        if fields.len() != 1 || fields[0].name != "text" {
+                            return Err(self.error(
+                                &function.owner,
+                                "E0800: ordinary Map/Any owner-v2 Label layout differs from its exact TypeDesc",
+                            ));
+                        }
+                        MirRuntimeValue::Record {
+                            nominal: nominal.clone(),
+                            fields: vec![MirRuntimeValue::String(text)],
+                        }
+                    }
+                    _ => {
+                        return Err(self.error(
+                            &function.owner,
+                            "E0800: ordinary Map/Any owner-v2 Values payload representation differs from its checked target",
+                        ));
+                    }
+                };
+                values.insert(result.clone(), unpacked);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, root } => {
+                if values.contains_key(result) {
+                    return Err(self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 Values result '{}' is already initialized",
+                            result
+                        ),
+                    ));
+                }
+                let receipt = self
+                    .program
+                    .ordinary_map_owned_any_v2_values_result_receipts()
+                    .map_err(|message| self.error(&function.owner, message))?
+                    .into_iter()
+                    .filter(|receipt| {
+                        receipt.owner == function.owner && receipt.instruction == instruction.id
+                    })
+                    .collect::<Vec<_>>();
+                let [receipt] = receipt.as_slice() else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values has no unique validated Checker result receipt",
+                    ));
+                };
+                receipt
+                    .validate_against_program(self.program)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                if receipt.result != *result || receipt.root != *root {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values operands disagree with its validated result receipt",
+                    ));
+                }
+                let selection = self
+                    .program
+                    .ordinary_map_owned_any_v2_payload_selection_receipt()
+                    .map_err(|message| self.error(&function.owner, message))?
+                    .ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Values has no Checker-owned payload-selection receipt",
+                        )
+                    })?;
+                selection
+                    .validate_against_program(self.program)
+                    .map_err(|message| self.error(&function.owner, message))?;
+                if selection.selection_digest != receipt.payload_selection_digest {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values payload selection disagrees with its result receipt",
+                    ));
+                }
+
+                let root_type = function.values.get(root).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values root is absent from MIR values",
+                    )
+                })?;
+                if root_type.ty != super::types::ordinary_map_owned_any_v2_type_id() {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values root has another TypeDesc",
+                    ));
+                }
+                let result_type = function.values.get(result).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values result is absent from MIR values",
+                    )
+                })?;
+                if result_type.ty != receipt.mir_result_type
+                    || result_type.ty != super::types::ordinary_map_owned_any_v2_values_type_id()
+                {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values result has another TypeDesc",
+                    ));
+                }
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    self.program
+                        .type_catalog()
+                        .validate_list_glue(&result_type.ty, operation)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                }
+                let map = match values.get(root) {
+                    Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) => map,
+                    Some(_) => {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Values expected its profile root",
+                        ));
+                    }
+                    None => {
+                        return Err(self.error(
+                            &function.owner,
+                            format!(
+                                "ordinary Map/Any owner-v2 Values root '{}' is unavailable",
+                                root
+                            ),
+                        ));
+                    }
+                };
+                let mut snapshot = Vec::new();
+                snapshot.try_reserve_exact(map.len()).map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 Values List allocation failed",
+                    )
+                })?;
+                for payload in map.values() {
+                    let payload_type = match payload {
+                        MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
+                        | MirOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
+                        | MirOrdinaryMapOwnedAnyV2Value::Label { type_id, .. } => type_id,
+                    };
+                    let selected = selection
+                        .selected_types
+                        .iter()
+                        .find(|selected| &selected.type_id == payload_type)
+                        .ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 Values stored payload TypeDesc is outside the Checker-selected Set closure",
+                            )
+                        })?;
+                    if !is_canonical_v2_payload_type(self.program.type_catalog(), payload_type) {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Values stored payload TypeDesc is not a canonical i32/String/Label profile member",
+                        ));
+                    }
+                    let _selected_type_desc_digest = &selected.type_desc_digest;
+                    let payload = try_copy_owned_any_v2_value(payload).ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Values payload snapshot exceeds capacity",
+                        )
+                    })?;
+                    snapshot.push(MirRuntimeValue::OrdinaryMapOwnedAnyV2ValuesElement(payload));
+                }
+                values.insert(result.clone(), MirRuntimeValue::List(snapshot));
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => {
+                let value = values.remove(root).ok_or_else(|| {
+                    self.error(
+                        &function.owner,
+                        format!(
+                            "ordinary Map/Any owner-v2 Drop root '{}' is unavailable",
+                            root
+                        ),
+                    )
+                })?;
+                if !matches!(value, MirRuntimeValue::OrdinaryMapOwnedAnyV2(_)) {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Drop expected its profile root",
+                    ));
                 }
             }
             MirInstructionKind::MapRootNew { result } => {
@@ -9935,36 +11730,80 @@ impl<'a> MirReferenceInterpreter<'a> {
                         )
                     })?
                     .ty;
-                let value =
-                    if source_ty == &super::types::ordinary_map_owned_get_i32_string_v1_type_id() {
-                        let Some(MirRuntimeValue::OrdinaryMapOwnedGetI32StringV1(map)) =
-                            values.get(source)
-                        else {
-                            return Err(self.error(
-                                &function.owner,
-                                "ordinary Map owned-Get Clone source root is unavailable",
-                            ));
-                        };
-                        let copied = try_copy_owned_get_map(map, None).ok_or_else(|| {
-                            self.error(
-                                &function.owner,
-                                "[E0800] ordinary Map owned-Get Clone allocation failed",
-                            )
-                        })?;
-                        MirRuntimeValue::OrdinaryMapOwnedGetI32StringV1(copied)
-                    } else if self.program.type_catalog().contains_managed_any(source_ty) {
-                        let value = values.get(source).ok_or_else(|| {
-                            self.error(&function.owner, "managed Any Clone source is unavailable")
-                        })?;
-                        try_clone_managed_any_runtime_value(value).map_err(|error| {
-                            self.error(
-                                &function.owner,
-                                format!("[E0800] managed Any aggregate Clone failed: {error:?}"),
-                            )
-                        })?
-                    } else {
-                        self.read_value(function, values, source)?
+                let value = if source_ty
+                    == &super::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                {
+                    let Some(MirRuntimeValue::OrdinaryMapOwnedGetI32StringV1(map)) =
+                        values.get(source)
+                    else {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map owned-Get Clone source root is unavailable",
+                        ));
                     };
+                    let copied = try_copy_owned_get_map(map, None).ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "[E0800] ordinary Map owned-Get Clone allocation failed",
+                        )
+                    })?;
+                    MirRuntimeValue::OrdinaryMapOwnedGetI32StringV1(copied)
+                } else if source_ty == &super::types::ordinary_map_owned_any_v2_type_id() {
+                    let Some(MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)) = values.get(source)
+                    else {
+                        return Err(self.error(
+                            &function.owner,
+                            "ordinary Map/Any owner-v2 Clone source root is unavailable",
+                        ));
+                    };
+                    let copied = try_copy_owned_any_v2_map(map).ok_or_else(|| {
+                        self.error(
+                            &function.owner,
+                            "[E0800] ordinary Map/Any owner-v2 Clone allocation failed",
+                        )
+                    })?;
+                    ordinary_map_owned_any_v2_root_publish_checkpoint().map_err(|_| {
+                        self.error(
+                            &function.owner,
+                            "[E0800] ordinary Map/Any owner-v2 Clone root publication failed",
+                        )
+                    })?;
+                    MirRuntimeValue::OrdinaryMapOwnedAnyV2(copied)
+                } else if source_ty == &super::types::ordinary_map_owned_any_v2_values_type_id() {
+                    self.program
+                        .type_catalog()
+                        .validate_list_glue(source_ty, MirGlueOperation::Clone)
+                        .map_err(|message| self.error(&function.owner, message))?;
+                    let Some(MirRuntimeValue::List(elements)) = values.get(source) else {
+                        return Err(self.error(
+                                &function.owner,
+                                "ordinary Map/Any owner-v2 Values Clone source is unavailable or not a List",
+                            ));
+                    };
+                    let copied = try_copy_owned_any_v2_values(
+                            self.program.type_catalog(),
+                            elements,
+                        )
+                        .ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "[E0800] ordinary Map/Any owner-v2 Values Clone allocation or element validation failed",
+                            )
+                        })?;
+                    MirRuntimeValue::List(copied)
+                } else if self.program.type_catalog().contains_managed_any(source_ty) {
+                    let value = values.get(source).ok_or_else(|| {
+                        self.error(&function.owner, "managed Any Clone source is unavailable")
+                    })?;
+                    try_clone_managed_any_runtime_value(value).map_err(|error| {
+                        self.error(
+                            &function.owner,
+                            format!("[E0800] managed Any aggregate Clone failed: {error:?}"),
+                        )
+                    })?
+                } else {
+                    self.read_value(function, values, source)?
+                };
                 values.insert(result.clone(), value);
             }
             MirInstructionKind::Convert { result, source } => {
@@ -10565,9 +12404,7 @@ impl<'a> MirReferenceInterpreter<'a> {
                     .map_err(|message| self.error(&function.owner, message))?;
                 let output = match operation {
                     super::MirListOperation::Len => {
-                        let MirRuntimeValue::List(elements) =
-                            self.read_value(function, values, list)?
-                        else {
+                        let Some(MirRuntimeValue::List(elements)) = values.get(list) else {
                             return Err(self.error(
                                 &function.owner,
                                 "List operation receiver is not a canonical List",
@@ -12699,6 +14536,74 @@ impl<'a> MirReferenceInterpreter<'a> {
             {
                 Ok(())
             }
+            MirLayout::OrdinaryMapOwnedAnyV2
+                if matches!(&value, MirRuntimeValue::OrdinaryMapOwnedAnyV2(_)) =>
+            {
+                Ok(())
+            }
+            MirLayout::OrdinaryMapOwnedAnyV2Payload => {
+                let MirRuntimeValue::OrdinaryMapOwnedAnyV2Payload(payload) = value else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 payload Drop value has another runtime shape",
+                    ));
+                };
+                let payload_type = match &payload {
+                    MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
+                    | MirOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
+                    | MirOrdinaryMapOwnedAnyV2Value::Label { type_id, .. } => type_id,
+                };
+                let payload_shape_matches = match &payload {
+                    MirOrdinaryMapOwnedAnyV2Value::I32 { .. } => {
+                        is_canonical_i32_type(self.program.type_catalog(), payload_type)
+                    }
+                    MirOrdinaryMapOwnedAnyV2Value::String { .. } => {
+                        is_canonical_v2_string_type(self.program.type_catalog(), payload_type)
+                    }
+                    MirOrdinaryMapOwnedAnyV2Value::Label { .. } => {
+                        is_canonical_v2_label_type(self.program.type_catalog(), payload_type)
+                    }
+                };
+                if !payload_shape_matches {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 payload Drop identity disagrees with its runtime representation",
+                    ));
+                }
+                self.program
+                    .type_catalog()
+                    .validate_glue(payload_type, MirGlueOperation::Drop)
+                    .map_err(|message| self.error(&function.owner, message))
+            }
+            MirLayout::OrdinaryMapOwnedAnyV2ValuesElement => {
+                if ty != &super::types::ordinary_map_owned_any_v2_values_element_type_id() {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values element Drop has a noncanonical TypeDesc identity",
+                    ));
+                }
+                let MirRuntimeValue::OrdinaryMapOwnedAnyV2ValuesElement(payload) = value else {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values element Drop has another runtime shape",
+                    ));
+                };
+                let payload_type = match &payload {
+                    MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
+                    | MirOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
+                    | MirOrdinaryMapOwnedAnyV2Value::Label { type_id, .. } => type_id,
+                };
+                if !is_canonical_v2_payload_type(self.program.type_catalog(), payload_type) {
+                    return Err(self.error(
+                        &function.owner,
+                        "ordinary Map/Any owner-v2 Values element Drop identity disagrees with its runtime representation",
+                    ));
+                }
+                self.program
+                    .type_catalog()
+                    .validate_glue(payload_type, MirGlueOperation::Drop)
+                    .map_err(|message| self.error(&function.owner, message))
+            }
             MirLayout::ManagedAnyI32StringV1 => {
                 let MirRuntimeValue::ManagedAnyI32StringV1(owner) = value else {
                     return Err(self.error(
@@ -14268,14 +16173,14 @@ fn execution_error(function: &NodeId, message: impl Into<String>) -> MirExecutio
 
 #[cfg(test)]
 mod tests {
-    use crate::core::ir::ResolvedBinaryOp;
+    use crate::core::ir::{PrimitiveType, ResolvedBinaryOp};
     use crate::core::mir::types::managed_any_i32_string_v1_type_id;
     use std::cell::Cell;
     use std::collections::{BTreeMap, HashMap};
 
     use super::{
-        MirExecutionError, MirManagedAnyValue, MirProgram, MirProgramBuildError,
-        MirReferenceFfiResolver, MirReferenceInterpreter, MirRuntimeValue,
+        MirExecutionError, MirManagedAnyValue, MirOrdinaryMapOwnedAnyV2Value, MirProgram,
+        MirProgramBuildError, MirReferenceFfiResolver, MirReferenceInterpreter, MirRuntimeValue,
     };
     use crate::core::mir::lower::{lower_body, lower_program, MirLoweringError};
     use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
@@ -14899,6 +16804,1038 @@ func main() -> i32 { 0 }
             .expect("main callable");
         let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
         (owner, program)
+    }
+
+    fn direct_v2_program_with_main(source: &str) -> (crate::core::NodeId, MirProgram) {
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let owner = checked
+            .callables()
+            .values()
+            .find(|callable| callable.owner.0.ends_with("main"))
+            .map(|callable| callable.owner.clone())
+            .expect("main callable");
+        let catalog = crate::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
+            .expect("checker-derived TypeDesc catalog");
+        let functions =
+            crate::core::mir::lower::lower_program_with_type_catalog(&checked, &catalog)
+                .expect("checker-receipted V2 MIR lowering");
+        let program = MirProgram::with_type_catalog(functions, catalog)
+            .expect("checker-receipted V2 MIR validation");
+        (owner, program)
+    }
+
+    #[test]
+    fn reference_executes_ordinary_map_owned_any_v2_record_profile() {
+        let (owner, program) = canonical_program_with_main(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_record_unit.mimi"
+        ));
+        let observation = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("reference V2 owner execution");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "owned label\n");
+    }
+
+    fn ordinary_map_owned_any_v2_unpack_program(key: &str) -> (crate::core::NodeId, MirProgram) {
+        let source = format!(
+            r#"
+                type Label {{ text: string }}
+                func main() -> i32 {{
+                    let label = Label {{ text: "unpack fixture" }}
+                    let empty = map_new()
+                    let numbers = map_set(empty, "number", 42)
+                    let mixed = map_set(numbers, "label", label)
+                    let pair = map_get(mixed, "{key}")
+                    let value = pair.1 as i32
+                    drop(pair)
+                    drop(empty)
+                    drop(numbers)
+                    drop(mixed)
+                    drop(label)
+                    value
+                }}
+            "#
+        );
+        direct_v2_program_with_main(&source)
+    }
+
+    #[test]
+    fn reference_executes_receipted_ordinary_map_owned_any_v2_i32_unpack() {
+        let (owner, program) = ordinary_map_owned_any_v2_unpack_program("number");
+        let receipts = program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("exact Checker/MIR unpack result receipt");
+        assert_eq!(receipts.len(), 1);
+        receipts[0]
+            .validate_against_program(&program)
+            .expect("receipt binds GetAny pair, target, and explicit Drop");
+        assert_eq!(
+            MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("selected i32 payload unpack"),
+            MirRuntimeValue::Int(42)
+        );
+    }
+
+    #[test]
+    fn reference_unpacks_selected_ordinary_map_owned_any_v2_record_after_other_owners_drop() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "detached record payload" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", label)
+    let pair = map_get(stored, "present")
+    let value = pair.1 as Label
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(label)
+    let matches = value.text == "detached record payload"
+    println(matches)
+    0
+}
+"#;
+        let (owner, program) = direct_v2_program_with_main(source);
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("Checker Set selection receipt")
+            .expect("Record Set selects a nominal payload TypeDesc");
+        let unpack = program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("exact Record unpack receipt")
+            .into_iter()
+            .next()
+            .expect("one Record unpack");
+        assert_eq!(
+            unpack.payload_source,
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+        );
+        assert_eq!(unpack.payload_selection_digest, selection.selection_digest);
+        let selected = selection
+            .selected_types
+            .iter()
+            .find(|selected| {
+                selected.type_id == unpack.conversion_to
+                    && super::is_canonical_v2_label_type(program.type_catalog(), &selected.type_id)
+            })
+            .expect("the exact unpack target is a Checker-selected Label TypeDesc");
+        assert_eq!(unpack.payload_type_desc_digest, selected.type_desc_digest);
+
+        let observation = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("unpack deep-clones the owned String field before pair/root drops");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "true\n");
+    }
+
+    #[test]
+    fn reference_v2_i32_miss_remains_zero_without_an_i32_set_selection() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected Label" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", label)
+    let pair = map_get(stored, "absent")
+    let value = pair.1 as i32
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(label)
+    value
+}
+"#;
+        let (owner, program) = direct_v2_program_with_main(source);
+        let unpack = program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("canonical miss receipt validates")
+            .into_iter()
+            .next()
+            .expect("one i32 miss unpack");
+        assert_eq!(
+            unpack.payload_source,
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+        );
+        assert_eq!(
+            MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("canonical i32 miss remains zero"),
+            MirRuntimeValue::Int(0)
+        );
+    }
+
+    #[test]
+    fn reference_v2_label_unpack_rejects_miss_and_wrong_selected_tag() {
+        let missing = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected Label" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", label)
+    let pair = map_get(stored, "absent")
+    let value = pair.1 as Label
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(label)
+    drop(value)
+    0
+}
+"#;
+        let (owner, program) = direct_v2_program_with_main(missing);
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("a non-i32 target cannot reinterpret the canonical i32 miss");
+        assert!(error.message.contains("E0800"), "{error:?}");
+
+        let wrong_tag = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected Label" }
+    let empty = map_new()
+    let with_label = map_set(empty, "label", label)
+    let mixed = map_set(with_label, "number", 42)
+    let pair = map_get(mixed, "number")
+    let value = pair.1 as Label
+    drop(pair)
+    drop(empty)
+    drop(with_label)
+    drop(mixed)
+    drop(label)
+    drop(value)
+    0
+}
+"#;
+        let (owner, program) = direct_v2_program_with_main(wrong_tag);
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("a selected Label target cannot reinterpret an i32 payload");
+        assert!(error.message.contains("E0800"), "{error:?}");
+
+        let wrong_nominal = r#"
+type Label { text: string }
+type SpareLabel { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected Label" }
+    let spare = SpareLabel { text: "selected SpareLabel" }
+    let empty = map_new()
+    let with_label = map_set(empty, "label", label)
+    let mixed = map_set(with_label, "spare", spare)
+    let pair = map_get(mixed, "spare")
+    let value = pair.1 as Label
+    drop(pair)
+    drop(empty)
+    drop(with_label)
+    drop(mixed)
+    drop(label)
+    drop(spare)
+    drop(value)
+    0
+}
+"#;
+        let (owner, program) = direct_v2_program_with_main(wrong_nominal);
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("a same-layout nominal payload still has a distinct exact TypeDesc");
+        assert!(error.message.contains("E0800"), "{error:?}");
+    }
+
+    #[test]
+    fn reference_unpacks_ordinary_map_owned_any_v2_miss_as_zero() {
+        let (owner, program) = ordinary_map_owned_any_v2_unpack_program("absent");
+        assert_eq!(
+            MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("canonical missing-key i32 payload"),
+            MirRuntimeValue::Int(0)
+        );
+    }
+
+    #[test]
+    fn reference_executes_selected_ordinary_map_owned_any_v2_string_unpack_independently() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let source = "detached String payload"
+    let label = Label { text: "record marker" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", source)
+    drop(source)
+    let mixed = map_set(stored, "label", label)
+    let pair = map_get(mixed, "present")
+    let value = pair.1 as string
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(mixed)
+    drop(label)
+    println(value)
+    drop(value)
+    0
+}
+"#;
+        let (owner, program) = canonical_program_with_main(source);
+        let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("Checker payload selection receipt")
+            .expect("String Set selects the direct String payload TypeDesc");
+        assert!(selection
+            .selected_types
+            .iter()
+            .any(|selected| selected.type_id == string_type));
+
+        let get_any = program
+            .ordinary_map_owned_any_v2_get_any_result_receipts()
+            .expect("GetAny owner receipt")
+            .into_iter()
+            .next()
+            .expect("one GetAny result");
+        assert_eq!(
+            get_any.miss_payload_type,
+            crate::core::ir::primitive_type_id(PrimitiveType::I32),
+            "the missing-key representation remains canonical i32 zero"
+        );
+        let unpack = program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("exact selected-String unpack and pair-drop receipt")
+            .into_iter()
+            .next()
+            .expect("one checked unpack");
+        unpack
+            .validate_against_program(&program)
+            .expect("receipt binds exact Checker-selected String TypeDesc");
+        assert_eq!(unpack.conversion_to, string_type);
+        assert_eq!(unpack.payload_selection_digest, selection.selection_digest);
+        assert_eq!(
+            unpack.payload_type_desc_digest,
+            selection
+                .selected_types
+                .iter()
+                .find(|selected| selected.type_id == string_type)
+                .expect("selected String TypeDesc")
+                .type_desc_digest
+        );
+
+        let observation = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("Set, GetAny token, and unpack own independent String copies");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "detached String payload\n");
+    }
+
+    #[test]
+    fn reference_tracks_unpacked_v2_string_through_print_and_explicit_drop() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let source = "detached String payload"
+    let label = Label { text: "record marker" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", source)
+    drop(source)
+    let mixed = map_set(stored, "label", label)
+    let pair = map_get(mixed, "present")
+    let value = pair.1 as string
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(mixed)
+    drop(label)
+    println(value)
+    drop(value)
+    0
+}
+"#;
+        let (owner, program) = canonical_program_with_main(source);
+        let observation = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("unpacked String remains independently owned through println and Drop");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "detached String payload\n");
+    }
+
+    #[test]
+    fn reference_ordinary_map_owned_any_v2_string_unpack_miss_keeps_i32_zero_and_traps() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let source = "selected String payload"
+    let label = Label { text: "record marker" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", source)
+    let mixed = map_set(stored, "label", label)
+    let pair = map_get(mixed, "absent")
+    let value = pair.1 as string
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(mixed)
+    drop(label)
+    drop(value)
+    0
+}
+"#;
+        let (owner, program) = canonical_program_with_main(source);
+        let receipt = program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("selected String authorizes the checked target independently of the key")
+            .into_iter()
+            .next()
+            .expect("one String unpack");
+        assert_eq!(
+            receipt.conversion_to,
+            crate::core::ir::primitive_type_id(PrimitiveType::String)
+        );
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("GetAny miss is canonical i32 zero, not an invented empty String");
+        assert!(error.message.contains("E0800"), "{error:?}");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_string_unpack_without_selected_string_fails_closed() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected payload" }
+    let empty = map_new()
+    let root = map_set(empty, "present", label)
+    let pair = map_get(root, "absent")
+    let value = pair.1 as string
+    drop(pair)
+    drop(empty)
+    drop(root)
+    drop(label)
+    drop(value)
+    0
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file)
+            .expect("Checker can represent an explicit DynamicAny-to-String cast");
+        let analysis = checked
+            .resource_analysis(&crate::core::NodeId("function:main".into()))
+            .expect("source resource analysis");
+        assert!(
+            analysis.ordinary_map_owned_any_v2_cfg_receipt.is_none(),
+            "an unselected String target must not receive a Checker unpack receipt"
+        );
+        MirProgram::from_checked_program(&checked)
+            .expect_err("an unselected String cast cannot widen canonical i32 miss payload");
+    }
+
+    #[test]
+    fn reference_ordinary_map_owned_any_v2_string_unpack_rejects_wrong_payload_tag() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let source = "selected String payload"
+    let label = Label { text: "record marker" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", source)
+    let with_label = map_set(stored, "label", label)
+    let mixed = map_set(with_label, "number", 42)
+    let pair = map_get(mixed, "number")
+    let value = pair.1 as string
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(with_label)
+    drop(mixed)
+    drop(label)
+    drop(value)
+    0
+}
+"#;
+        let (owner, program) = canonical_program_with_main(source);
+        assert!(program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("the String target is selected by the first Set")
+            .iter()
+            .any(|receipt| receipt.conversion_to
+                == crate::core::ir::primitive_type_id(PrimitiveType::String)));
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("the selected key holds i32, so as string must trap");
+        assert!(error.message.contains("E0800"), "{error:?}");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_rejects_forged_checker_conversion_receipt() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let source = "selected String payload"
+    let label = Label { text: "record marker" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", source)
+    let mixed = map_set(stored, "label", label)
+    let pair = map_get(mixed, "present")
+    let value = pair.1 as string
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(mixed)
+    drop(label)
+    drop(value)
+    0
+}
+"#;
+        let (_, mut program) = canonical_program_with_main(source);
+        let owner = program
+            .functions()
+            .keys()
+            .find(|owner| owner.0.ends_with("main"))
+            .expect("main MIR function")
+            .clone();
+        let mut function = program
+            .functions
+            .get(&owner)
+            .expect("main MIR function")
+            .clone();
+        let unpack = function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("private Checker V2 receipt")
+            .unpack_receipts
+            .first_mut()
+            .expect("checked String unpack receipt");
+        unpack.conversion_to = crate::core::ir::primitive_type_id(PrimitiveType::Bool);
+        program.replace_function_for_test_only(function);
+        let error = program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect_err("a forged target cannot widen the selected String payload proof");
+        assert!(
+            error.contains("outside the selected i32/String/Label payload ABI"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reference_preflights_values_unpack_binding_before_output() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    println("before unpack")
+    let label = Label { text: "selected payload" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let snapshot = values(root)
+    let value = snapshot[0] as Label
+    drop(snapshot)
+    drop(value)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+"#;
+        let (owner, mut program) = canonical_program_with_main(source);
+        assert_eq!(
+            program
+                .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+                .expect("valid Values unpack result receipt")
+                .len(),
+            1,
+            "fixture has one Values unpack"
+        );
+        let mut function = program
+            .functions
+            .get(&owner)
+            .expect("main MIR function")
+            .clone();
+        let checker_receipt = function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("private Checker V2 CFG receipt")
+            .values_unpack_receipts
+            .first_mut()
+            .expect("Checker Values unpack receipt");
+        checker_receipt.unpack_binding_point =
+            crate::core::NodeId("forged_values_unpack_binding_point".into());
+        program.replace_function_for_test_only(function);
+
+        let interpreter = MirReferenceInterpreter::new(&program);
+        let error = interpreter
+            .execute_with_output(&owner, &[])
+            .expect_err("forged result binding must fail before the earlier println");
+        assert!(
+            error.message.contains("exact Checker result binding point"),
+            "{error:?}"
+        );
+        assert_eq!(
+            interpreter.captured_output(),
+            "",
+            "receipt rejection must happen before executing earlier output"
+        );
+    }
+
+    #[test]
+    fn reference_rejects_ordinary_map_owned_any_v2_wrong_payload_type() {
+        let (owner, program) = ordinary_map_owned_any_v2_unpack_program("label");
+        let error = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("a selected Label payload cannot be unpacked as i32");
+        assert!(error.message.contains("E0800"), "{error:?}");
+    }
+
+    #[test]
+    fn reference_empty_v2_root_receipts_empty_selection_miss_and_values() {
+        let source = r#"
+func main() -> i32 {
+    let root = map_new()
+    let pair = map_get(root, "\0雪")
+    println(pair.0)
+    drop(pair)
+    let snapshot = values(root)
+    println(snapshot.len())
+    drop(snapshot)
+    drop(root)
+    0
+}
+"#;
+        let (owner, program) = direct_v2_program_with_main(source);
+        let function = program.functions.get(&owner).expect("main MIR function");
+        assert!(!function
+            .ownership
+            .has_checker_ordinary_map_owned_get_i32_string_v1_actions());
+        assert!(function
+            .ownership
+            .checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .is_none());
+        assert!(program
+            .type_catalog()
+            .get(&crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id())
+            .is_none());
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("empty V2 payload-selection receipt validates")
+            .expect("New action certifies the empty payload closure");
+        assert!(selection.entries.is_empty());
+        assert!(selection.selected_types.is_empty());
+        assert!(selection.validate_against_program(&program).is_ok());
+
+        let get_receipt = program
+            .ordinary_map_owned_any_v2_get_any_result_receipts()
+            .expect("empty-root miss receipt validates")
+            .into_iter()
+            .next()
+            .expect("one miss-only GetAny result");
+        assert_eq!(
+            get_receipt.miss_payload_type,
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+        );
+        assert!(get_receipt.validate_against_program(&program).is_ok());
+
+        let values_receipt = program
+            .ordinary_map_owned_any_v2_values_result_receipts()
+            .expect("empty-root Values receipt validates")
+            .into_iter()
+            .next()
+            .expect("one empty Values snapshot");
+        assert_eq!(
+            values_receipt.payload_selection_digest,
+            selection.selection_digest
+        );
+        assert!(values_receipt.validate_against_program(&program).is_ok());
+
+        let observation = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("empty GetAny and Values owners settle independently");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "false\n0\n");
+
+        let mut missing_checker_action = program.clone();
+        let mut function = program
+            .functions
+            .get(&owner)
+            .expect("main MIR function")
+            .clone();
+        function
+            .ownership
+            .checker_ordinary_map_owned_any_v2
+            .retain(|action| action.kind != crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny);
+        missing_checker_action.replace_function_for_test_only(function);
+        assert!(missing_checker_action
+            .ordinary_map_owned_any_v2_get_any_result_receipts()
+            .is_err());
+
+        let mut missing_new_cfg_action = program
+            .functions
+            .get(&owner)
+            .expect("main MIR function")
+            .clone();
+        missing_new_cfg_action
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("V2 root CFG receipt")
+            .actions
+            .retain(|action| action.kind != crate::core::OrdinaryMapOwnedAnyV2ActionKind::New);
+        let errors = missing_new_cfg_action
+            .validate()
+            .expect_err("V2 New cannot get an owner without its exact Checker CFG action");
+        assert!(
+            errors.iter().any(|error| {
+                error.subject.contains("ordinary_map_owned_any_v2_get_any")
+                    && error
+                        .message
+                        .contains("outside its typed owner/tuple/call contract")
+            }) && errors.iter().any(|error| {
+                error.subject.contains("ordinary_map_owned_any_v2_values")
+                    && error
+                        .message
+                        .contains("outside its typed owner/tuple/call contract")
+            }),
+            "removing the V2 New CFG action must invalidate both dependent read receipts: {errors:#?}"
+        );
+    }
+
+    #[test]
+    fn reference_v2_candidate_rejects_uncovered_typed_get_overlap() {
+        let source = r#"
+type Point { value: i32 }
+
+func main() -> i32 {
+    let point = Point { value: 7 }
+    let empty = map_new()
+    let root = map_set(empty, "point", point)
+    let pair = map_get(root, "key")
+    drop(pair)
+    let typed = map_get_i32(root, "missing")
+    let snapshot = values(root)
+    drop(snapshot)
+    drop(empty)
+    drop(root)
+    drop(point)
+    0
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("mixed Map calls typecheck");
+        let analysis = checked
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("mixed Map resource analysis");
+        assert!(analysis
+            .ordinary_map_owned_get_i32_string_v1_operation_attempts
+            .iter()
+            .any(|attempt| {
+                attempt.kind == crate::core::OrdinaryMapOwnedGetI32StringV1AttemptKind::GetI32
+            }));
+        assert!(analysis.ordinary_map_owned_any_v2_cfg_receipt.is_none());
+
+        let admission = crate::core::mir::route::classify_canonical_mir_route_admission(&checked);
+        assert!(
+            !admission.ordinary_map_owned_any_v2.is_type_materializable(),
+            "uncovered typed-get traffic must not authorize the record V2 consumer: {admission:?}"
+        );
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            crate::core::mir::route::OrdinaryMapOwnedGetI32StringV1Admission::IncompleteCoverage,
+            "the incomplete V1 scan must remain visible"
+        );
+        assert!(
+            crate::core::mir::route::materialize_canonical_mir_route(&checked, None).is_err(),
+            "a record Map candidate mixed with a typed getter must not fall back to V1"
+        );
+    }
+
+    #[test]
+    fn reference_v2_computed_keys_preserve_nul_and_unicode() {
+        let (owner, program) = direct_v2_program_with_main(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi"
+        ));
+        let observation = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&owner, &[])
+            .expect("computed String keys are owned and settled at each V2 operation");
+        assert_eq!(observation.value, MirRuntimeValue::Int(0));
+        assert_eq!(observation.output, "true\ntrue\nfalse\n");
+    }
+
+    #[test]
+    fn reference_v2_rejects_forged_computed_key_provenance() {
+        let (_, program) = direct_v2_program_with_main(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi"
+        ));
+        let owner = NodeId("function:main".into());
+        let mut function = program
+            .functions
+            .get(&owner)
+            .expect("main MIR function")
+            .clone();
+        let action = function
+            .ownership
+            .checker_ordinary_map_owned_any_v2
+            .iter_mut()
+            .find(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set)
+            .expect("computed-key Set action");
+        assert!(action.key_local.is_none());
+        action.key_provenance = Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::DirectLocal);
+
+        let errors = function
+            .validate()
+            .expect_err("MIR cannot accept a forged source key-owner classification");
+        assert!(errors.iter().any(|error| {
+            error.message.contains("String key receipt")
+                || error.message.contains("key identity/key/type receipt")
+        }));
+    }
+
+    fn ordinary_map_owned_any_v2_get_program(key: &str) -> (NodeId, MirProgram) {
+        let source = format!(
+            r#"
+type Label {{ text: string }}
+type SpareLabel {{ text: string }}
+func main() -> i32 {{
+    let label = Label {{ text: "owned label" }}
+    let spare = SpareLabel {{ text: "not selected" }}
+    let empty = map_new()
+    let numbers = map_set(empty, "zero", 0)
+    let root = map_set(numbers, "label", label)
+    let snapshot = map_get(root, "{key}")
+    drop(snapshot)
+    drop(empty)
+    drop(numbers)
+    drop(root)
+    drop(label)
+    drop(spare)
+    0
+}}
+"#
+        );
+        canonical_program_with_main(&source)
+    }
+
+    fn ordinary_map_owned_any_v2_get_instruction<'a>(
+        program: &'a MirProgram,
+        owner: &NodeId,
+    ) -> (&'a super::MirFunction, &'a MirInstruction) {
+        let function = program.functions.get(owner).expect("main MIR function");
+        let instruction = function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                )
+            })
+            .expect("V2 GetAny MIR instruction");
+        (function, instruction)
+    }
+
+    #[test]
+    fn reference_v2_get_any_returns_selected_independent_payload_and_canonical_miss() {
+        use super::MirInstructionKind as I;
+
+        let (owner, program) = ordinary_map_owned_any_v2_get_program("label");
+        assert_eq!(
+            MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("MIR execution drops independent GetAny owner and retains Map root"),
+            MirRuntimeValue::Int(0)
+        );
+        let (function, instruction) = ordinary_map_owned_any_v2_get_instruction(&program, &owner);
+        let I::OrdinaryMapOwnedAnyV2GetAny { result, root, key } = &instruction.kind else {
+            unreachable!()
+        };
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("payload selection receipt")
+            .expect("Set-selected V2 payload profile");
+        let label_type = selection
+            .selected_types
+            .iter()
+            .find(|selected| selected.type_id != i32_type)
+            .expect("concrete Label selected by Set")
+            .type_id
+            .clone();
+        let initial_root = std::collections::BTreeMap::from([
+            (
+                "zero".to_string(),
+                MirOrdinaryMapOwnedAnyV2Value::I32 {
+                    type_id: i32_type.clone(),
+                    value: 0,
+                },
+            ),
+            (
+                "label".to_string(),
+                MirOrdinaryMapOwnedAnyV2Value::Label {
+                    type_id: label_type.clone(),
+                    text: "owned label".into(),
+                },
+            ),
+        ]);
+        let mut values = HashMap::from([
+            (
+                root.clone(),
+                MirRuntimeValue::OrdinaryMapOwnedAnyV2(initial_root.clone()),
+            ),
+            (key.clone(), MirRuntimeValue::String("label".into())),
+        ]);
+        let interpreter = MirReferenceInterpreter::new(&program);
+        let mut steps = 0;
+        interpreter
+            .execute_instruction(function, instruction, &mut values, &mut steps)
+            .expect("present payload snapshots from the live root");
+        assert_eq!(
+            values.get(result),
+            Some(&MirRuntimeValue::Tuple(vec![
+                MirRuntimeValue::Bool(true),
+                MirRuntimeValue::OrdinaryMapOwnedAnyV2Payload(
+                    MirOrdinaryMapOwnedAnyV2Value::Label {
+                        type_id: label_type.clone(),
+                        text: "owned label".into(),
+                    }
+                ),
+            ]))
+        );
+        assert_eq!(
+            values.get(root),
+            Some(&MirRuntimeValue::OrdinaryMapOwnedAnyV2(
+                initial_root.clone()
+            ))
+        );
+
+        values.remove(result);
+        values.insert(key.clone(), MirRuntimeValue::String("zero".into()));
+        interpreter
+            .execute_instruction(function, instruction, &mut values, &mut steps)
+            .expect("present i32 payload snapshots from the live root");
+        assert_eq!(
+            values.get(result),
+            Some(&MirRuntimeValue::Tuple(vec![
+                MirRuntimeValue::Bool(true),
+                MirRuntimeValue::OrdinaryMapOwnedAnyV2Payload(MirOrdinaryMapOwnedAnyV2Value::I32 {
+                    type_id: i32_type.clone(),
+                    value: 0,
+                }),
+            ]))
+        );
+        values.remove(result);
+        values.insert(key.clone(), MirRuntimeValue::String("missing".into()));
+        interpreter
+            .execute_instruction(function, instruction, &mut values, &mut steps)
+            .expect("miss produces the independently receipted zero payload");
+        assert_eq!(
+            values.get(result),
+            Some(&MirRuntimeValue::Tuple(vec![
+                MirRuntimeValue::Bool(false),
+                MirRuntimeValue::OrdinaryMapOwnedAnyV2Payload(MirOrdinaryMapOwnedAnyV2Value::I32 {
+                    type_id: i32_type,
+                    value: 0,
+                }),
+            ]))
+        );
+        assert_eq!(
+            values.get(root),
+            Some(&MirRuntimeValue::OrdinaryMapOwnedAnyV2(initial_root))
+        );
+    }
+
+    #[test]
+    fn reference_v2_get_any_rejects_payload_outside_checker_selected_set_types() {
+        use super::MirInstructionKind as I;
+
+        let (owner, program) = ordinary_map_owned_any_v2_get_program("label");
+        let (function, instruction) = ordinary_map_owned_any_v2_get_instruction(&program, &owner);
+        let I::OrdinaryMapOwnedAnyV2GetAny { root, key, .. } = &instruction.kind else {
+            unreachable!()
+        };
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("payload selection receipt")
+            .expect("Set-selected V2 payload profile");
+        let spare_type = function
+            .values
+            .values()
+            .map(|value| value.ty.clone())
+            .find(|ty| {
+                !selection
+                    .selected_types
+                    .iter()
+                    .any(|selected| &selected.type_id == ty)
+                    && super::is_canonical_v2_label_type(program.type_catalog(), ty)
+            })
+            .expect("canonical but unselected SpareLabel TypeDesc");
+        let map = std::collections::BTreeMap::from([(
+            "label".to_string(),
+            MirOrdinaryMapOwnedAnyV2Value::Label {
+                type_id: spare_type,
+                text: "outside selected closure".into(),
+            },
+        )]);
+        let mut values = HashMap::from([
+            (root.clone(), MirRuntimeValue::OrdinaryMapOwnedAnyV2(map)),
+            (key.clone(), MirRuntimeValue::String("label".into())),
+        ]);
+        let mut steps = 0;
+        let error = MirReferenceInterpreter::new(&program)
+            .execute_instruction(function, instruction, &mut values, &mut steps)
+            .expect_err("runtime values cannot widen the Checker Set payload selection");
+        assert!(error
+            .message
+            .contains("outside the Checker-selected Set closure"));
+    }
+
+    #[test]
+    fn v2_get_any_result_receipt_rejects_a_forged_explicit_drop_instruction() {
+        let (owner, mut program) = ordinary_map_owned_any_v2_get_program("label");
+        let receipt = program
+            .ordinary_map_owned_any_v2_get_any_result_receipts()
+            .expect("valid result receipt")
+            .into_iter()
+            .next()
+            .expect("one GetAny result");
+        let function = program.functions.get_mut(&owner).expect("main function");
+        let drop = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| instruction.id == receipt.settlement_instruction)
+            .expect("explicit drop instruction");
+        drop.kind = MirInstructionKind::Nop;
+        assert!(program
+            .ordinary_map_owned_any_v2_get_any_result_receipts()
+            .is_err());
+    }
+
+    #[test]
+    fn v2_get_any_cannot_borrow_payload_selection_from_an_unrelated_root() {
+        let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let unrelated = map_new()
+    let populated = map_set(unrelated, "label", label)
+    let pair = map_get(empty, "missing")
+    drop(pair)
+    drop(empty)
+    drop(unrelated)
+    drop(populated)
+    drop(label)
+    0
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("source checks");
+        let error = MirProgram::from_checked_program(&checked)
+            .expect_err("an unrelated same-function Set cannot select this root's payloads");
+        assert!(error
+            .to_string()
+            .contains("source root has no same-function Checker Set"));
     }
 
     fn closure_map_any_program() -> (crate::core::NodeId, MirProgram) {
@@ -21614,5 +24551,126 @@ func main() -> i64 { println(foreign(1 as i64)); 0 }
             "",
             "repeated receipt preflight must leave a clean stdout snapshot"
         );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_root_publish_capacity_matches_reference_and_bytecode() {
+        let source = r#"
+            type Label { text: string }
+
+            func main() -> i32 {
+                let label = Label { text: "capacity boundary" }
+                let empty = map_new()
+                let one = map_set(empty, "key", label)
+                let copied = one
+                let removed = map_remove(copied, "key")
+                drop(empty)
+                drop(one)
+                drop(copied)
+                drop(removed)
+                drop(label)
+                0
+            }
+        "#;
+        let file = Parser::new(Lexer::new(source).tokenize().expect("lex V2 program"))
+            .parse_file()
+            .expect("parse V2 program");
+        let checked = crate::core::check_program(&file).expect("Checker V2 ownership");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical V2 MIR");
+        let owner = NodeId("function:main".into());
+        let main = program.functions().get(&owner).expect("main MIR");
+        for (name, matches) in [
+            (
+                "New",
+                main.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
+                        )
+                    })
+                    .count(),
+            ),
+            (
+                "Set",
+                main.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+                        )
+                    })
+                    .count(),
+            ),
+            (
+                "Remove",
+                main.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
+                        )
+                    })
+                    .count(),
+            ),
+            (
+                "Clone",
+                main.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| {
+                        let MirInstructionKind::Clone { source, .. } = &instruction.kind else {
+                            return false;
+                        };
+                        main.values.get(source).is_some_and(|value| {
+                            value.ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+                        })
+                    })
+                    .count(),
+            ),
+        ] {
+            assert_eq!(matches, 1, "fixture must contain one V2 {name} instruction");
+        }
+
+        for stage in 0..4 {
+            let (execution, attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(
+                    stage,
+                    || {
+                        let execution = MirReferenceInterpreter::new(&program).execute(&owner, &[]);
+                        let attempts = crate::runtime::
+                            ordinary_map_owned_any_v2_root_publish_attempts_for_test();
+                        (execution, attempts)
+                    },
+                );
+            let error = execution.expect_err("the selected publication must trap");
+            assert!(error.to_string().contains("E0800"), "{error}");
+            assert_eq!(attempts, stage + 1, "reference stage {stage}");
+        }
+
+        let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+            .expect("compile canonical V2 MIR into bytecode");
+        for stage in 0..4 {
+            let (execution, attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(
+                    stage,
+                    || {
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode.clone());
+                        let execution = vm.run_value_for_component().map(|_| ());
+                        let attempts = crate::runtime::
+                            ordinary_map_owned_any_v2_root_publish_attempts_for_test();
+                        (execution, attempts)
+                    },
+                );
+            let error = execution.expect_err("the selected publication must trap");
+            assert!(error.message().contains("E0800"), "{error}");
+            assert_eq!(attempts, stage + 1, "bytecode stage {stage}");
+        }
     }
 }

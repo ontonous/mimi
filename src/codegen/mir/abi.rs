@@ -19,6 +19,29 @@ pub(super) fn validate_native_product_type(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> Result<(), String> {
+    if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id() {
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            catalog.validate_glue(ty, operation)?;
+        }
+        let descriptor = catalog
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
+        let expected = MirLayout::Tuple(vec![
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool),
+            crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id(),
+        ]);
+        if descriptor.kind != (MirTypeKind::Tuple { arity: 2 }) || descriptor.layout != expected {
+            return Err(format!(
+                "type '{}' is not the exact ordinary Map/Any owner-v2 GetAny result product",
+                ty.as_str()
+            ));
+        }
+        return Ok(());
+    }
     let descriptor = catalog
         .get(ty)
         .ok_or_else(|| format!("type '{}' is absent from MIR TypeDesc catalog", ty.as_str()))?;
@@ -168,6 +191,13 @@ pub(super) fn native_list_kind(
     catalog: &MirTypeCatalog,
     ty: &crate::core::ResolvedTypeId,
 ) -> Result<i8, NativeMirError> {
+    if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id() {
+        super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_values_list_type(
+            catalog, ty,
+        )
+        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        return Ok(crate::runtime::ListElementKind::ManagedAnyV2 as i8);
+    }
     catalog
         .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)
         .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
@@ -189,10 +219,10 @@ pub(super) fn native_list_kind(
     if matches!(element_desc.layout, MirLayout::List { .. }) {
         return Ok(crate::runtime::ListElementKind::List as i8);
     }
-    // Values snapshots use a move-owned List<ManagedAny> whose elements are
-    // generation-bearing i64 owner tokens.  The TypeDesc (and list glue
-    // validator) proves this exact element identity; the native adapter must
-    // never infer it from the raw i64 storage.
+    // Legacy Values snapshots use a move-owned List<ManagedAny> whose
+    // elements are generation-bearing i64 owner tokens. The TypeDesc (and
+    // list glue validator) proves this exact element identity; the native
+    // adapter must never infer it from the raw i64 storage.
     if element_desc.kind == MirTypeKind::ManagedAnyI32StringV1
         || matches!(element_desc.layout, MirLayout::ManagedAnyI32StringV1)
     {
@@ -206,6 +236,17 @@ pub(super) fn native_list_kind(
             .validate_glue(element, crate::core::mir::types::MirGlueOperation::Drop)
             .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
         return Ok(crate::runtime::ListElementKind::ManagedAny as i8);
+    }
+    if element_desc.kind == MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement
+        || matches!(
+            element_desc.layout,
+            MirLayout::OrdinaryMapOwnedAnyV2ValuesElement
+        )
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "V2 Values owner elements are admitted only in their dedicated canonical Values List",
+        ));
     }
     match element_desc.abi {
         MirAbiClass::Integer {
@@ -491,7 +532,7 @@ pub(super) fn native_variant_abi_with_generic_result(
                 return Err(NativeMirError::new(
                     ty.as_str(),
                     format!("native non-Copy variant layout {layout:?} is outside contract"),
-                ))
+                ));
             }
         }
     } else if matches!(descriptor.layout, MirLayout::Result { .. })
@@ -516,7 +557,7 @@ pub(super) fn native_variant_abi_with_generic_result(
             return Err(NativeMirError::new(
                 ty.as_str(),
                 format!("native variant layout {layout:?} is outside contract"),
-            ))
+            ));
         }
     };
     let mut payload_fields = Vec::new();
@@ -537,7 +578,7 @@ pub(super) fn native_variant_abi_with_generic_result(
                                     "variant '{}' is outside the native canonical Result ABI",
                                     variant.id.0
                                 ),
-                            ))
+                            ));
                         }
                     }
                 } else if union_tagged {
@@ -677,14 +718,59 @@ pub(super) fn native_basic_type<'ctx>(
             Ok(context.ptr_type(inkwell::AddressSpace::default()).into())
         }
         MirAbiClass::OpaqueHandle => match &desc.layout {
-            MirLayout::List { .. } => Ok(context.ptr_type(inkwell::AddressSpace::default()).into()),
+            MirLayout::List { .. } => {
+                if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id() {
+                    super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_values_list_type(catalog, ty)
+                        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                }
+                Ok(context.ptr_type(inkwell::AddressSpace::default()).into())
+            }
             MirLayout::ManagedAnyI32StringV1 => {
                 super::ordinary_map_any_get::validate_managed_any_type(catalog, ty)
                     .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
                 Ok(context.i64_type().into())
             }
             MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
-            | MirLayout::OrdinaryMapOwnedGetI32StringV1 => {
+            | MirLayout::OrdinaryMapOwnedGetI32StringV1
+            | MirLayout::OrdinaryMapOwnedAnyV2 => {
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    catalog
+                        .validate_glue(ty, operation)
+                        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                }
+                Ok(context.i64_type().into())
+            }
+            MirLayout::OrdinaryMapOwnedAnyV2Payload => {
+                if ty != &crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id() {
+                    return Err(NativeMirError::new(
+                        ty.as_str(),
+                        "opaque DynamicAny payload does not use the distinct canonical V2 TypeDesc",
+                    ));
+                }
+                for operation in [
+                    MirGlueOperation::MoveOut,
+                    MirGlueOperation::Clone,
+                    MirGlueOperation::Drop,
+                ] {
+                    catalog
+                        .validate_glue(ty, operation)
+                        .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+                }
+                Ok(context.i64_type().into())
+            }
+            MirLayout::OrdinaryMapOwnedAnyV2ValuesElement => {
+                let expected =
+                    crate::core::mir::types::ordinary_map_owned_any_v2_values_element_type_id();
+                if ty != &expected {
+                    return Err(NativeMirError::new(
+                        ty.as_str(),
+                        "opaque Values element does not use the distinct canonical V2 TypeDesc",
+                    ));
+                }
                 for operation in [
                     MirGlueOperation::MoveOut,
                     MirGlueOperation::Clone,
@@ -742,6 +828,40 @@ pub(super) fn native_basic_type<'ctx>(
                 .validate_set_glue(ty, crate::core::mir::types::MirGlueOperation::MoveOut)
                 .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
             Ok(context.i64_type().into())
+        }
+        MirAbiClass::Aggregate
+            if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id() =>
+        {
+            // This exact product contains one Core-owned DynamicAny token.
+            // It is deliberately validated by its dedicated TypeDesc/glue
+            // contract instead of the generic scalar/String tuple profile.
+            for operation in [
+                MirGlueOperation::MoveOut,
+                MirGlueOperation::Clone,
+                MirGlueOperation::Drop,
+            ] {
+                catalog
+                    .validate_glue(ty, operation)
+                    .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+            }
+            let expected = MirLayout::Tuple(vec![
+                crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool),
+                crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id(),
+            ]);
+            if desc.kind != (MirTypeKind::Tuple { arity: 2 }) || desc.layout != expected {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    "ordinary Map/Any owner-v2 GetAny result TypeDesc is not exact (bool, DynamicAny)",
+                ));
+            }
+            let MirLayout::Tuple(elements) = &desc.layout else {
+                unreachable!("the exact layout was checked above")
+            };
+            let fields = elements
+                .iter()
+                .map(|element| native_basic_type(context, catalog, element))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(context.struct_type(&fields, false).into())
         }
         MirAbiClass::Aggregate => match &desc.layout {
             MirLayout::Tuple(elements) => {

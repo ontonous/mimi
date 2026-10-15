@@ -33,6 +33,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .validate_list_construct_receipt(&result_ty, &element_types, receipt)
             .map_err(|message| NativeMirError::new(subject, message))?;
         let kind = native_list_kind(catalog, &result_ty)?;
+        if kind == crate::runtime::ListElementKind::ManagedAnyV2 as i8 {
+            return Err(NativeMirError::new(
+                subject,
+                "V2 Values Lists can only be materialized by the receipted ordinary Map Values operation",
+            ));
+        }
         let kind_value = self
             .generator
             .context
@@ -145,6 +151,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let kind = native_list_kind(self.program.type_catalog(), &source_ty)?;
         let nested = kind == crate::runtime::ListElementKind::List as i8;
         let managed_any = kind == crate::runtime::ListElementKind::ManagedAny as i8;
+        let managed_any_v2 = kind == crate::runtime::ListElementKind::ManagedAnyV2 as i8;
         let source_value = self.value(source, subject)?.into_pointer_value();
         let kind_value = self
             .generator
@@ -153,7 +160,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(kind as u64, false);
         let clone_fn = self
             .generator
-            .get_runtime_fn(if managed_any {
+            .get_runtime_fn(if managed_any_v2 {
+                "mimi_mir_list_clone_managed_any_v2"
+            } else if managed_any {
                 "mimi_mir_list_clone_managed_any"
             } else if nested {
                 "mimi_mir_list_clone_nested"
@@ -161,7 +170,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "mimi_mir_list_clone_scalar"
             })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let clone_args = if managed_any || nested {
+        let clone_args = if managed_any || managed_any_v2 || nested {
             vec![BasicMetadataValueEnum::from(source_value)]
         } else {
             vec![
@@ -191,6 +200,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let kind = native_list_kind(self.program.type_catalog(), ty)?;
         let nested = kind == crate::runtime::ListElementKind::List as i8;
         let managed_any = kind == crate::runtime::ListElementKind::ManagedAny as i8;
+        let managed_any_v2 = kind == crate::runtime::ListElementKind::ManagedAnyV2 as i8;
         let kind_value = self
             .generator
             .context
@@ -198,7 +208,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(kind as u64, false);
         let clone_fn = self
             .generator
-            .get_runtime_fn(if managed_any {
+            .get_runtime_fn(if managed_any_v2 {
+                "mimi_mir_list_clone_managed_any_v2"
+            } else if managed_any {
                 "mimi_mir_list_clone_managed_any"
             } else if nested {
                 "mimi_mir_list_clone_nested"
@@ -206,7 +218,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "mimi_mir_list_clone_scalar"
             })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let clone_args = if managed_any || nested {
+        let clone_args = if managed_any || managed_any_v2 || nested {
             vec![BasicMetadataValueEnum::from(value.into_pointer_value())]
         } else {
             vec![
@@ -236,6 +248,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let kind = native_list_kind(self.program.type_catalog(), ty)?;
         let nested = kind == crate::runtime::ListElementKind::List as i8;
         let managed_any = kind == crate::runtime::ListElementKind::ManagedAny as i8;
+        let managed_any_v2 = kind == crate::runtime::ListElementKind::ManagedAnyV2 as i8;
         let kind_value = self
             .generator
             .context
@@ -243,7 +256,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .const_int(kind as u64, false);
         let drop_fn = self
             .generator
-            .get_runtime_fn(if managed_any {
+            .get_runtime_fn(if managed_any_v2 {
+                "mimi_mir_list_drop_managed_any_v2"
+            } else if managed_any {
                 "mimi_mir_list_drop_managed_any"
             } else if nested {
                 "mimi_mir_list_drop_nested"
@@ -251,7 +266,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "mimi_mir_list_drop_scalar"
             })
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let drop_args = if managed_any || nested {
+        let drop_args = if managed_any || managed_any_v2 || nested {
             vec![BasicMetadataValueEnum::from(value.into_pointer_value())]
         } else {
             vec![
@@ -292,7 +307,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 return Err(NativeMirError::new(
                     subject,
                     "Set construction result has no canonical Set<T> layout",
-                ))
+                ));
             }
         };
         let new_fn = self
@@ -414,6 +429,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         match glue {
             MirGlueKind::ManagedAnyI32StringV1 => {
                 self.emit_managed_any_drop_value(value, ty, subject)
+            }
+            MirGlueKind::OrdinaryMapOwnedAnyV2Payload => {
+                self.emit_ordinary_map_owned_any_v2_payload_drop_value(value, ty, subject)
             }
             MirGlueKind::OwnedString => self.emit_owned_string_drop_value(value, subject),
             MirGlueKind::List => self.emit_list_drop_value(value, ty, subject),
@@ -574,6 +592,76 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(())
     }
 
+    fn emit_ordinary_map_owned_any_v2_payload_drop_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        let expected = crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id();
+        if ty != &expected {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map/Any owner-v2 payload Drop uses a noncanonical owner TypeDesc",
+            ));
+        }
+        self.program
+            .type_catalog()
+            .validate_glue(ty, MirGlueOperation::Drop)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+        let drop_fn = self
+            .generator
+            .get_runtime_fn("mimi_any_payload_v2_drop")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let status = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    drop_fn,
+                    &[BasicMetadataValueEnum::from(value.into_int_value())],
+                    "mir_map_any_v2_payload_drop_status",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "ordinary Map/Any owner-v2 payload Drop returned void",
+            )
+        })?
+        .into_int_value();
+        let dropped = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                self.generator.context.i32_type().const_zero(),
+                "mir_map_any_v2_payload_drop_ok",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let ok = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_map_any_v2_payload_drop_ok");
+        let failed = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_map_any_v2_payload_drop_failed");
+        self.generator
+            .builder
+            .build_conditional_branch(dropped, ok, failed)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(failed);
+        self.emit_abort_with_message(
+            "[E0800] ordinary Map/Any owner-v2 payload Drop failed",
+            subject,
+        )?;
+        self.generator.builder.position_at_end(ok);
+        Ok(())
+    }
+
     pub(super) fn emit_drop(
         &mut self,
         value: &MirValueId,
@@ -594,6 +682,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if glue == MirGlueKind::ManagedAnyI32StringV1 {
             return self.emit_managed_any_drop_value(self.value(value, subject)?, &ty, subject);
         }
+        if glue == MirGlueKind::OrdinaryMapOwnedAnyV2Payload {
+            return self.emit_ordinary_map_owned_any_v2_payload_drop_value(
+                self.value(value, subject)?,
+                &ty,
+                subject,
+            );
+        }
         if glue == MirGlueKind::OwnedString {
             return self.emit_owned_string_drop_value(self.value(value, subject)?, subject);
         }
@@ -610,9 +705,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let kind = native_list_kind(self.program.type_catalog(), &ty)?;
         let nested = kind == crate::runtime::ListElementKind::List as i8;
         let managed_any = kind == crate::runtime::ListElementKind::ManagedAny as i8;
+        let managed_any_v2 = kind == crate::runtime::ListElementKind::ManagedAnyV2 as i8;
         let function = self
             .generator
-            .get_runtime_fn(if managed_any {
+            .get_runtime_fn(if managed_any_v2 {
+                "mimi_mir_list_drop_managed_any_v2"
+            } else if managed_any {
                 "mimi_mir_list_drop_managed_any"
             } else if nested {
                 "mimi_mir_list_drop_nested"
@@ -625,7 +723,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .context
             .i8_type()
             .const_int(kind as u64, false);
-        let drop_args = if managed_any || nested {
+        let drop_args = if managed_any || managed_any_v2 || nested {
             vec![BasicMetadataValueEnum::from(
                 self.value(value, subject)?.into_pointer_value(),
             )]

@@ -24,9 +24,9 @@ readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
 # gate and reviewed together with the migration that changes the condition.
 readonly EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST=fc5d620ce5d0ca2182f85bcc629ab0729cd0f162b511cfccd0b6bf9bb682a7b3
 readonly EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST=93de03d733aaa6989cb3af9cd425e27565babd99ad64cbc4cddca27fdae345ee
-readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=bf600c2bdf035af84479b7fe16ddc415ea3716bf273c39a089358e05841712d0
+readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=6152264b37a9ce45f86e2685571841145584bf72ab772c49e9bd6a06d94ac4a5
 readonly EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST=2f2b0eb8778541ec328a7af98c4cee4fdaf116863ab8769ae3f2d6d569495740
-readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=3092551fbf65e60eba825d96eb92740d504027d50f261fa72800591c79d5fb1d
+readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=3b161aa3081bc9836d00d342cee1619aa00133434556463ffd20e601a874f840
 audit_failed=0
 closed_scalar_marker_sequence=()
 
@@ -180,7 +180,7 @@ test_only_legacy_body_adapter_context
 # owners (Flow, FFI, or the secondary dual engine).
 test_only_ast_verifier_modules() {
     local module
-    for module in expr ffi flow func helpers vir; do
+    for module in expr flow func helpers vir; do
         if ! rg -U -q "#\[cfg\(test\)\]\n(?:pub[[:space:]]+)?mod ${module};" \
             "$ROOT_DIR/src/verifier/mod.rs"; then
             printf 'owner_audit_error=verifier_ast_module_not_cfg_test module=%s\n' "$module" >&2
@@ -188,6 +188,16 @@ test_only_ast_verifier_modules() {
             return
         fi
     done
+    local ffi_context
+    ffi_context="$(sed -n '/fn verify_items_collect(/,/pub(crate) fn preseed_func_status(/p' \
+        "$ROOT_DIR/src/verifier/func.rs")"
+    if ! printf '%s\n' "$ffi_context" | rg -F 'Item::ExternBlock(block) =>' >/dev/null \
+        || ! printf '%s\n' "$ffi_context" | rg -F 'self.verify_extern_func(session, func)' >/dev/null \
+        || ! rg -Fq 'pub(crate) fn verify_extern_func(' "$ROOT_DIR/src/verifier/func.rs"; then
+        printf 'owner_audit_error=verifier_ast_ffi_entry_missing=func::ExternBlock->verify_extern_func\n' >&2
+        audit_failed=1
+        return
+    fi
     if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn verify_file\(' \
         "$ROOT_DIR/src/verifier/ctx.rs"; then
         printf 'owner_audit_error=verifier_ast_file_entry_not_cfg_test\n' >&2
@@ -200,7 +210,7 @@ test_only_ast_verifier_modules() {
         audit_failed=1
         return
     fi
-    printf 'test_only_ast_verifier_modules=expr,ffi,flow,func,helpers,vir;ctx::verify_file;helpers::mock_verify_file\n'
+    printf 'test_only_ast_verifier_modules=expr,flow,func,helpers,vir;func::ExternBlock->verify_extern_func;ctx::verify_file;helpers::mock_verify_file\n'
 }
 
 test_only_ast_verifier_modules
@@ -251,7 +261,7 @@ owner_closed_route_guard \
     'pub fn verify_checked(' \
     'pub fn verify_ffi_source(' \
     verify_closed_mir_program \
-    'if let Some(results) = verify_closed_mir_program(program, source_hash.clone())?'
+    'match verify_closed_mir_program(program, source_hash.clone())'
 owner_closed_route_guard \
     FfiVerifierCompatibility \
     src/verifier/mod.rs \
@@ -265,7 +275,7 @@ owner_closed_route_guard \
     'pub fn verify_checked_dual(' \
     'fn verify_closed_mir_program(' \
     verify_closed_mir_program \
-    'if let Some(results) = verify_closed_mir_program(program, source_hash.clone())?'
+    'match verify_closed_mir_program(program, source_hash.clone())'
 
 # Direct CodeGenerator callers must enforce the same called-extern boundary
 # as CLI dispatch before the migrated-island probe can return a compatibility
@@ -707,18 +717,20 @@ verifier_semantic_receipt_required() {
 
 verifier_semantic_receipt_required
 
-# Public source-hash verifier adapters must derive one default receipt before
-# entering their semantic helpers, then reuse that same witness for provenance
-# validation.  This prevents the wrapper from rebuilding a second default
-# receipt after the semantic batch has already completed.
+# Public source-hash verifier adapters must derive one receipt before entering
+# their receipt-bearing APIs, then reuse that same witness for semantic
+# verification and provenance validation.  The general MIR wrapper selects a
+# profile from the Checker-owned V2 signal; the receipt-bearing API validates
+# the profile and performs provenance checks.  FFI-only MIR still uses its
+# dedicated scalar verifier profile.
 verifier_default_entry_receipt_handoff() {
     local mir_context ffi_context
     mir_context="$(sed -n '/^pub fn verify_mir(/,/^fn verify_mir_results_with_route_receipt(/p' "$ROOT_DIR/src/verifier/mod.rs")"
     ffi_context="$(sed -n '/^pub fn verify_ffi_mir_with_source_hash(/,/^fn verify_ffi_mir_results_with_route_receipt(/p' "$ROOT_DIR/src/verifier/mod.rs")"
     for pattern in \
-        'let receipt = program.route_receipt("verifier-mir-v1");' \
-        'verify_mir_results_with_route_receipt(program, source_hash.clone(), &receipt)?' \
-        'validate_mir_result_provenance('; do
+        'let profile = if mir_program_has_ordinary_map_owned_any_v2_actions(program)' \
+        'let receipt = program.route_receipt(profile);' \
+        'verify_mir_with_route_receipt(program, &receipt, source_hash)'; do
         if ! printf '%s\n' "$mir_context" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=verifier_default_entry_receipt_handoff_missing=src/verifier/mod.rs::verify_mir pattern=%s\n' \
                 "$pattern" >&2
@@ -1629,8 +1641,8 @@ for owner in \
             ;;
         FfiVerifierCompatibility)
             dependency_class='ffi-declaration-compatibility'
-            deletion_blocker='cfg(test) FFI compatibility adapter and AST call-site encoder remain retained'
-            condition='delete after cfg(test) FFI compatibility adapters and the AST call-site encoder are removed after canonical MIR receipts and proofs cover all declarations'
+            deletion_blocker='typed Resolved-body FFI proof path remains; canonical MIR receipts and proofs do not cover every declaration'
+            condition='retire after canonical MIR receipts and proofs cover every FFI declaration and call-site obligation, and the typed Resolved-body compatibility path is no longer authoritative'
             ;;
         DualVerifierCompatibility)
             dependency_class='secondary-flow-vir-compatibility'
@@ -1639,10 +1651,10 @@ for owner in \
             ;;
     esac
     if [ "$count" -eq 0 ]; then
-        owner_status='closed'
-        accessor_blocker='no production accessor; cfg(test) adapter only'
+        production_access_status='sealed'
+        accessor_blocker='no production accessor'
     else
-        owner_status='open'
+        production_access_status='open'
         accessor_blocker='production accessor remains reachable'
     fi
     # Accessor reachability is only one deletion prerequisite. Keep the
@@ -1672,8 +1684,8 @@ for owner in \
         audit_failed=1
     fi
     condition_inventory+="${owner}=${condition_digest}"$'\n'
-    printf 'owner=%s status=%s dependency_class=%s owner_deletion_ready=%s owner_deletion_blocker=%s; %s\n' \
-        "$owner" "$owner_status" "$dependency_class" "$deletion_ready" "$accessor_blocker" "$deletion_blocker"
+    printf 'owner=%s production_access_status=%s dependency_class=%s owner_deletion_ready=%s owner_deletion_blocker=%s; %s\n' \
+        "$owner" "$production_access_status" "$dependency_class" "$deletion_ready" "$accessor_blocker" "$deletion_blocker"
     printf 'owner_deletion_condition=%s\n' "$condition"
 done
 condition_set_digest="$(printf '%s' "$condition_inventory" | sha256sum | awk '{print $1}')"

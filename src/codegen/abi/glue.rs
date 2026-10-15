@@ -326,6 +326,713 @@ fn validate_result_error_storage(
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
+    /// Emit the pointer-based clone/drop callback pair required by the
+    /// native `AnyOwner` V2 envelope.  The runtime owns an allocation whose
+    /// address is represented as `*mut u8`; callbacks therefore bridge that
+    /// opaque pointer ABI to the exact typed LLVM layout. Clone callbacks
+    /// use fallible transactions; drop callbacks consume initialized values.
+    ///
+    /// This entry point is intentionally narrow: callers must provide the
+    /// checker-derived ownership class and concrete LLVM type.  A shape or
+    /// ABI mismatch is a hard compilation error and never falls through to a
+    /// legacy callback or an inferred pointer convention.
+    pub(in crate::codegen) fn ensure_any_payload_v2_glue(
+        &self,
+        class: &OwnershipClass,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<(FunctionValue<'ctx>, FunctionValue<'ctx>), CompileError> {
+        let plan = GluePlan::derive(class).map_err(|error| {
+            CompileError::Unsupported(format!("cannot derive AnyOwner V2 payload glue: {error}"))
+        })?;
+        validate_plan_type(&plan, ty)?;
+
+        // The admitted V2 payload profile has a Copy scalar (`i32`), an owned
+        // String, and a non-Copy record (`Label { text: String }`). Keep this
+        // bridge fail-closed if another ownership shape reaches it accidentally.
+        if !matches!(
+            plan,
+            GluePlan::Trivial | GluePlan::StringBox | GluePlan::Record(_)
+        ) || !plan.is_emitted()
+        {
+            return Err(CompileError::Unsupported(format!(
+                "AnyOwner V2 callback glue shape `{}` is outside the admitted profile",
+                plan.symbol_suffix()
+            )));
+        }
+
+        let suffix = format!(
+            "{}__llvm_{}",
+            plan.symbol_suffix(),
+            llvm_type_symbol_suffix(ty)
+        );
+        let clone_name = format!("mimi_any_payload_v2_clone_glue__{suffix}");
+        let drop_name = format!("mimi_any_payload_v2_drop_glue__{suffix}");
+        let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32 = self.context.i32_type();
+        let clone_type = i32.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::PointerType(ptr),
+            ],
+            false,
+        );
+        let drop_type = self
+            .context
+            .void_type()
+            .fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false);
+
+        let clone = match self.module.get_function(&clone_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == clone_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved AnyOwner V2 callback symbol collision: `{clone_name}`"
+                )))
+            }
+            None => self.emit_any_payload_v2_clone_glue(&clone_name, &plan, ty)?,
+        };
+        let drop = match self.module.get_function(&drop_name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == drop_type =>
+            {
+                function
+            }
+            Some(_) => {
+                return Err(CompileError::Unsupported(format!(
+                    "reserved AnyOwner V2 callback symbol collision: `{drop_name}`"
+                )))
+            }
+            None => self.emit_any_payload_v2_drop_glue(&drop_name, &plan, ty)?,
+        };
+        Ok((clone, drop))
+    }
+
+    fn emit_any_payload_v2_clone_glue(
+        &self,
+        name: &str,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32 = self.context.i32_type();
+        let function = self.module.add_function(
+            name,
+            i32.fn_type(
+                &[
+                    BasicMetadataTypeEnum::PointerType(ptr),
+                    BasicMetadataTypeEnum::PointerType(ptr),
+                ],
+                false,
+            ),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            self.builder.position_at_end(entry);
+            let destination = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("AnyOwner V2 clone destination is missing".into())
+                })?
+                .into_pointer_value();
+            let source = function
+                .get_nth_param(1)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("AnyOwner V2 clone source is missing".into())
+                })?
+                .into_pointer_value();
+            let source_value = self.build_load(ty, source, "any_payload_v2_clone_source")?;
+            self.emit_any_payload_v2_clone_body(function, destination, source_value, plan, ty)
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
+    }
+
+    // Clone callbacks run while the runtime may hold a MapLease. Allocation
+    // failure must return normally so that lease and all staged owners can
+    // return through Rust before the outer emitter turns the status into a
+    // language trap. Never call the ordinary by-value clone glue here: its
+    // allocator intentionally aborts and therefore has a different contract.
+    fn ensure_any_payload_v2_fallible_clone(
+        &self,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        validate_plan_type(plan, ty)?;
+        if !plan.is_emitted() {
+            return Err(glue_shape_error(
+                plan,
+                ty,
+                "fallible callback shape is not emitted",
+            ));
+        }
+        let suffix = format!(
+            "{}__llvm_{}",
+            plan.symbol_suffix(),
+            llvm_type_symbol_suffix(ty)
+        );
+        let name = format!("mimi_any_payload_v2_clone_glue__{suffix}");
+        let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let signature = self.context.i32_type().fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::PointerType(ptr),
+            ],
+            false,
+        );
+        match self.module.get_function(&name) {
+            Some(function)
+                if function.get_linkage() == Linkage::Internal
+                    && function.get_type() == signature =>
+            {
+                Ok(function)
+            }
+            Some(_) => Err(CompileError::Unsupported(format!(
+                "reserved AnyOwner V2 callback symbol collision: `{name}`"
+            ))),
+            None => self.emit_any_payload_v2_clone_glue(&name, plan, ty),
+        }
+    }
+
+    /// Emit one complete transaction: destination remains untouched until all
+    /// owned descendants have been cloned. A failed child cleans its own
+    /// partial work; the caller drops only its previously completed children.
+    fn emit_any_payload_v2_clone_body(
+        &self,
+        function: FunctionValue<'ctx>,
+        destination: inkwell::values::PointerValue<'ctx>,
+        source: BasicValueEnum<'ctx>,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        match plan {
+            GluePlan::Trivial => {
+                self.build_store(destination, source)?;
+                self.build_return(Some(&self.context.i32_type().const_zero()))
+            }
+            GluePlan::StringBox => {
+                self.emit_any_payload_v2_string_clone(function, destination, source)
+            }
+            GluePlan::Tuple(fields) | GluePlan::Record(fields) => {
+                let product = source.into_struct_value();
+                let llvm_fields = product.get_type().get_field_types();
+                let mut cloned = product;
+                let mut completed = Vec::new();
+                for (index, (field_plan, field_type)) in fields.iter().zip(llvm_fields).enumerate()
+                {
+                    if matches!(field_plan, GluePlan::Trivial) {
+                        continue;
+                    }
+                    let field = self.build_extract_value(
+                        product.into(),
+                        index as u32,
+                        "v2_clone_product_source",
+                    )?;
+                    let child = self.emit_any_payload_v2_clone_child(
+                        function, field_plan, field, field_type, &completed,
+                    )?;
+                    cloned = self
+                        .builder
+                        .build_insert_value(cloned, child, index as u32, "v2_clone_product_insert")
+                        .map_err(|error| {
+                            CompileError::LlvmError(format!(
+                                "AnyOwner V2 product clone insert: {error}"
+                            ))
+                        })?
+                        .into_struct_value();
+                    completed.push((field_plan, child));
+                }
+                self.build_store(destination, cloned)?;
+                self.build_return(Some(&self.context.i32_type().const_zero()))
+            }
+            GluePlan::Option(_) | GluePlan::Result { .. } => {
+                self.emit_any_payload_v2_variant_clone(function, destination, source, plan)
+            }
+            _ => Err(glue_shape_error(
+                plan,
+                ty,
+                "fallible callback shape is not emitted",
+            )),
+        }
+    }
+
+    fn emit_any_payload_v2_clone_child(
+        &self,
+        function: FunctionValue<'ctx>,
+        plan: &GluePlan,
+        source: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        completed: &[(&GluePlan, BasicValueEnum<'ctx>)],
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        if matches!(plan, GluePlan::Trivial) {
+            return Ok(source);
+        }
+        let child = self.ensure_any_payload_v2_fallible_clone(plan, ty)?;
+        // Field values use aligned local slots rather than pointers into a
+        // potentially packed aggregate. No destination slot is read on failure.
+        let input = self.build_alloca(ty, "v2_clone_child_source")?;
+        let output = self.build_alloca(ty, "v2_clone_child_output")?;
+        self.build_store(input, source)?;
+        let call = self.build_call(
+            child,
+            &[output.into(), input.into()],
+            "v2_clone_child_status",
+        )?;
+        let status = call_try_basic_value(&call)
+            .ok_or_else(|| {
+                CompileError::LlvmError("AnyOwner V2 child callback returned void".into())
+            })?
+            .into_int_value();
+        let succeeded = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                status,
+                status.get_type().const_zero(),
+                "v2_clone_child_succeeded",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 clone status: {error}"))
+            })?;
+        let success = self
+            .context
+            .append_basic_block(function, "v2_clone_child_success");
+        let failure = self
+            .context
+            .append_basic_block(function, "v2_clone_child_failure");
+        self.build_cond_br(succeeded, success, failure)?;
+        self.builder.position_at_end(failure);
+        for (prior_plan, prior) in completed.iter().rev() {
+            let drop = self.ensure_value_glue(prior_plan, prior.get_type())?.drop;
+            self.build_call(drop, &[(*prior).into()], "v2_clone_rollback_child")?;
+        }
+        self.build_return(Some(&status))?;
+        self.builder.position_at_end(success);
+        self.build_load(ty, output, "v2_clone_child_value")
+    }
+
+    fn emit_any_payload_v2_string_clone(
+        &self,
+        function: FunctionValue<'ctx>,
+        destination: inkwell::values::PointerValue<'ctx>,
+        source: BasicValueEnum<'ctx>,
+    ) -> Result<(), CompileError> {
+        let string = source.into_struct_value();
+        let data = self
+            .build_extract_value(string.into(), 0, "v2_clone_string_data")?
+            .into_pointer_value();
+        let length = self
+            .build_extract_value(string.into(), 1, "v2_clone_string_length")?
+            .into_int_value();
+        let integer = length.get_type();
+        let nonnegative = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::SGE,
+                length,
+                integer.const_zero(),
+                "v2_clone_string_nonnegative",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String length: {error}"))
+            })?;
+        let no_overflow = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULE,
+                length,
+                integer.const_int(i64::MAX as u64 - 8, false),
+                "v2_clone_string_allocation_fits",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String allocation length: {error}"))
+            })?;
+        let valid = self
+            .builder
+            .build_and(nonnegative, no_overflow, "v2_clone_string_valid_length")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String valid length: {error}"))
+            })?;
+        let checked = self
+            .context
+            .append_basic_block(function, "v2_clone_string_checked");
+        let failure = self
+            .context
+            .append_basic_block(function, "v2_clone_string_failure");
+        self.build_cond_br(valid, checked, failure)?;
+        self.builder.position_at_end(failure);
+        self.build_return(Some(&self.context.i32_type().const_int(1, false)))?;
+        self.builder.position_at_end(checked);
+        let is_null = self
+            .builder
+            .build_is_null(data, "v2_clone_string_null")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String null: {error}"))
+            })?;
+        let empty = self
+            .context
+            .append_basic_block(function, "v2_clone_string_empty");
+        let allocate = self
+            .context
+            .append_basic_block(function, "v2_clone_string_allocate");
+        self.build_cond_br(is_null, empty, allocate)?;
+        self.builder.position_at_end(empty);
+        let is_empty = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                length,
+                integer.const_zero(),
+                "v2_clone_string_empty_length",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 empty String: {error}"))
+            })?;
+        let null_success = self
+            .context
+            .append_basic_block(function, "v2_clone_string_null_success");
+        self.build_cond_br(is_empty, null_success, failure)?;
+        self.builder.position_at_end(null_success);
+        self.build_store(destination, source)?;
+        self.build_return(Some(&self.context.i32_type().const_zero()))?;
+        self.builder.position_at_end(allocate);
+        // Preserve the existing StringBox allocation size while checking the
+        // len+8 round-up before it can wrap. malloc supplies natural alignment.
+        let rounded = self
+            .builder
+            .build_int_add(
+                length,
+                integer.const_int(8, false),
+                "v2_clone_string_round_up",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String round-up: {error}"))
+            })?;
+        let size = self
+            .builder
+            .build_and(
+                rounded,
+                integer.const_int(!7u64, false),
+                "v2_clone_string_allocation_size",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String allocation size: {error}"))
+            })?;
+        let malloc = self.get_runtime_fn("malloc")?;
+        let allocation = call_try_basic_value(&self.build_call(
+            malloc,
+            &[size.into()],
+            "v2_clone_string_malloc",
+        )?)
+        .ok_or_else(|| CompileError::LlvmError("AnyOwner V2 String malloc returned void".into()))?
+        .into_pointer_value();
+        let failed = self
+            .builder
+            .build_is_null(allocation, "v2_clone_string_allocation_failed")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String malloc status: {error}"))
+            })?;
+        let copy = self
+            .context
+            .append_basic_block(function, "v2_clone_string_copy");
+        self.build_cond_br(failed, failure, copy)?;
+        self.builder.position_at_end(copy);
+        let memcpy = self.get_runtime_fn("memcpy")?;
+        self.build_call(
+            memcpy,
+            &[allocation.into(), data.into(), length.into()],
+            "v2_clone_string_memcpy",
+        )?;
+        let nul = self.build_in_bounds_gep(
+            self.context.i8_type(),
+            allocation,
+            &[length],
+            "v2_clone_string_nul",
+        )?;
+        self.build_store(nul, self.context.i8_type().const_zero())?;
+        let cloned = self
+            .builder
+            .build_insert_value(string, allocation, 0, "v2_clone_string_result")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 String result: {error}"))
+            })?
+            .into_struct_value();
+        self.build_store(destination, cloned)?;
+        self.build_return(Some(&self.context.i32_type().const_zero()))
+    }
+
+    fn emit_any_payload_v2_variant_clone(
+        &self,
+        function: FunctionValue<'ctx>,
+        destination: inkwell::values::PointerValue<'ctx>,
+        source: BasicValueEnum<'ctx>,
+        plan: &GluePlan,
+    ) -> Result<(), CompileError> {
+        let variant = source.into_struct_value();
+        let fields = variant.get_type().get_field_types();
+        let tag = self
+            .build_extract_value(
+                variant.into(),
+                builtin_variant::DISCRIMINANT_FIELD,
+                "v2_clone_variant_tag",
+            )?
+            .into_int_value();
+        let active = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                tag.get_type().const_int(builtin_variant::ACTIVE_TAG, false),
+                "v2_clone_variant_active",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 variant tag: {error}"))
+            })?;
+        let active_block = self
+            .context
+            .append_basic_block(function, "v2_clone_variant_active");
+        let inactive_block = self
+            .context
+            .append_basic_block(function, "v2_clone_variant_inactive");
+        self.build_cond_br(active, active_block, inactive_block)?;
+        self.builder.position_at_end(active_block);
+        let payload_plan = match plan {
+            GluePlan::Option(payload) => payload.as_ref(),
+            GluePlan::Result { ok, .. } => ok.as_ref(),
+            _ => {
+                return Err(glue_shape_error(
+                    plan,
+                    variant.get_type().into(),
+                    "not a variant",
+                ))
+            }
+        };
+        // Both Option and Result use field one for their active payload.
+        let payload = self.build_extract_value(
+            variant.into(),
+            builtin_variant::OPTION_PAYLOAD_FIELD,
+            "v2_clone_variant_payload",
+        )?;
+        let cloned =
+            self.emit_any_payload_v2_clone_child(function, payload_plan, payload, fields[1], &[])?;
+        let mut active_value = self
+            .builder
+            .build_insert_value(variant, cloned, 1, "v2_clone_variant_insert")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 variant insert: {error}"))
+            })?
+            .into_struct_value();
+        if matches!(plan, GluePlan::Result { .. }) {
+            active_value = self
+                .builder
+                .build_insert_value(
+                    active_value,
+                    self.zero_value_for(fields[2]),
+                    builtin_variant::RESULT_ERROR_FIELD,
+                    "v2_clone_result_clear_error",
+                )
+                .map_err(|error| {
+                    CompileError::LlvmError(format!("AnyOwner V2 Result clear error: {error}"))
+                })?
+                .into_struct_value();
+        }
+        self.build_store(destination, active_value)?;
+        self.build_return(Some(&self.context.i32_type().const_zero()))?;
+        self.builder.position_at_end(inactive_block);
+        let cleared = self
+            .builder
+            .build_insert_value(
+                variant,
+                self.zero_value_for(fields[1]),
+                1,
+                "v2_clone_variant_clear_payload",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 variant clear payload: {error}"))
+            })?
+            .into_struct_value();
+        let inactive_value = if let GluePlan::Result { error, .. } = plan {
+            let payload = self.build_extract_value(
+                variant.into(),
+                builtin_variant::RESULT_ERROR_FIELD,
+                "v2_clone_result_error",
+            )?;
+            let cloned = match error.as_ref() {
+                GluePlan::Trivial => payload,
+                GluePlan::StringBox => self
+                    .emit_any_payload_v2_packed_string_clone(function, payload.into_int_value())?,
+                _ => {
+                    return Err(glue_shape_error(
+                        plan,
+                        variant.get_type().into(),
+                        "unsupported Result error storage",
+                    ))
+                }
+            };
+            self.builder
+                .build_insert_value(
+                    cleared,
+                    cloned,
+                    builtin_variant::RESULT_ERROR_FIELD,
+                    "v2_clone_result_insert_error",
+                )
+                .map_err(|error| {
+                    CompileError::LlvmError(format!("AnyOwner V2 Result insert error: {error}"))
+                })?
+                .into_struct_value()
+        } else {
+            cleared
+        };
+        self.build_store(destination, inactive_value)?;
+        self.build_return(Some(&self.context.i32_type().const_zero()))
+    }
+
+    fn emit_any_payload_v2_packed_string_clone(
+        &self,
+        function: FunctionValue<'ctx>,
+        handle: inkwell::values::IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let integer = handle.get_type();
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                handle,
+                integer.const_zero(),
+                "v2_clone_packed_string_null",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 packed String null: {error}"))
+            })?;
+        let null = self
+            .context
+            .append_basic_block(function, "v2_clone_packed_string_empty");
+        let copy = self
+            .context
+            .append_basic_block(function, "v2_clone_packed_string_copy");
+        let merge = self
+            .context
+            .append_basic_block(function, "v2_clone_packed_string_merge");
+        self.build_cond_br(is_null, null, copy)?;
+        self.builder.position_at_end(null);
+        self.build_br(merge)?;
+        self.builder.position_at_end(copy);
+        let pointer = self.context.ptr_type(inkwell::AddressSpace::default());
+        let source_pointer =
+            self.build_int_to_ptr(handle, pointer, "v2_clone_packed_string_pointer")?;
+        let string = self.string_box_type();
+        let value = self.build_load(string, source_pointer, "v2_clone_packed_string_source")?;
+        let cloned = self.emit_any_payload_v2_clone_child(
+            function,
+            &GluePlan::StringBox,
+            value,
+            string.into(),
+            &[],
+        )?;
+        let size = string.size_of().ok_or_else(|| {
+            CompileError::LlvmError("AnyOwner V2 StringBox size is unknown".into())
+        })?;
+        let malloc = self.get_runtime_fn("malloc")?;
+        let allocation = call_try_basic_value(&self.build_call(
+            malloc,
+            &[size.into()],
+            "v2_clone_packed_string_malloc",
+        )?)
+        .ok_or_else(|| {
+            CompileError::LlvmError("AnyOwner V2 StringBox malloc returned void".into())
+        })?
+        .into_pointer_value();
+        let failed = self
+            .builder
+            .build_is_null(allocation, "v2_clone_packed_string_allocation_failed")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 StringBox allocation status: {error}"))
+            })?;
+        let failure = self
+            .context
+            .append_basic_block(function, "v2_clone_packed_string_failure");
+        let success = self
+            .context
+            .append_basic_block(function, "v2_clone_packed_string_success");
+        self.build_cond_br(failed, failure, success)?;
+        self.builder.position_at_end(failure);
+        let drop = self
+            .ensure_value_glue(&GluePlan::StringBox, string.into())?
+            .drop;
+        self.build_call(drop, &[cloned.into()], "v2_clone_packed_string_rollback")?;
+        self.build_return(Some(&self.context.i32_type().const_int(1, false)))?;
+        self.builder.position_at_end(success);
+        self.build_store(allocation, cloned)?;
+        let owned = self.build_ptr_to_int(allocation, integer, "v2_clone_packed_string_handle")?;
+        let success_end = self.builder.get_insert_block().ok_or_else(|| {
+            CompileError::LlvmError("AnyOwner V2 packed String lost success block".into())
+        })?;
+        self.build_br(merge)?;
+        self.builder.position_at_end(merge);
+        let result = self
+            .builder
+            .build_phi(integer, "v2_clone_packed_string_result")
+            .map_err(|error| {
+                CompileError::LlvmError(format!("AnyOwner V2 packed String phi: {error}"))
+            })?;
+        result.add_incoming(&[
+            (&handle as &dyn inkwell::values::BasicValue, null),
+            (&owned as &dyn inkwell::values::BasicValue, success_end),
+        ]);
+        Ok(result.as_basic_value())
+    }
+
+    fn emit_any_payload_v2_drop_glue(
+        &self,
+        name: &str,
+        plan: &GluePlan,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<FunctionValue<'ctx>, CompileError> {
+        let ptr = self.context.ptr_type(inkwell::AddressSpace::default());
+        let function = self.module.add_function(
+            name,
+            self.context
+                .void_type()
+                .fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+            Some(Linkage::Internal),
+        );
+        let saved_block = self.builder.get_insert_block();
+        let result = (|| {
+            let entry = self.context.append_basic_block(function, "entry");
+            self.builder.position_at_end(entry);
+            let payload = function
+                .get_nth_param(0)
+                .ok_or_else(|| {
+                    CompileError::LlvmError("AnyOwner V2 drop payload is missing".into())
+                })?
+                .into_pointer_value();
+            if !matches!(plan, GluePlan::Trivial) {
+                let value = self.build_load(ty, payload, "any_payload_v2_drop_value")?;
+                let pair = self.ensure_value_glue(plan, ty)?;
+                self.build_call(
+                    pair.drop,
+                    &[BasicMetadataValueEnum::from(value)],
+                    "any_payload_v2_drop_value_glue",
+                )?;
+            }
+            self.build_return(None)
+        })();
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        result?;
+        Ok(function)
+    }
+
     /// Clone a value through glue derived from the canonical ownership class
     /// and the concrete LLVM ABI as a pair.  The ABI half is essential for
     /// products: `(i32, string)` and `(i64, string)` have the same ownership

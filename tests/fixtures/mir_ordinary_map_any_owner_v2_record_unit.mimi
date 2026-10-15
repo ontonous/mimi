@@ -1,0 +1,26 @@
+type Label { text: string }
+
+func main() -> i32 {
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let one = map_set(empty, "answer", 42)
+    let two = map_set(one, "label", label)
+    let overwritten = map_set(two, "label", 99)
+    let removed = map_remove(two, "label")
+    map_size(empty)
+    map_size(one)
+    map_size(two)
+    map_size(overwritten)
+    map_size(removed)
+    has_key(two, "label")
+    has_key(overwritten, "label")
+    has_key(removed, "label")
+    println(label.text)
+    drop(empty)
+    drop(one)
+    drop(two)
+    drop(overwritten)
+    drop(removed)
+    drop(label)
+    0
+}

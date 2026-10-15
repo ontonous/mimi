@@ -38,11 +38,14 @@ use super::instr::{
     CanonicalManagedAnyIdentityBytecodeReceipt, CanonicalManagedAnyIdentityCallBinding,
     CanonicalManagedAnyIdentityInstanceBinding, CanonicalManagedAnyTrapCleanupBytecodeReceipt,
     CanonicalManagedAnyTrapCleanupCallBinding, CanonicalManagedAnyTrapCleanupInstanceBinding,
-    CanonicalMapAnyOwnerV1BytecodeReceipt, CanonicalMapRootBytecodeReceipt, ConstIdx, ConstValue,
-    FuncIdx, FunctionProto, ListOperationShape, ListProjectionShape, Op,
-    RecordMoveDropProjectionShape, RecordProjectionShape, RecordResidualDropShape, Reg,
-    TupleDestructureShape, TupleProjectionShape, VariantPredicateShape,
-    VariantProjectionFallbackShape, VariantShape,
+    CanonicalMapAnyOwnerV1BytecodeReceipt, CanonicalMapRootBytecodeReceipt,
+    CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding, CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+    CanonicalOrdinaryMapOwnedAnyV2PayloadKind, CanonicalOrdinaryMapOwnedAnyV2TemporaryRootBinding,
+    CanonicalOrdinaryMapOwnedAnyV2UnpackBinding, CanonicalOrdinaryMapOwnedAnyV2ValuesBinding,
+    CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding, ConstIdx, ConstValue, FuncIdx,
+    FunctionProto, ListOperationShape, ListProjectionShape, Op, RecordMoveDropProjectionShape,
+    RecordProjectionShape, RecordResidualDropShape, Reg, TupleDestructureShape,
+    TupleProjectionShape, VariantPredicateShape, VariantProjectionFallbackShape, VariantShape,
 };
 
 /// A fail-closed error from the canonical-MIR → bytecode adapter.
@@ -195,6 +198,14 @@ fn compile_mir_program_inner(
             message,
         });
     }
+    if let Err(message) = program.ordinary_map_owned_any_v2_values_unpack_result_receipts() {
+        validation_errors.push(MirBytecodeError {
+            function: NodeId("mir-program".into()),
+            message: format!(
+                "ordinary Map/Any owner-v2 Values unpack preflight rejected: {message}"
+            ),
+        });
+    }
     for (owner, function) in &ordered {
         if let Err(message) = program
             .type_catalog()
@@ -210,6 +221,7 @@ fn compile_mir_program_inner(
                 == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
                 || value.ty
                     == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                || value.ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
                 || program.type_catalog().contains_managed_any(&value.ty)
         }) || function
             .ownership
@@ -219,6 +231,9 @@ fn compile_mir_program_inner(
             || function
                 .ownership
                 .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+            || function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
             || function.blocks.values().any(|block| {
                 block.instructions.iter().any(|instruction| {
                     matches!(
@@ -240,6 +255,16 @@ fn compile_mir_program_inner(
                             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
                             | MirInstructionKind::ManagedAny { .. }
                             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
                     )
                 })
             })
@@ -279,10 +304,21 @@ fn compile_mir_program_inner(
     let (ffi_indices, canonical_ffi) = materialize_canonical_ffi(program)?;
 
     let mut functions = Vec::with_capacity(ordered.len());
+    let mut emitted_instruction_pc_ranges = BTreeMap::new();
     let mut errors = Vec::new();
-    for (_, function) in &ordered {
+    for (owner, function) in &ordered {
         match compile_function(function, program, &indices, &ffi_indices) {
-            Ok(proto) => functions.push(proto),
+            Ok((proto, instruction_pc_ranges)) => {
+                let Some(function_index) = indices.get(*owner).copied() else {
+                    errors.push(MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: "compiled MIR function has no bytecode index".into(),
+                    });
+                    continue;
+                };
+                emitted_instruction_pc_ranges.insert(function_index, instruction_pc_ranges);
+                functions.push(proto);
+            }
             Err(mut function_errors) => errors.append(&mut function_errors),
         }
     }
@@ -323,6 +359,69 @@ fn compile_mir_program_inner(
             entry,
             &functions,
         );
+    let (v2_payload_selection_digest, v2_payload_bindings) =
+        materialize_ordinary_map_owned_any_v2_payload_bindings(program, &ordered, &indices)?;
+    canonical_map_any_owner_v1_receipt
+        .bind_ordinary_map_owned_any_v2_payload_bindings_from_selection(
+            v2_payload_bindings,
+            v2_payload_selection_digest,
+        )
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message,
+            }]
+        })?;
+    let v2_get_any_bindings = materialize_ordinary_map_owned_any_v2_get_any_bindings(
+        program, &ordered, &indices, &functions,
+    )?;
+    canonical_map_any_owner_v1_receipt
+        .bind_ordinary_map_owned_any_v2_get_any_bindings_from_selection(v2_get_any_bindings)
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message,
+            }]
+        })?;
+    let v2_unpack_bindings = materialize_ordinary_map_owned_any_v2_unpack_bindings(
+        program, &ordered, &indices, &functions,
+    )?;
+    canonical_map_any_owner_v1_receipt
+        .bind_ordinary_map_owned_any_v2_unpack_bindings_from_core_receipts(v2_unpack_bindings)
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message,
+            }]
+        })?;
+    let v2_values_bindings = materialize_ordinary_map_owned_any_v2_values_bindings(
+        program, &ordered, &indices, &functions,
+    )?;
+    canonical_map_any_owner_v1_receipt
+        .bind_ordinary_map_owned_any_v2_values_bindings_from_core_receipts(v2_values_bindings)
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message,
+            }]
+        })?;
+    let v2_values_unpack_bindings = materialize_ordinary_map_owned_any_v2_values_unpack_bindings(
+        program,
+        &ordered,
+        &indices,
+        &functions,
+        &emitted_instruction_pc_ranges,
+    )?;
+    canonical_map_any_owner_v1_receipt
+        .bind_ordinary_map_owned_any_v2_values_unpack_bindings_from_core_receipts(
+            v2_values_unpack_bindings,
+        )
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message,
+            }]
+        })?;
     if let Some(identity_receipt) = materialize_managed_any_identity_bytecode_receipt(
         program, &ordered, &indices, entry, &functions,
     )? {
@@ -382,6 +481,2141 @@ fn compile_mir_program_inner(
         ast: None,
         record_fields: std::collections::HashMap::new(),
     }))
+}
+
+/// Bind Core-selected AnyOwner-v2 payload entries to their exact MIR Set
+/// instruction sites, then carry the payload TypeDesc identity into the
+/// bytecode receipt in emitted Set ordinal order. The emitted VM value must
+/// not reconstruct this identity from the record's display name or field
+/// shape. Order follows FunctionEmitter::emit_blocks: entry block first,
+/// then the remaining stable block order.
+fn materialize_ordinary_map_owned_any_v2_payload_bindings(
+    program: &MirProgram,
+    ordered: &[(&NodeId, &MirFunction)],
+    indices: &BTreeMap<NodeId, FuncIdx>,
+) -> Result<
+    (
+        Option<String>,
+        BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>>,
+    ),
+    Vec<MirBytecodeError>,
+> {
+    let mut bindings_by_function = BTreeMap::new();
+    let selection = program
+        .ordinary_map_owned_any_v2_payload_selection_receipt()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 payload selection receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    let Some(selection) = selection else {
+        return Ok((None, bindings_by_function));
+    };
+    selection
+        .validate_against_program(program)
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 payload selection receipt rejected: {message}"
+                ),
+            }]
+        })?;
+
+    // Core sorts receipt rows by identity for deterministic serialization.
+    // The bytecode VM indexes bindings by emitted Set ordinal, so retain the
+    // rows by exact MIR site here and consume them in emitter order below.
+    let mut entries_by_site = BTreeMap::new();
+    for entry in &selection.entries {
+        let key = (entry.owner.clone(), entry.instruction.clone());
+        if entries_by_site.insert(key, entry).is_some() {
+            return Err(vec![MirBytecodeError {
+                function: entry.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 payload selection repeats Set site '{}'",
+                    entry.instruction
+                ),
+            }]);
+        }
+    }
+
+    for (owner, function) in ordered {
+        let Some(&function_index) = indices.get(*owner) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 function has no bytecode index".into(),
+            }]);
+        };
+        let mut blocks = Vec::with_capacity(function.blocks.len());
+        if let Some(entry) = function.blocks.get(&function.entry) {
+            blocks.push(entry);
+        }
+        blocks.extend(
+            function
+                .blocks
+                .values()
+                .filter(|block| block.id != function.entry),
+        );
+
+        let mut bindings = Vec::new();
+        for block in blocks {
+            for instruction in &block.instructions {
+                let MirInstructionKind::OrdinaryMapOwnedAnyV2Set { value, .. } = &instruction.kind
+                else {
+                    continue;
+                };
+                let key = ((*owner).clone(), instruction.id.clone());
+                let Some(entry) = entries_by_site.remove(&key) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Set '{}' has no matching Core payload selection entry",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                if entry.value != *value {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Set '{}' payload '{}' disagrees with Core selection value '{}'",
+                            instruction.id, value, entry.value
+                        ),
+                    }]);
+                }
+                let Some(descriptor) = program.type_catalog().get(&entry.checker_type) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Set '{}' Core-selected payload TypeDesc '{}' is absent",
+                            instruction.id,
+                            entry.checker_type.as_str()
+                        ),
+                    }]);
+                };
+                let kind = match (&descriptor.kind, &descriptor.layout) {
+                    (MirTypeKind::Primitive(PrimitiveType::I32), MirLayout::Scalar) => {
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+                    }
+                    (MirTypeKind::Primitive(PrimitiveType::String), MirLayout::Handle)
+                        if program
+                            .type_catalog()
+                            .validate_owned_string(&entry.checker_type)
+                            .is_ok() =>
+                    {
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                    }
+                    (MirTypeKind::Nominal, MirLayout::Record { nominal, fields })
+                        if fields.len() == 1 && fields[0].name == "text" =>
+                    {
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record {
+                            nominal: nominal.as_str().to_owned(),
+                        }
+                    }
+                    _ => {
+                        return Err(vec![MirBytecodeError {
+                            function: (*owner).clone(),
+                            message: format!(
+                                "ordinary Map/Any owner-v2 Set '{}' Core-selected payload TypeDesc '{}' is outside the admitted i32/String/record binding",
+                                instruction.id,
+                                entry.checker_type.as_str()
+                            ),
+                        }]);
+                    }
+                };
+                bindings.push(CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
+                    type_id: entry.checker_type.clone(),
+                    type_desc_digest: entry.type_desc_digest.clone(),
+                    kind,
+                });
+            }
+        }
+        if !bindings.is_empty() {
+            bindings_by_function.insert(function_index, bindings);
+        }
+    }
+
+    if let Some(((owner, instruction), _)) = entries_by_site.into_iter().next() {
+        return Err(vec![MirBytecodeError {
+            function: owner,
+            message: format!(
+                "Core AnyOwner-v2 payload selection entry '{}' has no matching MIR Set site",
+                instruction
+            ),
+        }]);
+    }
+
+    Ok((
+        Some(selection.selection_digest.clone()),
+        bindings_by_function,
+    ))
+}
+
+/// Consume Core-derived GetAny/result-settlement witnesses and bind each to
+/// one exact MIR instruction, its typed values, and the emitted bytecode
+/// registers/PC. The binding is the only authority for the opaque owned
+/// result; no V1 Any receipt or inferred payload shape can authorize it.
+fn materialize_ordinary_map_owned_any_v2_get_any_bindings(
+    program: &MirProgram,
+    ordered: &[(&NodeId, &MirFunction)],
+    indices: &BTreeMap<NodeId, FuncIdx>,
+    functions: &[FunctionProto],
+) -> Result<
+    BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding>>,
+    Vec<MirBytecodeError>,
+> {
+    let receipts = program
+        .ordinary_map_owned_any_v2_get_any_result_receipts()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 GetAny result receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    let mut receipts_by_site = BTreeMap::new();
+    for receipt in receipts {
+        receipt.validate().map_err(|message| {
+            vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 GetAny result receipt rejected: {message}"
+                ),
+            }]
+        })?;
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![MirBytecodeError {
+                    function: receipt.owner.clone(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 GetAny result receipt rejected: {message}"
+                    ),
+                }]
+            })?;
+        let site = (receipt.owner.clone(), receipt.instruction.clone());
+        if receipts_by_site.insert(site, receipt.clone()).is_some() {
+            return Err(vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "Core AnyOwner-v2 GetAny result receipt repeats site '{}'",
+                    receipt.instruction
+                ),
+            }]);
+        }
+    }
+
+    let result_type = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let key_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let miss_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let mut bindings_by_function = BTreeMap::new();
+
+    for (owner, function) in ordered {
+        let Some(&function_index) = indices.get(*owner) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 GetAny function has no bytecode index".into(),
+            }]);
+        };
+        let Some(proto) = functions.get(function_index as usize) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 GetAny function has no emitted prototype"
+                    .into(),
+            }]);
+        };
+
+        let mut blocks = Vec::with_capacity(function.blocks.len());
+        if let Some(entry) = function.blocks.get(&function.entry) {
+            blocks.push(entry);
+        }
+        blocks.extend(
+            function
+                .blocks
+                .values()
+                .filter(|block| block.id != function.entry),
+        );
+
+        let mut bindings = Vec::new();
+        for block in blocks {
+            for instruction in &block.instructions {
+                let MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, root, key } =
+                    &instruction.kind
+                else {
+                    continue;
+                };
+                let site = ((*owner).clone(), instruction.id.clone());
+                let Some(receipt) = receipts_by_site.remove(&site) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' has no Core result-settlement receipt",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                if receipt.owner != **owner
+                    || receipt.result != *result
+                    || receipt.root != *root
+                    || receipt.key != *key
+                    || receipt.mir_result_type != result_type
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' disagrees with its exact Core owner/instruction/root/key/result/type receipt",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let root_value_type = function.values.get(root).map(|value| &value.ty);
+                let key_value_type = function.values.get(key).map(|value| &value.ty);
+                let result_value_type = function.values.get(result).map(|value| &value.ty);
+                let binding_value_type =
+                    function.values.get(&receipt.binding).map(|value| &value.ty);
+                if root_value_type != Some(&root_type)
+                    || key_value_type != Some(&key_type)
+                    || result_value_type != Some(&result_type)
+                    || binding_value_type != Some(&result_type)
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' has a root/key/result/binding TypeDesc mismatch",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let settlement = function
+                    .blocks
+                    .values()
+                    .flat_map(|block| block.instructions.iter())
+                    .find(|candidate| candidate.id == receipt.settlement_instruction);
+                if !settlement.is_some_and(|settlement| {
+                    matches!(
+                        &settlement.kind,
+                        MirInstructionKind::Drop { value } if value == &receipt.binding
+                    )
+                }) {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' has no exact explicit binding Drop settlement",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                if receipt.miss_payload_type != miss_type {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' miss payload is not canonical i32",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let Some(miss_descriptor) = program.type_catalog().get(&receipt.miss_payload_type)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' miss TypeDesc is absent",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let miss_digest = blake3::hash(miss_descriptor.canonical_text().as_bytes())
+                    .to_hex()
+                    .to_string();
+                if miss_digest != receipt.miss_payload_type_desc_digest {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' miss TypeDesc digest disagrees with Core receipt",
+                            instruction.id
+                        ),
+                    }]);
+                }
+
+                let Some(rd) = emitted_register_for_mir_value(function, result) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' result has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(ra) = emitted_register_for_mir_value(function, root) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' root has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(key_reg) = emitted_register_for_mir_value(function, key) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' key has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let matching_sites = proto
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pc, op)| match op {
+                        Op::MirOrdinaryMapOwnedAnyV2GetAny {
+                            rd: actual_rd,
+                            ra: actual_ra,
+                            key: actual_key,
+                        } if (*actual_rd, *actual_ra, *actual_key) == (rd, ra, key_reg) => Some(pc),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let [pc] = matching_sites.as_slice() else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 GetAny '{}' does not bind to exactly one emitted opcode/register site",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let temporary_root = if let Some(root_receipt) = &receipt.temporary_root {
+                    let matching_new_pcs = proto
+                        .code
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(new_pc, op)| {
+                            (new_pc < *pc
+                                && matches!(op, Op::MirOrdinaryMapOwnedAnyV2New { rd: actual }
+                                    if *actual == ra))
+                            .then_some(new_pc)
+                        })
+                        .collect::<Vec<_>>();
+                    let Some(new_pc) = matching_new_pcs.last().copied() else {
+                        return Err(vec![MirBytecodeError {
+                            function: (*owner).clone(),
+                            message: format!(
+                                "ordinary Map/Any owner-v2 GetAny '{}' temporary root has no emitted New register site",
+                                instruction.id
+                            ),
+                        }]);
+                    };
+                    let drop_pc = pc.checked_add(1).ok_or_else(|| {
+                        vec![MirBytecodeError {
+                            function: (*owner).clone(),
+                            message: "ordinary Map/Any owner-v2 temporary root Drop PC overflows"
+                                .into(),
+                        }]
+                    })?;
+                    let exact_drop = matches!(
+                        proto.code.get(drop_pc),
+                        Some(Op::MirOrdinaryMapOwnedAnyV2Drop { ra: actual }) if *actual == ra
+                    );
+                    if root_receipt.get_any_instruction != instruction.id
+                        || root_receipt.root != *root
+                        || !exact_drop
+                    {
+                        return Err(vec![MirBytecodeError {
+                            function: (*owner).clone(),
+                            message: format!(
+                                "ordinary Map/Any owner-v2 GetAny '{}' temporary root does not bind its exact New/GetAny/immediate Drop bytecode sites",
+                                instruction.id
+                            ),
+                        }]);
+                    }
+                    Some(CanonicalOrdinaryMapOwnedAnyV2TemporaryRootBinding {
+                        receipt: root_receipt.clone(),
+                        new_pc: u32::try_from(new_pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 temporary root New PC exceeds u32 ABI".into(),
+                            }]
+                        })?,
+                        get_any_pc: u32::try_from(*pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 GetAny PC exceeds u32 ABI".into(),
+                            }]
+                        })?,
+                        drop_pc: u32::try_from(drop_pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 temporary root Drop PC exceeds u32 ABI".into(),
+                            }]
+                        })?,
+                        root_reg: ra,
+                    })
+                } else {
+                    None
+                };
+                bindings.push((
+                    *pc,
+                    CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding {
+                        owner: receipt.owner,
+                        operation: receipt.operation,
+                        instruction: receipt.instruction,
+                        source_node: receipt.source_node,
+                        source_local: receipt.source_local,
+                        root: receipt.root,
+                        checker_source_type: receipt.checker_source_type,
+                        key_node: receipt.key_node,
+                        key: receipt.key,
+                        checker_key_type: receipt.checker_key_type,
+                        checker_key_local: receipt.checker_key_local,
+                        result: receipt.result,
+                        checker_result_type: receipt.checker_result_type,
+                        mir_result_type: receipt.mir_result_type,
+                        binding_local: receipt.binding_local,
+                        binding: receipt.binding,
+                        settlement: receipt.settlement,
+                        settlement_point: receipt.settlement_point,
+                        settlement_instruction: receipt.settlement_instruction,
+                        temporary_root,
+                        miss_payload_type: receipt.miss_payload_type,
+                        miss_payload_type_desc_digest: receipt.miss_payload_type_desc_digest,
+                        pc: u32::try_from(*pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 GetAny PC exceeds u32 ABI"
+                                    .into(),
+                            }]
+                        })?,
+                        rd,
+                        ra,
+                        key_reg,
+                    },
+                ));
+            }
+        }
+
+        let bytecode_sites = proto
+            .code
+            .iter()
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }))
+            .count();
+        if bytecode_sites != bindings.len() {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 GetAny MIR/bytecode site census differs (MIR {}, bytecode {bytecode_sites})",
+                    bindings.len()
+                ),
+            }]);
+        }
+        bindings.sort_by_key(|(pc, _)| *pc);
+        if !bindings.is_empty() {
+            bindings_by_function.insert(
+                function_index,
+                bindings.into_iter().map(|(_, binding)| binding).collect(),
+            );
+        }
+    }
+
+    if let Some(((owner, instruction), _)) = receipts_by_site.into_iter().next() {
+        return Err(vec![MirBytecodeError {
+            function: owner,
+            message: format!(
+                "Core AnyOwner-v2 GetAny result receipt '{}' has no matching MIR instruction",
+                instruction
+            ),
+        }]);
+    }
+    Ok(bindings_by_function)
+}
+
+/// Bind each Checker-created V2 unpack instruction to its exact GetAny pair,
+/// target TypeDesc, MIR projection identity and emitted register/PC site.
+/// Payload selection admits canonical i32, direct String, and the existing
+/// concrete-record Set payloads; unpack opens exact selected i32/String/Label
+/// targets (plus the canonical i32 miss).
+fn materialize_ordinary_map_owned_any_v2_unpack_bindings(
+    program: &MirProgram,
+    ordered: &[(&NodeId, &MirFunction)],
+    indices: &BTreeMap<NodeId, FuncIdx>,
+    functions: &[FunctionProto],
+) -> Result<
+    BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2UnpackBinding>>,
+    Vec<MirBytecodeError>,
+> {
+    let has_mir_unpack = ordered.iter().any(|(_, function)| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+                )
+            })
+        })
+    });
+    if !has_mir_unpack {
+        return Ok(BTreeMap::new());
+    }
+
+    let get_any_receipts = program
+        .ordinary_map_owned_any_v2_get_any_result_receipts()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack GetAny receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    for receipt in &get_any_receipts {
+        receipt.validate().map_err(|message| {
+            vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack GetAny receipt rejected: {message}"
+                ),
+            }]
+        })?;
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![MirBytecodeError {
+                    function: receipt.owner.clone(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 unpack GetAny receipt rejected: {message}"
+                    ),
+                }]
+            })?;
+    }
+    let selection = program
+        .ordinary_map_owned_any_v2_payload_selection_receipt()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack payload selection receipt rejected: {message}"
+                ),
+            }]
+        })?
+        .ok_or_else(|| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: "ordinary Map/Any owner-v2 unpack has no Core payload selection receipt"
+                    .into(),
+            }]
+        })?;
+    selection
+        .validate_against_program(program)
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                "ordinary Map/Any owner-v2 unpack payload selection receipt rejected: {message}"
+            ),
+            }]
+        })?;
+    let unpack_receipts = program
+        .ordinary_map_owned_any_v2_unpack_result_receipts()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack Core receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    let mut unpack_receipts_by_site = BTreeMap::new();
+    for receipt in unpack_receipts {
+        receipt.validate().map_err(|message| {
+            vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack Core receipt rejected: {message}"
+                ),
+            }]
+        })?;
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![MirBytecodeError {
+                    function: receipt.owner.clone(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 unpack Core receipt rejected: {message}"
+                    ),
+                }]
+            })?;
+        let key = (receipt.owner.clone(), receipt.instruction.clone());
+        if unpack_receipts_by_site
+            .insert(key, receipt.clone())
+            .is_some()
+        {
+            return Err(vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack Core receipt repeats site '{}'",
+                    receipt.instruction
+                ),
+            }]);
+        }
+    }
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let pair_type = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let mut bindings_by_function = BTreeMap::new();
+
+    for (owner, function) in ordered {
+        let Some(&function_index) = indices.get(*owner) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 unpack function has no bytecode index".into(),
+            }]);
+        };
+        let Some(proto) = functions.get(function_index as usize) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 unpack function has no emitted prototype"
+                    .into(),
+            }]);
+        };
+
+        let mut blocks = Vec::with_capacity(function.blocks.len());
+        if let Some(entry) = function.blocks.get(&function.entry) {
+            blocks.push(entry);
+        }
+        blocks.extend(
+            function
+                .blocks
+                .values()
+                .filter(|block| block.id != function.entry),
+        );
+
+        let mut bindings = Vec::new();
+        let mut seen_pairs = BTreeSet::new();
+        for block in blocks {
+            for instruction in &block.instructions {
+                let MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                    result,
+                    pair,
+                    projection,
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                if !seen_pairs.insert(pair.clone()) {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 pair '{}' has more than one unpack site",
+                            pair
+                        ),
+                    }]);
+                }
+                let receipt_key = ((*owner).clone(), instruction.id.clone());
+                let Some(unpack_receipt) = unpack_receipts_by_site.remove(&receipt_key) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' has no exact Core unpack receipt",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                if unpack_receipt.result != *result
+                    || unpack_receipt.pair != *pair
+                    || unpack_receipt.projection != *projection
+                    || unpack_receipt.instruction != instruction.id
+                    || unpack_receipt.result_type != unpack_receipt.conversion_to
+                    || unpack_receipt.payload_selection_digest != selection.selection_digest
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' differs from its exact Core conversion/projection receipt",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let matching_get_any = get_any_receipts
+                    .iter()
+                    .filter(|receipt| {
+                        receipt.owner == **owner
+                            && receipt.operation == unpack_receipt.operation
+                            && receipt.binding_local == unpack_receipt.pair_binding_local
+                            && receipt.binding == *pair
+                            && receipt.binding_point == unpack_receipt.pair_binding_point
+                            && receipt.settlement == unpack_receipt.settlement
+                            && receipt.settlement_point == unpack_receipt.settlement_point
+                    })
+                    .collect::<Vec<_>>();
+                let [get_any] = matching_get_any.as_slice() else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' does not name exactly one Checker-receipted GetAny pair",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let pair_value_type = function.values.get(pair).map(|value| &value.ty);
+                let result_value_type = function.values.get(result).map(|value| &value.ty);
+                if pair_value_type != Some(&pair_type)
+                    || result_value_type != Some(&unpack_receipt.result_type)
+                    || get_any.binding != *pair
+                    || get_any.mir_result_type != pair_type
+                    || get_any.settlement
+                        != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    || get_any.miss_payload_type != i32_type
+                    || projection.0.trim().is_empty()
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' has no exact selected target, GetAny pair, projection, or explicit settlement",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let Some(target_desc) = program.type_catalog().get(&unpack_receipt.result_type)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' target TypeDesc is absent",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let target_is_i32 = unpack_receipt.result_type == i32_type
+                    && target_desc.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+                    && target_desc.layout == MirLayout::Scalar
+                    && target_desc.ownership == MirOwnership::Copy
+                    && program
+                        .type_catalog()
+                        .validate_copy_value(&i32_type)
+                        .is_ok();
+                let target_is_string = unpack_receipt.result_type == string_type
+                    && target_desc.kind == MirTypeKind::Primitive(PrimitiveType::String)
+                    && target_desc.layout == MirLayout::Handle
+                    && program
+                        .type_catalog()
+                        .validate_owned_string(&string_type)
+                        .is_ok();
+                let target_is_record = match &target_desc.layout {
+                    MirLayout::Record { nominal, fields }
+                        if target_desc.kind == MirTypeKind::Nominal
+                            && !nominal.as_str().is_empty()
+                            && target_desc.ownership == MirOwnership::Move
+                            && target_desc.abi == MirAbiClass::Aggregate
+                            && target_desc.needs_drop_glue
+                            && target_desc.needs_clone_glue
+                            && target_desc.drop_plan.is_some()
+                            && target_desc.glue
+                                == (crate::core::mir::types::MirGlueContract {
+                                    move_out: MirGlueKind::Aggregate,
+                                    clone: MirGlueKind::Aggregate,
+                                    drop: MirGlueKind::Aggregate,
+                                })
+                            && fields.len() == 1
+                            && fields[0].name == "text"
+                            && fields[0].ty == string_type =>
+                    {
+                        let text_desc = program.type_catalog().get(&fields[0].ty);
+                        text_desc.is_some_and(|text_desc| {
+                            text_desc.kind == MirTypeKind::Primitive(PrimitiveType::String)
+                                && text_desc.layout == MirLayout::Handle
+                                && program
+                                    .type_catalog()
+                                    .validate_owned_string(&fields[0].ty)
+                                    .is_ok()
+                        }) && [
+                            crate::core::mir::types::MirGlueOperation::MoveOut,
+                            crate::core::mir::types::MirGlueOperation::Clone,
+                            crate::core::mir::types::MirGlueOperation::Drop,
+                        ]
+                        .into_iter()
+                        .all(|operation| {
+                            program
+                                .type_catalog()
+                                .validate_glue(&unpack_receipt.result_type, operation)
+                                .is_ok()
+                        })
+                    }
+                    _ => false,
+                };
+                if !target_is_i32 && !target_is_string && !target_is_record {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' target TypeDesc is outside the exact i32/String/Label ABI",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let target_type_desc_digest = blake3::hash(target_desc.canonical_text().as_bytes())
+                    .to_hex()
+                    .to_string();
+                let selected_target = selection
+                    .selected_types
+                    .iter()
+                    .find(|selected| selected.type_id == unpack_receipt.result_type);
+                let selected_kind_matches = selected_target.is_some_and(|selected| {
+                    selected.type_desc_digest == target_type_desc_digest
+                        && (target_is_i32 || target_is_string || target_is_record)
+                });
+                let (target_is_exactly_selected, target_is_exact_canonical_miss) =
+                    match &unpack_receipt.payload_source {
+                        crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload => {
+                            (selected_kind_matches, false)
+                        }
+                        crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss => (
+                            false,
+                            target_is_i32
+                                && unpack_receipt.result_type == get_any.miss_payload_type
+                                && get_any.miss_payload_type_desc_digest == target_type_desc_digest,
+                        ),
+                    };
+                if target_type_desc_digest != unpack_receipt.payload_type_desc_digest
+                    || (!target_is_exactly_selected && !target_is_exact_canonical_miss)
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' target TypeDesc or selected payload identity disagrees with its Core receipt",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let Some(rd) = emitted_register_for_mir_value(function, result) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' result has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(ra) = emitted_register_for_mir_value(function, pair) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' pair has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                if rd == ra {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' aliases its pair register",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let matching_sites = proto
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pc, op)| match op {
+                        Op::MirOrdinaryMapOwnedAnyV2Unpack {
+                            rd: actual_rd,
+                            ra: actual_ra,
+                        } if (*actual_rd, *actual_ra) == (rd, ra) => Some(pc),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let [pc] = matching_sites.as_slice() else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 unpack '{}' does not bind to exactly one emitted opcode/register site",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                bindings.push((
+                    *pc,
+                    CanonicalOrdinaryMapOwnedAnyV2UnpackBinding {
+                        owner: unpack_receipt.owner.clone(),
+                        operation: unpack_receipt.operation.clone(),
+                        instruction: instruction.id.clone(),
+                        projection: unpack_receipt.projection.clone(),
+                        cast: unpack_receipt.cast.clone(),
+                        conversion_kind: unpack_receipt.conversion_kind,
+                        conversion_from: unpack_receipt.conversion_from.clone(),
+                        conversion_to: unpack_receipt.conversion_to.clone(),
+                        payload_source: unpack_receipt.payload_source.clone(),
+                        pair: unpack_receipt.pair.clone(),
+                        pair_local: unpack_receipt.pair_binding_local.clone(),
+                        result: unpack_receipt.result.clone(),
+                        target_type: unpack_receipt.result_type.clone(),
+                        target_type_desc_digest,
+                        get_any_instruction: get_any.instruction.clone(),
+                        settlement: unpack_receipt.settlement,
+                        settlement_point: unpack_receipt.settlement_point.clone(),
+                        settlement_instruction: unpack_receipt.settlement_instruction.clone(),
+                        miss_payload_type: get_any.miss_payload_type.clone(),
+                        payload_selection_digest: unpack_receipt.payload_selection_digest.clone(),
+                        pc: u32::try_from(*pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 unpack PC exceeds u32 ABI"
+                                    .into(),
+                            }]
+                        })?,
+                        rd,
+                        ra,
+                    },
+                ));
+            }
+        }
+
+        let bytecode_sites = proto
+            .code
+            .iter()
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }))
+            .count();
+        if bytecode_sites != bindings.len() {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack MIR/bytecode site census differs (MIR {}, bytecode {bytecode_sites})",
+                    bindings.len()
+                ),
+            }]);
+        }
+        bindings.sort_by_key(|(pc, _)| *pc);
+        if !bindings.is_empty() {
+            bindings_by_function.insert(
+                function_index,
+                bindings.into_iter().map(|(_, binding)| binding).collect(),
+            );
+        }
+    }
+    if let Some(((owner, instruction), _)) = unpack_receipts_by_site.into_iter().next() {
+        return Err(vec![MirBytecodeError {
+            function: owner,
+            message: format!(
+                "Core AnyOwner-v2 unpack result receipt '{}' has no matching MIR instruction",
+                instruction
+            ),
+        }]);
+    }
+    Ok(bindings_by_function)
+}
+
+/// Bind each Core-derived Values snapshot receipt to its exact bytecode
+/// snapshot, result Move, and explicit Drop. The emitted outer ABI is a
+/// `Value::List`; its elements are the dedicated V2 owner identities selected
+/// by the same closed payload receipt used by Set and GetAny.
+fn materialize_ordinary_map_owned_any_v2_values_bindings(
+    program: &MirProgram,
+    ordered: &[(&NodeId, &MirFunction)],
+    indices: &BTreeMap<NodeId, FuncIdx>,
+    functions: &[FunctionProto],
+) -> Result<
+    BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesBinding>>,
+    Vec<MirBytecodeError>,
+> {
+    let receipts = program
+        .ordinary_map_owned_any_v2_values_result_receipts()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values result receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    let selection = program
+        .ordinary_map_owned_any_v2_payload_selection_receipt()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 payload selection receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    let selection = if receipts.is_empty() {
+        selection
+    } else {
+        let selection = selection.ok_or_else(|| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message:
+                    "ordinary Map/Any owner-v2 Values has no exact Core payload selection receipt"
+                        .into(),
+            }]
+        })?;
+        selection
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![MirBytecodeError {
+                    function: NodeId("mir-program".into()),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 payload selection receipt rejected: {message}"
+                    ),
+                }]
+            })?;
+        Some(selection)
+    };
+    let selection_digest = selection
+        .as_ref()
+        .map(|receipt| receipt.selection_digest.as_str());
+
+    let mut receipts_by_site = BTreeMap::new();
+    for receipt in receipts {
+        receipt.validate().map_err(|message| {
+            vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values result receipt rejected: {message}"
+                ),
+            }]
+        })?;
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![MirBytecodeError {
+                    function: receipt.owner.clone(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 Values result receipt rejected: {message}"
+                    ),
+                }]
+            })?;
+        if Some(receipt.payload_selection_digest.as_str()) != selection_digest {
+            return Err(vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values '{}' disagrees with the exact Core payload selection receipt",
+                    receipt.instruction
+                ),
+            }]);
+        }
+        let site = (receipt.owner.clone(), receipt.instruction.clone());
+        if receipts_by_site.insert(site, receipt.clone()).is_some() {
+            return Err(vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "Core AnyOwner-v2 Values result receipt repeats site '{}'",
+                    receipt.instruction
+                ),
+            }]);
+        }
+    }
+
+    let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let values_type = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+    let mut bindings_by_function = BTreeMap::new();
+
+    for (owner, function) in ordered {
+        let Some(&function_index) = indices.get(*owner) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 Values function has no bytecode index".into(),
+            }]);
+        };
+        let Some(proto) = functions.get(function_index as usize) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 Values function has no emitted prototype"
+                    .into(),
+            }]);
+        };
+
+        let mut blocks = Vec::with_capacity(function.blocks.len());
+        if let Some(entry) = function.blocks.get(&function.entry) {
+            blocks.push(entry);
+        }
+        blocks.extend(
+            function
+                .blocks
+                .values()
+                .filter(|block| block.id != function.entry),
+        );
+
+        let mut bindings = Vec::new();
+        for block in blocks {
+            for instruction in &block.instructions {
+                let MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, root } =
+                    &instruction.kind
+                else {
+                    continue;
+                };
+                let site = ((*owner).clone(), instruction.id.clone());
+                let Some(receipt) = receipts_by_site.remove(&site) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' has no Core result-settlement receipt",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                if receipt.owner != **owner
+                    || receipt.result != *result
+                    || receipt.root != *root
+                    || receipt.mir_result_type != values_type
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' disagrees with its exact Core owner/instruction/root/result/type receipt",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let root_value_type = function.values.get(root).map(|value| &value.ty);
+                let result_value_type = function.values.get(result).map(|value| &value.ty);
+                let binding_value_type =
+                    function.values.get(&receipt.binding).map(|value| &value.ty);
+                if root_value_type != Some(&root_type)
+                    || result_value_type != Some(&values_type)
+                    || binding_value_type != Some(&values_type)
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' has a root/result/binding TypeDesc mismatch",
+                            instruction.id
+                        ),
+                    }]);
+                }
+
+                let moves = function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|candidate| {
+                        matches!(
+                            &candidate.kind,
+                            MirInstructionKind::Move { result: move_result, source }
+                                if move_result == &receipt.binding && source == &receipt.result
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let [binding_move] = moves.as_slice() else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' has no unique direct result-to-binding Move",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let drop_instruction = function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .find(|candidate| candidate.id == receipt.settlement_instruction);
+                if !drop_instruction.is_some_and(|candidate| {
+                    matches!(
+                        &candidate.kind,
+                        MirInstructionKind::Drop { value } if value == &receipt.binding
+                    )
+                }) {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' has no exact explicit binding Drop settlement",
+                            instruction.id
+                        ),
+                    }]);
+                }
+
+                let Some(rd) = emitted_register_for_mir_value(function, result) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' result has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(ra) = emitted_register_for_mir_value(function, root) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' root has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(binding_rd) = emitted_register_for_mir_value(function, &receipt.binding)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' binding has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(binding_rs) = emitted_register_for_mir_value(function, &receipt.result)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' result Move has no source register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(drop_ra) = emitted_register_for_mir_value(function, &receipt.binding)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' Drop has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let values_sites = proto
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pc, op)| match op {
+                        Op::MirOrdinaryMapOwnedAnyV2Values {
+                            rd: actual_rd,
+                            ra: actual_ra,
+                        } if (*actual_rd, *actual_ra) == (rd, ra) => Some(pc),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let move_sites = proto
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pc, op)| match op {
+                        Op::Move {
+                            rd: actual_rd,
+                            rs: actual_rs,
+                        } if (*actual_rd, *actual_rs) == (binding_rd, binding_rs) => Some(pc),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let drop_sites = proto
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pc, op)| match op {
+                        Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra: actual_ra }
+                            if *actual_ra == drop_ra =>
+                        {
+                            Some(pc)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let ([pc], [binding_pc], [drop_pc]) = (
+                    values_sites.as_slice(),
+                    move_sites.as_slice(),
+                    drop_sites.as_slice(),
+                ) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values '{}' does not bind to exactly one bytecode snapshot, result Move, and explicit Drop site",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                bindings.push((
+                    *pc,
+                    CanonicalOrdinaryMapOwnedAnyV2ValuesBinding {
+                        owner: receipt.owner,
+                        operation: receipt.operation,
+                        instruction: receipt.instruction,
+                        source_node: receipt.source_node,
+                        source_local: receipt.source_local,
+                        root: receipt.root,
+                        checker_source_type: receipt.checker_source_type,
+                        checker_result_type: receipt.checker_result_type,
+                        result: receipt.result,
+                        mir_result_type: receipt.mir_result_type,
+                        binding_local: receipt.binding_local,
+                        binding: receipt.binding,
+                        settlement: receipt.settlement,
+                        settlement_point: receipt.settlement_point,
+                        settlement_instruction: receipt.settlement_instruction,
+                        payload_selection_digest: receipt.payload_selection_digest,
+                        pc: u32::try_from(*pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 Values PC exceeds u32 ABI"
+                                    .into(),
+                            }]
+                        })?,
+                        rd,
+                        ra,
+                        binding_pc: u32::try_from(*binding_pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 Values Move PC exceeds u32 ABI"
+                                    .into(),
+                            }]
+                        })?,
+                        binding_rd,
+                        binding_rs,
+                        drop_pc: u32::try_from(*drop_pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 Values Drop PC exceeds u32 ABI"
+                                    .into(),
+                            }]
+                        })?,
+                        drop_ra,
+                    },
+                ));
+                let _ = binding_move;
+            }
+        }
+
+        let values_sites = proto
+            .code
+            .iter()
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Values { .. }))
+            .count();
+        let values_drop_sites = proto
+            .code
+            .iter()
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. }))
+            .count();
+        if values_sites != bindings.len() || values_drop_sites != bindings.len() {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values MIR/bytecode census differs (receipts {}, Values opcodes {values_sites}, Values Drop opcodes {values_drop_sites})",
+                    bindings.len()
+                ),
+            }]);
+        }
+        bindings.sort_by_key(|(pc, _)| *pc);
+        if !bindings.is_empty() {
+            bindings_by_function.insert(
+                function_index,
+                bindings.into_iter().map(|(_, binding)| binding).collect(),
+            );
+        }
+    }
+
+    if let Some(((owner, instruction), _)) = receipts_by_site.into_iter().next() {
+        return Err(vec![MirBytecodeError {
+            function: owner,
+            message: format!(
+                "Core AnyOwner-v2 Values result receipt '{}' has no matching MIR instruction",
+                instruction
+            ),
+        }]);
+    }
+    Ok(bindings_by_function)
+}
+
+/// Bind each indexed Any-v2 Values extraction to its exact snapshot, signed
+/// index, cast TypeDesc and Core payload-selection digest. The bytecode op
+/// owns only the copied result; it leaves the source Values List live for its
+/// Checker-directed Drop.
+fn materialize_ordinary_map_owned_any_v2_values_unpack_bindings(
+    program: &MirProgram,
+    ordered: &[(&NodeId, &MirFunction)],
+    indices: &BTreeMap<NodeId, FuncIdx>,
+    functions: &[FunctionProto],
+    emitted_instruction_pc_ranges: &BTreeMap<
+        FuncIdx,
+        BTreeMap<crate::core::mir::MirInstructionId, (usize, usize)>,
+    >,
+) -> Result<
+    BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding>>,
+    Vec<MirBytecodeError>,
+> {
+    let receipts = program
+        .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values unpack Core receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    let values_receipts = program
+        .ordinary_map_owned_any_v2_values_result_receipts()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values snapshot receipt rejected: {message}"
+                ),
+            }]
+        })?;
+    let selection = program
+        .ordinary_map_owned_any_v2_payload_selection_receipt()
+        .map_err(|message| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values unpack payload selection rejected: {message}"
+                ),
+            }]
+        })?;
+    let selection = if receipts.is_empty() {
+        selection
+    } else {
+        let selection = selection.ok_or_else(|| {
+            vec![MirBytecodeError {
+                function: NodeId("mir-program".into()),
+                message:
+                    "ordinary Map/Any owner-v2 Values unpack has no Core payload selection receipt"
+                        .into(),
+            }]
+        })?;
+        selection
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![MirBytecodeError {
+                    function: NodeId("mir-program".into()),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 Values unpack payload selection rejected: {message}"
+                    ),
+                }]
+            })?;
+        Some(selection)
+    };
+    let selection = selection.as_ref();
+    let selection_digest = selection.map(|receipt| receipt.selection_digest.as_str());
+    let mut receipts_by_site = BTreeMap::new();
+    for receipt in receipts {
+        receipt.validate().map_err(|message| {
+            vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values unpack Core receipt rejected: {message}"
+                ),
+            }]
+        })?;
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![MirBytecodeError {
+                    function: receipt.owner.clone(),
+                    message: format!(
+                        "ordinary Map/Any owner-v2 Values unpack Core receipt rejected: {message}"
+                    ),
+                }]
+            })?;
+        if Some(receipt.payload_selection_digest.as_str()) != selection_digest {
+            return Err(vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values unpack '{}' disagrees with the Core payload-selection digest",
+                    receipt.instruction
+                ),
+            }]);
+        }
+        let key = (receipt.owner.clone(), receipt.instruction.clone());
+        if receipts_by_site.insert(key, receipt.clone()).is_some() {
+            return Err(vec![MirBytecodeError {
+                function: receipt.owner.clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values unpack repeats MIR site '{}'",
+                    receipt.instruction
+                ),
+            }]);
+        }
+    }
+
+    let values_type = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+    let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+    let i64_type = crate::core::ir::primitive_type_id(PrimitiveType::I64);
+    let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+    let mut bindings_by_function = BTreeMap::new();
+
+    for (owner, function) in ordered {
+        let Some(&function_index) = indices.get(*owner) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: "ordinary Map/Any owner-v2 Values unpack function has no bytecode index"
+                    .into(),
+            }]);
+        };
+        let Some(proto) = functions.get(function_index as usize) else {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message:
+                    "ordinary Map/Any owner-v2 Values unpack function has no emitted prototype"
+                        .into(),
+            }]);
+        };
+        let mut blocks = Vec::with_capacity(function.blocks.len());
+        if let Some(entry) = function.blocks.get(&function.entry) {
+            blocks.push(entry);
+        }
+        blocks.extend(
+            function
+                .blocks
+                .values()
+                .filter(|block| block.id != function.entry),
+        );
+
+        let mut bindings = Vec::new();
+        for block in blocks {
+            for instruction in &block.instructions {
+                let MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                    result,
+                    values,
+                    index,
+                    projection,
+                } = &instruction.kind
+                else {
+                    continue;
+                };
+                let site = ((*owner).clone(), instruction.id.clone());
+                let Some(receipt) = receipts_by_site.remove(&site) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' has no exact Core receipt",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                if receipt.owner != **owner
+                    || receipt.instruction != instruction.id
+                    || receipt.values != *values
+                    || receipt.index != *index
+                    || receipt.result != *result
+                    || receipt.projection != *projection
+                    || receipt.conversion_to != receipt.result_type
+                    || receipt.conversion_kind
+                        != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' differs from its exact Checker operands/conversion receipt",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let snapshot_receipt = values_receipts
+                    .iter()
+                    .filter(|snapshot| {
+                        snapshot.owner == **owner
+                            && snapshot.operation == receipt.operation
+                            && snapshot.binding_local == receipt.values_binding_local
+                            && snapshot.binding == *values
+                            && snapshot.binding_point == receipt.values_binding_point
+                            && snapshot.settlement == receipt.settlement
+                            && snapshot.settlement_point == receipt.settlement_point
+                            && snapshot.settlement_instruction == receipt.settlement_instruction
+                            && snapshot.payload_selection_digest == receipt.payload_selection_digest
+                    })
+                    .collect::<Vec<_>>();
+                let [_snapshot_receipt] = snapshot_receipt.as_slice() else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' does not name exactly one receipted, explicitly settled snapshot",
+                            instruction.id
+                        ),
+                    }]);
+                };
+
+                let value_type = function.values.get(values).map(|value| &value.ty);
+                let index_value_type = function.values.get(index).map(|value| &value.ty);
+                let result_value_type = function.values.get(result).map(|value| &value.ty);
+                let binding_value_type = function
+                    .values
+                    .get(&receipt.result_binding)
+                    .map(|value| &value.ty);
+                if value_type != Some(&values_type)
+                    || index_value_type != Some(&receipt.index_type)
+                    || result_value_type != Some(&receipt.result_type)
+                    || binding_value_type != Some(&receipt.result_type)
+                    || (receipt.index_type != i32_type && receipt.index_type != i64_type)
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' has mismatched snapshot/index/result TypeDescs",
+                            instruction.id
+                        ),
+                    }]);
+                }
+
+                let index_desc = program.type_catalog().get(&receipt.index_type);
+                if !index_desc.is_some_and(|desc| {
+                    desc.id == receipt.index_type
+                        && desc.layout == MirLayout::Scalar
+                        && desc.ownership == MirOwnership::Copy
+                        && (desc.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+                            || desc.kind == MirTypeKind::Primitive(PrimitiveType::I64))
+                        && program
+                            .type_catalog()
+                            .validate_copy_value(&receipt.index_type)
+                            .is_ok()
+                }) {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' index is not a signed scalar integer",
+                            instruction.id
+                        ),
+                    }]);
+                }
+
+                let target_desc = program.type_catalog().get(&receipt.result_type);
+                let target_type_desc_digest = target_desc
+                    .map(|desc| {
+                        blake3::hash(desc.canonical_text().as_bytes())
+                            .to_hex()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                let target_shape_supported = target_desc.is_some_and(|desc| {
+                    if receipt.result_type == i32_type {
+                        desc.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+                            && desc.layout == MirLayout::Scalar
+                            && desc.ownership == MirOwnership::Copy
+                            && program
+                                .type_catalog()
+                                .validate_copy_value(&i32_type)
+                                .is_ok()
+                    } else if receipt.result_type == string_type {
+                        desc.kind == MirTypeKind::Primitive(PrimitiveType::String)
+                            && desc.layout == MirLayout::Handle
+                            && program
+                                .type_catalog()
+                                .validate_owned_string(&string_type)
+                                .is_ok()
+                    } else if let MirLayout::Record { fields, .. } = &desc.layout {
+                        desc.kind == MirTypeKind::Nominal
+                            && desc.ownership == MirOwnership::Move
+                            && desc.abi == MirAbiClass::Aggregate
+                            && desc.needs_drop_glue
+                            && desc.needs_clone_glue
+                            && desc.drop_plan.is_some()
+                            && desc.glue
+                                == (crate::core::mir::types::MirGlueContract {
+                                    move_out: MirGlueKind::Aggregate,
+                                    clone: MirGlueKind::Aggregate,
+                                    drop: MirGlueKind::Aggregate,
+                                })
+                            && fields.len() == 1
+                            && fields[0].name == "text"
+                            && fields[0].ty == string_type
+                            && program
+                                .type_catalog()
+                                .validate_owned_string(&string_type)
+                                .is_ok()
+                            && [
+                                crate::core::mir::types::MirGlueOperation::MoveOut,
+                                crate::core::mir::types::MirGlueOperation::Clone,
+                                crate::core::mir::types::MirGlueOperation::Drop,
+                            ]
+                            .into_iter()
+                            .all(|operation| {
+                                program
+                                    .type_catalog()
+                                    .validate_glue(&receipt.result_type, operation)
+                                    .is_ok()
+                            })
+                    } else {
+                        false
+                    }
+                });
+                let selected_target_matches = selection.is_some_and(|selection| {
+                    selection.selected_types.iter().any(|selected| {
+                        selected.type_id == receipt.result_type
+                            && selected.type_desc_digest == target_type_desc_digest
+                    })
+                });
+                if !target_shape_supported
+                    || !selected_target_matches
+                    || target_type_desc_digest != receipt.payload_type_desc_digest
+                {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' target is outside the exact selected i32/String/Label TypeDesc",
+                            instruction.id
+                        ),
+                    }]);
+                }
+
+                let moves = function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|candidate| {
+                        matches!(
+                            &candidate.kind,
+                            MirInstructionKind::Move { result: move_result, source }
+                                if move_result == &receipt.result_binding
+                                    && source == &receipt.result
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let [binding_move] = moves.as_slice() else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' has no unique direct result binding Move",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(rd) = emitted_register_for_mir_value(function, result) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' result has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(ra) = emitted_register_for_mir_value(function, values) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' snapshot has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(index_reg) = emitted_register_for_mir_value(function, index) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' index has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(binding_rd) =
+                    emitted_register_for_mir_value(function, &receipt.result_binding)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' binding has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(binding_rs) = emitted_register_for_mir_value(function, &receipt.result)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' Move source has no emitted register",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                // Operand-register tuples are not site identities: separate
+                // MIR projections and Moves can reuse the same bytecode
+                // pattern. Bind through the exact instruction IDs recorded
+                // by FunctionEmitter, then check that each range is the one
+                // expected opcode with the receipt-derived operands.
+                let Some(instruction_pc_ranges) =
+                    emitted_instruction_pc_ranges.get(&function_index)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' has no emitted MIR instruction PC map",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let Some(&(pc, unpack_end)) = instruction_pc_ranges.get(&instruction.id) else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' has no exact emitted PC range",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let unpack_op_matches = unpack_end == pc + 1
+                    && matches!(
+                        proto.code.get(pc),
+                        Some(Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack {
+                            rd: actual_rd,
+                            ra: actual_ra,
+                            index: actual_index,
+                        }) if (*actual_rd, *actual_ra, *actual_index) == (rd, ra, index_reg)
+                    );
+                let Some(&(binding_pc, binding_move_end)) =
+                    instruction_pc_ranges.get(&binding_move.id)
+                else {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' direct result Move has no emitted PC range",
+                            instruction.id
+                        ),
+                    }]);
+                };
+                let binding_move_opcode_matches =
+                    if target_desc.is_some_and(|desc| desc.ownership == MirOwnership::Copy) {
+                        matches!(
+                            proto.code.get(binding_pc),
+                            Some(Op::Mov {
+                                rd: actual_rd,
+                                rs: actual_rs,
+                            }) if (*actual_rd, *actual_rs) == (binding_rd, binding_rs)
+                        )
+                    } else {
+                        matches!(
+                            proto.code.get(binding_pc),
+                            Some(Op::Move {
+                                rd: actual_rd,
+                                rs: actual_rs,
+                            }) if (*actual_rd, *actual_rs) == (binding_rd, binding_rs)
+                        )
+                    };
+                let binding_move_op_matches = binding_pc > pc
+                    && binding_move_end == binding_pc + 1
+                    && binding_move_opcode_matches;
+                if !unpack_op_matches || !binding_move_op_matches {
+                    return Err(vec![MirBytecodeError {
+                        function: (*owner).clone(),
+                        message: format!(
+                            "ordinary Map/Any owner-v2 Values unpack '{}' does not bind to its exact MIR opcode and direct result Move",
+                            instruction.id
+                        ),
+                    }]);
+                }
+                let (owner_settlement_pc, owner_settlement_reg, owner_settlement_arity) =
+                    match receipt.result_owner_settlement {
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::NoOwnedPayload => {
+                            if receipt.result_owner_settlement_instruction.is_some()
+                                || receipt.result_owner_settlement_point.is_some()
+                                || receipt.result_owner_settlement_index.is_some()
+                            {
+                                return Err(vec![MirBytecodeError {
+                                    function: (*owner).clone(),
+                                    message: format!(
+                                        "ordinary Map/Any owner-v2 Values unpack '{}' Copy result has forged owner-Drop metadata",
+                                        instruction.id
+                                    ),
+                                }]);
+                            }
+                            (None, None, None)
+                        }
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::CompilerOwnedStringDrop => {
+                            let Some(settlement_instruction) = receipt
+                                .result_owner_settlement_instruction
+                                .as_ref()
+                            else {
+                                return Err(vec![MirBytecodeError {
+                                    function: (*owner).clone(),
+                                    message: format!(
+                                        "ordinary Map/Any owner-v2 Values unpack '{}' String result has no compiler Drop instruction",
+                                        instruction.id
+                                    ),
+                                }]);
+                            };
+                            let Some(&(settlement_pc, settlement_end)) =
+                                instruction_pc_ranges.get(settlement_instruction)
+                            else {
+                                return Err(vec![MirBytecodeError {
+                                    function: (*owner).clone(),
+                                    message: format!(
+                                        "ordinary Map/Any owner-v2 Values unpack '{}' compiler String Drop has no emitted MIR PC range",
+                                        instruction.id
+                                    ),
+                                }]);
+                            };
+                            if settlement_end != settlement_pc + 1
+                                || receipt.result_owner_settlement_point.is_none()
+                                || receipt.result_owner_settlement_index.is_some()
+                                || settlement_pc <= binding_pc
+                                || !matches!(
+                                    proto.code.get(settlement_pc),
+                                    Some(Op::Drop { ra }) if *ra == binding_rd
+                                )
+                            {
+                                return Err(vec![MirBytecodeError {
+                                    function: (*owner).clone(),
+                                    message: format!(
+                                        "ordinary Map/Any owner-v2 Values unpack '{}' compiler String Drop does not release its exact result-binding register",
+                                        instruction.id
+                                    ),
+                                }]);
+                            }
+                            (Some(settlement_pc), Some(binding_rd), None)
+                        }
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::ExplicitWholeDrop => {
+                            let Some(settlement_instruction) = receipt
+                                .result_owner_settlement_instruction
+                                .as_ref()
+                            else {
+                                return Err(vec![MirBytecodeError {
+                                    function: (*owner).clone(),
+                                    message: format!(
+                                        "ordinary Map/Any owner-v2 Values unpack '{}' record result has no whole-Drop instruction",
+                                        instruction.id
+                                    ),
+                                }]);
+                            };
+                            let Some(&(settlement_pc, settlement_end)) =
+                                instruction_pc_ranges.get(settlement_instruction)
+                            else {
+                                return Err(vec![MirBytecodeError {
+                                    function: (*owner).clone(),
+                                    message: format!(
+                                        "ordinary Map/Any owner-v2 Values unpack '{}' whole-record Drop has no emitted MIR PC range",
+                                        instruction.id
+                                    ),
+                                }]);
+                            };
+                            let arity = target_desc
+                                .and_then(|desc| match &desc.layout {
+                                    MirLayout::Record { fields, .. } => {
+                                        u16::try_from(fields.len()).ok()
+                                    }
+                                    _ => None,
+                                })
+                                .ok_or_else(|| {
+                                    vec![MirBytecodeError {
+                                        function: (*owner).clone(),
+                                        message: format!(
+                                            "ordinary Map/Any owner-v2 Values unpack '{}' Label Drop has no canonical aggregate arity",
+                                            instruction.id
+                                        ),
+                                    }]
+                                })?;
+                            if settlement_end != settlement_pc + 1
+                                || receipt.result_owner_settlement_point.is_none()
+                                || receipt.result_owner_settlement_index.is_none()
+                                || settlement_pc <= binding_pc
+                                || !matches!(
+                                    proto.code.get(settlement_pc),
+                                    Some(Op::DropAggregate { ra, arity: actual_arity })
+                                        if *ra == binding_rd && *actual_arity == arity
+                                )
+                            {
+                                return Err(vec![MirBytecodeError {
+                                    function: (*owner).clone(),
+                                    message: format!(
+                                        "ordinary Map/Any owner-v2 Values unpack '{}' whole-record Drop does not release its exact result-binding register/layout",
+                                        instruction.id
+                                    ),
+                                }]);
+                            }
+                            (Some(settlement_pc), Some(binding_rd), Some(arity))
+                        }
+                    };
+                bindings.push((
+                    pc,
+                    CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding {
+                        owner: receipt.owner,
+                        operation: receipt.operation,
+                        instruction: receipt.instruction,
+                        values_binding_local: receipt.values_binding_local,
+                        values: receipt.values,
+                        values_binding_point: receipt.values_binding_point,
+                        projection: receipt.projection,
+                        index_expression: receipt.index_expression,
+                        index_type: receipt.index_type,
+                        index: receipt.index,
+                        cast: receipt.cast,
+                        conversion_kind: receipt.conversion_kind,
+                        conversion_from: receipt.conversion_from,
+                        conversion_to: receipt.conversion_to,
+                        result: receipt.result,
+                        result_type: receipt.result_type,
+                        result_binding_local: receipt.result_binding_local,
+                        result_binding_point: receipt.result_binding_point,
+                        result_binding: receipt.result_binding,
+                        result_owner_settlement: receipt.result_owner_settlement,
+                        result_owner_settlement_point: receipt.result_owner_settlement_point,
+                        result_owner_settlement_index: receipt.result_owner_settlement_index,
+                        result_owner_settlement_instruction: receipt
+                            .result_owner_settlement_instruction,
+                        result_owner_settlement_pc: owner_settlement_pc
+                            .map(|pc| {
+                                u32::try_from(pc).map_err(|_| {
+                                    vec![MirBytecodeError {
+                                        function: (*owner).clone(),
+                                        message: "ordinary Map/Any owner-v2 Values result-owner Drop PC exceeds u32 ABI".into(),
+                                    }]
+                                })
+                            })
+                            .transpose()?,
+                        result_owner_settlement_reg: owner_settlement_reg,
+                        result_owner_settlement_arity: owner_settlement_arity,
+                        settlement: receipt.settlement,
+                        settlement_point: receipt.settlement_point,
+                        settlement_instruction: receipt.settlement_instruction,
+                        payload_selection_digest: receipt.payload_selection_digest,
+                        payload_type_desc_digest: target_type_desc_digest,
+                        pc: u32::try_from(pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 Values unpack PC exceeds u32 ABI".into(),
+                            }]
+                        })?,
+                        rd,
+                        ra,
+                        index_reg,
+                        result_binding_pc: u32::try_from(binding_pc).map_err(|_| {
+                            vec![MirBytecodeError {
+                                function: (*owner).clone(),
+                                message: "ordinary Map/Any owner-v2 Values unpack result Move PC exceeds u32 ABI".into(),
+                            }]
+                        })?,
+                        result_binding_rd: binding_rd,
+                        result_binding_rs: binding_rs,
+                    },
+                ));
+            }
+        }
+
+        let bytecode_sites = proto
+            .code
+            .iter()
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }))
+            .count();
+        if bytecode_sites != bindings.len() {
+            return Err(vec![MirBytecodeError {
+                function: (*owner).clone(),
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values unpack MIR/bytecode census differs (receipts {}, opcodes {bytecode_sites})",
+                    bindings.len()
+                ),
+            }]);
+        }
+        bindings.sort_by_key(|(pc, _)| *pc);
+        if !bindings.is_empty() {
+            bindings_by_function.insert(
+                function_index,
+                bindings.into_iter().map(|(_, binding)| binding).collect(),
+            );
+        }
+    }
+
+    if let Some(((owner, instruction), _)) = receipts_by_site.into_iter().next() {
+        return Err(vec![MirBytecodeError {
+            function: owner,
+            message: format!(
+                "Core AnyOwner-v2 Values unpack receipt '{}' has no matching MIR instruction",
+                instruction
+            ),
+        }]);
+    }
+    Ok(bindings_by_function)
 }
 
 #[derive(Debug)]
@@ -2692,6 +4926,10 @@ struct FunctionEmitter<'a> {
     ffi_indices: &'a BTreeMap<crate::core::mir::MirInstructionId, u16>,
     proto: FunctionProto,
     registers: BTreeMap<MirValueId, Reg>,
+    /// Exact emission intervals for ValuesUnpack and MIR Move instructions,
+    /// used by Core receipt materialization to avoid inferring site identity
+    /// from potentially reusable register tuples.
+    emitted_instruction_pc_ranges: BTreeMap<crate::core::mir::MirInstructionId, (usize, usize)>,
     block_starts: BTreeMap<crate::core::mir::MirBlockId, usize>,
     pending_jumps: Vec<(usize, crate::core::mir::MirBlockId)>,
     errors: Vec<MirBytecodeError>,
@@ -2703,6 +4941,8 @@ struct FunctionEmitter<'a> {
     map_any_owner_v1: bool,
     /// Selected from the independent checker-owned typed owned-Get ledger.
     ordinary_map_owned_get_i32_string_v1: bool,
+    /// Selected from the independent checker-owned owner-v2 ledger.
+    ordinary_map_owned_any_v2: bool,
 }
 
 fn compile_function(
@@ -2710,7 +4950,13 @@ fn compile_function(
     program: &MirProgram,
     indices: &BTreeMap<NodeId, FuncIdx>,
     ffi_indices: &BTreeMap<crate::core::mir::MirInstructionId, u16>,
-) -> Result<FunctionProto, Vec<MirBytecodeError>> {
+) -> Result<
+    (
+        FunctionProto,
+        BTreeMap<crate::core::mir::MirInstructionId, (usize, usize)>,
+    ),
+    Vec<MirBytecodeError>,
+> {
     let parameter_count = match u16::try_from(function.parameters.len()) {
         Ok(count) => count,
         Err(_) => {
@@ -2727,6 +4973,7 @@ fn compile_function(
         ffi_indices,
         proto: FunctionProto::new(function.owner.0.clone(), parameter_count),
         registers: BTreeMap::new(),
+        emitted_instruction_pc_ranges: BTreeMap::new(),
         block_starts: BTreeMap::new(),
         pending_jumps: Vec::new(),
         errors: Vec::new(),
@@ -2736,6 +4983,9 @@ fn compile_function(
         ordinary_map_owned_get_i32_string_v1: function
             .ownership
             .has_checker_ordinary_map_owned_get_i32_string_v1_actions(),
+        ordinary_map_owned_any_v2: function
+            .ownership
+            .has_checker_ordinary_map_owned_any_v2_actions(),
     };
     emitter.assign_registers();
     emitter.validate_signature();
@@ -2743,7 +4993,7 @@ fn compile_function(
     emitter.emit_blocks();
     emitter.patch_jumps();
     if emitter.errors.is_empty() {
-        Ok(emitter.proto)
+        Ok((emitter.proto, emitter.emitted_instruction_pc_ranges))
     } else {
         Err(emitter.errors)
     }
@@ -2926,6 +5176,9 @@ impl<'a> FunctionEmitter<'a> {
                     || self
                         .validate_ordinary_map_owned_get_type_id(&value.ty)
                         .is_ok()
+                    || self
+                        .validate_ordinary_map_owned_any_v2_type_id(&value.ty)
+                        .is_ok()
                     || self.supported_type(&value.ty).is_err()
                 {
                     self.error(format!(
@@ -2940,6 +5193,9 @@ impl<'a> FunctionEmitter<'a> {
             .is_ok()
             || self
                 .validate_ordinary_map_owned_get_type_id(&self.function.result)
+                .is_ok()
+            || self
+                .validate_ordinary_map_owned_any_v2_type_id(&self.function.result)
                 .is_ok()
             || self.supported_type(&self.function.result).is_err()
         {
@@ -3159,6 +5415,13 @@ impl<'a> FunctionEmitter<'a> {
         instruction_id: &crate::core::mir::MirInstructionId,
         instruction: &MirInstructionKind,
     ) {
+        let pc_start = self.proto.code.len();
+        let track_emitted_range = matches!(
+            instruction,
+            MirInstructionKind::Move { .. }
+                | MirInstructionKind::Drop { .. }
+                | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+        );
         match instruction {
             MirInstructionKind::Actor { operation } => self.emit_actor(instruction_id, operation),
             MirInstructionKind::MapRootNew { result } => {
@@ -3386,6 +5649,350 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 self.proto
                     .emit(Op::MirOrdinaryMapOwnerLifecycleI32StringV1Drop { ra });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error("ordinary Map/Any owner-v2 New has no independent Checker receipt");
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(result) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 New result '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2New { rd });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error("ordinary Map/Any owner-v2 Set has no independent Checker receipt");
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(source) else { return };
+                let Some(key_reg) = self.reg(key) else { return };
+                let Some(value_reg) = self.reg(value) else {
+                    return;
+                };
+                for (id, role) in [(result, "result"), (source, "source")] {
+                    if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(id) {
+                        self.error(format!(
+                            "ordinary Map/Any owner-v2 Set {role} '{id}' is invalid: {message}"
+                        ));
+                        return;
+                    }
+                }
+                if let Err(message) = self.validate_ordinary_map_owner_lifecycle_string_type(key) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Set key '{key}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_payload_type(value) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Set payload '{value}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2Set {
+                    rd,
+                    ra,
+                    key: key_reg,
+                    value: value_reg,
+                });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
+                result,
+                source,
+                key,
+            } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error(
+                        "ordinary Map/Any owner-v2 Remove has no independent Checker receipt",
+                    );
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(source) else { return };
+                let Some(key_reg) = self.reg(key) else { return };
+                for (id, role) in [(result, "result"), (source, "source")] {
+                    if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(id) {
+                        self.error(format!(
+                            "ordinary Map/Any owner-v2 Remove {role} '{id}' is invalid: {message}"
+                        ));
+                        return;
+                    }
+                }
+                if let Err(message) = self.validate_ordinary_map_owner_lifecycle_string_type(key) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Remove key '{key}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2Remove {
+                    rd,
+                    ra,
+                    key: key_reg,
+                });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, root } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error("ordinary Map/Any owner-v2 Size has no independent Checker receipt");
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(root) else { return };
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(root) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Size root '{root}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owner_lifecycle_i32_type(result) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Size result '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2Size { rd, ra });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, root, key } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error(
+                        "ordinary Map/Any owner-v2 Contains has no independent Checker receipt",
+                    );
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(root) else { return };
+                let Some(key_reg) = self.reg(key) else { return };
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(root) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Contains root '{root}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owner_lifecycle_string_type(key) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Contains key '{key}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owner_lifecycle_bool_type(result) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Contains result '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2Contains {
+                    rd,
+                    ra,
+                    key: key_reg,
+                });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, root, key } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error(
+                        "ordinary Map/Any owner-v2 GetAny has no independent Checker receipt",
+                    );
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(root) else { return };
+                let Some(key_reg) = self.reg(key) else { return };
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(root) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 GetAny root '{root}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owner_lifecycle_string_type(key) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 GetAny key '{key}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) =
+                    self.validate_ordinary_map_owned_any_v2_get_result_type(result)
+                {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 GetAny result '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2GetAny {
+                    rd,
+                    ra,
+                    key: key_reg,
+                });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection,
+            } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error(
+                        "ordinary Map/Any owner-v2 unpack has no independent Checker receipt",
+                    );
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(pair) else { return };
+                if rd == ra {
+                    self.error("ordinary Map/Any owner-v2 unpack aliases its pair register");
+                    return;
+                }
+                if projection.0.trim().is_empty() {
+                    self.error("ordinary Map/Any owner-v2 unpack has an empty projection identity");
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_get_result_type(pair)
+                {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 unpack pair '{pair}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) =
+                    self.validate_ordinary_map_owned_any_v2_unpack_target_type(result)
+                {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 unpack target '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto
+                    .emit(Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                result,
+                values,
+                index,
+                projection,
+            } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error(
+                        "ordinary Map/Any owner-v2 Values unpack has no independent Checker receipt",
+                    );
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(values) else { return };
+                let Some(index_reg) = self.reg(index) else {
+                    return;
+                };
+                if rd == ra {
+                    self.error(
+                        "ordinary Map/Any owner-v2 Values unpack result aliases its snapshot",
+                    );
+                    return;
+                }
+                if projection.0.trim().is_empty() {
+                    self.error(
+                        "ordinary Map/Any owner-v2 Values unpack has an empty projection identity",
+                    );
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_values_type(values) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Values unpack snapshot '{values}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) =
+                    self.validate_ordinary_map_owned_any_v2_unpack_target_type(result)
+                {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Values unpack target '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) =
+                    self.validate_ordinary_map_owned_any_v2_values_index_type(index)
+                {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Values unpack index '{index}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack {
+                    rd,
+                    ra,
+                    index: index_reg,
+                });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, root } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error(
+                        "ordinary Map/Any owner-v2 Values has no independent Checker receipt",
+                    );
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(root) else { return };
+                if rd == ra {
+                    self.error("ordinary Map/Any owner-v2 Values result aliases its source root");
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(root) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Values root '{root}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_values_type(result) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Values result '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto
+                    .emit(Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error(
+                        "ordinary Map/Any owner-v2 IsEmpty has no independent Checker receipt",
+                    );
+                    return;
+                }
+                let Some(rd) = self.reg(result) else { return };
+                let Some(ra) = self.reg(root) else { return };
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(root) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 IsEmpty root '{root}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                if let Err(message) = self.validate_ordinary_map_owner_lifecycle_bool_type(result) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 IsEmpty result '{result}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto
+                    .emit(Op::MirOrdinaryMapOwnedAnyV2IsEmpty { rd, ra });
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => {
+                if !self.ordinary_map_owned_any_v2 {
+                    self.error("ordinary Map/Any owner-v2 Drop has no independent Checker receipt");
+                    return;
+                }
+                let Some(ra) = self.reg(root) else { return };
+                if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(root) {
+                    self.error(format!(
+                        "ordinary Map/Any owner-v2 Drop root '{root}' is invalid: {message}"
+                    ));
+                    return;
+                }
+                self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2Drop { ra });
             }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result } => {
                 if !self.ordinary_map_owned_get_i32_string_v1 {
@@ -3799,6 +6406,12 @@ impl<'a> FunctionEmitter<'a> {
                     || self
                         .validate_ordinary_map_owned_get_type_id(&desc.id)
                         .is_ok()
+                    || self
+                        .validate_ordinary_map_owned_any_v2_type_id(&desc.id)
+                        .is_ok()
+                    || self
+                        .validate_ordinary_map_owned_any_v2_values_type_id(&desc.id)
+                        .is_ok()
                 {
                     self.error(format!(
                         "ordinary Map owner value '{}' cannot use generic Copy",
@@ -3832,6 +6445,7 @@ impl<'a> FunctionEmitter<'a> {
                         | MirGlueKind::Aggregate
                         | MirGlueKind::Session
                         | MirGlueKind::ManagedAnyI32StringV1
+                        | MirGlueKind::OrdinaryMapOwnedAnyV2Values
                 ) {
                     self.proto.emit(Op::Move { rd, rs });
                 } else {
@@ -3883,6 +6497,19 @@ impl<'a> FunctionEmitter<'a> {
                     }
                     self.proto
                         .emit(Op::MirOrdinaryMapOwnedGetI32StringV1Clone { rd, ra: rs });
+                } else if desc.glue.clone == MirGlueKind::OrdinaryMapOwnedAnyV2 {
+                    if !self.ordinary_map_owned_any_v2 {
+                        self.error(
+                            "ordinary Map/Any owner-v2 Clone has no independent Checker receipt",
+                        );
+                        return;
+                    }
+                    if let Err(message) = self.validate_ordinary_map_owned_any_v2_type(result) {
+                        self.error(message);
+                        return;
+                    }
+                    self.proto
+                        .emit(Op::MirOrdinaryMapOwnedAnyV2Clone { rd, ra: rs });
                 } else if desc.ownership == MirOwnership::Copy {
                     self.proto.emit(Op::Mov { rd, rs });
                 } else if matches!(
@@ -3910,6 +6537,29 @@ impl<'a> FunctionEmitter<'a> {
                         "value '{}' is not in the canonical bytecode slice",
                         value
                     ));
+                } else if desc.glue.drop == MirGlueKind::OrdinaryMapOwnedAnyV2 {
+                    if !self.ordinary_map_owned_any_v2 {
+                        self.error(
+                            "ordinary Map/Any owner-v2 Drop has no independent Checker receipt",
+                        );
+                    } else if let Some(ra) = self.reg(value) {
+                        self.proto.emit(Op::MirOrdinaryMapOwnedAnyV2Drop { ra });
+                    }
+                } else if desc.glue.drop == MirGlueKind::OrdinaryMapOwnedAnyV2Values {
+                    if !self.ordinary_map_owned_any_v2 {
+                        self.error(
+                            "ordinary Map/Any owner-v2 Values Drop has no independent Checker receipt",
+                        );
+                    } else if let Err(message) =
+                        self.validate_ordinary_map_owned_any_v2_values_type(value)
+                    {
+                        self.error(format!(
+                            "ordinary Map/Any owner-v2 Values Drop '{value}' is invalid: {message}"
+                        ));
+                    } else if let Some(ra) = self.reg(value) {
+                        self.proto
+                            .emit(Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra });
+                    }
                 } else if desc.ownership != MirOwnership::Copy
                     && matches!(
                         desc.glue.drop,
@@ -4140,6 +6790,19 @@ impl<'a> FunctionEmitter<'a> {
             }
             MirInstructionKind::Convert { result, source } => self.emit_convert(result, source),
             MirInstructionKind::Nop => {}
+        }
+        let pc_end = self.proto.code.len();
+        if track_emitted_range
+            && pc_start < pc_end
+            && self
+                .emitted_instruction_pc_ranges
+                .insert(instruction_id.clone(), (pc_start, pc_end))
+                .is_some()
+        {
+            self.error(format!(
+                "MIR instruction '{}' emitted bytecode more than once",
+                instruction_id
+            ));
         }
     }
 
@@ -7428,6 +10091,402 @@ impl<'a> FunctionEmitter<'a> {
         Ok(())
     }
 
+    fn validate_ordinary_map_owned_any_v2_type(&self, value: &MirValueId) -> Result<(), String> {
+        let info = self
+            .function
+            .values
+            .get(value)
+            .ok_or_else(|| format!("value '{}' is absent from MIR value catalog", value))?;
+        self.validate_ordinary_map_owned_any_v2_type_id(&info.ty)
+    }
+
+    fn validate_ordinary_map_owned_any_v2_type_id(
+        &self,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> Result<(), String> {
+        let expected = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+        if ty != &expected {
+            return Err(format!(
+                "type '{}' is not the ordinary Map/Any owner-v2 identity",
+                ty.as_str()
+            ));
+        }
+        let desc = self.program.type_catalog().get(ty).ok_or_else(|| {
+            format!(
+                "ordinary Map/Any owner-v2 type '{}' is absent from TypeDesc",
+                ty.as_str()
+            )
+        })?;
+        let expected_glue = crate::core::mir::types::MirGlueContract {
+            move_out: MirGlueKind::OrdinaryMapOwnedAnyV2,
+            clone: MirGlueKind::OrdinaryMapOwnedAnyV2,
+            drop: MirGlueKind::OrdinaryMapOwnedAnyV2,
+        };
+        if desc.id != expected
+            || desc.kind != MirTypeKind::OrdinaryMapOwnedAnyV2
+            || desc.layout != MirLayout::OrdinaryMapOwnedAnyV2
+            || desc.abi != MirAbiClass::OpaqueHandle
+            || desc.ownership != MirOwnership::Move
+            || !desc.needs_drop_glue
+            || !desc.needs_clone_glue
+            || desc.glue != expected_glue
+            || desc.session_protocol.is_some()
+            || desc.drop_plan.is_some()
+            || desc.variant_drop_plan.is_some()
+        {
+            return Err(format!(
+                "type '{}' has an inconsistent ordinary Map/Any owner-v2 ABI/glue contract",
+                ty.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_ordinary_map_owned_any_v2_payload_type(
+        &self,
+        value: &MirValueId,
+    ) -> Result<(), String> {
+        let info = self
+            .function
+            .values
+            .get(value)
+            .ok_or_else(|| format!("value '{}' is absent from MIR value catalog", value))?;
+        let desc = self
+            .program
+            .type_catalog()
+            .get(&info.ty)
+            .ok_or_else(|| format!("type '{}' is absent from TypeDesc", info.ty.as_str()))?;
+        if desc.kind == MirTypeKind::Primitive(PrimitiveType::I32)
+            && desc.layout == MirLayout::Scalar
+            && desc.ownership == MirOwnership::Copy
+        {
+            return self.program.type_catalog().validate_copy_value(&info.ty);
+        }
+        if desc.kind == MirTypeKind::Primitive(PrimitiveType::String)
+            && desc.layout == MirLayout::Handle
+            && desc.ownership == MirOwnership::Move
+        {
+            self.program
+                .type_catalog()
+                .validate_owned_string(&info.ty)?;
+            for operation in [
+                crate::core::mir::types::MirGlueOperation::MoveOut,
+                crate::core::mir::types::MirGlueOperation::Clone,
+                crate::core::mir::types::MirGlueOperation::Drop,
+            ] {
+                self.program
+                    .type_catalog()
+                    .validate_glue(&info.ty, operation)?;
+            }
+            return Ok(());
+        }
+        let MirLayout::Record { nominal, fields } = &desc.layout else {
+            return Err(format!(
+                "value '{}' is outside the owner-v2 i32/Label payload profile",
+                value
+            ));
+        };
+        if desc.kind != MirTypeKind::Nominal
+            || nominal.as_str().is_empty()
+            || desc.ownership != MirOwnership::Move
+            || desc.abi != MirAbiClass::Aggregate
+            || !desc.needs_drop_glue
+            || !desc.needs_clone_glue
+            || desc.drop_plan.is_none()
+            || desc.glue
+                != (crate::core::mir::types::MirGlueContract {
+                    move_out: MirGlueKind::Aggregate,
+                    clone: MirGlueKind::Aggregate,
+                    drop: MirGlueKind::Aggregate,
+                })
+            || fields.len() != 1
+            || fields[0].name != "text"
+        {
+            return Err(format!(
+                "value '{}' is not the concrete Label {{ text: string }} payload",
+                value
+            ));
+        }
+        let text = self
+            .program
+            .type_catalog()
+            .get(&fields[0].ty)
+            .ok_or_else(|| "owner-v2 Label text TypeDesc is absent".to_string())?;
+        if text.kind != MirTypeKind::Primitive(PrimitiveType::String)
+            || text.layout != MirLayout::Handle
+            || self
+                .program
+                .type_catalog()
+                .validate_owned_string(&fields[0].ty)
+                .is_err()
+        {
+            return Err(format!(
+                "value '{}' Label text field is not an owned String",
+                value
+            ));
+        }
+        self.program
+            .type_catalog()
+            .validate_glue(&info.ty, crate::core::mir::types::MirGlueOperation::MoveOut)?;
+        self.program
+            .type_catalog()
+            .validate_glue(&info.ty, crate::core::mir::types::MirGlueOperation::Clone)?;
+        self.program
+            .type_catalog()
+            .validate_glue(&info.ty, crate::core::mir::types::MirGlueOperation::Drop)
+    }
+
+    fn validate_ordinary_map_owned_any_v2_get_result_type(
+        &self,
+        value: &MirValueId,
+    ) -> Result<(), String> {
+        let info = self
+            .function
+            .values
+            .get(value)
+            .ok_or_else(|| format!("value '{}' is absent from MIR value catalog", value))?;
+        let expected = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+        if info.ty != expected {
+            return Err(format!(
+                "type '{}' is not the canonical (bool, DynamicAny-owner-v2) result identity",
+                info.ty.as_str()
+            ));
+        }
+        for operation in [
+            crate::core::mir::types::MirGlueOperation::MoveOut,
+            crate::core::mir::types::MirGlueOperation::Drop,
+        ] {
+            self.program
+                .type_catalog()
+                .validate_glue(&expected, operation)?;
+        }
+        Ok(())
+    }
+
+    fn validate_ordinary_map_owned_any_v2_unpack_target_type(
+        &self,
+        value: &MirValueId,
+    ) -> Result<(), String> {
+        let info = self
+            .function
+            .values
+            .get(value)
+            .ok_or_else(|| format!("value '{}' is absent from MIR value catalog", value))?;
+        let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+        if info.ty == i32_type || info.ty == string_type {
+            let desc = self
+                .program
+                .type_catalog()
+                .get(&info.ty)
+                .ok_or_else(|| format!("target TypeDesc '{}' is absent", info.ty.as_str()))?;
+            if info.ty == i32_type {
+                if desc.kind != MirTypeKind::Primitive(PrimitiveType::I32)
+                    || desc.layout != MirLayout::Scalar
+                    || desc.ownership != MirOwnership::Copy
+                {
+                    return Err(format!(
+                        "target TypeDesc '{}' has an unsupported owner-v2 unpack ABI",
+                        info.ty.as_str()
+                    ));
+                }
+                return self.program.type_catalog().validate_copy_value(&i32_type);
+            }
+            if desc.kind != MirTypeKind::Primitive(PrimitiveType::String)
+                || desc.layout != MirLayout::Handle
+            {
+                return Err(format!(
+                    "target TypeDesc '{}' has an unsupported owner-v2 unpack ABI",
+                    info.ty.as_str()
+                ));
+            }
+            self.program
+                .type_catalog()
+                .validate_owned_string(&string_type)?;
+            for operation in [
+                crate::core::mir::types::MirGlueOperation::Clone,
+                crate::core::mir::types::MirGlueOperation::Drop,
+            ] {
+                self.program
+                    .type_catalog()
+                    .validate_glue(&string_type, operation)?;
+            }
+            return Ok(());
+        }
+
+        let desc = self
+            .program
+            .type_catalog()
+            .get(&info.ty)
+            .ok_or_else(|| format!("target TypeDesc '{}' is absent", info.ty.as_str()))?;
+        let MirLayout::Record { nominal, fields } = &desc.layout else {
+            return Err(format!(
+                "target TypeDesc '{}' is outside the exact owner-v2 i32/String/Label unpack profile",
+                info.ty.as_str()
+            ));
+        };
+        if desc.kind != MirTypeKind::Nominal
+            || nominal.as_str().is_empty()
+            || desc.ownership != MirOwnership::Move
+            || desc.abi != MirAbiClass::Aggregate
+            || !desc.needs_drop_glue
+            || !desc.needs_clone_glue
+            || fields.len() != 1
+            || fields[0].name != "text"
+            || fields[0].ty != string_type
+        {
+            return Err(format!(
+                "target TypeDesc '{}' is not the concrete Label {{ text: string }} unpack shape",
+                info.ty.as_str()
+            ));
+        }
+        let text = self
+            .program
+            .type_catalog()
+            .get(&fields[0].ty)
+            .ok_or_else(|| "owner-v2 Label text TypeDesc is absent".to_string())?;
+        if text.kind != MirTypeKind::Primitive(PrimitiveType::String)
+            || text.layout != MirLayout::Handle
+            || self
+                .program
+                .type_catalog()
+                .validate_owned_string(&fields[0].ty)
+                .is_err()
+        {
+            return Err(format!(
+                "target TypeDesc '{}' Label text field is not an owned String",
+                info.ty.as_str()
+            ));
+        }
+        for operation in [
+            crate::core::mir::types::MirGlueOperation::MoveOut,
+            crate::core::mir::types::MirGlueOperation::Clone,
+            crate::core::mir::types::MirGlueOperation::Drop,
+        ] {
+            self.program
+                .type_catalog()
+                .validate_glue(&info.ty, operation)?;
+        }
+        Ok(())
+    }
+
+    fn validate_ordinary_map_owned_any_v2_values_index_type(
+        &self,
+        value: &MirValueId,
+    ) -> Result<(), String> {
+        let info = self
+            .function
+            .values
+            .get(value)
+            .ok_or_else(|| format!("value '{}' is absent from MIR value catalog", value))?;
+        let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+        let i64_type = crate::core::ir::primitive_type_id(PrimitiveType::I64);
+        if info.ty != i32_type && info.ty != i64_type {
+            return Err(format!(
+                "index TypeDesc '{}' is not signed i32/i64",
+                info.ty.as_str()
+            ));
+        }
+        let desc = self
+            .program
+            .type_catalog()
+            .get(&info.ty)
+            .ok_or_else(|| format!("index TypeDesc '{}' is absent", info.ty.as_str()))?;
+        let primitive = if info.ty == i32_type {
+            PrimitiveType::I32
+        } else {
+            PrimitiveType::I64
+        };
+        if desc.kind != MirTypeKind::Primitive(primitive)
+            || desc.layout != MirLayout::Scalar
+            || desc.ownership != MirOwnership::Copy
+        {
+            return Err(format!(
+                "index TypeDesc '{}' has an unsupported signed index ABI",
+                info.ty.as_str()
+            ));
+        }
+        self.program.type_catalog().validate_copy_value(&info.ty)
+    }
+
+    fn validate_ordinary_map_owned_any_v2_values_type(
+        &self,
+        value: &MirValueId,
+    ) -> Result<(), String> {
+        let info = self
+            .function
+            .values
+            .get(value)
+            .ok_or_else(|| format!("value '{}' is absent from MIR value catalog", value))?;
+        self.validate_ordinary_map_owned_any_v2_values_type_id(&info.ty)
+    }
+
+    fn validate_ordinary_map_owned_any_v2_values_type_id(
+        &self,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> Result<(), String> {
+        use crate::core::mir::types::MirGlueOperation as GlueOp;
+        let expected = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+        let element = crate::core::mir::types::ordinary_map_owned_any_v2_values_element_type_id();
+        let desc = self
+            .program
+            .type_catalog()
+            .get(ty)
+            .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if ty != &expected
+            || desc.id != expected
+            || desc.kind != MirTypeKind::OrdinaryMapOwnedAnyV2Values
+            || desc.layout
+                != (MirLayout::List {
+                    element: element.clone(),
+                })
+            || desc.abi != MirAbiClass::OpaqueHandle
+            || desc.ownership != MirOwnership::Move
+            || !desc.needs_drop_glue
+            || !desc.needs_clone_glue
+            || desc.glue.move_out != MirGlueKind::OrdinaryMapOwnedAnyV2Values
+            || desc.glue.clone != MirGlueKind::OrdinaryMapOwnedAnyV2Values
+            || desc.glue.drop != MirGlueKind::OrdinaryMapOwnedAnyV2Values
+            || desc.session_protocol.is_some()
+            || desc.drop_plan.is_some()
+            || desc.variant_drop_plan.is_some()
+        {
+            return Err(format!(
+                "type '{}' has an inconsistent ordinary Map/Any owner-v2 List ABI/glue contract",
+                ty.as_str()
+            ));
+        }
+        for operation in [GlueOp::MoveOut, GlueOp::Drop] {
+            self.program.type_catalog().validate_glue(ty, operation)?;
+        }
+        let element_desc = self.program.type_catalog().get(&element).ok_or_else(|| {
+            "ordinary Map/Any owner-v2 Values element TypeDesc is absent".to_string()
+        })?;
+        if element_desc.kind != MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement
+            || element_desc.layout != MirLayout::OrdinaryMapOwnedAnyV2ValuesElement
+            || element_desc.abi != MirAbiClass::OpaqueHandle
+            || element_desc.ownership != MirOwnership::Move
+            || !element_desc.needs_drop_glue
+            || !element_desc.needs_clone_glue
+            || element_desc.glue.move_out != MirGlueKind::OrdinaryMapOwnedAnyV2ValuesElement
+            || element_desc.glue.clone != MirGlueKind::OrdinaryMapOwnedAnyV2ValuesElement
+            || element_desc.glue.drop != MirGlueKind::OrdinaryMapOwnedAnyV2ValuesElement
+            || element_desc.session_protocol.is_some()
+            || element_desc.drop_plan.is_some()
+            || element_desc.variant_drop_plan.is_some()
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 Values element does not match its opaque owned payload TypeDesc".into(),
+            );
+        }
+        for operation in [GlueOp::MoveOut, GlueOp::Drop] {
+            self.program
+                .type_catalog()
+                .validate_glue(&element, operation)?;
+        }
+        Ok(())
+    }
+
     fn validate_managed_any_type_id(&self, ty: &crate::core::ResolvedTypeId) -> Result<(), String> {
         let expected = crate::core::mir::types::managed_any_i32_string_v1_type_id();
         let desc = self
@@ -7616,6 +10675,20 @@ impl<'a> FunctionEmitter<'a> {
             .type_catalog()
             .get(ty)
             .ok_or_else(|| format!("type '{}' is absent from MIR type catalog", ty.as_str()))?;
+        if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id() {
+            return self
+                .program
+                .type_catalog()
+                .validate_ordinary_map_owned_any_v2_get_any_result_type(ty);
+        }
+        if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id() {
+            return self.validate_ordinary_map_owned_any_v2_values_type_id(ty);
+        }
+        if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_values_element_type_id() {
+            return Err(
+                "ordinary Map/Any owner-v2 Values elements require their dedicated receipted List operation".into(),
+            );
+        }
         if let MirTypeKind::ActorHandle { actor } = &desc.kind {
             if self
                 .program
@@ -7665,6 +10738,8 @@ impl<'a> FunctionEmitter<'a> {
                         && desc.layout == MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
                     || desc.kind == MirTypeKind::OrdinaryMapOwnedGetI32StringV1
                         && desc.layout == MirLayout::OrdinaryMapOwnedGetI32StringV1
+                    || desc.kind == MirTypeKind::OrdinaryMapOwnedAnyV2
+                        && desc.layout == MirLayout::OrdinaryMapOwnedAnyV2
                     || desc.kind == MirTypeKind::ManagedAnyI32StringV1
                         && desc.layout == MirLayout::ManagedAnyI32StringV1)
                     && desc.ownership == MirOwnership::Move =>
@@ -7673,6 +10748,8 @@ impl<'a> FunctionEmitter<'a> {
                     self.validate_ordinary_map_owner_lifecycle_type_id(ty)
                 } else if desc.kind == MirTypeKind::OrdinaryMapOwnedGetI32StringV1 {
                     self.validate_ordinary_map_owned_get_type_id(ty)
+                } else if desc.kind == MirTypeKind::OrdinaryMapOwnedAnyV2 {
+                    self.validate_ordinary_map_owned_any_v2_type_id(ty)
                 } else if desc.kind == MirTypeKind::ManagedAnyI32StringV1 {
                     self.validate_managed_any_type_id(ty)
                 } else {
@@ -7742,10 +10819,10 @@ impl<'a> FunctionEmitter<'a> {
                                 || desc.drop_plan.is_none())
                         {
                             return Err(format!(
-                            "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
-                            ty.as_str(),
-                            desc.ownership
-                        ));
+                                "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
+                                ty.as_str(),
+                                desc.ownership
+                            ));
                         }
                         for element in elements {
                             self.supported_type(element)?;
@@ -7760,10 +10837,10 @@ impl<'a> FunctionEmitter<'a> {
                                 || desc.drop_plan.is_none())
                         {
                             return Err(format!(
-                            "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
-                            ty.as_str(),
-                            desc.ownership
-                        ));
+                                "type '{}' has ownership {:?} without a canonical aggregate glue/drop plan",
+                                ty.as_str(),
+                                desc.ownership
+                            ));
                         }
                         for field in fields {
                             self.supported_type(&field.ty)?;
@@ -8458,6 +11535,22 @@ impl<'a> FunctionEmitter<'a> {
                 "drop register type '{}' requires a dedicated ordinary Map owned-Get v1 operation",
                 ty.as_str()
             )),
+            MirGlueKind::OrdinaryMapOwnedAnyV2 => self.error(format!(
+                "drop register type '{}' requires a dedicated ordinary Map/Any owner-v2 operation",
+                ty.as_str()
+            )),
+            MirGlueKind::OrdinaryMapOwnedAnyV2Payload => self.error(format!(
+                "drop register type '{}' requires its Checker-receipted owning aggregate Drop",
+                ty.as_str()
+            )),
+            MirGlueKind::OrdinaryMapOwnedAnyV2Values => self.error(format!(
+                "drop register type '{}' requires its exact Checker-receipted Values Drop settlement",
+                ty.as_str()
+            )),
+            MirGlueKind::OrdinaryMapOwnedAnyV2ValuesElement => self.error(format!(
+                "drop register type '{}' can only be released by its owning Values list Drop",
+                ty.as_str()
+            )),
             MirGlueKind::ManagedAnyI32StringV1 => self.error(format!(
                 "drop register type '{}' requires a dedicated managed Any operation", ty.as_str()
             )),
@@ -8668,7 +11761,7 @@ impl<'a> FunctionEmitter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use super::{
@@ -8682,6 +11775,7 @@ mod tests {
         MirDropGluePlan, MirGlueKind, MirLayout, MirOwnership, MirTypeKind,
     };
     use crate::core::mir::{MirInstructionKind, MirOwnershipEventKind};
+    use crate::core::NodeId;
     use crate::interp::bytecode::compiler::BytecodeCompiler;
     use crate::interp::bytecode::instr::{CanonicalFfiScalarType, FunctionProto};
     use crate::interp::bytecode::BytecodeVM;
@@ -8862,7 +11956,8 @@ mod tests {
     fn map_any_owner_v1_bytecode_snapshot_rejects_tampering_before_execution() {
         let source = r#"
             func main() -> i32 {
-                let root = map_set(map_new(), "answer", 42)
+                let empty = map_new()
+                let root = map_set(empty, "answer", 42)
                 let size = map_size(root)
                 drop(root)
                 size
@@ -9359,6 +12454,7 @@ mod tests {
             ffi_indices: &BTreeMap::new(),
             proto: FunctionProto::new(function.owner.0.clone(), 0),
             registers: BTreeMap::new(),
+            emitted_instruction_pc_ranges: BTreeMap::new(),
             block_starts: BTreeMap::new(),
             pending_jumps: Vec::new(),
             errors: Vec::new(),
@@ -9366,6 +12462,7 @@ mod tests {
             constant_overflow_reported: false,
             map_any_owner_v1: false,
             ordinary_map_owned_get_i32_string_v1: false,
+            ordinary_map_owned_any_v2: false,
         };
 
         emitter.proto.register_count = u16::MAX;
@@ -10957,12 +14054,22 @@ mod tests {
         }
     }
 
-    fn compile(source: &str) -> std::sync::Arc<crate::interp::bytecode::BytecodeProgram> {
+    fn compile_with_mir(
+        source: &str,
+    ) -> (
+        MirProgram,
+        std::sync::Arc<crate::interp::bytecode::BytecodeProgram>,
+    ) {
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
-        compile_mir_program(&mir).expect("MIR bytecode")
+        let bytecode = compile_mir_program(&mir).expect("MIR bytecode");
+        (mir, bytecode)
+    }
+
+    fn compile(source: &str) -> std::sync::Arc<crate::interp::bytecode::BytecodeProgram> {
+        compile_with_mir(source).1
     }
 
     fn canonical_trap_program(code: &str) -> MirProgram {
@@ -14309,10 +17416,12 @@ mod tests {
         let source = "func abs_i64(value: i64) -> i64 { abs(value) }\nfunc main() -> i32 { if abs_i64(-4294967297) == 4294967297 { 42 } else { 0 } }";
         let program = compile(source);
         assert!(program.ast.is_none());
-        assert!(program.functions.iter().any(|function| function
-            .code
-            .iter()
-            .any(|op| matches!(op, Op::CallBuiltin { .. }))));
+        assert!(program.functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::CallBuiltin { .. }))
+        }));
         let value = BytecodeVM::new(program).run_value().expect("VM abs");
         assert!(matches!(value, Value::Int(42)));
     }
@@ -15404,10 +18513,12 @@ mod tests {
             .expect("reference direct owned String call execution");
         let bytecode = compile_mir_program(&mir).expect("direct owned String call bytecode");
         assert!(bytecode.ast.is_none());
-        assert!(bytecode.functions.iter().any(|function| function
-            .code
-            .iter()
-            .any(|op| matches!(op, Op::CallMove { .. }))));
+        assert!(bytecode.functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::CallMove { .. }))
+        }));
         let value = BytecodeVM::new(bytecode)
             .run_value()
             .expect("direct owned String call bytecode execution");
@@ -15462,8 +18573,7 @@ mod tests {
 
     #[test]
     fn rejects_forged_call_move_argument_window_before_bytecode_access() {
-        let source =
-            "func identity(value: string) -> string { value }\nfunc main() -> string { identity(\"owned\") }";
+        let source = "func identity(value: string) -> string { value }\nfunc main() -> string { identity(\"owned\") }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -15612,8 +18722,7 @@ mod tests {
 
     #[test]
     fn bytecode_and_reference_agree_on_copy_variant_match() {
-        let source =
-            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
+        let source = "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -15631,8 +18740,7 @@ mod tests {
 
     #[test]
     fn variant_get_carries_type_desc_identity_shape_contract() {
-        let source =
-            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
+        let source = "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -15681,8 +18789,7 @@ mod tests {
 
     #[test]
     fn rejects_variant_get_identity_drift_before_reading_payload() {
-        let source =
-            "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
+        let source = "func main() -> i32 { let value: Option<i32> = Some(41); match value { Some(v) => v + 1, None => 0 } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -15739,8 +18846,7 @@ mod tests {
 
     #[test]
     fn executes_move_variant_switch_before_any_backend() {
-        let source =
-            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let source = "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -15815,8 +18921,7 @@ mod tests {
 
     #[test]
     fn rejects_variant_destructure_tag_drift_before_moving_payload() {
-        let source =
-            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let source = "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -15859,8 +18964,7 @@ mod tests {
 
     #[test]
     fn rejects_variant_destructure_identity_drift_before_moving_payload() {
-        let source =
-            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let source = "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -15916,8 +19020,7 @@ mod tests {
 
     #[test]
     fn rejects_variant_drop_shape_drift_before_consuming_source() {
-        let source =
-            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); match value { Some(_) => 42, None => 0 } }";
+        let source = "func main() -> i32 { let value: Option<string> = Some(\"owned\"); match value { Some(_) => 42, None => 0 } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -16025,8 +19128,7 @@ mod tests {
 
     #[test]
     fn bytecode_and_reference_agree_when_consuming_switch_drops_unbound_payload() {
-        let source =
-            "func main() -> i32 { let value: Option<string> = Some(\"owned\"); match value { Some(_) => 42, None => 0 } }";
+        let source = "func main() -> i32 { let value: Option<string> = Some(\"owned\"); match value { Some(_) => 42, None => 0 } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -16053,8 +19155,7 @@ mod tests {
 
     #[test]
     fn bytecode_and_reference_agree_on_consuming_result_payload() {
-        let source =
-            "func main() -> string { let value: Result<string, string> = Err(\"error\"); match value { Ok(v) => v, Err(e) => e } }";
+        let source = "func main() -> string { let value: Result<string, string> = Err(\"error\"); match value { Ok(v) => v, Err(e) => e } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -17457,5 +20558,1264 @@ func main() -> i32 {
                 .contains("function #4294967295 out of range"),
             "{error}"
         );
+    }
+
+    fn ordinary_map_owned_any_v2_get_any_fixture(
+        requested_key: &str,
+    ) -> (MirProgram, Arc<crate::interp::bytecode::BytecodeProgram>) {
+        let source = format!(
+            r#"
+                type Label {{ text: string }}
+                func main() -> i32 {{
+                    let label = Label {{ text: "fixture payload" }}
+                    let empty = map_new()
+                    let one = map_set(empty, "label", label)
+                    let pair = map_get(one, "{requested_key}")
+                    drop(pair)
+                    drop(empty)
+                    drop(one)
+                    drop(label)
+                    0
+                }}
+            "#
+        );
+        let (_, checked) = parse_and_check(&source).expect("owner-v2 GetAny fixture check");
+        let mir = MirProgram::from_checked_program(&checked).expect("owner-v2 GetAny fixture MIR");
+        let bytecode = compile_mir_program(&mir).expect("owner-v2 GetAny fixture bytecode");
+        (mir, bytecode)
+    }
+
+    fn ordinary_map_owned_any_v2_values_fixture(
+    ) -> (MirProgram, Arc<crate::interp::bytecode::BytecodeProgram>) {
+        let source = r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let label = Label { text: "fixture Values payload" }
+                let empty = map_new()
+                let with_label = map_set(empty, "z", label)
+                let with_number = map_set(with_label, "a", 42)
+                let both = map_set(with_number, "m", "fixture direct String")
+                let snapshot = values(both)
+                drop(snapshot)
+                drop(empty)
+                drop(with_label)
+                drop(with_number)
+                drop(both)
+                drop(label)
+                0
+            }
+        "#;
+        let (_, checked) = parse_and_check(source).expect("owner-v2 Values fixture check");
+        let mir = MirProgram::from_checked_program(&checked).expect("owner-v2 Values fixture MIR");
+        let bytecode = compile_mir_program(&mir).expect("owner-v2 Values fixture bytecode");
+        (mir, bytecode)
+    }
+
+    fn ordinary_map_owned_any_v2_values_unpack_fixture(
+    ) -> (MirProgram, Arc<crate::interp::bytecode::BytecodeProgram>) {
+        let source = r#"
+            type Label { text: string }
+            func main() -> i32 {
+                let label = Label { text: "fixture Values unpack label" }
+                let empty = map_new()
+                let with_label = map_set(empty, "z", label)
+                let with_number = map_set(with_label, "a", 42)
+                let both = map_set(with_number, "m", "fixture Values unpack String")
+                let snapshot = values(both)
+                let number = snapshot[0] as i32
+                let text = snapshot[1] as string
+                let label_copy = snapshot[2] as Label
+                drop(snapshot)
+                drop(number)
+                drop(label_copy)
+                drop(empty)
+                drop(with_label)
+                drop(with_number)
+                drop(both)
+                drop(label)
+                0
+            }
+        "#;
+        let (_, checked) = parse_and_check(source).expect("owner-v2 Values unpack fixture check");
+        let mir =
+            MirProgram::from_checked_program(&checked).expect("owner-v2 Values unpack fixture MIR");
+        let bytecode = compile_mir_program(&mir).expect("owner-v2 Values unpack fixture bytecode");
+        (mir, bytecode)
+    }
+
+    fn ordinary_map_owned_any_v2_values_record_identity(
+        mir: &MirProgram,
+    ) -> (crate::core::ResolvedTypeId, String) {
+        let selection = mir
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("Core payload selection receipt")
+            .expect("Values fixture has concrete Set payloads");
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let type_id = selection
+            .selected_types
+            .iter()
+            .map(|selected| selected.type_id.clone())
+            .find(|type_id| type_id != &i32_type && type_id != &string_type)
+            .expect("fixture selected a nominal record payload");
+        let descriptor = mir
+            .type_catalog()
+            .get(&type_id)
+            .expect("selected record TypeDesc");
+        let MirLayout::Record { nominal, .. } = &descriptor.layout else {
+            panic!("fixture non-i32 payload must retain a nominal record layout");
+        };
+        (type_id, nominal.as_str().to_owned())
+    }
+
+    fn ordinary_map_owned_any_v2_values_test_root(
+        mir: &MirProgram,
+        include_entries: bool,
+    ) -> Value {
+        let mut entries = BTreeMap::new();
+        if include_entries {
+            let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+            let string_type =
+                crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+            let (record_type, nominal) = ordinary_map_owned_any_v2_values_record_identity(mir);
+            // Deliberately insert the later key first. Values must follow key
+            // order rather than payload insertion order.
+            entries.insert(
+                "z".to_owned(),
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                    type_id: record_type,
+                    nominal,
+                    text: Arc::new("copied label".into()),
+                },
+            );
+            entries.insert(
+                "a".to_owned(),
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                    type_id: i32_type,
+                    value: 42,
+                },
+            );
+            entries.insert(
+                "m".to_owned(),
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
+                    type_id: string_type,
+                    text: Arc::new("copied direct string".into()),
+                },
+            );
+        }
+        Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries))
+    }
+
+    fn ordinary_map_owned_any_v2_test_root(
+        key: &str,
+        type_id: crate::core::ResolvedTypeId,
+        nominal: String,
+        text: &str,
+    ) -> Value {
+        Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(BTreeMap::from([(
+            key.to_owned(),
+            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                type_id,
+                nominal,
+                text: Arc::new(text.to_owned()),
+            },
+        )])))
+    }
+
+    fn ordinary_map_owned_any_v2_label_identity(
+        mir: &MirProgram,
+    ) -> (crate::core::ResolvedTypeId, String) {
+        let selection = mir
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("Core payload selection receipt")
+            .expect("record Set selected the owner-v2 profile");
+        let type_id = selection
+            .entries
+            .first()
+            .expect("one exact Set payload binding")
+            .checker_type
+            .clone();
+        let descriptor = mir
+            .type_catalog()
+            .get(&type_id)
+            .expect("selected payload TypeDesc");
+        let MirLayout::Record { nominal, .. } = &descriptor.layout else {
+            panic!("fixture payload must retain its nominal record layout");
+        };
+        (type_id, nominal.as_str().to_owned())
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_get_any_consumes_exact_core_receipt_and_returns_owned_hit() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_get_any_fixture("label");
+        let core_receipts = mir
+            .ordinary_map_owned_any_v2_get_any_result_receipts()
+            .expect("Core GetAny result receipt");
+        assert_eq!(core_receipts.len(), 1);
+        let bytecode_receipt = bytecode
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .expect("independent owner-v2 bytecode receipt");
+        let binding = bytecode_receipt
+            .ordinary_map_owned_any_v2_get_any_binding(bytecode.entry, 0)
+            .expect("emitted GetAny/settlement binding");
+        let core = &core_receipts[0];
+        assert_eq!(binding.owner, core.owner);
+        assert_eq!(binding.operation, core.operation);
+        assert_eq!(binding.instruction, core.instruction);
+        assert_eq!(binding.root, core.root);
+        assert_eq!(binding.key, core.key);
+        assert_eq!(binding.result, core.result);
+        assert_eq!(binding.checker_result_type, core.checker_result_type);
+        assert_eq!(binding.mir_result_type, core.mir_result_type);
+        assert_eq!(binding.binding, core.binding);
+        assert_eq!(binding.settlement_instruction, core.settlement_instruction);
+        assert_eq!(
+            binding.settlement,
+            crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+        );
+
+        let (type_id, nominal) = ordinary_map_owned_any_v2_label_identity(&mir);
+        let root = ordinary_map_owned_any_v2_test_root(
+            "label",
+            type_id.clone(),
+            nominal.clone(),
+            "fixture payload",
+        );
+        let value = BytecodeVM::new(bytecode)
+            .execute_ordinary_map_owned_any_v2_get_any_for_test(
+                0,
+                root,
+                Value::String(Arc::new("label".into())),
+            )
+            .expect("GetAny hit plus a subsequent read of its still-live source root");
+        let Value::Tuple(result) = value else {
+            panic!("GetAny returns the exact two-field product");
+        };
+        assert_eq!(result.len(), 2);
+        assert!(matches!(result.first(), Some(Value::Bool(true))));
+        let Some(Value::CanonicalManagedAnyV2(any)) = result.get(1) else {
+            panic!("GetAny hit returns an independently owned V2 Any");
+        };
+        assert!(any.matches_record(&type_id, &nominal));
+        assert!(any.matches_record_text(&type_id, &nominal, "fixture payload"));
+        assert_eq!(Arc::strong_count(any), 1);
+    }
+
+    fn ordinary_map_owned_any_v2_unpack_source(key: &str) -> String {
+        format!(
+            r#"
+                type Label {{ text: string }}
+                func main() -> i32 {{
+                    let label = Label {{ text: "unpack fixture" }}
+                    let empty = map_new()
+                    let numbers = map_set(empty, "number", 42)
+                    let mixed = map_set(numbers, "label", label)
+                    let pair = map_get(mixed, "{key}")
+                    let value = pair.1 as i32
+                    drop(pair)
+                    drop(empty)
+                    drop(numbers)
+                    drop(mixed)
+                    drop(label)
+                    value
+                }}
+            "#
+        )
+    }
+
+    fn ordinary_map_owned_any_v2_unpack_string_source(key: &str) -> String {
+        format!(
+            r#"
+                type Label {{ text: string }}
+                func main() -> i32 {{
+                    let label = Label {{ text: "record marker" }}
+                    let source = "unpack fixture"
+                    let empty = map_new()
+                    let stored = map_set(empty, "text", source)
+                    drop(source)
+                    let with_label = map_set(stored, "label", label)
+                    let mixed = map_set(with_label, "number", 42)
+                    let pair = map_get(mixed, "{key}")
+                    let value = pair.1 as string
+                    drop(pair)
+                    drop(empty)
+                    drop(stored)
+                    drop(with_label)
+                    drop(mixed)
+                    let matches = value == "unpack fixture"
+                    println(value)
+                    println(matches)
+                    drop(value)
+                    drop(label)
+                    0
+                }}
+            "#
+        )
+    }
+
+    fn ordinary_map_owned_any_v2_unpack_record_source(key: &str) -> String {
+        format!(
+            r#"
+                type Label {{ text: string }}
+                func main() -> i32 {{
+                    let label = Label {{ text: "record unpack fixture" }}
+                    let empty = map_new()
+                    let with_label = map_set(empty, "label", label)
+                    let with_number = map_set(with_label, "number", 42)
+                    let pair = map_get(with_number, "{key}")
+                    let value = pair.1 as Label
+                    drop(pair)
+                    drop(empty)
+                    drop(with_label)
+                    drop(with_number)
+                    drop(label)
+                    let matches = value.text == "record unpack fixture"
+                    println(matches)
+                    0
+                }}
+            "#
+        )
+    }
+
+    fn ordinary_map_owned_any_v2_canonical_i32_miss_source() -> &'static str {
+        r#"
+            type Label { text: string }
+            func unrelated_i32_payload() -> i32 {
+                0
+            }
+            func main() -> i32 {
+                let label = Label { text: "only record payload" }
+                let empty = map_new()
+                let root = map_set(empty, "label", label)
+                let pair = map_get(root, "missing")
+                let value = pair.1 as i32
+                drop(pair)
+                drop(empty)
+                drop(root)
+                drop(label)
+                value
+            }
+        "#
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_executes_i32_hit_and_canonical_miss() {
+        let (hit_mir, hit) = compile_with_mir(&ordinary_map_owned_any_v2_unpack_source("number"));
+        assert!(hit.ast.is_none(), "canonical bytecode must remain AST-free");
+        assert_eq!(
+            MirReferenceInterpreter::new(&hit_mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference selected i32 payload"),
+            MirRuntimeValue::Int(42)
+        );
+        assert!(matches!(
+            BytecodeVM::new(hit)
+                .run_value_for_component()
+                .expect("selected i32 payload"),
+            Value::Int(42)
+        ));
+
+        let (miss_mir, miss) = compile_with_mir(&ordinary_map_owned_any_v2_unpack_source("absent"));
+        assert_eq!(
+            MirReferenceInterpreter::new(&miss_mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference canonical missing-key i32 payload"),
+            MirRuntimeValue::Int(0)
+        );
+        assert!(matches!(
+            BytecodeVM::new(miss)
+                .run_value_for_component()
+                .expect("canonical missing-key i32 payload"),
+            Value::Int(0)
+        ));
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_canonical_i32_miss_uses_core_source_provenance() {
+        let (mir, bytecode) =
+            compile_with_mir(ordinary_map_owned_any_v2_canonical_i32_miss_source());
+        let receipts = mir
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("Core unpack provenance receipt");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].payload_source,
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+        );
+        assert!(
+            receipts[0].result_type
+                == crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32),
+            "the explicit miss source is only the canonical i32 token"
+        );
+        assert_eq!(
+            MirReferenceInterpreter::new(&mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect("reference canonical i32 miss"),
+            MirRuntimeValue::Int(0)
+        );
+        assert!(matches!(
+            BytecodeVM::new(bytecode)
+                .run_value_for_component()
+                .expect("bytecode canonical i32 miss from exact Core source"),
+            Value::Int(0)
+        ));
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_traps_on_wrong_selected_payload_type() {
+        let (mir, bytecode) = compile_with_mir(&ordinary_map_owned_any_v2_unpack_source("label"));
+        let reference_error = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect_err("reference rejects unpacking a selected Label as i32");
+        let error = BytecodeVM::new(bytecode)
+            .run_value_for_component()
+            .expect_err("a selected Label payload cannot be unpacked as i32");
+        assert!(reference_error.to_string().contains("E0800"));
+        assert_eq!(error.code(), "E0800", "{error}");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_direct_string_unpack_is_detached_from_pair_drop() {
+        let (mir, bytecode) =
+            compile_with_mir(&ordinary_map_owned_any_v2_unpack_string_source("text"));
+        assert!(
+            bytecode.ast.is_none(),
+            "canonical bytecode must remain AST-free"
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference String remains readable after pair and root Drop");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "unpack fixture\ntrue\n");
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("selected direct String payload"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), "unpack fixture\ntrue\n");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_direct_string_unpack_rejects_wrong_type_and_miss() {
+        for key in ["number", "missing"] {
+            let (mir, bytecode) =
+                compile_with_mir(&ordinary_map_owned_any_v2_unpack_string_source(key));
+            let reference_error = MirReferenceInterpreter::new(&mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect_err("reference rejects a wrong String payload or i32 miss token");
+            let error = BytecodeVM::new(bytecode)
+                .run_value_for_component()
+                .expect_err("String unpack requires an exact selected String payload");
+            assert!(reference_error.to_string().contains("E0800"));
+            assert_eq!(error.code(), "E0800", "{error}");
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_record_unpack_uses_exact_receipt_and_detaches_payload() {
+        let (mir, bytecode) =
+            compile_with_mir(&ordinary_map_owned_any_v2_unpack_record_source("label"));
+        assert!(
+            bytecode.ast.is_none(),
+            "canonical bytecode remains AST-free"
+        );
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference unpacks the selected concrete Label payload");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "true\n");
+
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode unpacks the exact Label TypeDesc and nominal"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), "true\n");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_record_unpack_rejects_wrong_tag_and_non_i32_miss() {
+        for key in ["number", "missing"] {
+            let (mir, bytecode) =
+                compile_with_mir(&ordinary_map_owned_any_v2_unpack_record_source(key));
+            let reference_error = MirReferenceInterpreter::new(&mir)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .expect_err("record target rejects an i32 hit and canonical i32 miss");
+            let error = BytecodeVM::new(bytecode)
+                .run_value_for_component()
+                .expect_err("record target requires its selected record payload");
+            assert!(reference_error.to_string().contains("E0800"));
+            assert_eq!(error.code(), "E0800", "{error}");
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_rejects_unsupported_record_shape() {
+        let source = r#"
+            type Label { text: string, count: i32 }
+            func main() -> i32 {
+                let pair_value = Label { text: "unsupported", count: 1 }
+                let empty = map_new()
+                let stored = map_set(empty, "label", pair_value)
+                let pair = map_get(stored, "label")
+                let unpacked = pair.1 as Label
+                drop(unpacked)
+                drop(pair)
+                drop(empty)
+                drop(stored)
+                drop(pair_value)
+                0
+            }
+        "#;
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex unsupported record");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse unsupported record");
+        let rejection = match crate::core::check_program(&file) {
+            Err(errors) => format!("{errors:?}"),
+            Ok(checked) => match MirProgram::from_checked_program(&checked) {
+                Err(errors) => format!("{errors:?}"),
+                Ok(mir) => {
+                    let errors = compile_mir_program(&mir).expect_err(
+                        "bytecode adapter rejects records outside Label { text: string }",
+                    );
+                    format!("{errors:?}")
+                }
+            },
+        };
+        assert!(
+            rejection.contains("Label")
+                || rejection.contains("owner-v2")
+                || rejection.contains("Map/Any")
+                || rejection.contains("AnyOwner-v2"),
+            "unsupported shape rejection retains owner-v2 context: {rejection}"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_get_any_miss_is_canonical_i32_zero() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_get_any_fixture("missing");
+        let (type_id, nominal) = ordinary_map_owned_any_v2_label_identity(&mir);
+        let root =
+            ordinary_map_owned_any_v2_test_root("label", type_id, nominal, "fixture payload");
+        let value = BytecodeVM::new(bytecode)
+            .execute_ordinary_map_owned_any_v2_get_any_for_test(
+                0,
+                root,
+                Value::String(Arc::new("missing".into())),
+            )
+            .expect("GetAny miss plus a subsequent read of its still-live source root");
+        let Value::Tuple(result) = value else {
+            panic!("GetAny returns the exact two-field product");
+        };
+        assert!(matches!(result.first(), Some(Value::Bool(false))));
+        let Some(Value::CanonicalManagedAnyV2(any)) = result.get(1) else {
+            panic!("GetAny miss still returns an owned V2 Any");
+        };
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        assert!(any.matches_i32_value(&i32_type, 0));
+        assert_eq!(Arc::strong_count(any), 1);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_get_any_rejects_duplicate_root_and_unselected_payload() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_get_any_fixture("label");
+        let (type_id, nominal) = ordinary_map_owned_any_v2_label_identity(&mir);
+        let duplicate_root = Arc::new(BTreeMap::from([(
+            "label".to_owned(),
+            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                type_id: type_id.clone(),
+                nominal: nominal.clone(),
+                text: Arc::new("fixture payload".into()),
+            },
+        )]));
+        let duplicate = Arc::clone(&duplicate_root);
+        let error = BytecodeVM::new(Arc::clone(&bytecode))
+            .execute_ordinary_map_owned_any_v2_get_any_for_test(
+                0,
+                Value::CanonicalOrdinaryMapOwnedAnyV2(duplicate_root),
+                Value::String(Arc::new("label".into())),
+            )
+            .expect_err("GetAny cannot borrow a duplicated owner");
+        assert!(error.message().contains("stale or duplicate owner"));
+        drop(duplicate);
+
+        let unselected_type = crate::core::ResolvedTypeId::synthetic(
+            "test:ordinary-map-owned-any-v2:unselected-record",
+        );
+        let wrong_payload_root =
+            Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(BTreeMap::from([(
+                "label".to_owned(),
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                    type_id: unselected_type,
+                    nominal,
+                    text: Arc::new("fixture payload".into()),
+                },
+            )])));
+        let error = BytecodeVM::new(bytecode)
+            .execute_ordinary_map_owned_any_v2_get_any_for_test(
+                0,
+                wrong_payload_root,
+                Value::String(Arc::new("label".into())),
+            )
+            .expect_err("GetAny cannot infer or widen payload selection from runtime shape");
+        assert!(error
+            .message()
+            .contains("outside the Core-selected payload table"));
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_get_any_rejects_tampered_register_receipt() {
+        let (_, mut bytecode) = ordinary_map_owned_any_v2_get_any_fixture("label");
+        let program = Arc::make_mut(&mut bytecode);
+        let op = program
+            .functions
+            .iter_mut()
+            .flat_map(|function| function.code.iter_mut())
+            .find(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }))
+            .expect("emitted V2 GetAny opcode");
+        let Op::MirOrdinaryMapOwnedAnyV2GetAny { key, .. } = op else {
+            unreachable!();
+        };
+        *key = u16::MAX;
+
+        let error = BytecodeVM::new(bytecode)
+            .run_value_for_component()
+            .expect_err("tampered GetAny register must fail before execution");
+        assert!(error
+            .message()
+            .contains("disagrees with its independent Checker receipt snapshot"));
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_binds_exact_payload_selection_move_and_drop() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_values_fixture();
+        let core_receipts = mir
+            .ordinary_map_owned_any_v2_values_result_receipts()
+            .expect("Core Values result receipt");
+        assert_eq!(core_receipts.len(), 1);
+        let core = &core_receipts[0];
+        let selection = mir
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("Core payload selection receipt")
+            .expect("selected Set payloads");
+        let bytecode_receipt = bytecode
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .expect("independent owner-v2 bytecode receipt");
+        let binding = bytecode_receipt
+            .ordinary_map_owned_any_v2_values_binding(bytecode.entry, 0)
+            .expect("emitted Values/Move/Drop binding");
+        assert_eq!(binding.owner, core.owner);
+        assert_eq!(binding.operation, core.operation);
+        assert_eq!(binding.instruction, core.instruction);
+        assert_eq!(binding.source_node, core.source_node);
+        assert_eq!(binding.source_local, core.source_local);
+        assert_eq!(binding.root, core.root);
+        assert_eq!(binding.checker_source_type, core.checker_source_type);
+        assert_eq!(binding.checker_result_type, core.checker_result_type);
+        assert_eq!(binding.result, core.result);
+        assert_eq!(binding.mir_result_type, core.mir_result_type);
+        assert_eq!(binding.binding_local, core.binding_local);
+        assert_eq!(binding.binding, core.binding);
+        assert_eq!(binding.settlement_instruction, core.settlement_instruction);
+        assert_eq!(binding.payload_selection_digest, selection.selection_digest);
+        assert_eq!(
+            binding.settlement,
+            crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+        );
+        let proto = &bytecode.functions[bytecode.entry as usize];
+        assert!(matches!(
+            proto.code.get(binding.pc as usize),
+            Some(Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra })
+                if *rd == binding.rd && *ra == binding.ra
+        ));
+        assert!(matches!(
+            proto.code.get(binding.binding_pc as usize),
+            Some(Op::Move { rd, rs })
+                if *rd == binding.binding_rd && *rs == binding.binding_rs
+        ));
+        assert!(matches!(
+            proto.code.get(binding.drop_pc as usize),
+            Some(Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra })
+                if *ra == binding.drop_ra
+        ));
+        assert_eq!(
+            proto
+                .code
+                .iter()
+                .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. }))
+                .count(),
+            1,
+            "Values result has exactly one dedicated explicit Drop"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_materializes_sorted_independent_v2_list() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_values_fixture();
+        let root = ordinary_map_owned_any_v2_values_test_root(&mir, true);
+        let mut vm = BytecodeVM::new(bytecode);
+        let snapshot = vm
+            .execute_ordinary_map_owned_any_v2_values_for_test(0, root)
+            .expect("Values snapshot leaves its source root readable");
+        drop(vm); // Destroy the source Map after the snapshot has been made.
+
+        let Value::List(values) = snapshot else {
+            panic!("Values materializes the bytecode List ABI");
+        };
+        assert_eq!(values.len(), 3);
+        assert_eq!(Arc::strong_count(&values), 1);
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let (record_type, nominal) = ordinary_map_owned_any_v2_values_record_identity(&mir);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let Some(Value::CanonicalManagedAnyV2(first)) = values.first() else {
+            panic!("first Values entry is a dedicated V2 payload owner");
+        };
+        let Some(Value::CanonicalManagedAnyV2(second)) = values.get(1) else {
+            panic!("second Values entry is a dedicated V2 payload owner");
+        };
+        let Some(Value::CanonicalManagedAnyV2(third)) = values.get(2) else {
+            panic!("third Values entry is a dedicated V2 payload owner");
+        };
+        assert!(first.matches_i32_value(&i32_type, 42));
+        assert!(second.matches_string(&string_type, "copied direct string"));
+        assert!(third.matches_record_text(&record_type, &nominal, "copied label"));
+        assert_eq!(Arc::strong_count(first), 1);
+        assert_eq!(Arc::strong_count(second), 1);
+        assert_eq!(Arc::strong_count(third), 1);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_binds_exact_receipts_and_registers() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let core_receipts = mir
+            .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            .expect("Core Values unpack result receipts");
+        assert_eq!(core_receipts.len(), 3);
+        let selection = mir
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("Core payload-selection receipt")
+            .expect("selected Values payloads");
+        let bytecode_receipt = bytecode
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .expect("independent owner-v2 bytecode receipt");
+        let proto = &bytecode.functions[bytecode.entry as usize];
+        let mut unpack_pcs = BTreeSet::new();
+        let mut result_move_pcs = BTreeSet::new();
+
+        for core in &core_receipts {
+            let binding = (0..proto.code.len())
+                .find_map(|pc| {
+                    let pc = u32::try_from(pc).ok()?;
+                    let binding = bytecode_receipt
+                        .ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+                            bytecode.entry,
+                            pc,
+                        )?;
+                    (binding.instruction == core.instruction).then_some(binding)
+                })
+                .expect("exact Values unpack bytecode receipt by MIR instruction identity");
+            assert!(unpack_pcs.insert(binding.pc), "unpack PCs are unique");
+            assert!(
+                result_move_pcs.insert(binding.result_binding_pc),
+                "direct result Move PCs are unique"
+            );
+            assert_eq!(binding.owner, core.owner);
+            assert_eq!(binding.operation, core.operation);
+            assert_eq!(binding.instruction, core.instruction);
+            assert_eq!(binding.values_binding_local, core.values_binding_local);
+            assert_eq!(binding.values, core.values);
+            assert_eq!(binding.values_binding_point, core.values_binding_point);
+            assert_eq!(binding.projection, core.projection);
+            assert_eq!(binding.index_expression, core.index_expression);
+            assert_eq!(binding.index_type, core.index_type);
+            assert_eq!(binding.index, core.index);
+            assert_eq!(binding.cast, core.cast);
+            assert_eq!(binding.conversion_kind, core.conversion_kind);
+            assert_eq!(binding.conversion_from, core.conversion_from);
+            assert_eq!(binding.conversion_to, core.conversion_to);
+            assert_eq!(binding.result, core.result);
+            assert_eq!(binding.result_type, core.result_type);
+            assert_eq!(binding.result_binding_local, core.result_binding_local);
+            assert_eq!(binding.result_binding_point, core.result_binding_point);
+            assert_eq!(binding.result_binding, core.result_binding);
+            assert_eq!(binding.settlement_instruction, core.settlement_instruction);
+            assert_eq!(binding.payload_selection_digest, selection.selection_digest);
+            assert_eq!(
+                binding.payload_type_desc_digest,
+                core.payload_type_desc_digest
+            );
+            assert!(matches!(
+                proto.code.get(binding.pc as usize),
+                Some(Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, ra, index })
+                    if (*rd, *ra, *index) == (binding.rd, binding.ra, binding.index_reg)
+            ));
+            let target_desc = mir
+                .type_catalog()
+                .get(&binding.result_type)
+                .expect("receipt target TypeDesc");
+            let direct_move_matches = if target_desc.ownership == MirOwnership::Copy {
+                matches!(
+                    proto.code.get(binding.result_binding_pc as usize),
+                    Some(Op::Mov { rd, rs })
+                        if (*rd, *rs)
+                            == (binding.result_binding_rd, binding.result_binding_rs)
+                )
+            } else {
+                matches!(
+                    proto.code.get(binding.result_binding_pc as usize),
+                    Some(Op::Move { rd, rs })
+                        if (*rd, *rs)
+                            == (binding.result_binding_rd, binding.result_binding_rs)
+                )
+            };
+            assert!(direct_move_matches);
+        }
+        assert_eq!(unpack_pcs.len(), 3);
+        assert_eq!(result_move_pcs.len(), 3);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_copies_i32_string_and_label() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let (_, nominal) = ordinary_map_owned_any_v2_values_record_identity(&mir);
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let (record_type, _) = ordinary_map_owned_any_v2_values_record_identity(&mir);
+        for (index, expected, target_type) in [
+            (0, "number", i32_type),
+            (1, "string", string_type),
+            (2, "label", record_type),
+        ] {
+            let mut vm = BytecodeVM::new(Arc::clone(&bytecode));
+            let snapshot = vm
+                .execute_ordinary_map_owned_any_v2_values_for_test(
+                    bytecode.entry,
+                    ordinary_map_owned_any_v2_values_test_root(&mir, true),
+                )
+                .expect("Values creates the input snapshot");
+            let result = vm
+                .execute_ordinary_map_owned_any_v2_values_unpack_for_test(
+                    bytecode.entry,
+                    snapshot,
+                    index,
+                    &target_type,
+                )
+                .expect("indexed unpack leaves its source List readable");
+            match expected {
+                "number" => assert!(matches!(result, Value::Int(42))),
+                "string" => {
+                    let Value::String(text) = result else {
+                        panic!("String unpack returns an owned String");
+                    };
+                    assert_eq!(&**text, "copied direct string");
+                    assert_eq!(Arc::strong_count(&text), 1);
+                }
+                "label" => {
+                    let Value::Record(Some(actual_nominal), fields) = result else {
+                        panic!("Label unpack returns an owned record");
+                    };
+                    assert_eq!(actual_nominal, nominal);
+                    let Some(Value::String(text)) = fields.get("text") else {
+                        panic!("Label output has its owned text field");
+                    };
+                    assert_eq!(&**text, "copied label");
+                    assert_eq!(Arc::strong_count(text), 1);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_runs_result_owner_cleanup() {
+        let (_, bytecode) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let result = BytecodeVM::new(bytecode)
+            .run_value_for_component()
+            .expect("complete Values unpack program runs both String and Label result Drops");
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_uses_e0803_and_rejects_runtime_tag_mismatch() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        for index in [-4, 3] {
+            let mut vm = BytecodeVM::new(Arc::clone(&bytecode));
+            let snapshot = vm
+                .execute_ordinary_map_owned_any_v2_values_for_test(
+                    bytecode.entry,
+                    ordinary_map_owned_any_v2_values_test_root(&mir, true),
+                )
+                .expect("Values snapshot for bounds check");
+            let error = vm
+                .execute_ordinary_map_owned_any_v2_values_unpack_for_test(
+                    bytecode.entry,
+                    snapshot,
+                    index,
+                    &i32_type,
+                )
+                .expect_err("negative/positive out-of-range indexes trap");
+            assert_eq!(error.code(), "E0803", "{error}");
+        }
+
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let wrong_tag = Value::List(Arc::new(vec![Value::CanonicalManagedAnyV2(Arc::new(
+            crate::interp::value::CanonicalManagedAnyV2::from_i32(string_type.clone(), 7),
+        ))]));
+        let error = BytecodeVM::new(bytecode.clone())
+            .execute_ordinary_map_owned_any_v2_values_unpack_for_test(
+                bytecode.entry,
+                wrong_tag,
+                0,
+                &string_type,
+            )
+            .expect_err("matching TypeId with the wrong runtime payload tag traps");
+        assert_eq!(error.code(), "E0800", "{error}");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_rejects_tampered_opcode_and_receipt() {
+        let (_, mut tampered_op) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let program = Arc::make_mut(&mut tampered_op);
+        let op = program
+            .functions
+            .iter_mut()
+            .flat_map(|function| function.code.iter_mut())
+            .find(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }))
+            .expect("emitted Values unpack opcode");
+        let Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { index, .. } = op else {
+            unreachable!();
+        };
+        *index = u16::MAX;
+        let error = BytecodeVM::new(tampered_op)
+            .run_value_for_component()
+            .expect_err("tampered indexed-unpack operand fails preflight");
+        assert!(
+            error
+                .message()
+                .contains("independent Checker receipt snapshot"),
+            "{error}"
+        );
+
+        let (_, mut tampered_receipt) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let program = Arc::make_mut(&mut tampered_receipt);
+        let entry = program.entry;
+        let unpack_pc = program.functions[entry as usize]
+            .code
+            .iter()
+            .position(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }))
+            .expect("emitted Values unpack opcode");
+        let mut binding = program
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .expect("owner-v2 bytecode receipt")
+            .ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+                entry,
+                u32::try_from(unpack_pc).expect("PC fits the receipt ABI"),
+            )
+            .expect("Values unpack binding")
+            .clone();
+        binding.payload_type_desc_digest = "0".repeat(64);
+        program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .expect("owner-v2 bytecode receipt")
+            .replace_ordinary_map_owned_any_v2_values_unpack_bindings_for_test_only(
+                BTreeMap::from([(entry, vec![binding])]),
+            );
+        let error = BytecodeVM::new(tampered_receipt)
+            .run_value_for_component()
+            .expect_err("tampered payload TypeDesc digest fails preflight");
+        assert!(
+            error.message().contains("Values unpack bindings disagree"),
+            "entry {entry}: {error}"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_rejects_forged_result_move_and_drop_order() {
+        let (_, mut tampered_move) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let program = Arc::make_mut(&mut tampered_move);
+        let entry = program.entry;
+        let bindings = {
+            let receipt = program
+                .canonical_map_any_owner_v1_receipt
+                .as_ref()
+                .expect("owner-v2 bytecode receipt");
+            program.functions[entry as usize]
+                .code
+                .iter()
+                .enumerate()
+                .filter(|(_, op)| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }))
+                .map(|(pc, _)| {
+                    receipt
+                        .ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+                            entry,
+                            u32::try_from(pc).expect("PC fits the receipt ABI"),
+                        )
+                        .expect("emitted unpack binding")
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bindings.len(), 3);
+        let mut forged_bindings = bindings;
+        let owned_result = forged_bindings
+            .iter_mut()
+            .find(|binding| binding.result_owner_settlement_pc.is_some())
+            .expect("String or Label result has an owner Drop");
+        owned_result.result_binding_rs = owned_result.rd.wrapping_add(1);
+        program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .expect("owner-v2 bytecode receipt")
+            .replace_ordinary_map_owned_any_v2_values_unpack_bindings_for_test_only(
+                BTreeMap::from([(entry, forged_bindings)]),
+            );
+        let error = BytecodeVM::new(tampered_move)
+            .run_value_for_component()
+            .expect_err("forged result Move source must fail receipt preflight");
+        assert!(
+            error.message().contains("Values unpack bindings disagree"),
+            "{error}"
+        );
+
+        let (_, mut tampered_drop) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let program = Arc::make_mut(&mut tampered_drop);
+        let entry = program.entry;
+        let bindings = {
+            let receipt = program
+                .canonical_map_any_owner_v1_receipt
+                .as_ref()
+                .expect("owner-v2 bytecode receipt");
+            program.functions[entry as usize]
+                .code
+                .iter()
+                .enumerate()
+                .filter(|(_, op)| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }))
+                .map(|(pc, _)| {
+                    receipt
+                        .ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+                            entry,
+                            u32::try_from(pc).expect("PC fits the receipt ABI"),
+                        )
+                        .expect("emitted unpack binding")
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut forged_bindings = bindings;
+        let owned_result = forged_bindings
+            .iter_mut()
+            .find(|binding| binding.result_owner_settlement_pc.is_some())
+            .expect("String or Label result has an owner Drop");
+        owned_result.result_owner_settlement_pc = Some(owned_result.result_binding_pc);
+        program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .expect("owner-v2 bytecode receipt")
+            .replace_ordinary_map_owned_any_v2_values_unpack_bindings_for_test_only(
+                BTreeMap::from([(entry, forged_bindings)]),
+            );
+        let error = BytecodeVM::new(tampered_drop)
+            .run_value_for_component()
+            .expect_err("owner Drop must follow the exact result-binding Move");
+        assert!(
+            error.message().contains("Values unpack bindings disagree"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_receipt_is_preflighted_before_emission() {
+        let (mut mir, _) = ordinary_map_owned_any_v2_values_unpack_fixture();
+        let receipt = mir
+            .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            .expect("Core Values unpack receipts")
+            .into_iter()
+            .next()
+            .expect("fixture has a Values unpack");
+        let mut forged = mir
+            .functions()
+            .get(&receipt.owner)
+            .expect("Values unpack owner")
+            .clone();
+        let move_instruction = forged
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Move { result, source }
+                        if result == &receipt.result_binding && source == &receipt.result
+                )
+            })
+            .expect("direct result binding Move");
+        move_instruction.id = crate::core::mir::MirInstructionId::new(format!(
+            "inst:bind:preflight-forged:{}",
+            receipt.cast.0
+        ))
+        .expect("distinct forged instruction identity");
+        mir.replace_function_for_test_only(forged);
+
+        let errors = compile_mir_program(&mir)
+            .expect_err("bytecode adapter rejects a bad Core Values receipt before emission");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("Values unpack preflight rejected")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_accepts_empty_snapshot() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_values_fixture();
+        let snapshot = BytecodeVM::new(bytecode)
+            .execute_ordinary_map_owned_any_v2_values_for_test(
+                0,
+                ordinary_map_owned_any_v2_values_test_root(&mir, false),
+            )
+            .expect("empty Values snapshot leaves its source root live");
+        let Value::List(values) = snapshot else {
+            panic!("empty Values snapshot retains the bytecode List ABI");
+        };
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_rejects_duplicate_root_and_unselected_descriptor() {
+        let (mir, bytecode) = ordinary_map_owned_any_v2_values_fixture();
+        let root = ordinary_map_owned_any_v2_values_test_root(&mir, true);
+        let Value::CanonicalOrdinaryMapOwnedAnyV2(root) = root else {
+            unreachable!();
+        };
+        let duplicate = Arc::clone(&root);
+        let error = BytecodeVM::new(Arc::clone(&bytecode))
+            .execute_ordinary_map_owned_any_v2_values_for_test(
+                0,
+                Value::CanonicalOrdinaryMapOwnedAnyV2(root),
+            )
+            .expect_err("Values cannot snapshot a duplicated source owner");
+        assert!(error.message().contains("stale or duplicate owner"));
+        drop(duplicate);
+
+        let unselected_type =
+            crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:unselected-i32");
+        let wrong_root = Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(BTreeMap::from([(
+            "a".to_owned(),
+            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                type_id: unselected_type,
+                value: 42,
+            },
+        )])));
+        let error = BytecodeVM::new(bytecode)
+            .execute_ordinary_map_owned_any_v2_values_for_test(0, wrong_root)
+            .expect_err("Values cannot widen its exact selected payload descriptors");
+        assert!(error
+            .message()
+            .contains("outside the exact Core-selected payload table"));
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_rejects_unreceipted_and_tampered_sites() {
+        let (_, mut missing_receipt) = ordinary_map_owned_any_v2_values_fixture();
+        Arc::make_mut(&mut missing_receipt).canonical_map_any_owner_v1_receipt = None;
+        let error = BytecodeVM::new(missing_receipt)
+            .run_value()
+            .expect_err("Values opcode has no authority without the independent receipt");
+        assert!(error.message().contains("no independent Checker receipt"));
+
+        let (_, mut tampered_op) = ordinary_map_owned_any_v2_values_fixture();
+        let program = Arc::make_mut(&mut tampered_op);
+        let op = program
+            .functions
+            .iter_mut()
+            .flat_map(|function| function.code.iter_mut())
+            .find(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Values { .. }))
+            .expect("emitted Values opcode");
+        let Op::MirOrdinaryMapOwnedAnyV2Values { ra, .. } = op else {
+            unreachable!();
+        };
+        *ra = u16::MAX;
+        let error = BytecodeVM::new(tampered_op)
+            .run_value()
+            .expect_err("tampered Values source register fails preflight");
+        assert!(error
+            .message()
+            .contains("independent Checker receipt snapshot"));
+
+        let (_, mut tampered_receipt) = ordinary_map_owned_any_v2_values_fixture();
+        let program = Arc::make_mut(&mut tampered_receipt);
+        let receipt = program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .expect("owner-v2 bytecode receipt");
+        let original = receipt
+            .ordinary_map_owned_any_v2_values_binding(program.entry, 0)
+            .expect("Core-derived Values binding")
+            .clone();
+        receipt.replace_ordinary_map_owned_any_v2_values_bindings_for_test_only(BTreeMap::new());
+        let error = BytecodeVM::new(tampered_receipt)
+            .run_value()
+            .expect_err("missing result receipt fails preflight");
+        assert!(error.message().contains("Values receipts disagree"));
+
+        let (_, mut forged_receipt) = ordinary_map_owned_any_v2_values_fixture();
+        let program = Arc::make_mut(&mut forged_receipt);
+        let receipt = program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .expect("owner-v2 bytecode receipt");
+        let mut forged = original.clone();
+        forged.owner = NodeId("forged-owner".into());
+        receipt.replace_ordinary_map_owned_any_v2_values_bindings_for_test_only(BTreeMap::from([
+            (program.entry, vec![forged]),
+        ]));
+        let error = BytecodeVM::new(forged_receipt)
+            .run_value()
+            .expect_err("forged source receipt fails preflight");
+        assert!(error.message().contains("Values receipts disagree"));
+
+        let (_, mut duplicate_receipt) = ordinary_map_owned_any_v2_values_fixture();
+        let program = Arc::make_mut(&mut duplicate_receipt);
+        let entry = program.entry;
+        program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .expect("owner-v2 bytecode receipt")
+            .replace_ordinary_map_owned_any_v2_values_bindings_for_test_only(BTreeMap::from([(
+                entry,
+                vec![original.clone(), original.clone()],
+            )]));
+        let error = BytecodeVM::new(duplicate_receipt)
+            .run_value()
+            .expect_err("duplicate result receipt fails preflight");
+        assert!(error.message().contains("Values receipts disagree"));
+
+        let (_, mut extra_receipt) = ordinary_map_owned_any_v2_values_fixture();
+        let program = Arc::make_mut(&mut extra_receipt);
+        let entry = program.entry;
+        program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .expect("owner-v2 bytecode receipt")
+            .replace_ordinary_map_owned_any_v2_values_bindings_for_test_only(BTreeMap::from([
+                (entry, vec![original.clone()]),
+                (u32::MAX, vec![original]),
+            ]));
+        let error = BytecodeVM::new(extra_receipt)
+            .run_value()
+            .expect_err("extra result receipt fails preflight");
+        assert!(error.message().contains("Values receipts disagree"));
     }
 }

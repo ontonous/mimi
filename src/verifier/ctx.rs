@@ -1080,7 +1080,12 @@ impl Verifier {
                 self.ctx.source_hash.clone(),
             ));
         }
-        results
+        // This legacy public API enters through Resolved contracts rather
+        // than the newer checked-verifier route selector. Keep the owner's
+        // source identity explicit and remove any stale proof artifact when
+        // Checker has staged or incomplete ordinary Map/Any owner-v2
+        // coverage. Other callables remain reportable beside those NITS.
+        super::enforce_ordinary_map_owned_any_v2_coverage(program, results)
     }
 
     /// Verify checked callables without appending the Actor compatibility

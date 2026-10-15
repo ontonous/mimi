@@ -1,21 +1,26 @@
 //! Persistent ordinary-map snapshots whose entries own typed `Any` values.
 //!
-//! This is the runtime layer for the distinct
-//! `ordinary-map-owner-lifecycle-i32-string-v1` profile.
-//! It is intentionally independent of the MapAnyOwner v1 root API: the map
-//! stores `AnyOwnerToken`s only inside non-copyable RAII values and never
-//! encodes them as `ValueHandle`s.
+//! This module contains the existing distinct v1 profiles and the staged
+//! `ordinary_map_owned_any_v2` profile. The v2 snapshot is isolated by its
+//! MapStorageMode and stores AnyOwnerTokens only in private non-copyable RAII
+//! values; none of these tokens are legacy ValueHandles.
 //!
-//! Root-producing ABIs return zero on failure; Size and Contains return -1.
-//! This lets the native consumer clean up every live root before its trap.
-//! Rust staging locals are dropped before an error sentinel is returned.
+//! The V2 ordinary-Map ABI uses status/out for every fallible operation.
+//! Status zero means success; every nonzero status is an error handled by the
+//! compiler-native trap adapter. V1 exports retain their historical ABI.
+//! Rust staging locals are dropped before an error status is returned.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(test)]
 use std::cell::{Cell, RefCell};
 
 use super::any_owner::{self, AnyOwnerError, AnyOwnerKind, AnyOwnerReceiptError, AnyOwnerToken};
+use super::managed_any_payload_v2::{
+    ManagedAnyPayloadV2, ManagedAnyPayloadV2Glue, ManagedAnyPayloadV2Identity,
+};
 
 /// A single owned `Any` value. The token is released exactly once on drop.
 ///
@@ -95,6 +100,96 @@ impl Drop for OwnedAny {
     }
 }
 
+/// One unpublished or Map-entry V2 owner. The token always comes from the
+/// shared generation-bearing any_owner table; this is not a second token set.
+pub(super) struct OwnedAnyV2 {
+    token: AnyOwnerToken,
+}
+
+impl OwnedAnyV2 {
+    fn from_payload(payload: ManagedAnyPayloadV2) -> Result<Self, AnyOwnerError> {
+        snapshot_allocation_checkpoint().map_err(|_| AnyOwnerError::Capacity)?;
+        let token = any_owner::allocate_managed_v2(payload)?;
+        record_created_token(token);
+        Ok(Self { token })
+    }
+
+    fn from_borrowed(
+        identity: ManagedAnyPayloadV2Identity,
+        glue: ManagedAnyPayloadV2Glue,
+        source: *const u8,
+    ) -> Result<Self, AnyOwnerError> {
+        snapshot_allocation_checkpoint().map_err(|_| AnyOwnerError::Capacity)?;
+        // SAFETY: FFI callers provide a readable pointer matching this exact
+        // TypeDesc layout. The V2 owner module validates size/alignment and
+        // clones to private storage before taking ownership.
+        let payload = unsafe { ManagedAnyPayloadV2::clone_from_borrowed(identity, glue, source) }
+            .map_err(|error| match error {
+            super::managed_any_payload_v2::ManagedAnyPayloadV2Error::Capacity => {
+                AnyOwnerError::Capacity
+            }
+            super::managed_any_payload_v2::ManagedAnyPayloadV2Error::Poisoned => {
+                AnyOwnerError::Poisoned
+            }
+            super::managed_any_payload_v2::ManagedAnyPayloadV2Error::UnsupportedAggregate => {
+                AnyOwnerError::UnsupportedAggregate
+            }
+            super::managed_any_payload_v2::ManagedAnyPayloadV2Error::CallbackConflict => {
+                AnyOwnerError::CallbackConflict
+            }
+            super::managed_any_payload_v2::ManagedAnyPayloadV2Error::CloneFailed(status) => {
+                AnyOwnerError::CloneFailed(status)
+            }
+            _ => AnyOwnerError::DescriptorMismatch,
+        })?;
+        Self::from_payload(payload)
+    }
+
+    fn clone_published_owner(
+        owner: i64,
+        expected: ManagedAnyPayloadV2Identity,
+    ) -> Result<Self, ManagedAnyStatus> {
+        let (source, actual) = managed_v2_token_receipt(owner)?;
+        if actual != expected {
+            return Err(ManagedAnyStatus::TypeMismatch);
+        }
+        managed_allocation_checkpoint()?;
+        let token = any_owner::clone_managed_v2_owner(source).map_err(ManagedAnyStatus::from)?;
+        record_created_token(token);
+        Ok(Self { token })
+    }
+
+    fn identity(&self) -> Result<ManagedAnyPayloadV2Identity, AnyOwnerError> {
+        any_owner::managed_v2_identity(self.token)
+    }
+
+    fn try_clone(&self) -> Result<Self, AnyOwnerError> {
+        snapshot_allocation_checkpoint().map_err(|_| AnyOwnerError::Capacity)?;
+        let token = any_owner::clone_managed_v2_owner(self.token)?;
+        record_created_token(token);
+        Ok(Self { token })
+    }
+
+    /// Transfer a token into the creator cleanup domain only once its exact
+    /// actual descriptor receipt has been recorded successfully.
+    fn publish_managed(self) -> Result<i64, ManagedAnyStatus> {
+        let descriptor = self.identity().map_err(ManagedAnyStatus::from)?;
+        super::ordinary_map_domain::register_fresh_managed_any_v2(self.token, descriptor)
+            .map_err(ManagedAnyStatus::from)?;
+        let accepted = std::mem::ManuallyDrop::new(self);
+        Ok(accepted.token.wire_bits() as i64)
+    }
+}
+
+impl Drop for OwnedAnyV2 {
+    fn drop(&mut self) {
+        if any_owner::release(self.token).is_err() && !super::ordinary_map_domain::in_trap_cleanup()
+        {
+            std::process::abort();
+        }
+    }
+}
+
 /// Errors returned while staging an ordinary map snapshot update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OrdinaryMapSnapshotError {
@@ -111,12 +206,440 @@ impl From<AnyOwnerError> for OrdinaryMapSnapshotError {
     }
 }
 
-/// An immutable root containing heterogeneous owned `i32` and `String` values.
+/// An immutable legacy v1 root containing owned `i32` and `String` values.
 ///
 /// Keys are Rust UTF-8 strings, hashed over their full byte contents. Embedded
 /// NUL bytes are valid and remain part of the key.
 pub(crate) struct OrdinaryMapSnapshot {
     entries: HashMap<String, OwnedAny>,
+}
+
+/// Unified version-2 ordinary Map storage. Each entry owns a token from the
+/// shared Any registry and therefore preserves its actual tag, canonical type
+/// ID, TypeDesc closure hash, layout, and descriptor-pinned callbacks.
+pub(crate) struct OrdinaryMapAnyV2Snapshot {
+    entries: HashMap<String, OwnedAnyV2>,
+}
+
+impl OrdinaryMapAnyV2Snapshot {
+    pub(super) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    pub(super) fn size(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(super) fn contains(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Set by cloning a descriptor-checked published owner into the persistent
+    /// snapshot. The caller retains its source owner and this root owns a
+    /// separate token/payload instance.
+    fn set_owned(&self, key: &str, value: OwnedAnyV2) -> Result<Self, OrdinaryMapSnapshotError> {
+        let owned_key = try_copy_string(key)?;
+        self.with_entry(owned_key, value)
+    }
+
+    /// Return an independent hit snapshot. Missing stays `None`; the FFI
+    /// adapter creates the mandated i32-zero owner from its sealed core
+    /// descriptor receipt and compiler-generated scalar glue.
+    fn get_any(&self, key: &str) -> Result<Option<OwnedAnyV2>, OrdinaryMapSnapshotError> {
+        self.entries
+            .get(key)
+            .map(OwnedAnyV2::try_clone)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    fn clone_root(&self) -> Result<Self, OrdinaryMapSnapshotError> {
+        let mut entries = HashMap::new();
+        snapshot_allocation_checkpoint()?;
+        entries
+            .try_reserve(self.entries.len())
+            .map_err(|_| OrdinaryMapSnapshotError::Capacity)?;
+        for (key, value) in &self.entries {
+            let key = try_copy_string(key)?;
+            let value = value.try_clone()?;
+            entries.insert(key, value);
+        }
+        Ok(Self { entries })
+    }
+
+    fn remove(&self, key: &str) -> Result<Self, OrdinaryMapSnapshotError> {
+        let mut entries = HashMap::new();
+        let final_len = self
+            .entries
+            .len()
+            .checked_sub(usize::from(self.entries.contains_key(key)))
+            .ok_or(OrdinaryMapSnapshotError::Capacity)?;
+        snapshot_allocation_checkpoint()?;
+        entries
+            .try_reserve(final_len)
+            .map_err(|_| OrdinaryMapSnapshotError::Capacity)?;
+        for (old_key, old_value) in &self.entries {
+            if old_key == key {
+                continue;
+            }
+            entries.insert(try_copy_string(old_key)?, old_value.try_clone()?);
+        }
+        Ok(Self { entries })
+    }
+
+    fn values(&self) -> Result<Vec<OwnedAnyV2>, OrdinaryMapSnapshotError> {
+        let ordered = self.sorted_entries()?;
+        let mut values = Vec::new();
+        snapshot_allocation_checkpoint()?;
+        values
+            .try_reserve_exact(ordered.len())
+            .map_err(|_| OrdinaryMapSnapshotError::Capacity)?;
+        for (_, value) in ordered {
+            values.push(value.try_clone()?);
+        }
+        Ok(values)
+    }
+
+    fn to_list(&self) -> Result<Vec<(String, OwnedAnyV2)>, OrdinaryMapSnapshotError> {
+        let ordered = self.sorted_entries()?;
+        let mut entries = Vec::new();
+        snapshot_allocation_checkpoint()?;
+        entries
+            .try_reserve_exact(ordered.len())
+            .map_err(|_| OrdinaryMapSnapshotError::Capacity)?;
+        for (key, value) in ordered {
+            entries.push((try_copy_string(key)?, value.try_clone()?));
+        }
+        Ok(entries)
+    }
+
+    fn sorted_entries(&self) -> Result<Vec<(&String, &OwnedAnyV2)>, OrdinaryMapSnapshotError> {
+        let mut entries = Vec::new();
+        snapshot_allocation_checkpoint()?;
+        entries
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| OrdinaryMapSnapshotError::Capacity)?;
+        entries.extend(self.entries.iter());
+        entries.sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+        Ok(entries)
+    }
+
+    fn size_i32(&self) -> Result<i32, OrdinaryMapSnapshotError> {
+        i32::try_from(self.entries.len()).map_err(|_| OrdinaryMapSnapshotError::Capacity)
+    }
+
+    fn with_entry(&self, key: String, value: OwnedAnyV2) -> Result<Self, OrdinaryMapSnapshotError> {
+        let replaces_existing = self.entries.contains_key(key.as_str());
+        let final_len = self
+            .entries
+            .len()
+            .checked_add(usize::from(!replaces_existing))
+            .ok_or(OrdinaryMapSnapshotError::Capacity)?;
+        let mut entries = HashMap::new();
+        snapshot_allocation_checkpoint()?;
+        entries
+            .try_reserve(final_len)
+            .map_err(|_| OrdinaryMapSnapshotError::Capacity)?;
+        for (old_key, old_value) in &self.entries {
+            if old_key == key.as_str() {
+                continue;
+            }
+            entries.insert(try_copy_string(old_key)?, old_value.try_clone()?);
+        }
+        entries.insert(key, value);
+        Ok(Self { entries })
+    }
+}
+
+/// An independently owned, immutable `values` result.  Its wire identity is
+/// deliberately a separate opaque handle: it is neither a `MimiList` with
+/// V1 `ManagedAny` slots nor an Any owner token.  Indexing clones one element
+/// into a separately published ManagedAny V2 owner.
+struct OrdinaryMapAnyV2ValuesSnapshot {
+    values: Vec<OwnedAnyV2>,
+}
+
+impl OrdinaryMapAnyV2ValuesSnapshot {
+    fn try_clone(&self) -> Result<Self, OrdinaryMapSnapshotError> {
+        let mut values = Vec::new();
+        snapshot_allocation_checkpoint()?;
+        values
+            .try_reserve_exact(self.values.len())
+            .map_err(|_| OrdinaryMapSnapshotError::Capacity)?;
+        for value in &self.values {
+            values.push(value.try_clone()?);
+        }
+        Ok(Self { values })
+    }
+}
+
+/// Owner domains that can appear in Mimi lists. The V2 owner-list registry
+/// deliberately recognizes only its canonical V2 domain; a V1 list or an
+/// unrelated list allocation cannot borrow the same pointer receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ManagedAnyV2ListDomain {
+    CanonicalOwnerListV2,
+    LegacyManagedAnyV1,
+}
+
+/// Creator-thread cleanup receipt for a canonical `MimiList<ManagedAnyV2>`.
+/// The list owns both its Box header/backing buffer and its element tokens;
+/// tracking only the tokens would leave the list allocation behind after an
+/// orderly runtime trap.
+#[derive(Clone, Copy)]
+struct RegisteredManagedAnyV2List {
+    creator: super::handle::LeaseThreadId,
+    domain: ManagedAnyV2ListDomain,
+    list: usize,
+}
+
+// This registry owns identities only. List destruction and V2 payload Drop
+// glue always run after its mutex has been released.
+static MANAGED_ANY_V2_LISTS: Mutex<Vec<RegisteredManagedAnyV2List>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+thread_local! {
+    static MANAGED_ANY_V2_LIST_REGISTRATION_FAIL: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn with_managed_any_v2_list_registration_failure_for_test<T>(
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MANAGED_ANY_V2_LIST_REGISTRATION_FAIL.with(|fail| fail.set(self.0));
+        }
+    }
+
+    let _restore = Restore(MANAGED_ANY_V2_LIST_REGISTRATION_FAIL.with(|fail| fail.replace(true)));
+    operation()
+}
+
+/// Register a newly allocated canonical V2 owner list before publishing its
+/// pointer. False means the caller still owns the list and must free it.
+pub(super) fn register_managed_any_v2_list(list: *mut super::MimiList) -> bool {
+    if list.is_null() {
+        return false;
+    }
+    #[cfg(test)]
+    if MANAGED_ANY_V2_LIST_REGISTRATION_FAIL.with(Cell::get) {
+        return false;
+    }
+    let mut lists = MANAGED_ANY_V2_LISTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list_identity = list as usize;
+    if lists
+        .iter()
+        .any(|registered| registered.list == list_identity)
+        || lists.try_reserve(1).is_err()
+    {
+        return false;
+    }
+    lists.push(RegisteredManagedAnyV2List {
+        creator: super::handle::current_lease_thread_id(),
+        domain: ManagedAnyV2ListDomain::CanonicalOwnerListV2,
+        list: list_identity,
+    });
+    true
+}
+
+/// Check that the exact pointer belongs to the requested list ownership
+/// domain. The creator is intentionally not compared here: explicit Drop may
+/// happen on another thread, while trap draining filters by creator below.
+pub(super) fn managed_any_v2_list_is_registered(
+    list: *const super::MimiList,
+    domain: ManagedAnyV2ListDomain,
+) -> bool {
+    if list.is_null() {
+        return false;
+    }
+    MANAGED_ANY_V2_LISTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .any(|registered| registered.list == list as usize && registered.domain == domain)
+}
+
+/// Remove a list's cleanup receipt before normal destruction. This is also
+/// called by the generic MimiList deallocator, so every supported free path
+/// retires the same identity exactly once.
+pub(super) fn forget_managed_any_v2_list(
+    list: *mut super::MimiList,
+    domain: ManagedAnyV2ListDomain,
+) -> bool {
+    if list.is_null() {
+        return false;
+    }
+    let mut lists = MANAGED_ANY_V2_LISTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(index) = lists
+        .iter()
+        .position(|registered| registered.list == list as usize && registered.domain == domain)
+    {
+        lists.remove(index);
+        return true;
+    }
+    false
+}
+
+/// Retire every V2 owner list created by the trapping native thread. Detach a
+/// pointer identity from the registry lock before invoking the normal typed
+/// list Drop path; Drop itself removes the receipt before releasing any
+/// element owner. Remaining independently published tokens are drained by
+/// `ordinary_map_domain` after this function.
+pub(super) fn drain_current_thread_managed_any_v2_lists() {
+    let Some(creator) = super::handle::cached_lease_thread_id() else {
+        return;
+    };
+    loop {
+        let list = {
+            let mut lists = MANAGED_ANY_V2_LISTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let index = lists.iter().rposition(|registered| {
+                registered.creator == creator
+                    && registered.domain == ManagedAnyV2ListDomain::CanonicalOwnerListV2
+            });
+            index.map(|index| lists[index].list as *mut super::MimiList)
+        };
+        let Some(list) = list else {
+            return;
+        };
+        // SAFETY: the matching domain/creator receipt was observed under the
+        // registry lock, and normal Drop removes it before freeing the list.
+        unsafe { super::mimi_mir_list_drop_managed_any_v2(list) };
+    }
+}
+
+#[cfg(test)]
+pub(super) fn managed_any_v2_list_registered_for_test(list: *mut super::MimiList) -> bool {
+    managed_any_v2_list_is_registered(list, ManagedAnyV2ListDomain::CanonicalOwnerListV2)
+}
+
+#[cfg(test)]
+fn managed_any_v2_list_registered_in_legacy_domain_for_test(list: *mut super::MimiList) -> bool {
+    managed_any_v2_list_is_registered(list, ManagedAnyV2ListDomain::LegacyManagedAnyV1)
+}
+
+#[derive(Clone)]
+struct PublishedOrdinaryMapAnyV2Values {
+    // Cleanup ownership follows the thread that published this opaque handle.
+    // Acquires are shared across threads, and an explicit Drop may retire it
+    // from any thread; the creator is consulted only by trap-domain draining.
+    creator: super::handle::LeaseThreadId,
+    snapshot: Arc<OrdinaryMapAnyV2ValuesSnapshot>,
+}
+
+static V2_VALUES_NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
+static V2_VALUES_HANDLES: OnceLock<Mutex<HashMap<i64, PublishedOrdinaryMapAnyV2Values>>> =
+    OnceLock::new();
+
+fn v2_values_handles() -> &'static Mutex<HashMap<i64, PublishedOrdinaryMapAnyV2Values>> {
+    V2_VALUES_HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn allocate_v2_values_handle() -> Result<i64, ManagedAnyStatus> {
+    V2_VALUES_NEXT_HANDLE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            (current > 0).then(|| current.checked_add(1)).flatten()
+        })
+        .map_err(|_| ManagedAnyStatus::Capacity)
+}
+
+fn publish_v2_values_snapshot(
+    snapshot: OrdinaryMapAnyV2ValuesSnapshot,
+) -> Result<i64, ManagedAnyStatus> {
+    snapshot_allocation_checkpoint().map_err(|_| ManagedAnyStatus::Capacity)?;
+    let handle = allocate_v2_values_handle()?;
+    let published = PublishedOrdinaryMapAnyV2Values {
+        creator: super::handle::current_lease_thread_id(),
+        snapshot: Arc::new(snapshot),
+    };
+    let mut registry = v2_values_handles()
+        .lock()
+        .map_err(|_| ManagedAnyStatus::Poisoned)?;
+    registry
+        .try_reserve(1)
+        .map_err(|_| ManagedAnyStatus::Capacity)?;
+    registry.insert(handle, published);
+    Ok(handle)
+}
+
+fn acquire_v2_values_snapshot(
+    handle: i64,
+) -> Result<Arc<OrdinaryMapAnyV2ValuesSnapshot>, ManagedAnyStatus> {
+    if handle <= 0 {
+        return Err(ManagedAnyStatus::InvalidToken);
+    }
+    let registry = v2_values_handles()
+        .lock()
+        .map_err(|_| ManagedAnyStatus::Poisoned)?;
+    registry
+        .get(&handle)
+        .map(|published| Arc::clone(&published.snapshot))
+        .ok_or_else(|| {
+            if handle < V2_VALUES_NEXT_HANDLE.load(Ordering::Relaxed) {
+                ManagedAnyStatus::StaleToken
+            } else {
+                ManagedAnyStatus::InvalidToken
+            }
+        })
+}
+
+fn retire_v2_values_snapshot(handle: i64) -> Result<(), ManagedAnyStatus> {
+    if handle <= 0 {
+        return Err(ManagedAnyStatus::InvalidToken);
+    }
+    // Detach under the registry lock, then release the owner graph after the
+    // lock has been dropped. Payload callbacks must never run under this lock.
+    let removed = v2_values_handles()
+        .lock()
+        .map_err(|_| ManagedAnyStatus::Poisoned)?
+        .remove(&handle);
+    match removed {
+        Some(snapshot) => {
+            drop(snapshot);
+            Ok(())
+        }
+        None if handle < V2_VALUES_NEXT_HANDLE.load(Ordering::Relaxed) => {
+            Err(ManagedAnyStatus::StaleToken)
+        }
+        None => Err(ManagedAnyStatus::InvalidToken),
+    }
+}
+
+/// Release values snapshots created by the trapping execution thread. Each
+/// entry is detached before its V2 owners run Drop glue, so cleanup is
+/// idempotent and callback-safe even during an orderly trap drain.
+pub(super) fn drain_current_thread_v2_values_snapshots() {
+    let Some(creator) = super::handle::cached_lease_thread_id() else {
+        return;
+    };
+    loop {
+        let removed = {
+            let Ok(mut registry) = v2_values_handles().lock() else {
+                return;
+            };
+            let handle = registry
+                .iter()
+                .find_map(|(handle, snapshot)| (snapshot.creator == creator).then_some(*handle));
+            handle.and_then(|handle| registry.remove(&handle))
+        };
+        match removed {
+            Some(snapshot) => drop(snapshot),
+            None => return,
+        }
+    }
 }
 
 /// Typed lookup result for profile-specific ordinary Map getters.
@@ -247,7 +770,8 @@ impl OrdinaryMapSnapshot {
             super::any_owner::AnyOwnerKind::I32 => {
                 Ok(OrdinaryMapLookup::Value(any_owner::read_i32(value.token)?))
             }
-            super::any_owner::AnyOwnerKind::OwnedString => Ok(OrdinaryMapLookup::TypeMismatch),
+            super::any_owner::AnyOwnerKind::OwnedString
+            | super::any_owner::AnyOwnerKind::ManagedV2 => Ok(OrdinaryMapLookup::TypeMismatch),
         }
     }
 
@@ -262,7 +786,9 @@ impl OrdinaryMapSnapshot {
             return Ok(OrdinaryMapLookup::Missing);
         };
         match any_owner::validate(value.token)? {
-            super::any_owner::AnyOwnerKind::I32 => Ok(OrdinaryMapLookup::TypeMismatch),
+            super::any_owner::AnyOwnerKind::I32 | super::any_owner::AnyOwnerKind::ManagedV2 => {
+                Ok(OrdinaryMapLookup::TypeMismatch)
+            }
             super::any_owner::AnyOwnerKind::OwnedString => {
                 #[cfg(test)]
                 ordinary_map_owned_get_allocation_checkpoint_for_test()
@@ -353,6 +879,8 @@ thread_local! {
     static OWNED_GET_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static OWNED_GET_ALLOCATION_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static OWNED_GET_FAILURE_TRIGGERED: Cell<bool> = const { Cell::new(false) };
+    static OWNED_ANY_V2_ROOT_PUBLISH_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Test-only allocation oracle shared by the independent owned-Get consumers.
@@ -412,6 +940,58 @@ pub(crate) fn with_ordinary_map_owned_get_allocation_failure_for_test<T>(
         fail_after: OWNED_GET_FAIL_AFTER.with(|value| value.replace(Some(stages_before_failure))),
         attempts: OWNED_GET_ALLOCATION_ATTEMPTS.with(|value| value.replace(0)),
         triggered: OWNED_GET_FAILURE_TRIGGERED.with(|value| value.replace(false)),
+    };
+    operation()
+}
+
+/// A shared logical failpoint at the V2 root publication boundary. Native,
+/// reference, and bytecode consumers invoke this only after staging a complete
+/// replacement root and immediately before publishing it. The failed outcome
+/// therefore leaves the old root and every input owner unchanged.
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_root_publish_checkpoint_for_test() -> Result<(), ()> {
+    OWNED_ANY_V2_ROOT_PUBLISH_FAIL_AFTER.with(|fail_after| match fail_after.get() {
+        Some(remaining) => {
+            OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS
+                .with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+            if remaining == 0 {
+                Err(())
+            } else {
+                fail_after.set(Some(remaining - 1));
+                Ok(())
+            }
+        }
+        None => Ok(()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_root_publish_attempts_for_test() -> usize {
+    OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS.with(Cell::get)
+}
+
+/// Install one thread-local root-publication failure and restore the prior
+/// oracle state even if the operation unwinds.
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_root_publish_failure_for_test<T>(
+    stages_before_failure: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreFailpoint {
+        fail_after: Option<usize>,
+        attempts: usize,
+    }
+    impl Drop for RestoreFailpoint {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_ROOT_PUBLISH_FAIL_AFTER.with(|value| value.set(self.fail_after));
+            OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS.with(|value| value.set(self.attempts));
+        }
+    }
+
+    let _restore = RestoreFailpoint {
+        fail_after: OWNED_ANY_V2_ROOT_PUBLISH_FAIL_AFTER
+            .with(|value| value.replace(Some(stages_before_failure))),
+        attempts: OWNED_ANY_V2_ROOT_PUBLISH_ATTEMPTS.with(|value| value.replace(0)),
     };
     operation()
 }
@@ -812,6 +1392,74 @@ fn drop_owned_get_root(handle: i64) -> Result<(), OrdinaryMapSnapshotRuntimeErro
     Ok(())
 }
 
+fn new_owned_any_v2_root(
+    snapshot: OrdinaryMapAnyV2Snapshot,
+) -> Result<i64, OrdinaryMapSnapshotRuntimeError> {
+    snapshot_allocation_checkpoint()?;
+    #[cfg(test)]
+    ordinary_map_owned_any_v2_root_publish_checkpoint_for_test()
+        .map_err(|_| OrdinaryMapSnapshotRuntimeError::Capacity)?;
+    match super::handle::map_new_handle_fallible(super::MimiMap::ordinary_map_owned_any_v2(
+        snapshot,
+    )) {
+        Ok(handle) => super::ordinary_map_domain::publish_new_root(
+            super::ordinary_map_domain::OrdinaryMapProfile::OwnedAnyV2,
+            handle,
+        )
+        .map_err(|_| OrdinaryMapSnapshotRuntimeError::Capacity),
+        Err(uninstalled_map) => {
+            drop(uninstalled_map);
+            Err(OrdinaryMapSnapshotRuntimeError::Capacity)
+        }
+    }
+}
+
+fn acquire_owned_any_v2_root(
+    handle: i64,
+) -> Result<super::handle::MapLease, OrdinaryMapSnapshotRuntimeError> {
+    super::handle::ordinary_map_owned_any_v2_acquire(handle).map_err(Into::into)
+}
+
+fn snapshot_any_v2_from_map(
+    map: &super::MimiMap,
+) -> Result<&OrdinaryMapAnyV2Snapshot, OrdinaryMapSnapshotRuntimeError> {
+    map.ordinary_map_any_v2_snapshot
+        .as_ref()
+        .ok_or(OrdinaryMapSnapshotRuntimeError::InvalidInput)
+}
+
+fn derive_owned_any_v2_root(
+    handle: i64,
+    update: impl FnOnce(
+        &OrdinaryMapAnyV2Snapshot,
+    ) -> Result<OrdinaryMapAnyV2Snapshot, OrdinaryMapSnapshotError>,
+) -> Result<i64, OrdinaryMapSnapshotRuntimeError> {
+    let source = acquire_owned_any_v2_root(handle)?;
+    let snapshot = update(snapshot_any_v2_from_map(&source)?)?;
+    drop(source);
+    new_owned_any_v2_root(snapshot)
+}
+
+fn clone_owned_any_v2_root(handle: i64) -> Result<i64, OrdinaryMapSnapshotRuntimeError> {
+    derive_owned_any_v2_root(handle, OrdinaryMapAnyV2Snapshot::clone_root)
+}
+
+fn remove_owned_any_v2_root(
+    handle: i64,
+    key: &str,
+) -> Result<i64, OrdinaryMapSnapshotRuntimeError> {
+    derive_owned_any_v2_root(handle, |snapshot| snapshot.remove(key))
+}
+
+fn drop_owned_any_v2_root(handle: i64) -> Result<(), OrdinaryMapSnapshotRuntimeError> {
+    super::handle::ordinary_map_owned_any_v2_drop(handle)?;
+    super::ordinary_map_domain::forget_root(
+        super::ordinary_map_domain::OrdinaryMapProfile::OwnedAnyV2,
+        handle,
+    );
+    Ok(())
+}
+
 unsafe fn owned_get_key(
     key: *const u8,
     key_len: i64,
@@ -1059,8 +1707,8 @@ pub unsafe extern "C" fn mimi_mir_ordinary_map_owned_get_i32_string_v1_get_strin
     ORDINARY_MAP_OWNED_GET_OK
 }
 
-/// Exact status ABI shared by ordinary `(bool, Any)` get and ManagedAny v1.
-/// Missing is successful and publishes a fresh i32-zero owner with found=0.
+/// Shared internal status table for ManagedAny and ordinary Map V2 helpers.
+/// Ordinary Map Get absence is a successful status with a fresh zero owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 enum ManagedAnyStatus {
@@ -1078,6 +1726,10 @@ enum ManagedAnyStatus {
     RootStaleDestroyed = 11,
     RootReentrant = 12,
     DomainConflict = 13,
+    CloneFailed = 14,
+    UnsupportedAggregate = 15,
+    CallbackConflict = 16,
+    SizeOverflow = 17,
 }
 
 impl From<AnyOwnerError> for ManagedAnyStatus {
@@ -1088,6 +1740,9 @@ impl From<AnyOwnerError> for ManagedAnyStatus {
             AnyOwnerError::DescriptorMismatch => Self::DescriptorMismatch,
             AnyOwnerError::Capacity => Self::Capacity,
             AnyOwnerError::Poisoned => Self::Poisoned,
+            AnyOwnerError::UnsupportedAggregate => Self::UnsupportedAggregate,
+            AnyOwnerError::CallbackConflict => Self::CallbackConflict,
+            AnyOwnerError::CloneFailed(_) => Self::CloneFailed,
         }
     }
 }
@@ -1118,8 +1773,8 @@ impl From<OrdinaryMapSnapshotRuntimeError> for ManagedAnyStatus {
     fn from(error: OrdinaryMapSnapshotRuntimeError) -> Self {
         match error {
             OrdinaryMapSnapshotRuntimeError::InvalidInput => Self::InvalidInput,
-            OrdinaryMapSnapshotRuntimeError::Capacity
-            | OrdinaryMapSnapshotRuntimeError::SizeOverflow => Self::Capacity,
+            OrdinaryMapSnapshotRuntimeError::Capacity => Self::Capacity,
+            OrdinaryMapSnapshotRuntimeError::SizeOverflow => Self::SizeOverflow,
             OrdinaryMapSnapshotRuntimeError::Owner(error) => error.into(),
             OrdinaryMapSnapshotRuntimeError::Handle(error) => match error {
                 super::handle::HandleError::Invalid => Self::RootInvalid,
@@ -1161,6 +1816,92 @@ fn managed_allocation_checkpoint() -> Result<(), ManagedAnyStatus> {
     ordinary_map_owned_get_allocation_checkpoint_for_test()
         .map_err(|_| ManagedAnyStatus::Capacity)?;
     Ok(())
+}
+
+unsafe fn managed_v2_identity_from_abi(
+    tag: i32,
+    type_id: *const u8,
+    type_id_len: i64,
+    descriptor_hash: *const u8,
+    size: i64,
+    align: i64,
+) -> Result<ManagedAnyPayloadV2Identity, ManagedAnyStatus> {
+    use super::managed_any_payload_v2::{
+        ManagedAnyPayloadV2Tag, ManagedAnyPayloadV2TypeId, DESCRIPTOR_HASH_BYTES,
+    };
+
+    let tag = ManagedAnyPayloadV2Tag::try_from(tag).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+    let id_bytes =
+        unsafe { checked_abi_bytes(type_id, type_id_len) }.map_err(ManagedAnyStatus::from)?;
+    let type_id =
+        ManagedAnyPayloadV2TypeId::parse(id_bytes).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+    if descriptor_hash.is_null() {
+        return Err(ManagedAnyStatus::InvalidInput);
+    }
+    let mut hash = [0; DESCRIPTOR_HASH_BYTES];
+    // SAFETY: the ABI contract requires 32 readable raw hash bytes.
+    unsafe { std::ptr::copy_nonoverlapping(descriptor_hash, hash.as_mut_ptr(), hash.len()) };
+    let size = usize::try_from(size).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+    let align = usize::try_from(align).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+    Ok(ManagedAnyPayloadV2Identity {
+        tag,
+        type_id,
+        descriptor_hash: hash,
+        size,
+        align,
+    })
+}
+
+fn managed_v2_token_receipt(
+    owner: i64,
+) -> Result<(AnyOwnerToken, ManagedAnyPayloadV2Identity), ManagedAnyStatus> {
+    let token = AnyOwnerToken::from_wire_bits(owner as u64).map_err(ManagedAnyStatus::from)?;
+    let receipt = super::ordinary_map_domain::managed_any_v2_identity(token)
+        .map_err(ManagedAnyStatus::from)?;
+    let Some(receipt) = receipt else {
+        any_owner::validate(token).map_err(ManagedAnyStatus::from)?;
+        return Err(ManagedAnyStatus::UnmanagedToken);
+    };
+    let actual = any_owner::managed_v2_identity(token).map_err(ManagedAnyStatus::from)?;
+    if actual != receipt {
+        return Err(ManagedAnyStatus::DescriptorMismatch);
+    }
+    Ok((token, receipt))
+}
+
+/// Exact V2 owner validator used by `ListElementKind::ManagedAnyV2`. The
+/// receipt comparison includes tag, type ID, descriptor hash, size, and
+/// alignment; no v1 owner descriptor or callback table participates.
+pub(super) fn managed_v2_owner_is_valid_for_list(owner: i64) -> bool {
+    managed_v2_token_receipt(owner).is_ok()
+}
+
+fn map_get_status(error: ManagedAnyStatus) -> i32 {
+    error as i32
+}
+
+fn managed_any_status_from_code(status: i32) -> ManagedAnyStatus {
+    match status {
+        0 => ManagedAnyStatus::Ok,
+        1 => ManagedAnyStatus::InvalidInput,
+        2 => ManagedAnyStatus::TypeMismatch,
+        3 => ManagedAnyStatus::Capacity,
+        4 => ManagedAnyStatus::InvalidToken,
+        5 => ManagedAnyStatus::StaleToken,
+        6 => ManagedAnyStatus::VersionMismatch,
+        7 => ManagedAnyStatus::DescriptorMismatch,
+        8 => ManagedAnyStatus::Poisoned,
+        9 => ManagedAnyStatus::UnmanagedToken,
+        10 => ManagedAnyStatus::RootInvalid,
+        11 => ManagedAnyStatus::RootStaleDestroyed,
+        12 => ManagedAnyStatus::RootReentrant,
+        13 => ManagedAnyStatus::DomainConflict,
+        14 => ManagedAnyStatus::CloneFailed,
+        15 => ManagedAnyStatus::UnsupportedAggregate,
+        16 => ManagedAnyStatus::CallbackConflict,
+        17 => ManagedAnyStatus::SizeOverflow,
+        _ => ManagedAnyStatus::DomainConflict,
+    }
 }
 
 /// Return the ordinary Map `(found, Any)` shape through an independent typed
@@ -1466,10 +2207,1704 @@ pub extern "C" fn mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(handle: i64
     });
 }
 
+// -------------------------------------------------------------------------
+// Ordinary Map/Any V2 concrete-record owner runtime
+// -------------------------------------------------------------------------
+//
+// This profile is intentionally a separate owner domain from both the v1
+// i32/String snapshot and the legacy `ValueHandle` Map.  The first supported
+// concrete payload is `Label { text: string }`.  A V2 root stores a private
+// UTF-8 copy of every key and label field, and persistent Set/Remove operations
+// build a new root while leaving their source root untouched.
+
+/// Borrowed C view of the concrete `Label { text: string }` payload accepted by
+/// the V2 Set ABI.  The runtime copies `text` before publishing the new root;
+/// this struct itself is never retained and is not an owner handle.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MimiMapAnyOwnerV2Label {
+    pub text: *const u8,
+    pub text_len: i64,
+}
+
+/// Owned storage for the concrete V2 payload shapes.  This is intentionally a
+/// private enum rather than the v1 AnyOwner table: each branch is deep-copied
+/// while building a persistent root, and no wire token is exposed.
+enum OrdinaryMapAnyOwnerV2Value {
+    I32(i32),
+    Label(OrdinaryMapAnyOwnerV2LabelOwner),
+}
+
+/// The owned `Label { text: string }` payload in the initial V2 runtime
+/// slice.  It has no Clone implementation on purpose: callers must use the
+/// fallible snapshot clone path so allocation failure cannot silently
+/// duplicate an owner.
+struct OrdinaryMapAnyOwnerV2LabelOwner {
+    text: String,
+}
+
+impl OrdinaryMapAnyOwnerV2Value {
+    fn try_clone(&self) -> Result<Self, OrdinaryMapAnyOwnerV2Error> {
+        match self {
+            Self::I32(value) => Ok(Self::I32(*value)),
+            Self::Label(label) => Ok(Self::Label(label.try_clone()?)),
+        }
+    }
+}
+
+impl OrdinaryMapAnyOwnerV2LabelOwner {
+    fn try_new(text: String) -> Result<Self, OrdinaryMapAnyOwnerV2Error> {
+        Ok(Self { text })
+    }
+
+    fn try_clone(&self) -> Result<Self, OrdinaryMapAnyOwnerV2Error> {
+        Ok(Self {
+            text: v2_copy_string(&self.text)?,
+        })
+    }
+}
+
+/// Immutable persistent V2 root.  No field stores a `ValueHandle` or a v1
+/// `AnyOwnerToken`; dropping this value releases all owned String payloads by
+/// normal Rust ownership once its dedicated generational root is retired.
+pub(crate) struct OrdinaryMapAnyOwnerV2Snapshot {
+    entries: HashMap<String, OrdinaryMapAnyOwnerV2Value>,
+}
+
+impl OrdinaryMapAnyOwnerV2Snapshot {
+    pub(super) fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn try_clone_root(&self) -> Result<Self, OrdinaryMapAnyOwnerV2Error> {
+        let mut entries = HashMap::new();
+        entries
+            .try_reserve(self.entries.len())
+            .map_err(|_| OrdinaryMapAnyOwnerV2Error::Capacity)?;
+        for (key, value) in &self.entries {
+            let key = v2_copy_string(key)?;
+            let value = value.try_clone()?;
+            entries.insert(key, value);
+        }
+        Ok(Self { entries })
+    }
+
+    fn set_label_owned(
+        &self,
+        key: String,
+        text: String,
+    ) -> Result<Self, OrdinaryMapAnyOwnerV2Error> {
+        let mut next = self.try_clone_root()?;
+        // `try_clone_root` reserved the existing entries; reserve one more
+        // slot before insertion so a failed capacity check leaves the source
+        // and every staged owner untouched.
+        next.entries
+            .try_reserve(1)
+            .map_err(|_| OrdinaryMapAnyOwnerV2Error::Capacity)?;
+        next.entries.insert(
+            key,
+            OrdinaryMapAnyOwnerV2Value::Label(OrdinaryMapAnyOwnerV2LabelOwner::try_new(text)?),
+        );
+        Ok(next)
+    }
+
+    fn set_i32_owned(&self, key: String, value: i32) -> Result<Self, OrdinaryMapAnyOwnerV2Error> {
+        let mut next = self.try_clone_root()?;
+        next.entries
+            .try_reserve(1)
+            .map_err(|_| OrdinaryMapAnyOwnerV2Error::Capacity)?;
+        next.entries
+            .insert(key, OrdinaryMapAnyOwnerV2Value::I32(value));
+        Ok(next)
+    }
+
+    fn remove(&self, key: &str) -> Result<Self, OrdinaryMapAnyOwnerV2Error> {
+        let mut next = self.try_clone_root()?;
+        next.entries.remove(key);
+        Ok(next)
+    }
+
+    fn size(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    #[cfg(test)]
+    fn label_text(&self, key: &str) -> Option<&str> {
+        match self.entries.get(key) {
+            Some(OrdinaryMapAnyOwnerV2Value::Label(owner)) => Some(owner.text.as_str()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrdinaryMapAnyOwnerV2Error {
+    InvalidInput,
+    Capacity,
+    Handle(super::handle::HandleError),
+}
+
+impl From<super::handle::HandleError> for OrdinaryMapAnyOwnerV2Error {
+    fn from(error: super::handle::HandleError) -> Self {
+        Self::Handle(error)
+    }
+}
+
+fn v2_copy_string(value: &str) -> Result<String, OrdinaryMapAnyOwnerV2Error> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(value.len())
+        .map_err(|_| OrdinaryMapAnyOwnerV2Error::Capacity)?;
+    copy.push_str(value);
+    Ok(copy)
+}
+
+fn v2_snapshot_from_map(
+    map: &super::MimiMap,
+) -> Result<&OrdinaryMapAnyOwnerV2Snapshot, OrdinaryMapAnyOwnerV2Error> {
+    map.ordinary_map_any_owner_v2_record
+        .as_ref()
+        .ok_or(OrdinaryMapAnyOwnerV2Error::InvalidInput)
+}
+
+fn v2_new_root(snapshot: OrdinaryMapAnyOwnerV2Snapshot) -> Result<i64, OrdinaryMapAnyOwnerV2Error> {
+    match super::handle::map_new_handle_fallible(super::MimiMap::ordinary_map_any_owner_v2_record(
+        snapshot,
+    )) {
+        Ok(handle) => super::ordinary_map_domain::publish_new_root(
+            super::ordinary_map_domain::OrdinaryMapProfile::AnyOwnerV2Record,
+            handle,
+        )
+        .map_err(|_| OrdinaryMapAnyOwnerV2Error::Capacity),
+        Err(unpublished) => {
+            // The fallible table allocator returns ownership of the complete
+            // Map object after unlocking; dropping it rolls back every staged
+            // key and Label field without publishing a partial root.
+            drop(unpublished);
+            Err(OrdinaryMapAnyOwnerV2Error::Capacity)
+        }
+    }
+}
+
+fn v2_new_empty_root() -> Result<i64, OrdinaryMapAnyOwnerV2Error> {
+    v2_new_root(OrdinaryMapAnyOwnerV2Snapshot::new())
+}
+
+fn v2_acquire_root(handle: i64) -> Result<super::handle::MapLease, OrdinaryMapAnyOwnerV2Error> {
+    super::handle::ordinary_map_any_owner_v2_record_acquire(handle).map_err(Into::into)
+}
+
+fn v2_derive_root(
+    handle: i64,
+    update: impl FnOnce(
+        &OrdinaryMapAnyOwnerV2Snapshot,
+    ) -> Result<OrdinaryMapAnyOwnerV2Snapshot, OrdinaryMapAnyOwnerV2Error>,
+) -> Result<i64, OrdinaryMapAnyOwnerV2Error> {
+    let source = v2_acquire_root(handle)?;
+    let snapshot = update(v2_snapshot_from_map(&source)?)?;
+    drop(source);
+    v2_new_root(snapshot)
+}
+
+fn v2_remove_root(handle: i64, key: &str) -> Result<i64, OrdinaryMapAnyOwnerV2Error> {
+    v2_derive_root(handle, |source| source.remove(key))
+}
+
+fn v2_set_label_root(
+    handle: i64,
+    key: String,
+    text: String,
+) -> Result<i64, OrdinaryMapAnyOwnerV2Error> {
+    v2_derive_root(handle, |source| source.set_label_owned(key, text))
+}
+
+fn v2_set_i32_root(
+    handle: i64,
+    key: String,
+    value: i32,
+) -> Result<i64, OrdinaryMapAnyOwnerV2Error> {
+    v2_derive_root(handle, |source| source.set_i32_owned(key, value))
+}
+
+fn v2_clone_root(handle: i64) -> Result<i64, OrdinaryMapAnyOwnerV2Error> {
+    v2_derive_root(handle, OrdinaryMapAnyOwnerV2Snapshot::try_clone_root)
+}
+
+fn v2_size_root(handle: i64) -> Result<i32, OrdinaryMapAnyOwnerV2Error> {
+    let root = v2_acquire_root(handle)?;
+    let size = v2_snapshot_from_map(&root)?.size();
+    i32::try_from(size).map_err(|_| OrdinaryMapAnyOwnerV2Error::Capacity)
+}
+
+fn v2_contains_root(handle: i64, key: &str) -> Result<bool, OrdinaryMapAnyOwnerV2Error> {
+    let root = v2_acquire_root(handle)?;
+    Ok(v2_snapshot_from_map(&root)?.contains(key))
+}
+
+fn v2_drop_root(handle: i64) -> Result<(), OrdinaryMapAnyOwnerV2Error> {
+    super::handle::ordinary_map_any_owner_v2_record_drop(handle)?;
+    super::ordinary_map_domain::forget_root(
+        super::ordinary_map_domain::OrdinaryMapProfile::AnyOwnerV2Record,
+        handle,
+    );
+    Ok(())
+}
+
+unsafe fn v2_checked_abi_bytes<'a>(
+    pointer: *const u8,
+    length: i64,
+) -> Result<&'a [u8], OrdinaryMapAnyOwnerV2Error> {
+    let length = usize::try_from(length).map_err(|_| OrdinaryMapAnyOwnerV2Error::InvalidInput)?;
+    if length > isize::MAX as usize {
+        return Err(OrdinaryMapAnyOwnerV2Error::InvalidInput);
+    }
+    if length == 0 {
+        return Ok(&[]);
+    }
+    if pointer.is_null() {
+        return Err(OrdinaryMapAnyOwnerV2Error::InvalidInput);
+    }
+    // SAFETY: the C ABI contract requires `pointer` to reference `length`
+    // readable bytes; null/negative/oversized lengths were rejected above.
+    Ok(unsafe { std::slice::from_raw_parts(pointer, length) })
+}
+
+fn v2_checked_utf8(bytes: &[u8]) -> Result<String, OrdinaryMapAnyOwnerV2Error> {
+    let value = std::str::from_utf8(bytes).map_err(|_| OrdinaryMapAnyOwnerV2Error::InvalidInput)?;
+    v2_copy_string(value)
+}
+
+fn v2_status(error: OrdinaryMapAnyOwnerV2Error) -> i32 {
+    match error {
+        OrdinaryMapAnyOwnerV2Error::InvalidInput => MIMI_MAP_ANY_OWNER_V2_INVALID_INPUT,
+        OrdinaryMapAnyOwnerV2Error::Capacity => MIMI_MAP_ANY_OWNER_V2_CAPACITY,
+        OrdinaryMapAnyOwnerV2Error::Handle(error) => match error {
+            super::handle::HandleError::Invalid => MIMI_MAP_ANY_OWNER_V2_INVALID_HANDLE,
+            super::handle::HandleError::StaleGeneration => MIMI_MAP_ANY_OWNER_V2_STALE,
+            super::handle::HandleError::Destroyed => MIMI_MAP_ANY_OWNER_V2_DESTROYED,
+            super::handle::HandleError::Reentrant => MIMI_MAP_ANY_OWNER_V2_REENTRANT,
+        },
+    }
+}
+
+pub const MIMI_MAP_ANY_OWNER_V2_OK: i32 = 0;
+pub const MIMI_MAP_ANY_OWNER_V2_INVALID_INPUT: i32 = 1;
+pub const MIMI_MAP_ANY_OWNER_V2_CAPACITY: i32 = 2;
+pub const MIMI_MAP_ANY_OWNER_V2_INVALID_HANDLE: i32 = 3;
+pub const MIMI_MAP_ANY_OWNER_V2_STALE: i32 = 4;
+pub const MIMI_MAP_ANY_OWNER_V2_DESTROYED: i32 = 5;
+pub const MIMI_MAP_ANY_OWNER_V2_REENTRANT: i32 = 6;
+
+/// Create an empty persistent concrete-record root.  Zero is the failure
+/// sentinel; valid roots are generational handles from the dedicated Map
+/// table and cannot be passed to legacy Map or v1 owner APIs.
+#[no_mangle]
+pub extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_new() -> i64 {
+    v2_new_empty_root().unwrap_or(0)
+}
+
+/// Create a persistent root with `Label { text }` under `key`.  Both strings
+/// are copied before a new root is registered; source and old roots stay live.
+/// Zero means invalid input, allocation failure, stale/wrong-profile handle,
+/// or registration failure.
+///
+/// # Safety
+/// For positive lengths, each pointer must reference that many readable UTF-8
+/// bytes for the duration of this call.  The pointers are never retained.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_set_label(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    text: *const u8,
+    text_len: i64,
+) -> i64 {
+    let result = (|| {
+        let key = unsafe { v2_checked_abi_bytes(key, key_len) }?;
+        let text = unsafe { v2_checked_abi_bytes(text, text_len) }?;
+        let key = v2_checked_utf8(key)?;
+        let text = v2_checked_utf8(text)?;
+        v2_set_label_root(handle, key, text)
+    })();
+    result.unwrap_or(0)
+}
+
+/// Create a persistent root with a copied scalar `i32` payload.  The scalar
+/// branch is part of the V2 value domain and is not represented by the v1
+/// AnyOwner token table.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_set_i32(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    value: i32,
+) -> i64 {
+    let result = (|| {
+        let key = unsafe { v2_checked_abi_bytes(key, key_len) }?;
+        let key = v2_checked_utf8(key)?;
+        v2_set_i32_root(handle, key, value)
+    })();
+    result.unwrap_or(0)
+}
+
+/// C ABI variant that receives the borrowed concrete Label descriptor as one
+/// `repr(C)` value.  The descriptor is read only during this call and is never
+/// installed as an owner.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_set(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    label: *const MimiMapAnyOwnerV2Label,
+) -> i64 {
+    if label.is_null() {
+        return 0;
+    }
+    // SAFETY: `label` is required by the C ABI to point to one readable
+    // descriptor for the duration of this call.
+    let label = unsafe { *label };
+    // SAFETY: forwarding the caller's borrowed byte ranges to the checked
+    // direct Set ABI; no pointer is retained by the runtime.
+    unsafe {
+        mimi_mir_ordinary_map_any_owner_v2_record_set_label(
+            handle,
+            key,
+            key_len,
+            label.text,
+            label.text_len,
+        )
+    }
+}
+
+/// Short alias for native emitters that use the profile name as the root
+/// operation prefix.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_any_owner_v2_set_label(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    text: *const u8,
+    text_len: i64,
+) -> i64 {
+    // SAFETY: same borrowed-pointer contract as the canonical function.
+    unsafe {
+        mimi_mir_ordinary_map_any_owner_v2_record_set_label(handle, key, key_len, text, text_len)
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_any_owner_v2_set_i32(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    value: i32,
+) -> i64 {
+    // SAFETY: same borrowed-key contract as the canonical V2 Set ABI.
+    unsafe { mimi_mir_ordinary_map_any_owner_v2_record_set_i32(handle, key, key_len, value) }
+}
+
+/// Create a persistent root without `key`; the source root stays unchanged.
+/// Zero means failure.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_remove(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+) -> i64 {
+    let result = (|| {
+        let key = unsafe { v2_checked_abi_bytes(key, key_len) }?;
+        let key = v2_checked_utf8(key)?;
+        v2_remove_root(handle, &key)
+    })();
+    result.unwrap_or(0)
+}
+
+/// Create a persistent deep clone of a V2 root, including independent Label
+/// field allocations.  Zero means failure.
+#[no_mangle]
+pub extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_clone(handle: i64) -> i64 {
+    v2_clone_root(handle).unwrap_or(0)
+}
+
+/// Return the number of entries, or -1 for invalid/stale/wrong-profile roots
+/// or an i32 overflow.
+#[no_mangle]
+pub extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_size(handle: i64) -> i32 {
+    v2_size_root(handle).unwrap_or(-1)
+}
+
+/// Return 0/1 for absence/presence, or -1 for invalid input or handles.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_contains(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+) -> i32 {
+    let result = (|| {
+        let key = unsafe { v2_checked_abi_bytes(key, key_len) }?;
+        let key = v2_checked_utf8(key)?;
+        v2_contains_root(handle, &key).map(i32::from)
+    })();
+    result.unwrap_or(-1)
+}
+
+/// Consume a V2 root and drop all private Label field owners.  The return
+/// status lets a native emitter diagnose stale generations without entering a
+/// legacy abort path.
+#[no_mangle]
+pub extern "C" fn mimi_mir_ordinary_map_any_owner_v2_record_drop(handle: i64) -> i32 {
+    match v2_drop_root(handle) {
+        Ok(()) => MIMI_MAP_ANY_OWNER_V2_OK,
+        Err(error) => v2_status(error),
+    }
+}
+
+/// Status protocol shared by every V2 Map helper. Status 0 means success;
+/// every nonzero status is an error and must reach the adapter's trap path.
+/// Get absence is successful and is represented by `found=0` plus a fresh
+/// i32-zero V2 owner. Numeric assignments are `ManagedAnyStatus` values.
+pub const ORDINARY_MAP_OWNED_ANY_V2_OK: i32 = 0;
+
+fn status_code(status: ManagedAnyStatus) -> i32 {
+    status as i32
+}
+
+/// Create and publish a fresh V2 owner. Input is borrowed; generated recursive
+/// clone glue creates the private payload allocation. Only compiler-native
+/// declarations may call this reserved helper.
+///
+/// # Safety
+/// `type_id` spans `type_id_len` bytes, `descriptor_hash` spans 32 raw bytes,
+/// `payload` has the declared size/alignment, and both callbacks are trusted
+/// compiler-generated glue bound to that exact V2 descriptor receipt.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_any_payload_v2_new(
+    tag: i32,
+    type_id: *const u8,
+    type_id_len: i64,
+    descriptor_hash: *const u8,
+    payload: *const u8,
+    size: i64,
+    align: i64,
+    clone_fn: Option<super::managed_any_payload_v2::ManagedAnyPayloadV2CloneGlue>,
+    drop_fn: Option<super::managed_any_payload_v2::ManagedAnyPayloadV2DropGlue>,
+    out_token: *mut i64,
+) -> i32 {
+    if !out_token.is_null() {
+        unsafe { *out_token = 0 };
+    }
+    if out_token.is_null() {
+        return status_code(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let identity = unsafe {
+            managed_v2_identity_from_abi(tag, type_id, type_id_len, descriptor_hash, size, align)
+        }?;
+        let glue = super::managed_any_payload_v2::ManagedAnyPayloadV2Glue {
+            clone: clone_fn.ok_or(ManagedAnyStatus::InvalidInput)?,
+            drop: drop_fn.ok_or(ManagedAnyStatus::InvalidInput)?,
+        };
+        let owner =
+            OwnedAnyV2::from_borrowed(identity, glue, payload).map_err(ManagedAnyStatus::from)?;
+        owner.publish_managed()
+    })();
+    match result {
+        Ok(token) => {
+            unsafe { *out_token = token };
+            status_code(ManagedAnyStatus::Ok)
+        }
+        Err(status) => status_code(status),
+    }
+}
+
+/// Clone any V2 owner using its runtime-selected pinned descriptor. No
+/// callback, expected static type, or version is accepted here.
+///
+/// # Safety
+/// `out_token` points to a writable i64; `token` is an opaque owner token.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_any_payload_v2_clone(token: i64, out_token: *mut i64) -> i32 {
+    if !out_token.is_null() {
+        unsafe { *out_token = 0 };
+    }
+    if out_token.is_null() {
+        return status_code(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let (token, _) = managed_v2_token_receipt(token)?;
+        managed_allocation_checkpoint()?;
+        let cloned = any_owner::clone_managed_v2_owner(token).map_err(ManagedAnyStatus::from)?;
+        record_created_token(cloned);
+        OwnedAnyV2 { token: cloned }.publish_managed()
+    })();
+    match result {
+        Ok(token) => {
+            unsafe { *out_token = token };
+            status_code(ManagedAnyStatus::Ok)
+        }
+        Err(status) => status_code(status),
+    }
+}
+
+/// Consume one V2 owner through the descriptor-pinned drop callback. A
+/// successful release removes its original creator-domain receipt.
+#[no_mangle]
+pub extern "C" fn mimi_any_payload_v2_drop(token: i64) -> i32 {
+    let result = (|| {
+        let (token, identity) = managed_v2_token_receipt(token)?;
+        any_owner::release_managed_v2_owner(token, identity).map_err(ManagedAnyStatus::from)?;
+        super::ordinary_map_domain::forget_managed_any(token);
+        Ok::<_, ManagedAnyStatus>(())
+    })();
+    match result {
+        Ok(()) => status_code(ManagedAnyStatus::Ok),
+        Err(status) => status_code(status),
+    }
+}
+
+/// Exact-check and recursively clone a V2 value into uninitialized output
+/// storage. Source ownership is borrowed and remains live.
+///
+/// # Safety
+/// `type_id` is canonical, `descriptor_hash` addresses 32 raw bytes, and
+/// `output` has the declared output layout. On nonzero clone status the
+/// callback contract guarantees output remains wholly uninitialized.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_any_payload_v2_unpack(
+    token: i64,
+    expected_tag: i32,
+    type_id: *const u8,
+    type_id_len: i64,
+    descriptor_hash: *const u8,
+    output: *mut u8,
+    output_size: i64,
+    output_align: i64,
+) -> i32 {
+    let result = (|| {
+        let output_size =
+            usize::try_from(output_size).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+        let output_align =
+            usize::try_from(output_align).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+        let expected = unsafe {
+            managed_v2_identity_from_abi(
+                expected_tag,
+                type_id,
+                type_id_len,
+                descriptor_hash,
+                i64::try_from(output_size).map_err(|_| ManagedAnyStatus::InvalidInput)?,
+                i64::try_from(output_align).map_err(|_| ManagedAnyStatus::InvalidInput)?,
+            )
+        }?;
+        let (token, actual) = managed_v2_token_receipt(token)?;
+        if actual != expected {
+            return Err(ManagedAnyStatus::TypeMismatch);
+        }
+        managed_allocation_checkpoint()?;
+        unsafe {
+            any_owner::unpack_managed_v2_owner(token, expected, output, output_size, output_align)
+        }
+        .map_err(ManagedAnyStatus::from)
+    })();
+    match result {
+        Ok(()) => status_code(ManagedAnyStatus::Ok),
+        Err(status) => status_code(status),
+    }
+}
+
+/// Create an empty V2 ordinary Map root with its exact profile.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_new(out_root: *mut i64) -> i32 {
+    if !out_root.is_null() {
+        unsafe { *out_root = 0 };
+    }
+    if out_root.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    match new_owned_any_v2_root(OrdinaryMapAnyV2Snapshot::new()) {
+        Ok(root) => {
+            unsafe { *out_root = root };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(error) => map_get_status(ManagedAnyStatus::from(error)),
+    }
+}
+
+/// Persistent V2 Map Set by cloning a published, descriptor-pinned Any owner
+/// after validating membership in the caller's canonical finite registry.
+/// The original root and input owner remain live on success or failure.
+///
+/// # Safety
+/// `out_root` is writable; key and selection spans are readable;
+/// `selection_hash32` addresses exactly 32 readable bytes. The selection is
+/// a canonical version-1 finite descriptor frame sealed by Core. The owner
+/// must be a published V2 token whose pinned actual descriptor is a member.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_set(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    payload_owner: i64,
+    selection_bytes: *const u8,
+    selection_len: i64,
+    selection_hash32: *const u8,
+    out_root: *mut i64,
+) -> i32 {
+    if !out_root.is_null() {
+        unsafe { *out_root = 0 };
+    }
+    if out_root.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        // Reject a wrong-profile root before key copies or owner callbacks.
+        let source = acquire_owned_any_v2_root(handle).map_err(ManagedAnyStatus::from)?;
+        let selection_bytes = unsafe { checked_abi_bytes(selection_bytes, selection_len) }
+            .map_err(ManagedAnyStatus::from)?;
+        if selection_hash32.is_null() {
+            return Err(ManagedAnyStatus::InvalidInput);
+        }
+        let mut selection_hash = [0u8; 32];
+        // SAFETY: the reserved ABI requires exactly 32 readable hash bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                selection_hash32,
+                selection_hash.as_mut_ptr(),
+                selection_hash.len(),
+            )
+        };
+        let selection = super::managed_any_payload_v2::ManagedAnyPayloadV2Selection::parse(
+            selection_bytes,
+            &selection_hash,
+            false,
+        )
+        .map_err(|error| match error {
+            super::managed_any_payload_v2::ManagedAnyPayloadV2SelectionError::InvalidEncoding => {
+                ManagedAnyStatus::InvalidInput
+            }
+            super::managed_any_payload_v2::ManagedAnyPayloadV2SelectionError::RegistryHashMismatch => {
+                ManagedAnyStatus::DescriptorMismatch
+            }
+        })?;
+        let key_bytes =
+            unsafe { checked_abi_bytes(key, key_len) }.map_err(ManagedAnyStatus::from)?;
+        let key = std::str::from_utf8(key_bytes).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+        let (_, actual) = managed_v2_token_receipt(payload_owner)?;
+        if !selection.contains(actual) {
+            return Err(ManagedAnyStatus::DescriptorMismatch);
+        }
+        let value = OwnedAnyV2::clone_published_owner(payload_owner, actual)?;
+        let snapshot = snapshot_any_v2_from_map(&source)
+            .map_err(ManagedAnyStatus::from)?
+            .set_owned(key, value)
+            .map_err(|error| {
+                ManagedAnyStatus::from(OrdinaryMapSnapshotRuntimeError::from(error))
+            })?;
+        drop(source);
+        new_owned_any_v2_root(snapshot).map_err(ManagedAnyStatus::from)
+    })();
+    match result {
+        Ok(root) => {
+            unsafe { *out_root = root };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(status) => map_get_status(status),
+    }
+}
+
+/// Return a fresh Any owner on both hit and miss. Absence is status 0 with
+/// `found=0` and a fresh canonical i32-zero V2 owner made from the supplied
+/// core receipt and compiler-generated i32 glue.
+///
+/// # Safety
+/// Outputs are writable and non-overlapping. Type ID and hash spans are
+/// readable and key is valid UTF-8. The miss descriptor must be the exact
+/// canonical i32 receipt (tag 1, i32 layout, core TypeDesc hash).
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_get(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    out_found: *mut i32,
+    out_token: *mut i64,
+    miss_tag: i32,
+    miss_type_id: *const u8,
+    miss_type_id_len: i64,
+    miss_descriptor_hash: *const u8,
+    miss_size: i64,
+    miss_align: i64,
+    miss_clone_fn: Option<super::managed_any_payload_v2::ManagedAnyPayloadV2CloneGlue>,
+    miss_drop_fn: Option<super::managed_any_payload_v2::ManagedAnyPayloadV2DropGlue>,
+) -> i32 {
+    if !out_found.is_null() {
+        unsafe { *out_found = 0 };
+    }
+    if !out_token.is_null() {
+        unsafe { *out_token = 0 };
+    }
+    if out_found.is_null() || out_token.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let root = acquire_owned_any_v2_root(handle).map_err(ManagedAnyStatus::from)?;
+        let miss = unsafe {
+            managed_v2_identity_from_abi(
+                miss_tag,
+                miss_type_id,
+                miss_type_id_len,
+                miss_descriptor_hash,
+                miss_size,
+                miss_align,
+            )
+        }?;
+        if miss.tag != super::managed_any_payload_v2::ManagedAnyPayloadV2Tag::I32
+            || miss.size != std::mem::size_of::<i32>()
+            || miss.align != std::mem::align_of::<i32>()
+        {
+            return Err(ManagedAnyStatus::TypeMismatch);
+        }
+        let glue = super::managed_any_payload_v2::ManagedAnyPayloadV2Glue {
+            clone: miss_clone_fn.ok_or(ManagedAnyStatus::InvalidInput)?,
+            drop: miss_drop_fn.ok_or(ManagedAnyStatus::InvalidInput)?,
+        };
+        let key_bytes =
+            unsafe { checked_abi_bytes(key, key_len) }.map_err(ManagedAnyStatus::from)?;
+        let key = checked_key(key_bytes).map_err(ManagedAnyStatus::from)?;
+        managed_allocation_checkpoint()?;
+        let snapshot = snapshot_any_v2_from_map(&root)
+            .map_err(ManagedAnyStatus::from)?
+            .get_any(&key)
+            .map_err(|error| {
+                ManagedAnyStatus::from(OrdinaryMapSnapshotRuntimeError::from(error))
+            })?;
+        drop(root);
+        let (found, owner) = match snapshot {
+            Some(snapshot) => (true, snapshot),
+            None => {
+                let zero = 0i32;
+                let zero_owner =
+                    OwnedAnyV2::from_borrowed(miss, glue, (&zero as *const i32).cast::<u8>())
+                        .map_err(ManagedAnyStatus::from)?;
+                (false, zero_owner)
+            }
+        };
+        let owner = owner.publish_managed()?;
+        Ok::<_, ManagedAnyStatus>((found, owner))
+    })();
+    match result {
+        Ok((found, owner)) => {
+            unsafe {
+                *out_found = i32::from(found);
+                *out_token = owner;
+            }
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(status) => map_get_status(status),
+    }
+}
+
+/// Create an immutable, key-byte-sorted snapshot list. The returned positive
+/// `i64` is an opaque values-list owner handle in its own namespace; it is not
+/// a MimiList pointer, a Map handle, or a ManagedAny token. Every list element
+/// owns a fresh clone of the exact source descriptor. The list remains valid
+/// after source Map updates or destruction.
+///
+/// # Safety
+/// `out_values` points to one writable `i64`. `handle` must be a live V2 Map
+/// root created by this profile.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_values(
+    handle: i64,
+    out_values: *mut i64,
+) -> i32 {
+    if !out_values.is_null() {
+        unsafe { *out_values = 0 };
+    }
+    if out_values.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let root = acquire_owned_any_v2_root(handle).map_err(ManagedAnyStatus::from)?;
+        let values = snapshot_any_v2_from_map(&root)
+            .map_err(ManagedAnyStatus::from)?
+            .values()
+            .map_err(|error| {
+                ManagedAnyStatus::from(OrdinaryMapSnapshotRuntimeError::from(error))
+            })?;
+        drop(root);
+        publish_v2_values_snapshot(OrdinaryMapAnyV2ValuesSnapshot { values })
+    })();
+    match result {
+        Ok(values) => {
+            unsafe { *out_values = values };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(status) => map_get_status(status),
+    }
+}
+
+/// Read the length of a V2 values snapshot. Overflow is a status error, never
+/// a wrapped or truncated element count.
+///
+/// # Safety
+/// `out_len` points to one writable `i32`; `values` is a live opaque values
+/// snapshot handle returned by `mimi_ordinary_map_owned_any_v2_values`.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_values_len(
+    values: i64,
+    out_len: *mut i32,
+) -> i32 {
+    if !out_len.is_null() {
+        unsafe { *out_len = 0 };
+    }
+    if out_len.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = acquire_v2_values_snapshot(values).and_then(|snapshot| {
+        i32::try_from(snapshot.values.len()).map_err(|_| ManagedAnyStatus::SizeOverflow)
+    });
+    match result {
+        Ok(len) => {
+            unsafe { *out_len = len };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(status) => map_get_status(status),
+    }
+}
+
+/// Return an independently published owner clone at `index`. An out-of-range
+/// index is status 0 with `found=0` and `out_owner=0`; a present zero/empty
+/// payload remains `found=1` with a nonzero owner carrying its exact descriptor.
+///
+/// # Safety
+/// Both outputs are writable and non-overlapping. `values` is a live opaque
+/// values snapshot handle. Negative indices are rejected as InvalidInput.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_values_get(
+    values: i64,
+    index: i64,
+    out_found: *mut i32,
+    out_owner: *mut i64,
+) -> i32 {
+    if !out_found.is_null() {
+        unsafe { *out_found = 0 };
+    }
+    if !out_owner.is_null() {
+        unsafe { *out_owner = 0 };
+    }
+    if out_found.is_null() || out_owner.is_null() || index < 0 {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let snapshot = acquire_v2_values_snapshot(values)?;
+        let index = usize::try_from(index).map_err(|_| ManagedAnyStatus::InvalidInput)?;
+        let Some(value) = snapshot.values.get(index) else {
+            return Ok::<_, ManagedAnyStatus>(None);
+        };
+        let owner = value.try_clone().map_err(ManagedAnyStatus::from)?;
+        owner.publish_managed().map(Some)
+    })();
+    match result {
+        Ok(Some(owner)) => {
+            unsafe {
+                *out_found = 1;
+                *out_owner = owner;
+            }
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Ok(None) => ORDINARY_MAP_OWNED_ANY_V2_OK,
+        Err(status) => map_get_status(status),
+    }
+}
+
+/// Clone a values snapshot into a new independent snapshot-list owner. All
+/// element clone stages complete before the output handle is published.
+///
+/// # Safety
+/// `out_values` points to a writable `i64`; `values` is a live V2 values
+/// snapshot handle.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_values_clone(
+    values: i64,
+    out_values: *mut i64,
+) -> i32 {
+    if !out_values.is_null() {
+        unsafe { *out_values = 0 };
+    }
+    if out_values.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = acquire_v2_values_snapshot(values)
+        .map_err(|status| status)
+        .and_then(|snapshot| {
+            snapshot.try_clone().map_err(|error| {
+                ManagedAnyStatus::from(OrdinaryMapSnapshotRuntimeError::from(error))
+            })
+        })
+        .and_then(publish_v2_values_snapshot);
+    match result {
+        Ok(clone) => {
+            unsafe { *out_values = clone };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(status) => map_get_status(status),
+    }
+}
+
+/// Consume exactly one values snapshot owner. Element Drop callbacks run after
+/// detaching the snapshot from the handle registry.
+#[no_mangle]
+pub extern "C" fn mimi_ordinary_map_owned_any_v2_values_drop(values: i64) -> i32 {
+    match retire_v2_values_snapshot(values) {
+        Ok(()) => ORDINARY_MAP_OWNED_ANY_V2_OK,
+        Err(status) => map_get_status(status),
+    }
+}
+
+struct StagedManagedAnyV2List(*mut super::MimiList);
+
+impl StagedManagedAnyV2List {
+    fn new() -> Result<Self, ManagedAnyStatus> {
+        snapshot_allocation_checkpoint().map_err(|_| ManagedAnyStatus::Capacity)?;
+        let list = super::mimi_mir_list_new_managed_any_v2();
+        if list.is_null() {
+            return Err(ManagedAnyStatus::Capacity);
+        }
+        Ok(Self(list))
+    }
+
+    fn push_owner(&mut self, owner: i64) -> Result<(), ManagedAnyStatus> {
+        // Safety: this guard owns the list exclusively. A successful push
+        // transfers this already-published V2 owner to the list.
+        if unsafe { super::mimi_mir_list_push_managed_any_v2(self.0, owner) } != 0 {
+            return Ok(());
+        }
+        let cleanup_status = super::mimi_any_payload_v2_drop(owner);
+        if cleanup_status != ORDINARY_MAP_OWNED_ANY_V2_OK {
+            return Err(managed_any_status_from_code(cleanup_status));
+        }
+        Err(ManagedAnyStatus::Capacity)
+    }
+
+    fn publish(mut self) -> *mut super::MimiList {
+        let list = self.0;
+        self.0 = std::ptr::null_mut();
+        list
+    }
+}
+
+impl Drop for StagedManagedAnyV2List {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: this guard is the unique owner of a valid V2 list. The
+            // V2 drop preflights every prefix token before releasing any.
+            unsafe { super::mimi_mir_list_drop_managed_any_v2(self.0) };
+        }
+    }
+}
+
+/// Materialize the Map's key-sorted V2 Values snapshot as an independently
+/// owned `MimiList<ManagedAnyV2>`. The canonical Core selection frame/hash is
+/// checked before any element token is published. Each unpublished snapshot
+/// value remains RAII-owned until its successful list append transfers the
+/// obligation; any failure drops the list prefix, current token, and remaining
+/// snapshot values before returning with `out_list == null`.
+///
+/// The selection schema records `(tag, type_id, descriptor_hash)`. Each value
+/// is first checked against its complete runtime V2 receipt, including
+/// `(size, align)`, then matched against that Core-selected record. The
+/// descriptor hash is the Core TypeDesc-closure authority for layout,
+/// cloneability, and drop behavior; its closure binds size/alignment and the
+/// payload's clone/drop dependencies even though the frame does not repeat
+/// those fields.
+///
+/// # Safety
+/// `selection_bytes` spans `selection_len` readable bytes, `selection_hash32`
+/// spans 32 readable bytes, and `out_list` points to one writable pointer.
+/// The output does not overlap either input. `handle` is a live V2 Map root.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_values_list(
+    handle: i64,
+    selection_bytes: *const u8,
+    selection_len: i64,
+    selection_hash32: *const u8,
+    out_list: *mut *mut super::MimiList,
+) -> i32 {
+    if !out_list.is_null() {
+        unsafe { *out_list = std::ptr::null_mut() };
+    }
+    if out_list.is_null() || selection_hash32.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let selection_bytes = unsafe { checked_abi_bytes(selection_bytes, selection_len) }
+            .map_err(ManagedAnyStatus::from)?;
+        let mut selection_hash = [0u8; 32];
+        // SAFETY: the caller supplies the fixed 32-byte canonical registry hash.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                selection_hash32,
+                selection_hash.as_mut_ptr(),
+                selection_hash.len(),
+            )
+        };
+        let selection = super::managed_any_payload_v2::ManagedAnyPayloadV2Selection::parse(
+            selection_bytes,
+            &selection_hash,
+            true,
+        )
+        .map_err(|error| match error {
+            super::managed_any_payload_v2::ManagedAnyPayloadV2SelectionError::InvalidEncoding => {
+                ManagedAnyStatus::InvalidInput
+            }
+            super::managed_any_payload_v2::ManagedAnyPayloadV2SelectionError::RegistryHashMismatch => {
+                ManagedAnyStatus::DescriptorMismatch
+            }
+        })?;
+
+        let root = acquire_owned_any_v2_root(handle).map_err(ManagedAnyStatus::from)?;
+        let values = snapshot_any_v2_from_map(&root)
+            .map_err(ManagedAnyStatus::from)?
+            .values()
+            .map_err(|error| {
+                ManagedAnyStatus::from(OrdinaryMapSnapshotRuntimeError::from(error))
+            })?;
+        // The sorted Values owners are independent clones now; releasing this
+        // lease before selector checks and callbacks keeps root access short.
+        drop(root);
+
+        for value in &values {
+            let identity = value.identity().map_err(ManagedAnyStatus::from)?;
+            if !selection.contains(identity) {
+                return Err(ManagedAnyStatus::DescriptorMismatch);
+            }
+        }
+
+        let mut list = StagedManagedAnyV2List::new()?;
+        for value in values {
+            let owner = value.publish_managed()?;
+            list.push_owner(owner)?;
+        }
+        Ok::<_, ManagedAnyStatus>(list.publish())
+    })();
+    match result {
+        Ok(list) => {
+            unsafe { *out_list = list };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(status) => map_get_status(status),
+    }
+}
+
+/// Return a persistent root with the selected key removed. The source stays
+/// live and unchanged; a missing key still yields a distinct empty-equivalent
+/// snapshot root.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_remove(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    out_root: *mut i64,
+) -> i32 {
+    if !out_root.is_null() {
+        unsafe { *out_root = 0 };
+    }
+    if out_root.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let root = acquire_owned_any_v2_root(handle).map_err(ManagedAnyStatus::from)?;
+        let key_bytes =
+            unsafe { checked_abi_bytes(key, key_len) }.map_err(ManagedAnyStatus::from)?;
+        let key = checked_key(key_bytes).map_err(ManagedAnyStatus::from)?;
+        let snapshot = snapshot_any_v2_from_map(&root)
+            .map_err(ManagedAnyStatus::from)?
+            .remove(&key)
+            .map_err(|error| {
+                ManagedAnyStatus::from(OrdinaryMapSnapshotRuntimeError::from(error))
+            })?;
+        drop(root);
+        new_owned_any_v2_root(snapshot).map_err(ManagedAnyStatus::from)
+    })();
+    match result {
+        Ok(root) => {
+            unsafe { *out_root = root };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(status) => map_get_status(status),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_clone(
+    handle: i64,
+    out_root: *mut i64,
+) -> i32 {
+    if !out_root.is_null() {
+        unsafe { *out_root = 0 };
+    }
+    if out_root.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    match clone_owned_any_v2_root(handle) {
+        Ok(root) => {
+            unsafe { *out_root = root };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(error) => map_get_status(ManagedAnyStatus::from(error)),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_size(
+    handle: i64,
+    out_size: *mut i32,
+) -> i32 {
+    if !out_size.is_null() {
+        unsafe { *out_size = 0 };
+    }
+    if out_size.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let root = acquire_owned_any_v2_root(handle)?;
+        snapshot_any_v2_from_map(&root)?
+            .size_i32()
+            .map_err(|_| OrdinaryMapSnapshotRuntimeError::SizeOverflow)
+    })();
+    match result {
+        Ok(size) => {
+            unsafe { *out_size = size };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(error) => map_get_status(ManagedAnyStatus::from(error)),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_contains(
+    handle: i64,
+    key: *const u8,
+    key_len: i64,
+    out_contains: *mut i32,
+) -> i32 {
+    if !out_contains.is_null() {
+        unsafe { *out_contains = 0 };
+    }
+    if out_contains.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let root = acquire_owned_any_v2_root(handle)?;
+        let key_bytes = unsafe { checked_abi_bytes(key, key_len) }?;
+        let key = std::str::from_utf8(key_bytes)
+            .map_err(|_| OrdinaryMapSnapshotRuntimeError::InvalidInput)?;
+        Ok::<_, OrdinaryMapSnapshotRuntimeError>(snapshot_any_v2_from_map(&root)?.contains(key))
+    })();
+    match result {
+        Ok(contains) => {
+            unsafe { *out_contains = i32::from(contains) };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(error) => map_get_status(ManagedAnyStatus::from(error)),
+    }
+}
+
+/// Read whether an exact V2 root is empty. The root remains live and
+/// unchanged; errors never become `true` or `false` because the status is
+/// checked separately by the compiler-native adapter.
+///
+/// # Safety
+/// `out_is_empty` points to one writable `i32`. `root` must be a live root
+/// created by this profile.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_is_empty(
+    handle: i64,
+    out_is_empty: *mut i32,
+) -> i32 {
+    if !out_is_empty.is_null() {
+        unsafe { *out_is_empty = 0 };
+    }
+    if out_is_empty.is_null() {
+        return map_get_status(ManagedAnyStatus::InvalidInput);
+    }
+    let result = (|| {
+        let root = acquire_owned_any_v2_root(handle)?;
+        Ok::<_, OrdinaryMapSnapshotRuntimeError>(snapshot_any_v2_from_map(&root)?.is_empty())
+    })();
+    match result {
+        Ok(is_empty) => {
+            unsafe { *out_is_empty = i32::from(is_empty) };
+            ORDINARY_MAP_OWNED_ANY_V2_OK
+        }
+        Err(error) => map_get_status(ManagedAnyStatus::from(error)),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn mimi_ordinary_map_owned_any_v2_drop(handle: i64) -> i32 {
+    match drop_owned_any_v2_root(handle) {
+        Ok(()) => ORDINARY_MAP_OWNED_ANY_V2_OK,
+        Err(error) => map_get_status(ManagedAnyStatus::from(error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OrdinaryMapSnapshot, OwnedAny};
-    use crate::runtime::any_owner::{self, AnyOwnerKind};
+    use super::super::blake3::Blake3Hasher;
+    use super::{ManagedAnyPayloadV2Identity, ManagedAnyStatus, OrdinaryMapSnapshot, OwnedAny};
+    use crate::runtime::any_owner::{self, AnyOwnerKind, AnyOwnerToken};
+
+    const V2_I32_TYPE_ID: &[u8; 35] = b"rt:11111111111111111111111111111111";
+    const V2_BOOL_TYPE_ID: &[u8; 35] = b"rt:0123456789abcdef0123456789abcdef";
+    const V2_AGGREGATE_TYPE_ID: &[u8; 35] = b"rt:fedcba9876543210fedcba9876543210";
+    const V2_I32_HASH: [u8; 32] = [11; 32];
+    const V2_TEST_FAILURE_TYPE_ID: &[u8; 35] = b"rt:22222222222222222222222222222222";
+    const V2_TEST_FAILURE_HASH: [u8; 32] = [191; 32];
+
+    static V2_VALUES_CLONE_FAIL: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static V2_VALUES_DROP_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    unsafe extern "C" fn clone_v2_byte(destination: *mut u8, source: *const u8) -> i32 {
+        unsafe { *destination = *source };
+        0
+    }
+
+    unsafe extern "C" fn drop_v2_byte(_payload: *mut u8) {}
+
+    unsafe extern "C" fn clone_v2_i32(destination: *mut u8, source: *const u8) -> i32 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(source.cast::<i32>(), destination.cast::<i32>(), 1)
+        };
+        0
+    }
+
+    unsafe extern "C" fn drop_v2_i32(_payload: *mut u8) {}
+
+    unsafe extern "C" fn clone_v2_toggle_failure(destination: *mut u8, source: *const u8) -> i32 {
+        if V2_VALUES_CLONE_FAIL.load(std::sync::atomic::Ordering::SeqCst) {
+            return 91;
+        }
+        unsafe { *destination = *source };
+        0
+    }
+
+    unsafe extern "C" fn drop_v2_values_counted(_payload: *mut u8) {
+        V2_VALUES_DROP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn new_v2_map() -> i64 {
+        let mut root = 0;
+        assert_eq!(
+            unsafe { super::mimi_ordinary_map_owned_any_v2_new(&mut root) },
+            0
+        );
+        assert_ne!(root, 0);
+        root
+    }
+
+    fn new_v2_bool_owner(value: u8, hash: &[u8; 32]) -> i64 {
+        let mut owner = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_new(
+                    3,
+                    V2_BOOL_TYPE_ID.as_ptr(),
+                    V2_BOOL_TYPE_ID.len() as i64,
+                    hash.as_ptr(),
+                    &value,
+                    1,
+                    1,
+                    Some(clone_v2_byte),
+                    Some(drop_v2_byte),
+                    &mut owner,
+                )
+            },
+            0
+        );
+        assert_ne!(owner, 0);
+        owner
+    }
+
+    fn new_v2_aggregate_owner(value: u8, hash: &[u8; 32]) -> i64 {
+        let mut owner = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_new(
+                    5,
+                    V2_AGGREGATE_TYPE_ID.as_ptr(),
+                    V2_AGGREGATE_TYPE_ID.len() as i64,
+                    hash.as_ptr(),
+                    &value,
+                    1,
+                    1,
+                    Some(clone_v2_byte),
+                    Some(drop_v2_byte),
+                    &mut owner,
+                )
+            },
+            0
+        );
+        assert_ne!(owner, 0);
+        owner
+    }
+
+    fn new_v2_i32_owner(value: i32) -> i64 {
+        let mut owner = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_new(
+                    1,
+                    V2_I32_TYPE_ID.as_ptr(),
+                    V2_I32_TYPE_ID.len() as i64,
+                    V2_I32_HASH.as_ptr(),
+                    (&value as *const i32).cast::<u8>(),
+                    std::mem::size_of::<i32>() as i64,
+                    std::mem::align_of::<i32>() as i64,
+                    Some(clone_v2_i32),
+                    Some(drop_v2_i32),
+                    &mut owner,
+                )
+            },
+            0
+        );
+        assert_ne!(owner, 0);
+        owner
+    }
+
+    fn set_v2_owner(
+        root: i64,
+        key: &[u8],
+        owner: i64,
+        tag: i32,
+        type_id: &[u8; 35],
+        hash: &[u8; 32],
+    ) -> i64 {
+        let (selection_bytes, selection_hash) = selection(tag, type_id, hash);
+        let mut new_root = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_ordinary_map_owned_any_v2_set(
+                    root,
+                    key.as_ptr(),
+                    key.len() as i64,
+                    owner,
+                    selection_bytes.as_ptr(),
+                    selection_bytes.len() as i64,
+                    selection_hash.as_ptr(),
+                    &mut new_root,
+                )
+            },
+            0
+        );
+        assert_ne!(new_root, 0);
+        new_root
+    }
+
+    fn values_v2(root: i64) -> (i32, i64) {
+        let mut values = -1;
+        let status = unsafe { super::mimi_ordinary_map_owned_any_v2_values(root, &mut values) };
+        (status, values)
+    }
+
+    fn values_len_v2(values: i64) -> (i32, i32) {
+        let mut len = -1;
+        let status = unsafe { super::mimi_ordinary_map_owned_any_v2_values_len(values, &mut len) };
+        (status, len)
+    }
+
+    fn values_get_v2(values: i64, index: i64) -> (i32, i32, i64) {
+        let mut found = -1;
+        let mut owner = -1;
+        let status = unsafe {
+            super::mimi_ordinary_map_owned_any_v2_values_get(values, index, &mut found, &mut owner)
+        };
+        (status, found, owner)
+    }
+
+    fn values_list_v2(
+        root: i64,
+        selection_bytes: &[u8],
+        selection_hash: &[u8; 32],
+    ) -> (i32, *mut super::super::MimiList) {
+        let mut list = std::ptr::null_mut();
+        let status = unsafe {
+            super::mimi_ordinary_map_owned_any_v2_values_list(
+                root,
+                selection_bytes.as_ptr(),
+                selection_bytes.len() as i64,
+                selection_hash.as_ptr(),
+                &mut list,
+            )
+        };
+        (status, list)
+    }
+
+    fn unpack_v2_byte(owner: i64, expected: ManagedAnyPayloadV2Identity) -> u8 {
+        let mut output = std::mem::MaybeUninit::<u8>::uninit();
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_unpack(
+                    owner,
+                    expected.tag as i32,
+                    expected.type_id.as_bytes().as_ptr(),
+                    expected.type_id.as_bytes().len() as i64,
+                    expected.descriptor_hash.as_ptr(),
+                    output.as_mut_ptr(),
+                    expected.size as i64,
+                    expected.align as i64,
+                )
+            },
+            0
+        );
+        unsafe { output.assume_init() }
+    }
+
+    fn selection(tag: i32, type_id: &[u8; 35], hash: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {
+        let mut bytes = Vec::with_capacity(8 + 8 + type_id.len() + 4 + hash.len());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&(type_id.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(type_id);
+        bytes.extend_from_slice(&tag.to_be_bytes());
+        bytes.extend_from_slice(hash);
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(b"mimi-managed-any-payload-v2:admitted-descriptor-set:v1\n");
+        hasher.update(&bytes[8..]);
+        (bytes, hasher.finalize())
+    }
+
+    fn selection_records(records: &[(i32, &[u8; 35], &[u8; 32])]) -> (Vec<u8>, [u8; 32]) {
+        let mut sorted = records.to_vec();
+        sorted.sort_unstable_by(|left, right| left.1.cmp(right.1));
+        let mut bytes = Vec::with_capacity(8 + sorted.len() * (8 + 35 + 4 + 32));
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&(sorted.len() as u32).to_be_bytes());
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(b"mimi-managed-any-payload-v2:admitted-descriptor-set:v1\n");
+        for (tag, type_id, hash) in sorted {
+            bytes.extend_from_slice(&(type_id.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(type_id);
+            bytes.extend_from_slice(&tag.to_be_bytes());
+            bytes.extend_from_slice(hash);
+            hasher.update(&(type_id.len() as u64).to_be_bytes());
+            hasher.update(type_id);
+            hasher.update(&tag.to_be_bytes());
+            hasher.update(hash);
+        }
+        (bytes, hasher.finalize())
+    }
+
+    fn bool_selection(hash: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {
+        selection(3, V2_BOOL_TYPE_ID, hash)
+    }
+
+    fn set_v2_bool(root: i64, key: &[u8], owner: i64, hash: &[u8; 32]) -> i64 {
+        let (selection, selection_hash) = bool_selection(hash);
+        let mut new_root = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_ordinary_map_owned_any_v2_set(
+                    root,
+                    key.as_ptr(),
+                    key.len() as i64,
+                    owner,
+                    selection.as_ptr(),
+                    selection.len() as i64,
+                    selection_hash.as_ptr(),
+                    &mut new_root,
+                )
+            },
+            0
+        );
+        assert_ne!(new_root, 0);
+        new_root
+    }
+
+    #[test]
+    fn set_requires_owner_descriptor_in_hashed_selection_before_mutation() {
+        let root = new_v2_map();
+        let owner = new_v2_bool_owner(0, &[51; 32]);
+        let (mut selection, selection_hash) = bool_selection(&[52; 32]);
+        let mut out_root = -1;
+        let status = unsafe {
+            super::mimi_ordinary_map_owned_any_v2_set(
+                root,
+                b"flag".as_ptr(),
+                4,
+                owner,
+                selection.as_mut_ptr(),
+                selection.len() as i64,
+                selection_hash.as_ptr(),
+                &mut out_root,
+            )
+        };
+        assert_eq!(status, 7);
+        assert_eq!(out_root, 0);
+        assert_eq!(
+            any_owner::validate(AnyOwnerToken::from_wire_bits(owner as u64).unwrap()),
+            Ok(AnyOwnerKind::ManagedV2)
+        );
+        assert_eq!(size_v2(root), (0, 0));
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+        assert_eq!(super::mimi_ordinary_map_owned_any_v2_drop(root), 0);
+    }
+
+    fn get_v2(root: i64, key: &[u8]) -> (i32, i32, i64) {
+        let mut found = -1;
+        let mut owner = -1;
+        let status = unsafe {
+            super::mimi_ordinary_map_owned_any_v2_get(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                &mut found,
+                &mut owner,
+                1,
+                V2_I32_TYPE_ID.as_ptr(),
+                V2_I32_TYPE_ID.len() as i64,
+                V2_I32_HASH.as_ptr(),
+                std::mem::size_of::<i32>() as i64,
+                std::mem::align_of::<i32>() as i64,
+                Some(clone_v2_i32),
+                Some(drop_v2_i32),
+            )
+        };
+        (status, found, owner)
+    }
+
+    fn size_v2(root: i64) -> (i32, i32) {
+        let mut size = -1;
+        let status = unsafe { super::mimi_ordinary_map_owned_any_v2_size(root, &mut size) };
+        (status, size)
+    }
+
+    fn is_empty_v2(root: i64) -> (i32, i32) {
+        let mut is_empty = -1;
+        let status = unsafe { super::mimi_ordinary_map_owned_any_v2_is_empty(root, &mut is_empty) };
+        (status, is_empty)
+    }
+
+    fn contains_v2(root: i64, key: &[u8]) -> (i32, i32) {
+        let mut contains = -1;
+        let status = unsafe {
+            super::mimi_ordinary_map_owned_any_v2_contains(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                &mut contains,
+            )
+        };
+        (status, contains)
+    }
+
+    fn drop_v2_map(root: i64) {
+        assert_eq!(super::mimi_ordinary_map_owned_any_v2_drop(root), 0);
+    }
+
+    #[test]
+    fn owned_any_v2_root_publication_capacity_preserves_sources_for_set_remove_and_clone() {
+        let owner_baseline = any_owner::live_count().expect("owner registry baseline");
+        let empty = new_v2_map();
+        let original_owner = new_v2_i32_owner(7);
+        let populated = set_v2_owner(
+            empty,
+            b"key",
+            original_owner,
+            1,
+            V2_I32_TYPE_ID,
+            &V2_I32_HASH,
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(original_owner), 0);
+        assert_eq!(size_v2(empty), (0, 0));
+        assert_eq!(size_v2(populated), (0, 1));
+        assert_eq!(contains_v2(populated, b"key"), (0, 1));
+
+        let replacement_owner = new_v2_i32_owner(9);
+        let (selection_bytes, selection_hash) = selection(1, V2_I32_TYPE_ID, &V2_I32_HASH);
+        let mut set_output = i64::MAX;
+        let (set_status, set_attempts) =
+            super::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(0, || {
+                let status = unsafe {
+                    super::mimi_ordinary_map_owned_any_v2_set(
+                        populated,
+                        b"next".as_ptr(),
+                        4,
+                        replacement_owner,
+                        selection_bytes.as_ptr(),
+                        selection_bytes.len() as i64,
+                        selection_hash.as_ptr(),
+                        &mut set_output,
+                    )
+                };
+                (
+                    status,
+                    super::ordinary_map_owned_any_v2_root_publish_attempts_for_test(),
+                )
+            });
+        assert_eq!(set_status, ManagedAnyStatus::Capacity as i32);
+        assert_eq!(set_output, 0, "failed Set must not publish a root handle");
+        assert_eq!(set_attempts, 1);
+        assert_eq!(size_v2(populated), (0, 1));
+        assert_eq!(contains_v2(populated, b"key"), (0, 1));
+        assert_eq!(contains_v2(populated, b"next"), (0, 0));
+        assert_eq!(super::mimi_any_payload_v2_drop(replacement_owner), 0);
+
+        let mut remove_output = i64::MAX;
+        let (remove_status, remove_attempts) =
+            super::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(0, || {
+                let status = unsafe {
+                    super::mimi_ordinary_map_owned_any_v2_remove(
+                        populated,
+                        b"key".as_ptr(),
+                        3,
+                        &mut remove_output,
+                    )
+                };
+                (
+                    status,
+                    super::ordinary_map_owned_any_v2_root_publish_attempts_for_test(),
+                )
+            });
+        assert_eq!(remove_status, ManagedAnyStatus::Capacity as i32);
+        assert_eq!(
+            remove_output, 0,
+            "failed Remove must not publish a root handle"
+        );
+        assert_eq!(remove_attempts, 1);
+        assert_eq!(size_v2(populated), (0, 1));
+        assert_eq!(contains_v2(populated, b"key"), (0, 1));
+
+        let mut clone_output = i64::MAX;
+        let (clone_status, clone_attempts) =
+            super::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(0, || {
+                let status = unsafe {
+                    super::mimi_ordinary_map_owned_any_v2_clone(populated, &mut clone_output)
+                };
+                (
+                    status,
+                    super::ordinary_map_owned_any_v2_root_publish_attempts_for_test(),
+                )
+            });
+        assert_eq!(clone_status, ManagedAnyStatus::Capacity as i32);
+        assert_eq!(
+            clone_output, 0,
+            "failed Clone must not publish a root handle"
+        );
+        assert_eq!(clone_attempts, 1);
+        assert_eq!(size_v2(populated), (0, 1));
+        assert_eq!(contains_v2(populated, b"key"), (0, 1));
+
+        drop_v2_map(empty);
+        drop_v2_map(populated);
+        assert_eq!(any_owner::live_count(), Ok(owner_baseline));
+    }
 
     fn read_i32(value: &OwnedAny) -> i32 {
         value.read_i32().expect("value is an i32 owner")
@@ -1477,6 +3912,888 @@ mod tests {
 
     fn read_string(value: &OwnedAny) -> String {
         value.copy_string().expect("value is a string owner")
+    }
+
+    #[test]
+    fn v2_map_keeps_bool_false_distinct_and_returns_fresh_i32_zero_owner_on_miss() {
+        let original = new_v2_map();
+        let hash = [121u8; 32];
+        let source_owner = new_v2_bool_owner(0, &hash);
+        let updated = set_v2_bool(original, b"flag", source_owner, &hash);
+        assert_eq!(size_v2(original), (0, 0));
+        assert_eq!(size_v2(updated), (0, 1));
+        assert_eq!(super::mimi_any_payload_v2_drop(source_owner), 0);
+
+        let (status, found, owner) = get_v2(updated, b"flag");
+        assert_eq!(status, super::ORDINARY_MAP_OWNED_ANY_V2_OK);
+        assert_eq!(found, 1);
+        assert_ne!(owner, 0);
+        let (_, identity) = super::managed_v2_token_receipt(owner).unwrap();
+        assert_eq!(
+            identity.tag,
+            super::super::managed_any_payload_v2::ManagedAnyPayloadV2Tag::Bool
+        );
+        assert_eq!(identity.descriptor_hash, hash);
+
+        let mut unpacked = std::mem::MaybeUninit::<u8>::uninit();
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_unpack(
+                    owner,
+                    3,
+                    V2_BOOL_TYPE_ID.as_ptr(),
+                    V2_BOOL_TYPE_ID.len() as i64,
+                    hash.as_ptr(),
+                    unpacked.as_mut_ptr(),
+                    1,
+                    1,
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { unpacked.assume_init() }, 0);
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+
+        let (status, found, zero_owner) = get_v2(updated, b"missing");
+        assert_eq!(status, super::ORDINARY_MAP_OWNED_ANY_V2_OK);
+        assert_eq!(found, 0);
+        assert_ne!(zero_owner, 0);
+        let mut zero = std::mem::MaybeUninit::<i32>::uninit();
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_unpack(
+                    zero_owner,
+                    1,
+                    V2_I32_TYPE_ID.as_ptr(),
+                    V2_I32_TYPE_ID.len() as i64,
+                    V2_I32_HASH.as_ptr(),
+                    zero.as_mut_ptr().cast::<u8>(),
+                    std::mem::size_of::<i32>() as i64,
+                    std::mem::align_of::<i32>() as i64,
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { zero.assume_init() }, 0);
+        assert_eq!(super::mimi_any_payload_v2_drop(zero_owner), 0);
+
+        let legacy_v1 = super::mimi_mir_ordinary_map_owned_get_i32_string_v1_new();
+        let (status, found, owner) = get_v2(legacy_v1, b"flag");
+        assert_ne!(status, 0, "cross-profile errors cannot look like Get miss");
+        assert_eq!((found, owner), (0, 0));
+
+        super::mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(legacy_v1);
+        drop_v2_map(original);
+        drop_v2_map(updated);
+    }
+
+    #[test]
+    fn v2_get_distinguishes_present_i32_zero_from_missing_and_survives_source_drop() {
+        let empty = new_v2_map();
+        let source = new_v2_i32_owner(0);
+        let root = set_v2_owner(empty, b"zero", source, 1, V2_I32_TYPE_ID, &V2_I32_HASH);
+        assert_eq!(super::mimi_any_payload_v2_drop(source), 0);
+
+        let (present_status, found, present) = get_v2(root, b"zero");
+        let (missing_status, missing_found, missing) = get_v2(root, b"absent");
+        assert_eq!((present_status, found), (0, 1));
+        assert_eq!((missing_status, missing_found), (0, 0));
+        assert_ne!(present, 0);
+        assert_ne!(missing, 0);
+        assert_ne!(present, missing);
+        let (_, present_identity) = super::managed_v2_token_receipt(present).unwrap();
+        let (_, missing_identity) = super::managed_v2_token_receipt(missing).unwrap();
+        assert_eq!(present_identity, missing_identity);
+
+        // A Get result is a standalone owner. Destroy every source Map before
+        // reading either result; the explicit found bit preserves zero-vs-miss.
+        drop_v2_map(empty);
+        drop_v2_map(root);
+        for owner in [present, missing] {
+            let mut output = std::mem::MaybeUninit::<i32>::uninit();
+            assert_eq!(
+                unsafe {
+                    super::mimi_any_payload_v2_unpack(
+                        owner,
+                        1,
+                        V2_I32_TYPE_ID.as_ptr(),
+                        V2_I32_TYPE_ID.len() as i64,
+                        V2_I32_HASH.as_ptr(),
+                        output.as_mut_ptr().cast::<u8>(),
+                        std::mem::size_of::<i32>() as i64,
+                        std::mem::align_of::<i32>() as i64,
+                    )
+                },
+                0
+            );
+            assert_eq!(unsafe { output.assume_init() }, 0);
+        }
+        assert_eq!(super::mimi_any_payload_v2_drop(present), 0);
+        assert_eq!(super::mimi_any_payload_v2_drop(present), 5);
+        assert_eq!(super::mimi_any_payload_v2_drop(missing), 0);
+    }
+
+    #[test]
+    fn v2_values_is_sorted_mixed_descriptor_snapshot_with_independent_clone_and_element_owners() {
+        let empty = new_v2_map();
+        let bool_owner = new_v2_bool_owner(0, &[201; 32]);
+        let with_z = set_v2_owner(empty, b"z", bool_owner, 3, V2_BOOL_TYPE_ID, &[201; 32]);
+        assert_eq!(super::mimi_any_payload_v2_drop(bool_owner), 0);
+
+        let aggregate_owner = new_v2_aggregate_owner(0x5a, &[202; 32]);
+        let root = set_v2_owner(
+            with_z,
+            b"a\0",
+            aggregate_owner,
+            5,
+            V2_AGGREGATE_TYPE_ID,
+            &[202; 32],
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(aggregate_owner), 0);
+
+        let (status, values) = values_v2(root);
+        assert_eq!(status, 0);
+        assert_ne!(values, 0);
+        let mut cloned = 0;
+        assert_eq!(
+            unsafe { super::mimi_ordinary_map_owned_any_v2_values_clone(values, &mut cloned) },
+            0
+        );
+        assert_ne!(cloned, 0);
+        assert_ne!(values, cloned);
+
+        // Values survives every source Map owner, including earlier persistent
+        // roots. Key ordering is raw UTF-8 bytes, so "a\0" precedes "z".
+        drop_v2_map(empty);
+        drop_v2_map(with_z);
+        drop_v2_map(root);
+        assert_eq!(values_len_v2(values), (0, 2));
+        assert_eq!(values_len_v2(cloned), (0, 2));
+
+        let (first_status, first_found, first) = values_get_v2(values, 0);
+        let (second_status, second_found, second) = values_get_v2(values, 1);
+        assert_eq!((first_status, first_found), (0, 1));
+        assert_eq!((second_status, second_found), (0, 1));
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        assert_ne!(first, second);
+        let (_, first_identity) = super::managed_v2_token_receipt(first).unwrap();
+        let (_, second_identity) = super::managed_v2_token_receipt(second).unwrap();
+        assert_eq!(first_identity.tag as i32, 5);
+        assert_eq!(first_identity.descriptor_hash, [202; 32]);
+        assert_eq!(unpack_v2_byte(first, first_identity), 0x5a);
+        assert_eq!(second_identity.tag as i32, 3);
+        assert_eq!(second_identity.descriptor_hash, [201; 32]);
+        assert_eq!(unpack_v2_byte(second, second_identity), 0);
+
+        assert_eq!(values_get_v2(values, 2), (0, 0, 0));
+        assert_eq!(values_get_v2(values, -1), (1, 0, 0));
+        let mut forged_len = -1;
+        assert_eq!(
+            unsafe { super::mimi_ordinary_map_owned_any_v2_values_len(i64::MAX, &mut forged_len) },
+            4
+        );
+        assert_eq!(forged_len, 0);
+
+        assert_eq!(super::mimi_ordinary_map_owned_any_v2_values_drop(values), 0);
+        assert_eq!(super::mimi_ordinary_map_owned_any_v2_values_drop(values), 5);
+        assert_eq!(values_len_v2(values), (5, 0));
+        // The independently cloned list still owns its descriptors after the
+        // first list and all source roots have been retired.
+        let (clone_status, clone_found, clone_first) = values_get_v2(cloned, 0);
+        assert_eq!((clone_status, clone_found), (0, 1));
+        let (_, clone_identity) = super::managed_v2_token_receipt(clone_first).unwrap();
+        assert_eq!(clone_identity, first_identity);
+        assert_eq!(unpack_v2_byte(clone_first, clone_identity), 0x5a);
+
+        for owner in [first, second, clone_first] {
+            assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+        }
+        assert_eq!(super::mimi_ordinary_map_owned_any_v2_values_drop(cloned), 0);
+        assert_eq!(super::mimi_ordinary_map_owned_any_v2_values_drop(cloned), 5);
+    }
+
+    #[test]
+    fn v2_values_snapshot_cross_thread_get_drop_keeps_creator_metadata_consistent() {
+        let empty = new_v2_map();
+        let hash = [207; 32];
+        let source = new_v2_bool_owner(1, &hash);
+        let root = set_v2_owner(empty, b"flag", source, 3, V2_BOOL_TYPE_ID, &hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(source), 0);
+        let (status, values) = values_v2(root);
+        assert_eq!(status, 0);
+        let creator = super::super::handle::current_lease_thread_id();
+        assert_eq!(
+            super::v2_values_handles()
+                .lock()
+                .unwrap()
+                .get(&values)
+                .map(|published| published.creator),
+            Some(creator)
+        );
+
+        let worker = std::thread::spawn(move || {
+            let worker_creator = super::super::handle::current_lease_thread_id();
+            assert_ne!(creator, worker_creator);
+            assert_eq!(values_len_v2(values), (0, 1));
+
+            let mut cloned = 0;
+            assert_eq!(
+                unsafe { super::mimi_ordinary_map_owned_any_v2_values_clone(values, &mut cloned) },
+                0
+            );
+            assert_eq!(
+                super::v2_values_handles()
+                    .lock()
+                    .unwrap()
+                    .get(&cloned)
+                    .map(|published| published.creator),
+                Some(worker_creator)
+            );
+
+            // Get publishes a fresh owner in the executing thread's domain.
+            let (get_status, found, owner) = values_get_v2(values, 0);
+            assert_eq!((get_status, found), (0, 1));
+            let token = any_owner::AnyOwnerToken::from_wire_bits(owner as u64).unwrap();
+            assert_eq!(
+                super::any_owner::validate(token),
+                Ok(any_owner::AnyOwnerKind::ManagedV2)
+            );
+
+            // A foreign trap drain retires the worker-created clone and Get
+            // result. The source Values snapshot remains associated with its
+            // original creator.
+            super::super::ordinary_map_domain::drain_current_thread_roots();
+            assert_eq!(
+                super::any_owner::validate(token),
+                Err(any_owner::AnyOwnerError::StaleToken)
+            );
+            assert_eq!(values_len_v2(cloned), (5, 0));
+            assert_eq!(values_len_v2(values), (0, 1));
+
+            // Normal cross-thread Drop retires the opaque handle and its
+            // private owner graph; no creator-domain receipt may remain.
+            assert_eq!(super::mimi_ordinary_map_owned_any_v2_values_drop(values), 0);
+            assert_eq!(values_len_v2(values), (5, 0));
+        });
+        worker.join().unwrap();
+
+        assert!(!super::v2_values_handles()
+            .lock()
+            .unwrap()
+            .contains_key(&values));
+        assert_eq!(size_v2(root), (0, 1));
+        drop_v2_map(empty);
+        drop_v2_map(root);
+    }
+
+    #[test]
+    fn v2_values_list_is_sorted_dedicated_and_independently_owned() {
+        let empty = new_v2_map();
+        let bool_hash = [211; 32];
+        let bool_owner = new_v2_bool_owner(0, &bool_hash);
+        let with_bool = set_v2_owner(empty, b"z", bool_owner, 3, V2_BOOL_TYPE_ID, &bool_hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(bool_owner), 0);
+
+        let i32_owner = new_v2_i32_owner(-37);
+        let with_i32 = set_v2_owner(with_bool, b"m", i32_owner, 1, V2_I32_TYPE_ID, &V2_I32_HASH);
+        assert_eq!(super::mimi_any_payload_v2_drop(i32_owner), 0);
+
+        let aggregate_hash = [212; 32];
+        let aggregate_owner = new_v2_aggregate_owner(0x5a, &aggregate_hash);
+        let root = set_v2_owner(
+            with_i32,
+            b"a\0",
+            aggregate_owner,
+            5,
+            V2_AGGREGATE_TYPE_ID,
+            &aggregate_hash,
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(aggregate_owner), 0);
+
+        let (selection_bytes, selection_hash) = selection_records(&[
+            (3, V2_BOOL_TYPE_ID, &bool_hash),
+            (1, V2_I32_TYPE_ID, &V2_I32_HASH),
+            (5, V2_AGGREGATE_TYPE_ID, &aggregate_hash),
+        ]);
+        let (status, list) = values_list_v2(root, &selection_bytes, &selection_hash);
+        assert_eq!(status, super::ORDINARY_MAP_OWNED_ANY_V2_OK);
+        assert!(!list.is_null());
+        assert!(super::managed_any_v2_list_registered_for_test(list));
+        assert!(!super::managed_any_v2_list_registered_in_legacy_domain_for_test(list));
+        assert!(
+            !super::register_managed_any_v2_list(list),
+            "duplicate list pointer registration must be rejected"
+        );
+        assert_eq!(
+            unsafe { (*list).element_kind },
+            super::super::ListElementKind::ManagedAnyV2
+        );
+        assert_eq!(
+            unsafe { super::super::mimi_mir_list_len_managed_any_v2(list) },
+            3
+        );
+
+        let list_tokens: Vec<i64> = (0..3)
+            .map(|index| unsafe { *((*list).data as *const i64).add(index) })
+            .collect();
+        let identities: Vec<_> = list_tokens
+            .iter()
+            .map(|token| super::managed_v2_token_receipt(*token).unwrap().1)
+            .collect();
+        // The Map Values ordering is key-byte order: "a\0", "m", then "z".
+        assert_eq!(identities[0].tag as i32, 5);
+        assert_eq!(identities[0].type_id.as_bytes(), V2_AGGREGATE_TYPE_ID);
+        assert_eq!(identities[0].descriptor_hash, aggregate_hash);
+        assert_eq!((identities[0].size, identities[0].align), (1, 1));
+        assert_eq!(identities[1].tag as i32, 1);
+        assert_eq!(identities[1].type_id.as_bytes(), V2_I32_TYPE_ID);
+        assert_eq!(identities[1].descriptor_hash, V2_I32_HASH);
+        assert_eq!(
+            (identities[1].size, identities[1].align),
+            (std::mem::size_of::<i32>(), std::mem::align_of::<i32>())
+        );
+        assert_eq!(identities[2].tag as i32, 3);
+        assert_eq!(identities[2].type_id.as_bytes(), V2_BOOL_TYPE_ID);
+        assert_eq!(identities[2].descriptor_hash, bool_hash);
+        assert_eq!((identities[2].size, identities[2].align), (1, 1));
+
+        let mut found = -1;
+        let mut indexed_owner = -1;
+        assert_eq!(
+            unsafe {
+                super::super::mimi_mir_list_get_managed_any_v2(
+                    list,
+                    -1,
+                    &mut found,
+                    &mut indexed_owner,
+                )
+            },
+            0
+        );
+        assert_eq!(found, 1);
+        assert_ne!(indexed_owner, list_tokens[2]);
+        let independently_indexed_owner = indexed_owner;
+        assert_eq!(
+            super::managed_v2_token_receipt(independently_indexed_owner)
+                .unwrap()
+                .1,
+            identities[2]
+        );
+        found = -1;
+        indexed_owner = -1;
+        assert_eq!(
+            unsafe {
+                super::super::mimi_mir_list_get_managed_any_v2(
+                    list,
+                    i64::MIN,
+                    &mut found,
+                    &mut indexed_owner,
+                )
+            },
+            0
+        );
+        assert_eq!((found, indexed_owner), (0, 0));
+
+        let clone = unsafe { super::super::mimi_mir_list_clone_managed_any_v2(list) };
+        assert!(!clone.is_null());
+        assert_eq!(
+            unsafe { super::super::mimi_mir_list_len_managed_any_v2(clone) },
+            3
+        );
+        let cloned_tokens: Vec<i64> = (0..3)
+            .map(|index| unsafe { *((*clone).data as *const i64).add(index) })
+            .collect();
+        for (source, cloned) in list_tokens.iter().zip(&cloned_tokens) {
+            assert_ne!(source, cloned);
+            assert_eq!(
+                super::managed_v2_token_receipt(*cloned).unwrap().1,
+                super::managed_v2_token_receipt(*source).unwrap().1
+            );
+        }
+
+        // Every list element remains usable after all source Map roots die.
+        for root in [empty, with_bool, with_i32, root] {
+            drop_v2_map(root);
+        }
+        for (owner, identity) in list_tokens.iter().zip(&identities) {
+            match identity.tag as i32 {
+                5 => assert_eq!(unpack_v2_byte(*owner, *identity), 0x5a),
+                3 => assert_eq!(unpack_v2_byte(*owner, *identity), 0),
+                1 => {}
+                _ => unreachable!(),
+            }
+        }
+        let mut unpacked_i32 = std::mem::MaybeUninit::<i32>::uninit();
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_unpack(
+                    list_tokens[1],
+                    1,
+                    V2_I32_TYPE_ID.as_ptr(),
+                    V2_I32_TYPE_ID.len() as i64,
+                    V2_I32_HASH.as_ptr(),
+                    unpacked_i32.as_mut_ptr().cast::<u8>(),
+                    std::mem::size_of::<i32>() as i64,
+                    std::mem::align_of::<i32>() as i64,
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { unpacked_i32.assume_init() }, -37);
+
+        unsafe { super::super::mimi_mir_list_drop_managed_any_v2(list) };
+        assert!(!super::managed_any_v2_list_registered_for_test(list));
+        for owner in &list_tokens {
+            assert!(super::managed_v2_token_receipt(*owner).is_err());
+        }
+        assert_eq!(unpack_v2_byte(cloned_tokens[0], identities[0]), 0x5a);
+        unsafe { super::super::mimi_mir_list_drop_managed_any_v2(clone) };
+        for owner in cloned_tokens {
+            assert!(super::managed_v2_token_receipt(owner).is_err());
+        }
+        assert_eq!(
+            super::mimi_any_payload_v2_drop(independently_indexed_owner),
+            0
+        );
+
+        // Empty Map Values accepts the canonical empty selector and yields a
+        // real, zero-length V2 owner list.
+        let empty_map = new_v2_map();
+        let (empty_selection, empty_hash) = selection_records(&[]);
+        let (empty_status, empty_list) = values_list_v2(empty_map, &empty_selection, &empty_hash);
+        assert_eq!(empty_status, 0);
+        assert!(!empty_list.is_null());
+        assert!(super::managed_any_v2_list_registered_for_test(empty_list));
+        assert_eq!(
+            unsafe { super::super::mimi_mir_list_len_managed_any_v2(empty_list) },
+            0
+        );
+        unsafe { super::super::mimi_mir_list_drop_managed_any_v2(empty_list) };
+        assert!(!super::managed_any_v2_list_registered_for_test(empty_list));
+        drop_v2_map(empty_map);
+    }
+
+    #[test]
+    fn v2_values_list_registration_failure_and_trap_drain_reclaim_the_list() {
+        let empty = new_v2_map();
+        let hash = [216; 32];
+        let source = new_v2_bool_owner(1, &hash);
+        let root = set_v2_owner(empty, b"flag", source, 3, V2_BOOL_TYPE_ID, &hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(source), 0);
+        let (selection_bytes, selection_hash) = selection_records(&[(3, V2_BOOL_TYPE_ID, &hash)]);
+
+        // A failed registration returns null and frees the freshly allocated
+        // empty header. Values-list construction propagates that failure and
+        // releases every cloned owner before exposing an output pointer.
+        let unregistered = super::with_managed_any_v2_list_registration_failure_for_test(|| {
+            super::super::mimi_mir_list_new_managed_any_v2()
+        });
+        assert!(unregistered.is_null());
+        super::begin_failure_injection(100);
+        let (status, failed_list) =
+            super::with_managed_any_v2_list_registration_failure_for_test(|| {
+                values_list_v2(root, &selection_bytes, &selection_hash)
+            });
+        let staged = super::end_failure_injection();
+        assert_eq!(status, 3, "registration capacity failure must fail closed");
+        assert!(failed_list.is_null());
+        assert_eq!(staged.len(), 1);
+        for token in staged {
+            assert_eq!(
+                any_owner::validate(token),
+                Err(any_owner::AnyOwnerError::StaleToken),
+                "registration failure leaked a staged Values token"
+            );
+        }
+        assert_eq!(size_v2(root), (0, 1));
+
+        let (status, list) = values_list_v2(root, &selection_bytes, &selection_hash);
+        assert_eq!(status, 0);
+        assert!(super::managed_any_v2_list_registered_for_test(list));
+        let list_owner = unsafe { *((*list).data as *const i64) };
+
+        // Trap cleanup uses the normal V2 list destructor. This must retire
+        // the list receipt before its element Drop glue runs, then the shared
+        // owner sweep must find no duplicate token left to release.
+        super::super::ordinary_map_domain::drain_current_thread_roots();
+        assert!(!super::managed_any_v2_list_registered_for_test(list));
+        assert!(super::managed_v2_token_receipt(list_owner).is_err());
+        assert_ne!(size_v2(root).0, 0, "the root was retired by trap cleanup");
+    }
+
+    #[test]
+    fn v2_values_list_rejects_unselected_descriptors_and_rolls_back_failures() {
+        let empty = new_v2_map();
+        let hash = [213; 32];
+        let owner = new_v2_bool_owner(1, &hash);
+        let root = set_v2_owner(empty, b"flag", owner, 3, V2_BOOL_TYPE_ID, &hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+
+        let (wrong_selection, wrong_selection_hash) =
+            selection(5, V2_AGGREGATE_TYPE_ID, &[214; 32]);
+        super::begin_failure_injection(100);
+        let (wrong_status, wrong_list) =
+            values_list_v2(root, &wrong_selection, &wrong_selection_hash);
+        let staged = super::end_failure_injection();
+        assert_eq!(wrong_status, 7, "unselected descriptor must fail closed");
+        assert!(wrong_list.is_null());
+        assert!(!staged.is_empty());
+        for token in staged {
+            assert_eq!(
+                any_owner::validate(token),
+                Err(any_owner::AnyOwnerError::StaleToken),
+                "selector rejection leaked a staged Values owner"
+            );
+        }
+
+        let (selected, selected_hash) = selection(3, V2_BOOL_TYPE_ID, &hash);
+        let wrong_type_desc_hash = [215; 32];
+        let (wrong_type_desc_selection, wrong_type_desc_registry_hash) =
+            selection_records(&[(3, V2_BOOL_TYPE_ID, &wrong_type_desc_hash)]);
+        let (type_desc_status, type_desc_list) = values_list_v2(
+            root,
+            &wrong_type_desc_selection,
+            &wrong_type_desc_registry_hash,
+        );
+        assert_eq!(
+            type_desc_status, 7,
+            "same tag/type with a different Core TypeDesc closure digest must fail closed"
+        );
+        assert!(type_desc_list.is_null());
+
+        // The valid canonical selector hash is separate from each selected
+        // TypeDesc digest. Corrupting it must be rejected before publication.
+        let mut incorrect_hash = selected_hash;
+        incorrect_hash[0] ^= 0x80;
+        let (hash_status, hash_list) = values_list_v2(root, &selected, &incorrect_hash);
+        assert_eq!(
+            hash_status, 7,
+            "wrong selector hash is a descriptor mismatch"
+        );
+        assert!(hash_list.is_null());
+        let malformed = [0u8; 8];
+        let (encoding_status, encoding_list) = values_list_v2(root, &malformed, &selected_hash);
+        assert_eq!(encoding_status, 1, "malformed selector is invalid input");
+        assert!(encoding_list.is_null());
+
+        assert_eq!(size_v2(root), (0, 1));
+        let (get_status, found, surviving) = get_v2(root, b"flag");
+        assert_eq!((get_status, found), (0, 1));
+        assert_eq!(
+            unpack_v2_byte(
+                surviving,
+                super::managed_v2_token_receipt(surviving).unwrap().1
+            ),
+            1
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(surviving), 0);
+
+        let second = new_v2_bool_owner(0, &hash);
+        let with_second = set_v2_owner(root, b"other", second, 3, V2_BOOL_TYPE_ID, &hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(second), 0);
+        let (selected, selected_hash) = selection(3, V2_BOOL_TYPE_ID, &hash);
+        // The helper has five observable allocation checkpoints for two
+        // entries: sorted index, result Vec, two owner clones, and list
+        // allocation. Each injected failure must leave only the Map's source
+        // owners live; the final admitted stage must publish a list cleanly.
+        for failure_stage in 0..=5 {
+            super::begin_failure_injection(failure_stage);
+            let (status, staged_list) = values_list_v2(with_second, &selected, &selected_hash);
+            let staged = super::end_failure_injection();
+            if failure_stage < 5 {
+                assert_eq!(status, 3, "allocation stage {failure_stage}");
+                assert!(staged_list.is_null(), "stage {failure_stage}");
+            } else {
+                assert_eq!(status, 0);
+                assert!(!staged_list.is_null());
+                assert_eq!(
+                    unsafe { super::super::mimi_mir_list_len_managed_any_v2(staged_list) },
+                    2
+                );
+                unsafe { super::super::mimi_mir_list_drop_managed_any_v2(staged_list) };
+            }
+            for token in staged {
+                assert_eq!(
+                    any_owner::validate(token),
+                    Err(any_owner::AnyOwnerError::StaleToken),
+                    "allocation stage {failure_stage} leaked or retained a Values owner"
+                );
+            }
+            assert_eq!(size_v2(with_second), (0, 2));
+        }
+
+        let (status, source_list) = values_list_v2(with_second, &selected, &selected_hash);
+        assert_eq!(status, 0);
+        assert!(!source_list.is_null());
+
+        // Fail the second append: first published token is owned by the list
+        // guard, the second remains with the helper and is explicitly dropped.
+        super::begin_failure_injection(100);
+        super::super::set_managed_any_v2_list_push_fail_after_for_test(Some(1));
+        let (push_status, failed_list) = values_list_v2(with_second, &selected, &selected_hash);
+        super::super::set_managed_any_v2_list_push_fail_after_for_test(None);
+        let staged_push = super::end_failure_injection();
+        assert_eq!(push_status, 3, "append failure reports Capacity");
+        assert!(failed_list.is_null());
+        assert_eq!(staged_push.len(), 2);
+        for token in staged_push {
+            assert_eq!(
+                any_owner::validate(token),
+                Err(any_owner::AnyOwnerError::StaleToken),
+                "failed append leaked a staged or published prefix owner"
+            );
+        }
+        assert_eq!(
+            unsafe { super::super::mimi_mir_list_len_managed_any_v2(source_list) },
+            2
+        );
+
+        // A list clone's partial prefix and current failed append also roll
+        // back using only the V2 owner clone/drop ABI.
+        super::begin_failure_injection(100);
+        super::super::set_managed_any_v2_list_push_fail_after_for_test(Some(1));
+        let failed_clone = unsafe { super::super::mimi_mir_list_clone_managed_any_v2(source_list) };
+        super::super::set_managed_any_v2_list_push_fail_after_for_test(None);
+        let staged_clone = super::end_failure_injection();
+        assert!(failed_clone.is_null());
+        assert_eq!(staged_clone.len(), 2);
+        for token in staged_clone {
+            assert_eq!(
+                any_owner::validate(token),
+                Err(any_owner::AnyOwnerError::StaleToken),
+                "failed List clone leaked a V2 owner"
+            );
+        }
+
+        unsafe { super::super::mimi_mir_list_drop_managed_any_v2(source_list) };
+        drop_v2_map(empty);
+        drop_v2_map(root);
+        drop_v2_map(with_second);
+    }
+
+    #[test]
+    fn v2_values_failures_are_atomic_and_staged_payloads_are_dropped_once() {
+        use std::sync::atomic::Ordering;
+
+        V2_VALUES_CLONE_FAIL.store(false, Ordering::SeqCst);
+        V2_VALUES_DROP_CALLS.store(0, Ordering::SeqCst);
+        let value = 0x71u8;
+        let mut source = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_new(
+                    3,
+                    V2_TEST_FAILURE_TYPE_ID.as_ptr(),
+                    V2_TEST_FAILURE_TYPE_ID.len() as i64,
+                    V2_TEST_FAILURE_HASH.as_ptr(),
+                    &value,
+                    1,
+                    1,
+                    Some(clone_v2_toggle_failure),
+                    Some(drop_v2_values_counted),
+                    &mut source,
+                )
+            },
+            0
+        );
+        let empty = new_v2_map();
+        let root = set_v2_owner(
+            empty,
+            b"x",
+            source,
+            3,
+            V2_TEST_FAILURE_TYPE_ID,
+            &V2_TEST_FAILURE_HASH,
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(source), 0);
+
+        // A descriptor callback failure while cloning a values element leaves
+        // the output empty and the source Map intact.
+        V2_VALUES_CLONE_FAIL.store(true, Ordering::SeqCst);
+        let mut failed = -1;
+        assert_eq!(
+            unsafe { super::mimi_ordinary_map_owned_any_v2_values(root, &mut failed) },
+            14
+        );
+        assert_eq!(failed, 0);
+        V2_VALUES_CLONE_FAIL.store(false, Ordering::SeqCst);
+        assert_eq!(size_v2(root), (0, 1));
+
+        // Exercise every fallible allocation checkpoint, including failure
+        // after an element clone but before the opaque list handle is published.
+        for failure_stage in 0..4 {
+            super::begin_failure_injection(failure_stage);
+            let mut output = -1;
+            let status = unsafe { super::mimi_ordinary_map_owned_any_v2_values(root, &mut output) };
+            let staged = super::end_failure_injection();
+            assert_eq!(status, 3, "stage {failure_stage}");
+            assert_eq!(output, 0, "stage {failure_stage}");
+            for token in staged {
+                assert_eq!(
+                    any_owner::validate(token),
+                    Err(any_owner::AnyOwnerError::StaleToken),
+                    "stage {failure_stage} leaked an element clone"
+                );
+            }
+            assert_eq!(size_v2(root), (0, 1));
+        }
+        assert_eq!(V2_VALUES_DROP_CALLS.load(Ordering::SeqCst), 2);
+
+        let (status, values) = values_v2(root);
+        assert_eq!(status, 0);
+        drop_v2_map(empty);
+        drop_v2_map(root);
+        let (get_status, found, element) = values_get_v2(values, 0);
+        assert_eq!((get_status, found), (0, 1));
+        assert_eq!(super::mimi_ordinary_map_owned_any_v2_values_drop(values), 0);
+        assert_eq!(super::mimi_any_payload_v2_drop(element), 0);
+        assert_eq!(V2_VALUES_DROP_CALLS.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn v2_is_empty_uses_status_out_and_preserves_independent_persistent_roots() {
+        let original = new_v2_map();
+        assert_eq!(is_empty_v2(original), (0, 1));
+
+        let hash = [131u8; 32];
+        let owner = new_v2_bool_owner(0, &hash);
+        let updated = set_v2_bool(original, b"flag", owner, &hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+        assert_eq!(is_empty_v2(original), (0, 1));
+        assert_eq!(is_empty_v2(updated), (0, 0));
+
+        let mut failed_output = -1;
+        let legacy = super::mimi_mir_ordinary_map_owned_get_i32_string_v1_new();
+        let status =
+            unsafe { super::mimi_ordinary_map_owned_any_v2_is_empty(legacy, &mut failed_output) };
+        assert_ne!(status, 0);
+        assert_eq!(failed_output, 0, "error must not be coerced to a boolean");
+
+        assert_eq!(
+            super::mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(legacy),
+            ()
+        );
+        drop_v2_map(original);
+        assert_eq!(is_empty_v2(updated), (0, 0));
+        drop_v2_map(updated);
+    }
+
+    #[test]
+    fn v2_contains_borrows_utf8_key_without_consuming_allocation_checkpoint() {
+        let empty = new_v2_map();
+        let owner = new_v2_i32_owner(42);
+        let root = set_v2_owner(
+            empty,
+            "键\0🧪".as_bytes(),
+            owner,
+            1,
+            V2_I32_TYPE_ID,
+            &V2_I32_HASH,
+        );
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+
+        super::begin_failure_injection(0);
+        assert_eq!(contains_v2(root, "键\0🧪".as_bytes()), (0, 1));
+
+        // Contains must leave the pending failure for the next operation that
+        // actually reaches an allocation checkpoint.
+        let mut cloned = -1;
+        let clone_status =
+            unsafe { super::mimi_ordinary_map_owned_any_v2_clone(root, &mut cloned) };
+        let staged = super::end_failure_injection();
+        assert_eq!(clone_status, 3);
+        assert_eq!(cloned, 0);
+        assert!(staged.is_empty());
+
+        assert_eq!(contains_v2(root, "键\0🧪".as_bytes()), (0, 1));
+        assert_eq!(contains_v2(root, b"missing"), (0, 0));
+        let invalid_utf8 = contains_v2(root, &[0xff]);
+        assert_ne!(invalid_utf8.0, 0);
+        assert_eq!(invalid_utf8.1, 0);
+
+        drop_v2_map(empty);
+        drop_v2_map(root);
+    }
+
+    #[test]
+    fn aggregate_tag5_owner_is_pinned_through_set_get_clone_and_drop() {
+        let original = new_v2_map();
+        let hash = [132u8; 32];
+        let source_owner = new_v2_aggregate_owner(0x5a, &hash);
+        let (selection_bytes, selection_hash) = selection(5, V2_AGGREGATE_TYPE_ID, &hash);
+        let mut updated = 0;
+        assert_eq!(
+            unsafe {
+                super::mimi_ordinary_map_owned_any_v2_set(
+                    original,
+                    b"record".as_ptr(),
+                    6,
+                    source_owner,
+                    selection_bytes.as_ptr(),
+                    selection_bytes.len() as i64,
+                    selection_hash.as_ptr(),
+                    &mut updated,
+                )
+            },
+            0,
+            "tag5 is admitted by exact pinned recursive glue, not a scalar-only gate"
+        );
+        assert_ne!(updated, 0);
+        assert_eq!(super::mimi_any_payload_v2_drop(source_owner), 0);
+        assert_eq!(size_v2(original), (0, 0));
+        assert_eq!(size_v2(updated), (0, 1));
+
+        let mut cloned = 0;
+        assert_eq!(
+            unsafe { super::mimi_ordinary_map_owned_any_v2_clone(updated, &mut cloned) },
+            0
+        );
+        assert_ne!(cloned, 0);
+        drop_v2_map(updated);
+
+        let (status, found, owner) = get_v2(cloned, b"record");
+        assert_eq!((status, found), (0, 1));
+        let mut payload = std::mem::MaybeUninit::<u8>::uninit();
+        assert_eq!(
+            unsafe {
+                super::mimi_any_payload_v2_unpack(
+                    owner,
+                    5,
+                    V2_AGGREGATE_TYPE_ID.as_ptr(),
+                    V2_AGGREGATE_TYPE_ID.len() as i64,
+                    hash.as_ptr(),
+                    payload.as_mut_ptr(),
+                    1,
+                    1,
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { payload.assume_init() }, 0x5a);
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+        drop_v2_map(original);
+        drop_v2_map(cloned);
+    }
+
+    #[test]
+    fn v2_map_creator_trap_cleanup_retires_roots_and_published_any_snapshot() {
+        let root = new_v2_map();
+        let hash = [122u8; 32];
+        let source_owner = new_v2_bool_owner(1, &hash);
+        let root = set_v2_bool(root, b"b", source_owner, &hash);
+        assert_eq!(super::mimi_any_payload_v2_drop(source_owner), 0);
+        let (status, found, owner) = get_v2(root, b"b");
+        assert_eq!(status, super::ORDINARY_MAP_OWNED_ANY_V2_OK);
+        assert_eq!(found, 1);
+        let token = any_owner::AnyOwnerToken::from_wire_bits(owner as u64).unwrap();
+        super::super::ordinary_map_domain::drain_current_thread_roots();
+        assert_eq!(
+            any_owner::validate(token),
+            Err(any_owner::AnyOwnerError::StaleToken)
+        );
+        assert_ne!(size_v2(root).0, 0);
+        assert_eq!(size_v2(root).1, 0);
     }
 
     #[test]
@@ -3475,5 +6792,189 @@ mod managed_any_tests {
         unsafe { super::super::mimi_string_free(pointer) };
         assert_eq!(mimi_mir_managed_any_i32_string_v1_drop(owner, 1), 0);
         drop_owned_get_root(source).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod v2_runtime_tests {
+    use super::*;
+
+    fn set_label(root: i64, key: &str, text: &str) -> i64 {
+        unsafe {
+            mimi_mir_ordinary_map_any_owner_v2_record_set_label(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                text.as_ptr(),
+                text.len() as i64,
+            )
+        }
+    }
+
+    fn set_i32(root: i64, key: &str, value: i32) -> i64 {
+        unsafe {
+            mimi_mir_ordinary_map_any_owner_v2_record_set_i32(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                value,
+            )
+        }
+    }
+
+    fn remove(root: i64, key: &str) -> i64 {
+        unsafe {
+            mimi_mir_ordinary_map_any_owner_v2_record_remove(root, key.as_ptr(), key.len() as i64)
+        }
+    }
+
+    fn contains(root: i64, key: &str) -> i32 {
+        unsafe {
+            mimi_mir_ordinary_map_any_owner_v2_record_contains(root, key.as_ptr(), key.len() as i64)
+        }
+    }
+
+    fn inspect(root: i64, key: &str) -> (usize, bool, Option<String>) {
+        let lease = v2_acquire_root(root).expect("V2 root is live");
+        let snapshot = v2_snapshot_from_map(&lease).expect("V2 snapshot is installed");
+        (
+            snapshot.size(),
+            snapshot.contains(key),
+            snapshot.label_text(key).map(str::to_owned),
+        )
+    }
+
+    #[test]
+    fn v2_record_roots_deep_copy_persist_overwrite_remove_and_drop() {
+        let mut key = b"label".to_vec();
+        let mut text = "owned label".as_bytes().to_vec();
+        let root = mimi_mir_ordinary_map_any_owner_v2_record_new();
+        assert_ne!(root, 0);
+        let first = unsafe {
+            mimi_mir_ordinary_map_any_owner_v2_record_set_label(
+                root,
+                key.as_ptr(),
+                key.len() as i64,
+                text.as_ptr(),
+                text.len() as i64,
+            )
+        };
+        assert_ne!(first, 0);
+        // The root owns private copies, so caller buffers can be reused as
+        // soon as Set returns.
+        key.fill(b'x');
+        text.fill(b'z');
+        assert_eq!(
+            inspect(first, "label"),
+            (1, true, Some("owned label".into()))
+        );
+
+        let mixed = set_i32(first, "answer", 42);
+        assert_ne!(mixed, 0);
+        let overwritten = set_label(mixed, "label", "new value");
+        assert_ne!(overwritten, 0);
+        let removed = remove(overwritten, "answer");
+        assert_ne!(removed, 0);
+
+        assert_eq!(inspect(root, "label"), (0, false, None));
+        assert_eq!(
+            inspect(first, "label"),
+            (1, true, Some("owned label".into()))
+        );
+        assert_eq!(inspect(mixed, "answer"), (2, true, None));
+        assert_eq!(
+            inspect(overwritten, "label"),
+            (2, true, Some("new value".into()))
+        );
+        assert_eq!(inspect(removed, "answer"), (1, false, None));
+        assert_eq!(contains(removed, "label"), 1);
+
+        for handle in [root, first, mixed, overwritten, removed] {
+            assert_eq!(
+                mimi_mir_ordinary_map_any_owner_v2_record_drop(handle),
+                MIMI_MAP_ANY_OWNER_V2_OK
+            );
+        }
+        assert_eq!(mimi_mir_ordinary_map_any_owner_v2_record_size(removed), -1);
+    }
+
+    #[test]
+    fn v2_stale_generation_and_registration_failure_are_fail_closed() {
+        let first = mimi_mir_ordinary_map_any_owner_v2_record_new();
+        assert_ne!(first, 0);
+        assert_eq!(
+            mimi_mir_ordinary_map_any_owner_v2_record_drop(first),
+            MIMI_MAP_ANY_OWNER_V2_OK
+        );
+
+        let second = mimi_mir_ordinary_map_any_owner_v2_record_new();
+        assert_ne!(second, 0);
+        assert_ne!(first, second, "slot reuse must advance its generation");
+        assert_eq!(mimi_mir_ordinary_map_any_owner_v2_record_size(first), -1);
+        assert_eq!(
+            mimi_mir_ordinary_map_any_owner_v2_record_drop(first),
+            MIMI_MAP_ANY_OWNER_V2_STALE
+        );
+        assert_eq!(
+            super::super::ordinary_map_domain::with_registration_failure_for_test(|| {
+                mimi_mir_ordinary_map_any_owner_v2_record_new()
+            },),
+            0
+        );
+        assert_eq!(mimi_mir_ordinary_map_any_owner_v2_record_size(second), 0);
+        assert_eq!(
+            mimi_mir_ordinary_map_any_owner_v2_record_drop(second),
+            MIMI_MAP_ANY_OWNER_V2_OK
+        );
+    }
+
+    #[test]
+    fn v2_invalid_set_is_atomic_and_profile_handles_do_not_cross() {
+        let root = mimi_mir_ordinary_map_any_owner_v2_record_new();
+        assert_ne!(root, 0);
+        let invalid_utf8 = [0xff_u8];
+        assert_eq!(
+            unsafe {
+                mimi_mir_ordinary_map_any_owner_v2_record_set_label(
+                    root,
+                    b"bad".as_ptr(),
+                    3,
+                    invalid_utf8.as_ptr(),
+                    invalid_utf8.len() as i64,
+                )
+            },
+            0
+        );
+        assert_eq!(mimi_mir_ordinary_map_any_owner_v2_record_size(root), 0);
+        assert_eq!(contains(root, "bad"), 0);
+
+        let v1 = mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_new();
+        assert_ne!(v1, 0);
+        assert_eq!(set_i32(v1, "wrong", 7), 0);
+        assert_eq!(mimi_mir_ordinary_map_any_owner_v2_record_size(v1), -1);
+        assert_eq!(
+            mimi_mir_ordinary_map_any_owner_v2_record_drop(v1),
+            MIMI_MAP_ANY_OWNER_V2_INVALID_HANDLE
+        );
+
+        assert_eq!(
+            mimi_mir_ordinary_map_any_owner_v2_record_drop(root),
+            MIMI_MAP_ANY_OWNER_V2_OK
+        );
+        super::mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop(v1);
+    }
+
+    #[test]
+    fn owned_any_v2_root_publication_capacity_returns_e0800_status_without_output() {
+        let mut root = i64::MAX;
+        super::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(0, || {
+            let status = unsafe { mimi_ordinary_map_owned_any_v2_new(&mut root) };
+            assert_eq!(status, ManagedAnyStatus::Capacity as i32);
+            assert_eq!(root, 0, "failed publication must not expose a handle");
+            assert_eq!(
+                super::ordinary_map_owned_any_v2_root_publish_attempts_for_test(),
+                1
+            );
+        });
     }
 }

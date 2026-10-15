@@ -1033,6 +1033,78 @@ pub enum Op {
     MirOrdinaryMapOwnedGetI32StringV1Drop {
         ra: Reg,
     },
+    /// Independent concrete-record ordinary Map/Any owner-v2 profile. The
+    /// payload boundary is validated by the MIR adapter (i32 or Label{text:
+    /// String}); opcodes remain distinct from every v1 owner profile.
+    MirOrdinaryMapOwnedAnyV2New {
+        rd: Reg,
+    },
+    MirOrdinaryMapOwnedAnyV2Clone {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnedAnyV2Set {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        value: Reg,
+    },
+    MirOrdinaryMapOwnedAnyV2Remove {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    MirOrdinaryMapOwnedAnyV2Size {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnedAnyV2Contains {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    /// Fresh `(found, owned Any-v2)` snapshot. Missing keys produce an
+    /// independently owned canonical i32 zero; the Map root stays live.
+    MirOrdinaryMapOwnedAnyV2GetAny {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    /// Borrow the owned Any-v2 payload from one Checker/MIR-bound GetAny
+    /// pair and copy it into its exact Core-authorized i32, String, or concrete
+    /// one-String-field record target type. The Core result-settlement receipt
+    /// remains the owner of the pair.
+    MirOrdinaryMapOwnedAnyV2Unpack {
+        rd: Reg,
+        ra: Reg,
+    },
+    /// Copy the exactly selected element of a Checker-receipted ordinary
+    /// Map/Any owner-v2 Values snapshot into its exact i32, String, or Label
+    /// target type. The Values snapshot remains live.
+    MirOrdinaryMapOwnedAnyV2ValuesUnpack {
+        rd: Reg,
+        ra: Reg,
+        index: Reg,
+    },
+    /// Snapshot the ordinary Map/Any owner-v2 Values result into an ordinary
+    /// bytecode List of independently owned V2 payload identities. The
+    /// Checker/MIR Values receipt binds this site and its exact Drop.
+    MirOrdinaryMapOwnedAnyV2Values {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnedAnyV2IsEmpty {
+        rd: Reg,
+        ra: Reg,
+    },
+    MirOrdinaryMapOwnedAnyV2Drop {
+        ra: Reg,
+    },
+    /// Explicitly settle the receipted V2 Values List. This stays separate
+    /// from generic List Drop because the elements carry opaque V2 owners.
+    MirOrdinaryMapOwnedAnyV2ValuesDrop {
+        ra: Reg,
+    },
     /// rd = canonical Option/Result predicate(ra). The receipt is mandatory
     /// for MIR bytecode and carries the TypeDesc-selected discriminant.
     MirVariantPredicate {
@@ -1412,6 +1484,14 @@ impl Op {
             | MirOrdinaryMapOwnedGetI32StringV1GetString { rd, .. }
             | MirOrdinaryMapOwnedGetI32StringV1GetAny { rd, .. }
             | MirOrdinaryMapOwnedGetI32StringV1Values { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2Clone { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2Remove { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2Contains { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2GetAny { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2Unpack { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2Values { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2IsEmpty { rd, .. }
             | MirVariantPredicate { rd, .. }
             | MirVariantProjectOr { rd, .. }
             | TupleGet { rd, .. }
@@ -1532,6 +1612,14 @@ impl Op {
             | Op::MirOrdinaryMapOwnedGetI32StringV1GetString { rd, .. }
             | Op::MirOrdinaryMapOwnedGetI32StringV1GetAny { rd, .. }
             | Op::MirOrdinaryMapOwnedGetI32StringV1Values { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2Clone { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2Remove { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2Contains { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2GetAny { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2Values { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2IsEmpty { rd, .. }
             | Op::TupleGet { rd, .. }
             | Op::RecordGet { rd, .. }
             | Op::RecordMoveGet { rd, .. }
@@ -1609,6 +1697,7 @@ impl Op {
             | MirMapAnyOwnerV1New { .. }
             | MirOrdinaryMapOwnerLifecycleI32StringV1New { .. }
             | MirOrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirOrdinaryMapOwnedAnyV2New { .. }
             | NewCap { .. }
             | Nop
             | Jmp { .. }
@@ -1686,6 +1775,16 @@ impl Op {
             | MirOrdinaryMapOwnedGetI32StringV1GetString { ra, key, .. }
             | MirOrdinaryMapOwnedGetI32StringV1GetAny { ra, key, .. } => *ra == reg || *key == reg,
             MirOrdinaryMapOwnedGetI32StringV1Values { ra, .. } => *ra == reg,
+            MirOrdinaryMapOwnedAnyV2Set { ra, key, value, .. } => {
+                *ra == reg || *key == reg || *value == reg
+            }
+            MirOrdinaryMapOwnedAnyV2Unpack { ra, .. } => *ra == reg,
+            MirOrdinaryMapOwnedAnyV2ValuesUnpack { ra, index, .. } => *ra == reg || *index == reg,
+            MirOrdinaryMapOwnedAnyV2Remove { ra, key, .. }
+            | MirOrdinaryMapOwnedAnyV2Contains { ra, key, .. }
+            | MirOrdinaryMapOwnedAnyV2GetAny { ra, key, .. } => *ra == reg || *key == reg,
+            MirOrdinaryMapOwnedAnyV2Values { ra, .. }
+            | MirOrdinaryMapOwnedAnyV2IsEmpty { ra, .. } => *ra == reg,
             NegInt { ra, .. }
             | NegFloat { ra, .. }
             | BitNot { ra, .. }
@@ -1735,6 +1834,10 @@ impl Op {
             | MirOrdinaryMapOwnedGetI32StringV1Clone { ra, .. }
             | MirOrdinaryMapOwnedGetI32StringV1Size { ra, .. }
             | MirOrdinaryMapOwnedGetI32StringV1Drop { ra }
+            | MirOrdinaryMapOwnedAnyV2Clone { ra, .. }
+            | MirOrdinaryMapOwnedAnyV2Size { ra, .. }
+            | MirOrdinaryMapOwnedAnyV2Drop { ra }
+            | MirOrdinaryMapOwnedAnyV2ValuesDrop { ra }
             | MirManagedAnyOp { ra, .. }
             | MirVariantPredicate { ra, .. }
             | SharedNew { ra, .. }
@@ -2323,6 +2426,15 @@ impl CanonicalMapRootBytecodeReceipt {
                 "MapRoot receipt cannot authorize ordinary Map owned-Get v1 bytecode".into(),
             );
         }
+        if self.expected_has_map_root
+            && functions
+                .iter()
+                .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err(
+                "MapRoot receipt cannot authorize ordinary Map/Any owner-v2 bytecode".into(),
+            );
+        }
         let has_map_root = functions.iter().any(function_has_map_root_ops);
         if !self.expected_has_map_root && !has_map_root {
             return Ok(());
@@ -2607,7 +2719,7 @@ impl CanonicalManagedAnyIdentityBytecodeReceipt {
                     return Err(
                         "ManagedAny generic identity call no longer matches its CallMove binding"
                             .into(),
-                    )
+                    );
                 }
             }
             match caller.code.get(call.transfer_pc as usize) {
@@ -2617,7 +2729,7 @@ impl CanonicalManagedAnyIdentityBytecodeReceipt {
                     return Err(
                         "ManagedAny generic identity call argument is not the receipted owner Move"
                             .into(),
-                    )
+                    );
                 }
             }
         }
@@ -3440,6 +3552,7 @@ pub(crate) struct CanonicalMapAnyOwnerV1BytecodeReceipt {
     ordinary_map_owner_lifecycle_i32_string_v1:
         Option<CanonicalOrdinaryMapOwnerLifecycleBytecodeReceipt>,
     ordinary_map_owned_get_i32_string_v1: Option<CanonicalOrdinaryMapOwnedGetBytecodeReceipt>,
+    ordinary_map_owned_any_v2: Option<CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt>,
     managed_any_identity: Option<CanonicalManagedAnyIdentityBytecodeReceipt>,
     managed_any_trap_cleanup: Option<CanonicalManagedAnyTrapCleanupBytecodeReceipt>,
     /// Independent whole-program Any/CFG bytecode seal.  The expected bit is
@@ -3461,6 +3574,7 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
             },
             ordinary_map_owner_lifecycle_i32_string_v1: None,
             ordinary_map_owned_get_i32_string_v1: None,
+            ordinary_map_owned_any_v2: None,
             managed_any_identity: None,
             managed_any_trap_cleanup: None,
             expected_managed_any_cfg_receipt: false,
@@ -3478,6 +3592,9 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         );
         receipt.ordinary_map_owned_get_i32_string_v1 = Some(
             CanonicalOrdinaryMapOwnedGetBytecodeReceipt::capture(entry, functions),
+        );
+        receipt.ordinary_map_owned_any_v2 = Some(
+            CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::capture(entry, functions),
         );
         receipt
     }
@@ -3533,11 +3650,12 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
 
     pub(crate) fn existing_managed_any_receipts_snapshot(&self) -> String {
         format!(
-            "map-any-owner-v1={}:{}|ordinary-map-owner={:?}|ordinary-map-owned-get={:?}|managed-any-identity={:?}|managed-any-trap-cleanup={:?}",
+            "map-any-owner-v1={}:{}|ordinary-map-owner={:?}|ordinary-map-owned-get={:?}|ordinary-map-owned-any-v2={:?}|managed-any-identity={:?}|managed-any-trap-cleanup={:?}",
             self.expected_has_map_any_owner_v1,
             self.expected_program,
             self.ordinary_map_owner_lifecycle_i32_string_v1,
             self.ordinary_map_owned_get_i32_string_v1,
+            self.ordinary_map_owned_any_v2,
             self.managed_any_identity,
             self.managed_any_trap_cleanup,
         )
@@ -3620,6 +3738,214 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         }
     }
 
+    pub(crate) fn validate_ordinary_map_owned_any_v2(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        match &self.ordinary_map_owned_any_v2 {
+            Some(receipt) => receipt.validate(entry, functions),
+            None if functions
+                .iter()
+                .any(function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Err("ordinary Map/Any owner-v2 bytecode has no independent Checker receipt".into())
+            }
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn bind_ordinary_map_owned_any_v2_payload_bindings_from_selection(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>,
+        >,
+        selection_digest: Option<String>,
+    ) -> Result<(), String> {
+        let Some(receipt) = self.ordinary_map_owned_any_v2.as_mut() else {
+            if bindings.is_empty() && selection_digest.is_none() {
+                return Ok(());
+            }
+            return Err(
+                "ordinary Map/Any owner-v2 payload TypeDescs have no profile receipt".into(),
+            );
+        };
+        receipt.bind_payload_bindings_from_selection(bindings, selection_digest)
+    }
+
+    pub(crate) fn bind_ordinary_map_owned_any_v2_get_any_bindings_from_selection(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding>,
+        >,
+    ) -> Result<(), String> {
+        let Some(receipt) = self.ordinary_map_owned_any_v2.as_mut() else {
+            if bindings.is_empty() {
+                return Ok(());
+            }
+            return Err("ordinary Map/Any owner-v2 GetAny results have no profile receipt".into());
+        };
+        receipt.bind_get_any_bindings_from_selection(bindings);
+        Ok(())
+    }
+
+    pub(crate) fn bind_ordinary_map_owned_any_v2_unpack_bindings_from_core_receipts(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2UnpackBinding>,
+        >,
+    ) -> Result<(), String> {
+        let Some(receipt) = self.ordinary_map_owned_any_v2.as_mut() else {
+            if bindings.is_empty() {
+                return Ok(());
+            }
+            return Err("ordinary Map/Any owner-v2 unpack sites have no profile receipt".into());
+        };
+        receipt.bind_unpack_bindings_from_core_receipts(bindings)
+    }
+
+    pub(crate) fn bind_ordinary_map_owned_any_v2_values_unpack_bindings_from_core_receipts(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding>,
+        >,
+    ) -> Result<(), String> {
+        let Some(receipt) = self.ordinary_map_owned_any_v2.as_mut() else {
+            if bindings.is_empty() {
+                return Ok(());
+            }
+            return Err(
+                "ordinary Map/Any owner-v2 Values unpack sites have no profile receipt".into(),
+            );
+        };
+        receipt.bind_values_unpack_bindings_from_core_receipts(bindings)
+    }
+
+    pub(crate) fn bind_ordinary_map_owned_any_v2_values_bindings_from_core_receipts(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesBinding>,
+        >,
+    ) -> Result<(), String> {
+        let Some(receipt) = self.ordinary_map_owned_any_v2.as_mut() else {
+            if bindings.is_empty() {
+                return Ok(());
+            }
+            return Err("ordinary Map/Any owner-v2 Values results have no profile receipt".into());
+        };
+        receipt.bind_values_bindings_from_core_receipts(bindings)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_payload_binding(
+        &self,
+        function: FuncIdx,
+        set_ordinal: usize,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .payload_binding(function, set_ordinal)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_selected_payload_binding(
+        &self,
+        type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .selected_payload_binding(type_id)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_get_any_binding(
+        &self,
+        function: FuncIdx,
+        get_any_ordinal: usize,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .get_any_binding(function, get_any_ordinal)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_unpack_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2UnpackBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .unpack_binding_at_pc(function, pc)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .values_unpack_binding_at_pc(function, pc)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_values_binding(
+        &self,
+        function: FuncIdx,
+        values_ordinal: usize,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .values_binding(function, values_ordinal)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_values_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .values_binding_at_pc(function, pc)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_values_drop_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .values_drop_binding_at_pc(function, pc)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_ordinary_map_owned_any_v2_values_bindings_for_test_only(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesBinding>,
+        >,
+    ) {
+        if let Some(receipt) = self.ordinary_map_owned_any_v2.as_mut() {
+            receipt.values_bindings = bindings;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_ordinary_map_owned_any_v2_values_unpack_bindings_for_test_only(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding>,
+        >,
+    ) {
+        if let Some(receipt) = self.ordinary_map_owned_any_v2.as_mut() {
+            receipt.values_unpack_bindings = bindings;
+        }
+    }
+
     pub(crate) fn validate(
         &self,
         entry: FuncIdx,
@@ -3648,6 +3974,14 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         {
             return Err(
                 "MapAnyOwner v1 receipt cannot authorize ordinary Map owned-Get v1 bytecode".into(),
+            );
+        }
+        if functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err(
+                "MapAnyOwner v1 receipt cannot authorize ordinary Map/Any owner-v2 bytecode".into(),
             );
         }
         if !self.expected_has_map_any_owner_v1 && has_map_any_owner_v1 {
@@ -3786,7 +4120,7 @@ impl CanonicalManagedAnyCfgBytecodeReceipt {
                     return Err(
                         "Any/CFG source call no longer matches its emitted owner-moving call site"
                             .into(),
-                    )
+                    );
                 }
             }
             if binding.source_instruction.is_empty()
@@ -3889,6 +4223,14 @@ impl CanonicalOrdinaryMapOwnerLifecycleBytecodeReceipt {
                 "ordinary Map owner lifecycle v1 receipt cannot authorize ordinary Map owned-Get v1 bytecode".into(),
             );
         }
+        if functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err(
+                "ordinary Map owner lifecycle v1 receipt cannot authorize owner-v2 bytecode".into(),
+            );
+        }
         if !has_ordinary_map_owner_lifecycle_i32_string_v1
             || ordinary_map_owner_lifecycle_i32_string_v1_program_snapshot(entry, functions)
                 != self.expected_program
@@ -3962,6 +4304,14 @@ impl CanonicalOrdinaryMapOwnedGetBytecodeReceipt {
         {
             return Err(
                 "ordinary Map owned-Get v1 receipt cannot authorize ordinary Map owner lifecycle v1 bytecode".into(),
+            );
+        }
+        if functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err(
+                "ordinary Map owned-Get v1 receipt cannot authorize owner-v2 bytecode".into(),
             );
         }
         if !has_owned_get
@@ -4043,6 +4393,27 @@ pub(crate) fn function_has_ordinary_map_owned_get_i32_string_v1_ops(
     })
 }
 
+pub(crate) fn function_has_ordinary_map_owned_any_v2_ops(function: &FunctionProto) -> bool {
+    function.code.iter().any(|op| {
+        matches!(
+            op,
+            Op::MirOrdinaryMapOwnedAnyV2New { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Size { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Contains { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Values { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2IsEmpty { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2Drop { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. }
+        )
+    })
+}
+
 /// Bytecode-level candidates that require the independent canonical MIR
 /// Any/CFG receipt even when a narrower Map, identity, or trap receipt was
 /// removed. Source-only Any signatures are covered by the canonical MIR
@@ -4116,6 +4487,1257 @@ fn ordinary_map_owned_get_i32_string_v1_program_snapshot(
         let _ = write!(snapshot, "|function[{index}]={function:?}");
     }
     snapshot
+}
+
+fn ordinary_map_owned_any_v2_program_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    let mut snapshot = format!(
+        "profile=ordinary-map-owned-any-v2;version=2;entry={entry};functions={}",
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+/// Independent postcompile snapshot for the ordinary Map/Any owner-v2 profile.
+/// The profile is separate from both v1 ordinary Map receipts so a mutable
+/// bytecode table cannot borrow authority from a different payload ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
+    profile_version: u16,
+    expected_has_ordinary_map_owned_any_v2: bool,
+    expected_program: String,
+    /// Core-selected TypeDesc identities paired with each static Set site in
+    /// emitted order. The adapter binds the Checker-derived selection rows
+    /// to exact MIR instruction sites; runtime display names are never used
+    /// to invent a TypeDesc identity.
+    payload_bindings:
+        std::collections::BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>>,
+    /// Unique Core-selected payload TypeDescs, used to validate the dynamic
+    /// TypeId carried by a GetAny hit. The miss-only canonical i32 zero is
+    /// checked as a separate result-contract exception.
+    selected_payload_bindings: std::collections::BTreeMap<
+        crate::core::ResolvedTypeId,
+        CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+    >,
+    /// Exact Core Set-selection receipt digest used to populate the selected
+    /// payload table. Values snapshots bind this identity directly.
+    payload_selection_digest: Option<String>,
+    /// Checker-derived GetAny result settlements bound to exact emitted MIR
+    /// instructions, values, registers, and bytecode PCs.
+    get_any_bindings:
+        std::collections::BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding>>,
+    /// Checker/MIR-derived exact target-type unpack sites.
+    unpack_bindings:
+        std::collections::BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2UnpackBinding>>,
+    expected_unpack_bindings: String,
+    /// Checker/MIR-derived Values indexed-unpack sites, bound to exact
+    /// snapshot/index/type-selection identities and emitted register/PC.
+    values_unpack_bindings:
+        std::collections::BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding>>,
+    expected_values_unpack_bindings: String,
+    /// Checker-derived Values result owners bound to their exact emitted
+    /// snapshot, result Move, and explicit Values Drop sites.
+    values_bindings:
+        std::collections::BTreeMap<FuncIdx, Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesBinding>>,
+    expected_values_bindings: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CanonicalOrdinaryMapOwnedAnyV2PayloadKind {
+    I32,
+    String,
+    Record { nominal: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
+    pub(crate) type_id: crate::core::ResolvedTypeId,
+    pub(crate) type_desc_digest: String,
+    pub(crate) kind: CanonicalOrdinaryMapOwnedAnyV2PayloadKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding {
+    pub(crate) owner: crate::core::NodeId,
+    pub(crate) operation: crate::core::NodeId,
+    pub(crate) instruction: crate::core::mir::MirInstructionId,
+    pub(crate) source_node: crate::core::NodeId,
+    pub(crate) source_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) root: crate::core::mir::MirValueId,
+    pub(crate) checker_source_type: crate::core::ResolvedTypeId,
+    pub(crate) key_node: crate::core::NodeId,
+    pub(crate) key: crate::core::mir::MirValueId,
+    pub(crate) checker_key_type: crate::core::ResolvedTypeId,
+    pub(crate) checker_key_local: Option<crate::core::ir::ResolvedLocalId>,
+    pub(crate) result: crate::core::mir::MirValueId,
+    pub(crate) checker_result_type: crate::core::ResolvedTypeId,
+    pub(crate) mir_result_type: crate::core::ResolvedTypeId,
+    pub(crate) binding_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) binding: crate::core::mir::MirValueId,
+    pub(crate) settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    pub(crate) settlement_point: crate::core::NodeId,
+    pub(crate) settlement_instruction: crate::core::mir::MirInstructionId,
+    pub(crate) temporary_root: Option<CanonicalOrdinaryMapOwnedAnyV2TemporaryRootBinding>,
+    pub(crate) miss_payload_type: crate::core::ResolvedTypeId,
+    pub(crate) miss_payload_type_desc_digest: String,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+    pub(crate) key_reg: Reg,
+}
+
+/// Core/MIR binding for an exact target-type unpack of the DynamicAny field
+/// from a GetAny pair. The source tuple remains the independently settled
+/// owner; this receipt binds the borrowed projection and target TypeDesc to
+/// one emitted opcode site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2UnpackBinding {
+    pub(crate) owner: crate::core::NodeId,
+    pub(crate) operation: crate::core::NodeId,
+    pub(crate) instruction: crate::core::mir::MirInstructionId,
+    pub(crate) projection: crate::core::NodeId,
+    pub(crate) cast: crate::core::NodeId,
+    pub(crate) conversion_kind: crate::core::ir::CheckedConversionKind,
+    pub(crate) conversion_from: crate::core::ResolvedTypeId,
+    pub(crate) conversion_to: crate::core::ResolvedTypeId,
+    pub(crate) payload_source: crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource,
+    pub(crate) pair: crate::core::mir::MirValueId,
+    pub(crate) pair_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) result: crate::core::mir::MirValueId,
+    pub(crate) target_type: crate::core::ResolvedTypeId,
+    pub(crate) target_type_desc_digest: String,
+    pub(crate) get_any_instruction: crate::core::mir::MirInstructionId,
+    pub(crate) settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    pub(crate) settlement_point: crate::core::NodeId,
+    pub(crate) settlement_instruction: crate::core::mir::MirInstructionId,
+    pub(crate) miss_payload_type: crate::core::ResolvedTypeId,
+    pub(crate) payload_selection_digest: String,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding {
+    pub(crate) owner: crate::core::NodeId,
+    pub(crate) operation: crate::core::NodeId,
+    pub(crate) instruction: crate::core::mir::MirInstructionId,
+    pub(crate) values_binding_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) values: crate::core::mir::MirValueId,
+    pub(crate) values_binding_point: crate::core::NodeId,
+    pub(crate) projection: crate::core::NodeId,
+    pub(crate) index_expression: crate::core::NodeId,
+    pub(crate) index_type: crate::core::ResolvedTypeId,
+    pub(crate) index: crate::core::mir::MirValueId,
+    pub(crate) cast: crate::core::NodeId,
+    pub(crate) conversion_kind: crate::core::ir::CheckedConversionKind,
+    pub(crate) conversion_from: crate::core::ResolvedTypeId,
+    pub(crate) conversion_to: crate::core::ResolvedTypeId,
+    pub(crate) result: crate::core::mir::MirValueId,
+    pub(crate) result_type: crate::core::ResolvedTypeId,
+    pub(crate) result_binding_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) result_binding_point: crate::core::NodeId,
+    pub(crate) result_binding: crate::core::mir::MirValueId,
+    pub(crate) result_owner_settlement:
+        crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind,
+    pub(crate) result_owner_settlement_point: Option<crate::core::NodeId>,
+    pub(crate) result_owner_settlement_index: Option<usize>,
+    pub(crate) result_owner_settlement_instruction: Option<crate::core::mir::MirInstructionId>,
+    pub(crate) result_owner_settlement_pc: Option<u32>,
+    pub(crate) result_owner_settlement_reg: Option<Reg>,
+    pub(crate) result_owner_settlement_arity: Option<u16>,
+    pub(crate) settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    pub(crate) settlement_point: crate::core::NodeId,
+    pub(crate) settlement_instruction: crate::core::mir::MirInstructionId,
+    pub(crate) payload_selection_digest: String,
+    pub(crate) payload_type_desc_digest: String,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+    pub(crate) index_reg: Reg,
+    pub(crate) result_binding_pc: u32,
+    pub(crate) result_binding_rd: Reg,
+    pub(crate) result_binding_rs: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2TemporaryRootBinding {
+    pub(crate) receipt: crate::core::mir::OrdinaryMapOwnedAnyV2TemporaryRootMirReceipt,
+    pub(crate) new_pc: u32,
+    pub(crate) get_any_pc: u32,
+    pub(crate) drop_pc: u32,
+    pub(crate) root_reg: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2ValuesBinding {
+    pub(crate) owner: crate::core::NodeId,
+    pub(crate) operation: crate::core::NodeId,
+    pub(crate) instruction: crate::core::mir::MirInstructionId,
+    pub(crate) source_node: crate::core::NodeId,
+    pub(crate) source_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) root: crate::core::mir::MirValueId,
+    pub(crate) checker_source_type: crate::core::ResolvedTypeId,
+    pub(crate) checker_result_type: crate::core::ResolvedTypeId,
+    pub(crate) result: crate::core::mir::MirValueId,
+    pub(crate) mir_result_type: crate::core::ResolvedTypeId,
+    pub(crate) binding_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) binding: crate::core::mir::MirValueId,
+    pub(crate) settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    pub(crate) settlement_point: crate::core::NodeId,
+    pub(crate) settlement_instruction: crate::core::mir::MirInstructionId,
+    pub(crate) payload_selection_digest: String,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+    pub(crate) binding_pc: u32,
+    pub(crate) binding_rd: Reg,
+    pub(crate) binding_rs: Reg,
+    pub(crate) drop_pc: u32,
+    pub(crate) drop_ra: Reg,
+}
+
+impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
+    pub(crate) fn capture(entry: FuncIdx, functions: &[FunctionProto]) -> Self {
+        let expected_has_ordinary_map_owned_any_v2 = functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops);
+        Self {
+            profile_version: 2,
+            expected_has_ordinary_map_owned_any_v2,
+            expected_program: if expected_has_ordinary_map_owned_any_v2 {
+                ordinary_map_owned_any_v2_program_snapshot(entry, functions)
+            } else {
+                String::new()
+            },
+            payload_bindings: std::collections::BTreeMap::new(),
+            selected_payload_bindings: std::collections::BTreeMap::new(),
+            payload_selection_digest: None,
+            get_any_bindings: std::collections::BTreeMap::new(),
+            unpack_bindings: std::collections::BTreeMap::new(),
+            expected_unpack_bindings: String::new(),
+            values_unpack_bindings: std::collections::BTreeMap::new(),
+            expected_values_unpack_bindings: String::new(),
+            values_bindings: std::collections::BTreeMap::new(),
+            expected_values_bindings: String::new(),
+        }
+    }
+
+    pub(crate) fn bind_payload_bindings_from_selection(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>,
+        >,
+        selection_digest: Option<String>,
+    ) -> Result<(), String> {
+        let mut selected = std::collections::BTreeMap::new();
+        for binding in bindings.values().flatten() {
+            if let Some(previous) = selected.insert(binding.type_id.clone(), binding.clone()) {
+                if previous.kind != binding.kind
+                    || previous.type_desc_digest != binding.type_desc_digest
+                {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 TypeDesc '{}' has conflicting selected payload kinds",
+                        binding.type_id.as_str()
+                    ));
+                }
+            }
+        }
+        self.payload_bindings = bindings;
+        self.selected_payload_bindings = selected;
+        self.payload_selection_digest = selection_digest;
+        Ok(())
+    }
+
+    pub(crate) fn bind_get_any_bindings_from_selection(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding>,
+        >,
+    ) {
+        self.get_any_bindings = bindings;
+    }
+
+    pub(crate) fn bind_unpack_bindings_from_core_receipts(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2UnpackBinding>,
+        >,
+    ) -> Result<(), String> {
+        for binding in bindings.values().flatten() {
+            if Some(binding.payload_selection_digest.as_str())
+                != self.payload_selection_digest.as_deref()
+            {
+                return Err(
+                    "ordinary Map/Any owner-v2 unpack binding disagrees with the Core payload selection digest".into(),
+                );
+            }
+        }
+        self.unpack_bindings = bindings;
+        self.expected_unpack_bindings = if self.unpack_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("{:?}", self.unpack_bindings)
+        };
+        Ok(())
+    }
+
+    pub(crate) fn bind_values_unpack_bindings_from_core_receipts(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding>,
+        >,
+    ) -> Result<(), String> {
+        if bindings.values().flatten().any(|binding| {
+            Some(binding.payload_selection_digest.as_str())
+                != self.payload_selection_digest.as_deref()
+        }) {
+            return Err(
+                "ordinary Map/Any owner-v2 Values unpack binding disagrees with the Core payload selection digest".into(),
+            );
+        }
+        self.values_unpack_bindings = bindings;
+        self.expected_values_unpack_bindings = if self.values_unpack_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("{:?}", self.values_unpack_bindings)
+        };
+        Ok(())
+    }
+
+    pub(crate) fn bind_values_bindings_from_core_receipts(
+        &mut self,
+        bindings: std::collections::BTreeMap<
+            FuncIdx,
+            Vec<CanonicalOrdinaryMapOwnedAnyV2ValuesBinding>,
+        >,
+    ) -> Result<(), String> {
+        if bindings.values().flatten().any(|binding| {
+            Some(binding.payload_selection_digest.as_str())
+                != self.payload_selection_digest.as_deref()
+        }) {
+            return Err(
+                "ordinary Map/Any owner-v2 Values binding disagrees with the Core payload selection digest".into(),
+            );
+        }
+        self.values_bindings = bindings;
+        self.expected_values_bindings = if self.values_bindings.is_empty() {
+            String::new()
+        } else {
+            format!("{:?}", self.values_bindings)
+        };
+        Ok(())
+    }
+
+    pub(crate) fn payload_binding(
+        &self,
+        function: FuncIdx,
+        set_ordinal: usize,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        self.payload_bindings.get(&function)?.get(set_ordinal)
+    }
+
+    pub(crate) fn selected_payload_binding(
+        &self,
+        type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        self.selected_payload_bindings.get(type_id)
+    }
+
+    pub(crate) fn get_any_binding(
+        &self,
+        function: FuncIdx,
+        get_any_ordinal: usize,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding> {
+        self.get_any_bindings.get(&function)?.get(get_any_ordinal)
+    }
+
+    pub(crate) fn unpack_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2UnpackBinding> {
+        self.unpack_bindings
+            .get(&function)?
+            .iter()
+            .find(|binding| binding.pc == pc)
+    }
+
+    pub(crate) fn values_unpack_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesUnpackBinding> {
+        self.values_unpack_bindings
+            .get(&function)?
+            .iter()
+            .find(|binding| binding.pc == pc)
+    }
+
+    pub(crate) fn values_binding(
+        &self,
+        function: FuncIdx,
+        values_ordinal: usize,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesBinding> {
+        self.values_bindings.get(&function)?.get(values_ordinal)
+    }
+
+    pub(crate) fn values_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesBinding> {
+        self.values_bindings
+            .get(&function)?
+            .iter()
+            .find(|binding| binding.pc == pc)
+    }
+
+    pub(crate) fn values_drop_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ValuesBinding> {
+        self.values_bindings
+            .get(&function)?
+            .iter()
+            .find(|binding| binding.drop_pc == pc)
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        if self.profile_version != 2 {
+            return Err(
+                "ordinary Map/Any owner-v2 receipt has an unsupported profile version".into(),
+            );
+        }
+        let has_v2 = functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops);
+        if !self.expected_has_ordinary_map_owned_any_v2 && !has_v2 {
+            return if self.payload_bindings.is_empty()
+                && self.selected_payload_bindings.is_empty()
+                && self.payload_selection_digest.is_none()
+                && self.get_any_bindings.is_empty()
+                && self.unpack_bindings.is_empty()
+                && self.values_unpack_bindings.is_empty()
+                && self.values_bindings.is_empty()
+            {
+                Ok(())
+            } else {
+                Err("ordinary Map/Any owner-v2 payload bindings exist without V2 bytecode".into())
+            };
+        }
+        if !self.expected_has_ordinary_map_owned_any_v2 && has_v2 {
+            return Err(
+                "ordinary Map/Any owner-v2 bytecode has no independent Checker receipt".into(),
+            );
+        }
+        if functions.iter().any(function_has_map_root_ops)
+            || functions.iter().any(function_has_map_any_owner_v1_ops)
+            || functions
+                .iter()
+                .any(function_has_ordinary_map_owner_lifecycle_i32_string_v1_ops)
+            || functions
+                .iter()
+                .any(function_has_ordinary_map_owned_get_i32_string_v1_ops)
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 receipt cannot authorize another Map profile".into(),
+            );
+        }
+        if !has_v2
+            || ordinary_map_owned_any_v2_program_snapshot(entry, functions) != self.expected_program
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 bytecode disagrees with its independent Checker receipt snapshot".into(),
+            );
+        }
+        let has_values_sites = functions.iter().any(|function| {
+            function.code.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2Values { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. }
+                )
+            })
+        });
+        if (has_values_sites || !self.values_bindings.is_empty())
+            && format!("{:?}", self.values_bindings) != self.expected_values_bindings
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 Values receipts disagree with their immutable Core-derived binding snapshot".into(),
+            );
+        }
+        let has_unpack_sites = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }))
+        });
+        if (has_unpack_sites || !self.unpack_bindings.is_empty())
+            && format!("{:?}", self.unpack_bindings) != self.expected_unpack_bindings
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 unpack bindings disagree with their immutable Core/MIR snapshot".into(),
+            );
+        }
+        let has_values_unpack_sites = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }))
+        });
+        if (has_values_unpack_sites || !self.values_unpack_bindings.is_empty())
+            && format!("{:?}", self.values_unpack_bindings) != self.expected_values_unpack_bindings
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 Values unpack bindings disagree with their immutable Core/MIR snapshot".into(),
+            );
+        }
+
+        let mut expected_binding_functions = std::collections::BTreeSet::new();
+        let mut expected_get_any_functions = std::collections::BTreeSet::new();
+        let mut expected_unpack_functions = std::collections::BTreeSet::new();
+        let mut expected_values_unpack_functions = std::collections::BTreeSet::new();
+        let mut expected_values_functions = std::collections::BTreeSet::new();
+        for (function_index, function) in functions.iter().enumerate() {
+            let set_count = function
+                .code
+                .iter()
+                .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Set { .. }))
+                .count();
+            let function_index = FuncIdx::try_from(function_index)
+                .map_err(|_| "ordinary Map/Any owner-v2 function index exceeds u32 ABI")?;
+            if set_count > 0 {
+                expected_binding_functions.insert(function_index);
+                let bindings = self.payload_bindings.get(&function_index).ok_or_else(|| {
+                    format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {set_count} Set site(s) but no MIR payload TypeDesc bindings"
+                    )
+                })?;
+                if bindings.len() != set_count {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {set_count} Set site(s) but {} payload TypeDesc binding(s)",
+                        bindings.len()
+                    ));
+                }
+                for binding in bindings {
+                    let type_id = binding.type_id.as_str();
+                    if type_id.len() != 35
+                        || !type_id.starts_with("rt:")
+                        || !type_id[3..]
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    {
+                        return Err(format!(
+                            "ordinary Map/Any owner-v2 payload TypeDesc identity is not canonical: {type_id}"
+                        ));
+                    }
+                    if !is_canonical_digest(&binding.type_desc_digest) {
+                        return Err(format!(
+                            "ordinary Map/Any owner-v2 payload TypeDesc '{}' has a noncanonical digest",
+                            binding.type_id.as_str()
+                        ));
+                    }
+                    match &binding.kind {
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+                            if binding.type_id
+                                != crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::I32,
+                                ) =>
+                        {
+                            return Err(
+                            "ordinary Map/Any owner-v2 i32 binding has a non-i32 TypeDesc identity"
+                                .into(),
+                        );
+                        }
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                            if binding.type_id
+                                != crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::String,
+                                ) =>
+                        {
+                            return Err(
+                                "ordinary Map/Any owner-v2 String binding has a non-String TypeDesc identity"
+                                    .into(),
+                            );
+                        }
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal }
+                            if nominal.is_empty() =>
+                        {
+                            return Err(
+                            "ordinary Map/Any owner-v2 record binding has an empty nominal identity"
+                                .into(),
+                        );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let get_any_sites = function
+                .code
+                .iter()
+                .enumerate()
+                .filter_map(|(pc, op)| match op {
+                    Op::MirOrdinaryMapOwnedAnyV2GetAny { rd, ra, key } => {
+                        Some((pc, *rd, *ra, *key))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !get_any_sites.is_empty() {
+                expected_get_any_functions.insert(function_index);
+                let get_any_bindings = self.get_any_bindings.get(&function_index).ok_or_else(|| {
+                    format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {} GetAny site(s) but no Checker result-settlement bindings",
+                        get_any_sites.len()
+                    )
+                })?;
+                if get_any_bindings.len() != get_any_sites.len() {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {} GetAny site(s) but {} Checker result-settlement binding(s)",
+                        get_any_sites.len(),
+                        get_any_bindings.len()
+                    ));
+                }
+                for ((pc, rd, ra, key_reg), binding) in get_any_sites.iter().zip(get_any_bindings) {
+                    let temporary_root_valid = match &binding.temporary_root {
+                        None => !binding
+                            .source_local
+                            .0
+                             .0
+                            .starts_with("ordinary-map-owned-any-v2:temporary-root:"),
+                        Some(temporary_root) => {
+                            let receipt = &temporary_root.receipt;
+                            receipt.local == binding.source_local
+                                && receipt.root == binding.root
+                                && receipt.get_any == binding.operation
+                                && receipt.get_any_instruction == binding.instruction
+                                && receipt.source_node == binding.source_node
+                                && receipt.source_type == binding.checker_source_type
+                                && receipt.construction == receipt.source_node
+                                && receipt.root_type == receipt.source_type
+                                && receipt.settlement_point == receipt.get_any
+                                && receipt.settlement
+                                    == crate::core::OrdinaryMapOwnedAnyV2RootSettlementKind::ImmediateGetAnyDrop
+                                && temporary_root.get_any_pc == binding.pc
+                                && temporary_root.root_reg == binding.ra
+                                && temporary_root.new_pc < binding.pc
+                                && binding.pc.checked_add(1) == Some(temporary_root.drop_pc)
+                                && matches!(
+                                    function.code.get(temporary_root.new_pc as usize),
+                                    Some(Op::MirOrdinaryMapOwnedAnyV2New { rd: new_root })
+                                        if *new_root == temporary_root.root_reg
+                                )
+                                && matches!(
+                                    function.code.get(temporary_root.drop_pc as usize),
+                                    Some(Op::MirOrdinaryMapOwnedAnyV2Drop { ra: dropped_root })
+                                        if *dropped_root == temporary_root.root_reg
+                                )
+                        }
+                    };
+                    if binding.pc
+                        != u32::try_from(*pc).map_err(|_| {
+                            "ordinary Map/Any owner-v2 GetAny PC exceeds u32 ABI".to_string()
+                        })?
+                        || binding.rd != *rd
+                        || binding.ra != *ra
+                        || binding.key_reg != *key_reg
+                        || binding.mir_result_type
+                            != crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id(
+                            )
+                        || binding.miss_payload_type
+                            != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+                        || binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        || binding.owner.0.is_empty()
+                        || binding.instruction.as_str().is_empty()
+                        || binding.source_node.0.is_empty()
+                        || binding.source_local.0 .0.is_empty()
+                        || binding.root.as_str().is_empty()
+                        || binding.checker_source_type.as_str().is_empty()
+                        || binding.key_node.0.is_empty()
+                        || binding.key.as_str().is_empty()
+                        || binding.checker_key_type.as_str().is_empty()
+                        || binding.checker_key_local.as_ref().is_some_and(|local| {
+                            local.0 .0.is_empty()
+                                || binding.key.as_str() != format!("local:{}", local.0 .0)
+                        })
+                        || (binding.checker_key_local.is_none()
+                            && binding.key.as_str() != format!("expr:{}", binding.key_node.0))
+                        || binding.result.as_str().is_empty()
+                        || binding.checker_result_type.as_str().is_empty()
+                        || binding.binding_local.0 .0.is_empty()
+                        || binding.binding.as_str().is_empty()
+                        || binding.settlement_point.0.is_empty()
+                        || binding.settlement_instruction.as_str().is_empty()
+                        || !is_canonical_digest(&binding.miss_payload_type_desc_digest)
+                        || !temporary_root_valid
+                    {
+                        return Err(format!(
+                            "ordinary Map/Any owner-v2 GetAny binding at function {function_index} PC {} disagrees with the exact Checker site/type/settlement",
+                            binding.pc
+                        ));
+                    }
+                }
+            }
+
+            let unpack_sites = function
+                .code
+                .iter()
+                .enumerate()
+                .filter_map(|(pc, op)| match op {
+                    Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra } => Some((pc, *rd, *ra)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !unpack_sites.is_empty() {
+                expected_unpack_functions.insert(function_index);
+                let unpack_bindings = self.unpack_bindings.get(&function_index).ok_or_else(|| {
+                    format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {} unpack site(s) but no Core/MIR binding",
+                        unpack_sites.len()
+                    )
+                })?;
+                if unpack_bindings.len() != unpack_sites.len() {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {} unpack site(s) but {} Core/MIR binding(s)",
+                        unpack_sites.len(),
+                        unpack_bindings.len()
+                    ));
+                }
+                let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                let string_type =
+                    crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                for ((pc, rd, ra), binding) in unpack_sites.iter().zip(unpack_bindings) {
+                    let get_any_binding = self
+                        .get_any_bindings
+                        .get(&function_index)
+                        .into_iter()
+                        .flatten()
+                        .find(|get_any| {
+                            get_any.owner == binding.owner
+                                && get_any.operation == binding.operation
+                                && get_any.instruction == binding.get_any_instruction
+                                && get_any.binding == binding.pair
+                                && get_any.binding_local == binding.pair_local
+                                && get_any.settlement == binding.settlement
+                                && get_any.settlement_point == binding.settlement_point
+                                && get_any.settlement_instruction == binding.settlement_instruction
+                                && get_any.miss_payload_type == binding.miss_payload_type
+                        });
+                    let selected = self.selected_payload_bindings.get(&binding.target_type);
+                    let selected_target_matches = if binding.target_type == i32_type {
+                        selected.is_some_and(|selected| {
+                            selected.type_id == binding.target_type
+                                && selected.type_desc_digest == binding.target_type_desc_digest
+                                && selected.kind == CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+                        })
+                    } else if binding.target_type == string_type {
+                        selected.is_some_and(|selected| {
+                            selected.type_id == binding.target_type
+                                && selected.type_desc_digest == binding.target_type_desc_digest
+                                && selected.kind
+                                    == CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                        })
+                    } else {
+                        selected.is_some_and(|selected| {
+                            selected.type_id == binding.target_type
+                                && selected.type_desc_digest == binding.target_type_desc_digest
+                                && matches!(
+                                    &selected.kind,
+                                    CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal }
+                                        if !nominal.is_empty()
+                                )
+                        })
+                    };
+                    let source_matches = match &binding.payload_source {
+                        crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload => {
+                            selected_target_matches
+                        }
+                        crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss => {
+                            binding.target_type == i32_type
+                                && get_any_binding.is_some_and(|get_any| {
+                                    get_any.miss_payload_type == binding.target_type
+                                        && get_any.miss_payload_type_desc_digest
+                                            == binding.target_type_desc_digest
+                                })
+                        }
+                    };
+                    let get_any_binding_matches = get_any_binding.is_some_and(|get_any| {
+                        binding.target_type != binding.miss_payload_type
+                            || get_any.miss_payload_type_desc_digest
+                                == binding.target_type_desc_digest
+                    });
+                    if binding.pc
+                        != u32::try_from(*pc).map_err(|_| {
+                            "ordinary Map/Any owner-v2 unpack PC exceeds u32 ABI".to_string()
+                        })?
+                        || binding.rd != *rd
+                        || binding.ra != *ra
+                        || binding.owner.0.is_empty()
+                        || binding.owner.0 != function.name
+                        || binding.operation.0.is_empty()
+                        || binding.instruction.as_str().is_empty()
+                        || binding.projection.0.is_empty()
+                        || binding.pair.as_str().is_empty()
+                        || binding.pair_local.0 .0.is_empty()
+                        || binding.result.as_str().is_empty()
+                        || !is_canonical_digest(&binding.target_type_desc_digest)
+                        || binding.cast.0.is_empty()
+                        || binding.conversion_kind
+                            != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                        || binding.conversion_to != binding.target_type
+                        || binding.conversion_from.as_str().is_empty()
+                        || binding.get_any_instruction.as_str().is_empty()
+                        || binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        || binding.settlement_point.0.is_empty()
+                        || binding.settlement_instruction.as_str().is_empty()
+                        || binding.miss_payload_type != i32_type
+                        || Some(binding.payload_selection_digest.as_str())
+                            != self.payload_selection_digest.as_deref()
+                        || !get_any_binding_matches
+                        || !source_matches
+                    {
+                        return Err(format!(
+                            "ordinary Map/Any owner-v2 unpack binding at function {function_index} PC {} disagrees with its Checker GetAny, MIR projection, exact target TypeDesc, or payload selection",
+                            binding.pc
+                        ));
+                    }
+                }
+            }
+
+            let values_sites = function
+                .code
+                .iter()
+                .enumerate()
+                .filter_map(|(pc, op)| match op {
+                    Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra } => Some((pc, *rd, *ra)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !values_sites.is_empty() {
+                expected_values_functions.insert(function_index);
+                let values_bindings = self.values_bindings.get(&function_index).ok_or_else(|| {
+                    format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {} Values site(s) but no Checker result-settlement bindings",
+                        values_sites.len()
+                    )
+                })?;
+                if values_bindings.len() != values_sites.len() {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {} Values site(s) but {} Checker result-settlement binding(s)",
+                        values_sites.len(),
+                        values_bindings.len()
+                    ));
+                }
+                for ((pc, rd, ra), binding) in values_sites.iter().zip(values_bindings) {
+                    let expected_pc = u32::try_from(*pc)
+                        .map_err(|_| "ordinary Map/Any owner-v2 Values PC exceeds u32 ABI")?;
+                    let move_matches = matches!(
+                        function.code.get(binding.binding_pc as usize),
+                        Some(Op::Move { rd, rs })
+                            if *rd == binding.binding_rd && *rs == binding.binding_rs
+                    );
+                    let drop_matches = matches!(
+                        function.code.get(binding.drop_pc as usize),
+                        Some(Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra })
+                            if *ra == binding.drop_ra
+                    );
+                    if binding.pc != expected_pc
+                        || binding.rd != *rd
+                        || binding.ra != *ra
+                        || binding.mir_result_type
+                            != crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
+                        || binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        || binding.owner.0.is_empty()
+                        || binding.owner.0 != function.name
+                        || binding.operation.0.is_empty()
+                        || binding.instruction.as_str().is_empty()
+                        || binding.source_node.0.is_empty()
+                        || binding.source_local.0 .0.is_empty()
+                        || binding.root.as_str().is_empty()
+                        || binding.checker_source_type.as_str().is_empty()
+                        || binding.checker_result_type.as_str().is_empty()
+                        || binding.result.as_str().is_empty()
+                        || binding.binding_local.0 .0.is_empty()
+                        || binding.binding.as_str().is_empty()
+                        || binding.settlement_point.0.is_empty()
+                        || binding.settlement_instruction.as_str().is_empty()
+                        || !is_canonical_digest(&binding.payload_selection_digest)
+                        || Some(binding.payload_selection_digest.as_str())
+                            != self.payload_selection_digest.as_deref()
+                        || !move_matches
+                        || !drop_matches
+                    {
+                        return Err(format!(
+                            "ordinary Map/Any owner-v2 Values binding at function {function_index} PC {} disagrees with the exact Checker source/result/Move/Drop/payload-selection sites",
+                            binding.pc
+                        ));
+                    }
+                }
+            }
+
+            let values_unpack_sites = function
+                .code
+                .iter()
+                .enumerate()
+                .filter_map(|(pc, op)| match op {
+                    Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, ra, index } => {
+                        Some((pc, *rd, *ra, *index))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !values_unpack_sites.is_empty() {
+                expected_values_unpack_functions.insert(function_index);
+                let bindings = self
+                    .values_unpack_bindings
+                    .get(&function_index)
+                    .ok_or_else(|| {
+                        format!(
+                            "ordinary Map/Any owner-v2 function {function_index} has {} Values unpack site(s) but no Core/MIR bindings",
+                            values_unpack_sites.len()
+                        )
+                    })?;
+                if bindings.len() != values_unpack_sites.len() {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 function {function_index} has {} Values unpack site(s) but {} Core/MIR bindings",
+                        values_unpack_sites.len(),
+                        bindings.len()
+                    ));
+                }
+                let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                let i64_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I64);
+                for ((pc, rd, ra, index_reg), binding) in values_unpack_sites.iter().zip(bindings) {
+                    let selected = self.selected_payload_bindings.get(&binding.conversion_to);
+                    let result_binding_matches = match selected.map(|selected| &selected.kind) {
+                        Some(CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32) => matches!(
+                            function.code.get(binding.result_binding_pc as usize),
+                            Some(Op::Mov { rd, rs })
+                                if *rd == binding.result_binding_rd
+                                    && *rs == binding.result_binding_rs
+                        ),
+                        Some(
+                            CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                            | CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { .. },
+                        ) => matches!(
+                            function.code.get(binding.result_binding_pc as usize),
+                            Some(Op::Move { rd, rs })
+                                if *rd == binding.result_binding_rd
+                                    && *rs == binding.result_binding_rs
+                        ),
+                        None => false,
+                    };
+                    let selected_target_matches = selected.is_some_and(|selected| {
+                        selected.type_id == binding.conversion_to
+                            && selected.type_desc_digest == binding.payload_type_desc_digest
+                            && matches!(
+                                &selected.kind,
+                                CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+                                    | CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                                    | CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { .. }
+                            )
+                    });
+                    let result_owner_settlement_matches = match binding.result_owner_settlement {
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::NoOwnedPayload => {
+                            binding.conversion_to == crate::core::ir::primitive_type_id(
+                                crate::core::PrimitiveType::I32,
+                            ) && binding.result_owner_settlement_point.is_none()
+                                && binding.result_owner_settlement_index.is_none()
+                                && binding.result_owner_settlement_instruction.is_none()
+                                && binding.result_owner_settlement_pc.is_none()
+                                && binding.result_owner_settlement_reg.is_none()
+                                && binding.result_owner_settlement_arity.is_none()
+                                && matches!(
+                                    selected.map(|selected| &selected.kind),
+                                    Some(CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32)
+                                )
+                        }
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::CompilerOwnedStringDrop => {
+                            let Some(pc) = binding.result_owner_settlement_pc else {
+                                return Err(format!(
+                                    "ordinary Map/Any owner-v2 Values unpack binding at function {function_index} PC {} lacks its String owner-Drop PC",
+                                    binding.pc
+                                ));
+                            };
+                            binding.conversion_to
+                                == crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::String,
+                                )
+                                && binding.result_binding_rs == binding.rd
+                                && binding.result_binding_pc > binding.pc
+                                && pc > binding.result_binding_pc
+                                && binding.result_owner_settlement_point.as_ref().is_some_and(|point| {
+                                    binding.result_owner_settlement_instruction.as_ref().is_some_and(|instruction| {
+                                        instruction
+                                            .as_str()
+                                            .strip_prefix("inst:drop.")
+                                            .and_then(|suffix| suffix.split_once(':'))
+                                            .is_some_and(|(role, anchor)| {
+                                                role.parse::<usize>().is_ok_and(|index| role == index.to_string())
+                                                    && anchor == point.0.as_str()
+                                            })
+                                    })
+                                })
+                                && binding.result_owner_settlement_index.is_none()
+                                && binding
+                                    .result_owner_settlement_instruction
+                                    .as_ref()
+                                    .is_some_and(|instruction| {
+                                        !instruction.as_str().trim().is_empty()
+                                    })
+                                && binding.result_owner_settlement_reg
+                                    == Some(binding.result_binding_rd)
+                                && binding.result_owner_settlement_arity.is_none()
+                                && matches!(
+                                    function.code.get(pc as usize),
+                                    Some(Op::Drop { ra })
+                                        if Some(*ra) == binding.result_owner_settlement_reg
+                                )
+                                && matches!(
+                                    selected.map(|selected| &selected.kind),
+                                    Some(CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String)
+                                )
+                        }
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::ExplicitWholeDrop => {
+                            let Some(pc) = binding.result_owner_settlement_pc else {
+                                return Err(format!(
+                                    "ordinary Map/Any owner-v2 Values unpack binding at function {function_index} PC {} lacks its Label owner-Drop PC",
+                                    binding.pc
+                                ));
+                            };
+                            binding.result_owner_settlement_point.as_ref().is_some_and(|point| {
+                                binding.result_owner_settlement_index.is_some_and(|place_index| {
+                                    binding.result_owner_settlement_instruction.as_ref().is_some_and(|instruction| {
+                                        instruction
+                                            .as_str()
+                                            .strip_prefix("inst:drop.")
+                                            .and_then(|suffix| suffix.split_once(':'))
+                                            .is_some_and(|(role, anchor)| {
+                                                role.parse::<usize>().is_ok_and(|index| {
+                                                    index == place_index
+                                                        && role == index.to_string()
+                                                        && anchor == point.0.as_str()
+                                                })
+                                            })
+                                    })
+                                })
+                            })
+                                && binding.result_binding_rs == binding.rd
+                                && binding.result_binding_pc > binding.pc
+                                && pc > binding.result_binding_pc
+                                && binding
+                                    .result_owner_settlement_instruction
+                                    .as_ref()
+                                    .is_some_and(|instruction| {
+                                        !instruction.as_str().trim().is_empty()
+                                    })
+                                && binding.result_owner_settlement_reg
+                                    == Some(binding.result_binding_rd)
+                                && binding.result_owner_settlement_arity == Some(1)
+                                && matches!(
+                                    function.code.get(pc as usize),
+                                    Some(Op::DropAggregate { ra, arity })
+                                        if Some(*ra) == binding.result_owner_settlement_reg
+                                            && Some(*arity) == binding.result_owner_settlement_arity
+                                )
+                                && matches!(
+                                    selected.map(|selected| &selected.kind),
+                                    Some(CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { .. })
+                                )
+                        }
+                    };
+                    let values_receipt_matches = self
+                        .values_bindings
+                        .get(&function_index)
+                        .into_iter()
+                        .flatten()
+                        .any(|values| {
+                            values.binding == binding.values
+                                && values.binding_local == binding.values_binding_local
+                                && values.operation == binding.operation
+                                && values.settlement
+                                    == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                                && values.settlement_point == binding.settlement_point
+                                && values.settlement_instruction
+                                    == binding.settlement_instruction
+                                && values.payload_selection_digest
+                                    == binding.payload_selection_digest
+                        });
+                    if binding.pc
+                        != u32::try_from(*pc).map_err(|_| {
+                            "ordinary Map/Any owner-v2 Values unpack PC exceeds u32 ABI"
+                        })?
+                        || binding.rd != *rd
+                        || binding.ra != *ra
+                        || binding.index_reg != *index_reg
+                        || !result_binding_matches
+                        || binding.result_binding_rs != binding.rd
+                        || binding.result_binding_pc <= binding.pc
+                        || binding.owner.0.is_empty()
+                        || binding.owner.0 != function.name
+                        || binding.operation.0.is_empty()
+                        || binding.instruction.as_str().is_empty()
+                        || binding.values_binding_local.0 .0.is_empty()
+                        || binding.values.as_str().is_empty()
+                        || binding.values_binding_point.0.is_empty()
+                        || binding.projection.0.is_empty()
+                        || binding.index_expression.0.is_empty()
+                        || binding.index.as_str().is_empty()
+                        || (binding.index_type != i32_type && binding.index_type != i64_type)
+                        || binding.cast.0.is_empty()
+                        || binding.conversion_kind
+                            != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                        || binding.conversion_from.as_str().is_empty()
+                        || binding.conversion_to != binding.result_type
+                        || binding.result.as_str().is_empty()
+                        || binding.result_binding_local.0 .0.is_empty()
+                        || binding.result_binding_point.0.is_empty()
+                        || binding.result_binding.as_str().is_empty()
+                        || !result_owner_settlement_matches
+                        || binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        || binding.settlement_point.0.is_empty()
+                        || binding.settlement_instruction.as_str().is_empty()
+                        || !is_canonical_digest(&binding.payload_selection_digest)
+                        || !is_canonical_digest(&binding.payload_type_desc_digest)
+                        || Some(binding.payload_selection_digest.as_str())
+                            != self.payload_selection_digest.as_deref()
+                        || !selected_target_matches
+                        || !values_receipt_matches
+                    {
+                        return Err(format!(
+                            "ordinary Map/Any owner-v2 Values unpack binding at function {function_index} PC {} disagrees with the exact snapshot, index, target TypeDesc, or payload selection",
+                            binding.pc
+                        ));
+                    }
+                }
+            }
+        }
+        if self
+            .payload_bindings
+            .keys()
+            .any(|function| !expected_binding_functions.contains(function))
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 receipt has payload bindings without a matching Set site".into(),
+            );
+        }
+        if self
+            .get_any_bindings
+            .keys()
+            .any(|function| !expected_get_any_functions.contains(function))
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 receipt has GetAny bindings without a matching site"
+                    .into(),
+            );
+        }
+        if self
+            .unpack_bindings
+            .keys()
+            .any(|function| !expected_unpack_functions.contains(function))
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 receipt has unpack bindings without a matching site"
+                    .into(),
+            );
+        }
+        if self
+            .values_bindings
+            .keys()
+            .any(|function| !expected_values_functions.contains(function))
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 receipt has Values bindings without a matching site"
+                    .into(),
+            );
+        }
+        if self
+            .values_unpack_bindings
+            .keys()
+            .any(|function| !expected_values_unpack_functions.contains(function))
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 receipt has Values unpack bindings without a matching site".into(),
+            );
+        }
+        let selected_from_sets = self
+            .payload_bindings
+            .values()
+            .flatten()
+            .map(|binding| {
+                (
+                    binding.type_id.clone(),
+                    (binding.type_desc_digest.clone(), binding.kind.clone()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if selected_from_sets.len() != self.selected_payload_bindings.len()
+            || self
+                .selected_payload_bindings
+                .iter()
+                .any(|(type_id, binding)| {
+                    type_id != &binding.type_id
+                        || selected_from_sets.get(type_id)
+                            != Some(&(binding.type_desc_digest.clone(), binding.kind.clone()))
+                })
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 selected TypeDesc table disagrees with Set bindings"
+                    .into(),
+            );
+        }
+        if self.payload_bindings.is_empty() != self.payload_selection_digest.is_none() {
+            return Err(
+                "ordinary Map/Any owner-v2 payload selection digest disagrees with Set bindings"
+                    .into(),
+            );
+        }
+        if self
+            .payload_selection_digest
+            .as_deref()
+            .is_some_and(|digest| !is_canonical_digest(digest))
+        {
+            return Err(
+                "ordinary Map/Any owner-v2 payload selection digest is not canonical".into(),
+            );
+        }
+        if !self.values_bindings.values().flatten().all(|binding| {
+            Some(binding.payload_selection_digest.as_str())
+                == self.payload_selection_digest.as_deref()
+        }) {
+            return Err(
+                "ordinary Map/Any owner-v2 Values receipt disagrees with the exact payload selection digest".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn is_canonical_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Immutable compiler-side provenance for one canonical FFI call site.

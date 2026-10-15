@@ -15,10 +15,13 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::core::mir::reference::MirProgram;
 use crate::core::{
-    CheckedProgram, OrdinaryMapOwnedGetI32StringV1Action, OrdinaryMapOwnedGetI32StringV1ActionKind,
-    OrdinaryMapOwnedGetI32StringV1Attempt, OrdinaryMapOwnedGetI32StringV1AttemptKind,
-    OrdinaryMapOwnedGetI32StringV1ProfileVersion, OrdinaryMapOwnerLifecycleActionKind,
-    OrdinaryMapOwnerLifecycleAttemptKind, OrdinaryMapOwnerLifecycleProfileVersion,
+    CheckedProgram, OrdinaryMapOwnedAnyV2Action, OrdinaryMapOwnedAnyV2ActionKind,
+    OrdinaryMapOwnedAnyV2Attempt, OrdinaryMapOwnedAnyV2AttemptKind,
+    OrdinaryMapOwnedAnyV2ProfileVersion, OrdinaryMapOwnedGetI32StringV1Action,
+    OrdinaryMapOwnedGetI32StringV1ActionKind, OrdinaryMapOwnedGetI32StringV1Attempt,
+    OrdinaryMapOwnedGetI32StringV1AttemptKind, OrdinaryMapOwnedGetI32StringV1ProfileVersion,
+    OrdinaryMapOwnerLifecycleActionKind, OrdinaryMapOwnerLifecycleAttemptKind,
+    OrdinaryMapOwnerLifecycleProfileVersion,
 };
 
 use super::{
@@ -49,7 +52,9 @@ use super::{
     GenericOptionProjectionFallbackAdmission, GenericResultProjectionAdmission,
     GenericResultProjectionFallbackAdmission, GenericVariantPredicateAdmission,
     ManagedResultCallAdmission, OptionNestedTupleVariantAdmission, OptionStringVariantAdmission,
-    ScalarCollectionAdmission, ScalarGenericIdentityAdmission, SessionChannelAdmission,
+    OrdinaryMapOwnedAnyV2PayloadSelectionReceipt, OrdinaryMapOwnedAnyV2UnpackPayloadSource,
+    OrdinaryMapOwnedAnyV2UnpackResultReceipt, ScalarCollectionAdmission,
+    ScalarGenericIdentityAdmission, SessionChannelAdmission,
 };
 
 #[cfg(test)]
@@ -74,6 +79,7 @@ pub(crate) fn test_route_materialization_count() -> usize {
 pub enum CanonicalMirRouteProfile {
     MapRoot,
     MapAnyOwnerV1,
+    OrdinaryMapOwnedAnyV2,
     OrdinaryMapOwnerLifecycleI32StringV1,
     OrdinaryMapOwnedGetI32StringV1,
     ScalarExport,
@@ -107,6 +113,7 @@ impl CanonicalMirRouteProfile {
         match self {
             Self::MapRoot => MAP_ROOT_ISLAND,
             Self::MapAnyOwnerV1 => MAP_ANY_OWNER_V1_ISLAND,
+            Self::OrdinaryMapOwnedAnyV2 => ORDINARY_MAP_OWNED_ANY_V2_ISLAND,
             Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
                 ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
             }
@@ -153,6 +160,7 @@ impl CanonicalMirRouteProfile {
         match self {
             Self::MapRoot => admission.map_root_complete(),
             Self::MapAnyOwnerV1 => admission.map_any_owner_complete(),
+            Self::OrdinaryMapOwnedAnyV2 => admission.ordinary_map_owned_any_v2_complete(),
             Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
                 admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
             }
@@ -196,6 +204,7 @@ impl CanonicalMirRouteProfile {
         match self {
             Self::MapRoot => route.materialized_map_root_candidate,
             Self::MapAnyOwnerV1 => route.materialized_map_any_owner_candidate,
+            Self::OrdinaryMapOwnedAnyV2 => route.materialized_ordinary_map_owned_any_v2_candidate,
             Self::OrdinaryMapOwnerLifecycleI32StringV1 => {
                 route.materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate
             }
@@ -286,6 +295,46 @@ pub enum MapAnyOwnerAdmission {
 }
 
 pub const MAP_ANY_OWNER_V1_ISLAND: &str = "map-any-owner-v1";
+
+/// Independent admission for the concrete-record ordinary Map/Any owner-v2
+/// lifecycle. V1 receipts and MapRoot compatibility facts cannot authorize
+/// this profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrdinaryMapOwnedAnyV2Admission {
+    OutsideProfile,
+    IncompleteCoverage,
+    /// Source root operations and result owners are receipted, while Values
+    /// and GetAny results without a complete supported unpack remain staged.
+    /// Fully covered GetAny and direct Values indexed-unpack graphs can reach
+    /// CompleteCoverage, which still authorizes diagnostic Core MIR
+    /// materialization only while the production-readiness gate is closed.
+    StagedGetValues,
+    CompleteCoverage,
+}
+
+pub const ORDINARY_MAP_OWNED_ANY_V2_ISLAND: &str = "map-any-owner-v2";
+
+/// Production admission for ordinary Map/Any owner-v2 remains closed until
+/// its complete consumer and end-to-end evidence set is approved.
+pub const ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY: bool = false;
+
+impl OrdinaryMapOwnedAnyV2Admission {
+    pub const fn is_candidate(self) -> bool {
+        !matches!(self, Self::OutsideProfile)
+    }
+
+    pub const fn has_profile_signal(self) -> bool {
+        self.is_candidate()
+    }
+
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::CompleteCoverage)
+    }
+
+    pub const fn is_type_materializable(self) -> bool {
+        matches!(self, Self::StagedGetValues | Self::CompleteCoverage)
+    }
+}
 
 impl MapAnyOwnerAdmission {
     pub const fn is_candidate(self) -> bool {
@@ -457,6 +506,7 @@ impl CanonicalMirRouteMaterializationError {
 pub struct CanonicalMirRouteAdmission {
     pub map_root: MapRootAdmission,
     pub map_any_owner: MapAnyOwnerAdmission,
+    pub ordinary_map_owned_any_v2: OrdinaryMapOwnedAnyV2Admission,
     pub ordinary_map_owner_lifecycle_i32_string_v1: OrdinaryMapOwnerLifecycleI32StringV1Admission,
     pub ordinary_map_owned_get_i32_string_v1: OrdinaryMapOwnedGetI32StringV1Admission,
     pub scalar_export: bool,
@@ -489,6 +539,7 @@ impl CanonicalMirRouteAdmission {
     pub const fn has_candidate(self) -> bool {
         self.map_root.is_candidate()
             || self.map_any_owner.is_candidate()
+            || self.ordinary_map_owned_any_v2.is_candidate()
             || self
                 .ordinary_map_owner_lifecycle_i32_string_v1
                 .is_candidate()
@@ -568,6 +619,10 @@ impl CanonicalMirRouteAdmission {
 
     pub const fn map_any_owner_complete(self) -> bool {
         self.map_any_owner.is_complete()
+    }
+
+    pub const fn ordinary_map_owned_any_v2_complete(self) -> bool {
+        self.ordinary_map_owned_any_v2.is_complete()
     }
 
     pub const fn ordinary_map_owner_lifecycle_i32_string_v1_complete(self) -> bool {
@@ -707,6 +762,11 @@ pub struct CanonicalMirRouteMaterialization {
     pub admission: CanonicalMirRouteAdmission,
     pub materialized_map_root_candidate: bool,
     pub materialized_map_any_owner_candidate: bool,
+    pub materialized_ordinary_map_owned_any_v2_candidate: bool,
+    /// Core-owned Checker payload selection for the V2 profile. Kept separate
+    /// from the stable public route manifest and absent for every other route.
+    pub ordinary_map_owned_any_v2_payload_selection:
+        Option<OrdinaryMapOwnedAnyV2PayloadSelectionReceipt>,
     pub materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate: bool,
     pub materialized_ordinary_map_owned_get_i32_string_v1_candidate: bool,
     pub materialized_scalar_export_candidate: bool,
@@ -749,6 +809,7 @@ pub struct CanonicalMirRouteMaterialization {
 pub(super) struct MapOwnerProfileAdmission {
     pub(super) map_root: MapRootAdmission,
     pub(super) map_any_owner: MapAnyOwnerAdmission,
+    pub(super) ordinary_map_owned_any_v2: OrdinaryMapOwnedAnyV2Admission,
     pub(super) ordinary_map_owner_lifecycle_i32_string_v1:
         OrdinaryMapOwnerLifecycleI32StringV1Admission,
     pub(super) ordinary_map_owned_get_i32_string_v1: OrdinaryMapOwnedGetI32StringV1Admission,
@@ -762,6 +823,10 @@ impl MapOwnerProfileAdmission {
     pub(super) const fn ordinary_map_owner_lifecycle_i32_string_v1_complete(self) -> bool {
         self.ordinary_map_owner_lifecycle_i32_string_v1
             .is_complete()
+    }
+
+    pub(super) const fn ordinary_map_owned_any_v2_complete(self) -> bool {
+        self.ordinary_map_owned_any_v2.is_complete()
     }
 }
 
@@ -784,8 +849,22 @@ pub(super) fn classify_map_owner_profile_admission_with_closure_source(
     program: &CheckedProgram,
     closure_source_plan: Option<&super::closure_callable::CheckedClosureCallablePlanV1>,
 ) -> MapOwnerProfileAdmission {
-    let ordinary_map_owned_get_i32_string_v1 =
+    let ordinary_map_owned_any_v2 = classify_ordinary_map_owned_any_v2_admission(program);
+    let mut ordinary_map_owned_get_i32_string_v1 =
         classify_ordinary_map_owned_get_i32_string_v1_admission(program, closure_source_plan);
+    // The independent owned-get scanner also observes `map_get` and the
+    // shared New/Set/Drop lifecycle. A concrete-record V2 graph can therefore
+    // leave an incomplete V1 candidate for the very same source operations.
+    // Suppress only that duplicate observation, and only after proving every
+    // V1 attempt/action is represented by one exact V2 attempt/action site.
+    // Typed getters, clone, closure-only observations, or any unmatched call
+    // remain independent signals and keep arbitration fail-closed.
+    if ordinary_map_owned_any_v2.is_type_materializable()
+        && ordinary_map_owned_get_v1_attempts_are_covered_by_v2(program)
+    {
+        ordinary_map_owned_get_i32_string_v1 =
+            OrdinaryMapOwnedGetI32StringV1Admission::OutsideProfile;
+    }
     let ordinary_map_owner_lifecycle_i32_string_v1 =
         classify_ordinary_map_owner_lifecycle_i32_string_v1_admission(program);
     let legacy_map_root = classify_map_root_admission(program);
@@ -837,6 +916,15 @@ pub(super) fn classify_map_owner_profile_admission_with_closure_source(
                 },
                 OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
             )
+        } else if ordinary_map_owned_any_v2.has_profile_signal() {
+            // V2 owns a disjoint concrete-record root identity. Preserve it
+            // as the sole Map profile; incomplete coverage remains a hard
+            // candidate and cannot borrow any legacy descriptor.
+            (
+                MapRootAdmission::OutsideProfile,
+                MapAnyOwnerAdmission::OutsideProfile,
+                OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
+            )
         } else {
             let (map_root, map_any_owner) = select_map_owner_admissions(
                 legacy_map_root,
@@ -862,6 +950,7 @@ pub(super) fn classify_map_owner_profile_admission_with_closure_source(
     MapOwnerProfileAdmission {
         map_root,
         map_any_owner,
+        ordinary_map_owned_any_v2,
         ordinary_map_owner_lifecycle_i32_string_v1: ordinary_map_owner_lifecycle_i32_string_v1,
         ordinary_map_owned_get_i32_string_v1,
     }
@@ -875,6 +964,7 @@ pub fn classify_canonical_mir_route_admission(
     CanonicalMirRouteAdmission {
         map_root: map_owner.map_root,
         map_any_owner: map_owner.map_any_owner,
+        ordinary_map_owned_any_v2: map_owner.ordinary_map_owned_any_v2,
         ordinary_map_owner_lifecycle_i32_string_v1: map_owner
             .ordinary_map_owner_lifecycle_i32_string_v1,
         ordinary_map_owned_get_i32_string_v1: map_owner.ordinary_map_owned_get_i32_string_v1,
@@ -1094,6 +1184,863 @@ fn is_prelude_origin(program: &CheckedProgram, origin: &crate::core::Origin) -> 
         .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
 }
 
+fn ordinary_map_owned_any_v2_attempt_first_argument_matches(
+    action: &OrdinaryMapOwnedAnyV2Action,
+    attempt: &OrdinaryMapOwnedAnyV2Attempt,
+) -> bool {
+    use OrdinaryMapOwnedAnyV2ActionKind as Action;
+
+    match action.kind {
+        Action::New => attempt.arguments.is_empty(),
+        Action::Drop => {
+            attempt.arguments.len() == 1 && attempt.arguments.first() == Some(&action.local.0)
+        }
+        Action::Clone
+        | Action::Set
+        | Action::Remove
+        | Action::Size
+        | Action::HasKey
+        | Action::IsEmpty
+        | Action::GetAny
+        | Action::Values => action.source_node.as_ref() == attempt.arguments.first(),
+    }
+}
+
+fn classify_ordinary_map_owned_any_v2_admission(
+    program: &CheckedProgram,
+) -> OrdinaryMapOwnedAnyV2Admission {
+    use OrdinaryMapOwnedAnyV2ActionKind as Action;
+    use OrdinaryMapOwnedAnyV2AttemptKind as Attempt;
+
+    let mut actions = Vec::<(crate::core::NodeId, OrdinaryMapOwnedAnyV2Action)>::new();
+    let mut attempts = BTreeSet::<(crate::core::NodeId, OrdinaryMapOwnedAnyV2Attempt)>::new();
+    let mut result_receipts = Vec::new();
+    let mut unpack_receipts = Vec::new();
+    let mut values_unpack_receipts = Vec::new();
+    for analysis in program.resource_analyses().values() {
+        attempts.extend(
+            analysis
+                .ordinary_map_owned_any_v2_operation_attempts
+                .iter()
+                .cloned()
+                .map(|attempt| (analysis.owner.clone(), attempt)),
+        );
+        actions.extend(
+            analysis
+                .ordinary_map_owned_any_v2_actions
+                .iter()
+                .cloned()
+                .map(|action| (analysis.owner.clone(), action)),
+        );
+        if let Some(receipt) = &analysis.ordinary_map_owned_any_v2_cfg_receipt {
+            unpack_receipts.extend(
+                receipt
+                    .unpack_receipts
+                    .iter()
+                    .cloned()
+                    .map(|unpack| (analysis.owner.clone(), unpack)),
+            );
+            values_unpack_receipts.extend(
+                receipt
+                    .values_unpack_receipts
+                    .iter()
+                    .cloned()
+                    .map(|unpack| (analysis.owner.clone(), unpack)),
+            );
+            result_receipts.extend(
+                receipt
+                    .result_receipts
+                    .iter()
+                    .cloned()
+                    .map(|result| (analysis.owner.clone(), result)),
+            );
+        }
+    }
+    if actions.is_empty() && attempts.is_empty() {
+        return OrdinaryMapOwnedAnyV2Admission::OutsideProfile;
+    }
+    // V2 is the concrete-record owner island.  The checker deliberately
+    // keeps a broad attempt ledger so its standalone tests can prove that
+    // unsupported operations were seen, but ordinary i32/String Map traffic
+    // already belongs to the older lifecycle/ManagedAny profiles.  Do not
+    // let that compatibility traffic become an incomplete V2 candidate just
+    // because the broad census observed the same builtin names.  A concrete
+    // nominal payload in a receipted Set is the source-level discriminator;
+    // once present, all other attempts remain fail-closed below.
+    let has_concrete_record_payload = actions.iter().any(|(_, action)| {
+        action.kind == OrdinaryMapOwnedAnyV2ActionKind::Set
+            && action.value_type.as_ref().is_some_and(|ty| {
+                matches!(
+                    program.resolved_types().get(ty),
+                    Some(crate::core::ResolvedType::Nominal {
+                        item,
+                        arguments,
+                        ..
+                    }) if !item.as_str().starts_with("builtin:type:") && arguments.is_empty()
+                )
+            })
+    });
+    // An empty Map has no concrete payload Set from which to infer the V2
+    // owner identity. Admit only the separately receipted empty-root query
+    // shape: a New, at least one GetAny/Values result, and no Set that could
+    // populate the root. The full action/attempt/CFG/result-receipt checks
+    // below still decide whether this candidate is materializable. Remove
+    // preserves emptiness, but every other unsupported action remains subject
+    // to those same fail-closed checks.
+    let has_empty_root_query = actions
+        .iter()
+        .any(|(_, action)| action.kind == OrdinaryMapOwnedAnyV2ActionKind::New)
+        && actions.iter().any(|(_, action)| {
+            matches!(
+                action.kind,
+                OrdinaryMapOwnedAnyV2ActionKind::GetAny | OrdinaryMapOwnedAnyV2ActionKind::Values
+            )
+        })
+        && actions
+            .iter()
+            .all(|(_, action)| action.kind != OrdinaryMapOwnedAnyV2ActionKind::Set);
+    if !has_concrete_record_payload && !has_empty_root_query {
+        return OrdinaryMapOwnedAnyV2Admission::OutsideProfile;
+    }
+    let mut valid = !actions.is_empty();
+    valid &= actions.iter().all(|(_, action)| {
+        action.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            && match action.kind {
+                Action::New => {
+                    action.key.is_none()
+                        && action.key_type.is_none()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.is_none()
+                        && action.source.is_none()
+                        && !action.payload_clone
+                }
+                Action::Clone => {
+                    let destination_root = crate::core::ResourceId(crate::core::NodeId(format!(
+                        "ordinary-map-owned-any-v2:{}",
+                        action.local.0 .0
+                    )));
+                    let source_root = action.source_local.as_ref().map(|source| {
+                        crate::core::ResourceId(crate::core::NodeId(format!(
+                            "ordinary-map-owned-any-v2:{}",
+                            source.0 .0
+                        )))
+                    });
+                    action.key.is_none()
+                        && action.key_type.is_none()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.as_ref() != Some(&action.local)
+                        && action.source_local.is_some()
+                        && action.source == source_root
+                        && action.source_node.as_ref() == Some(&action.point)
+                        && action
+                            .source_type
+                            .as_ref()
+                            .is_some_and(|ty| v2_root_type_shape_supported(program, ty))
+                        && action.result_type.is_none()
+                        && action.result_local.is_none()
+                        && !action.payload_clone
+                        && action.root == destination_root
+                }
+                Action::Set => {
+                    action.key.is_some()
+                        && action.key_type.is_some()
+                        && action.value.is_some()
+                        && action.value_type.is_some()
+                        && action.source_local.is_some()
+                        && action.source.is_some()
+                        && action.source_node.is_some()
+                        && action
+                            .source_type
+                            .as_ref()
+                            .is_some_and(|ty| v2_root_type_shape_supported(program, ty))
+                        && action.payload_clone
+                }
+                Action::Remove => {
+                    action.key.is_some()
+                        && action.key_type.is_some()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.is_some()
+                        && action.source.is_some()
+                        && action.source_node.is_some()
+                        && action
+                            .source_type
+                            .as_ref()
+                            .is_some_and(|ty| v2_root_type_shape_supported(program, ty))
+                        && !action.payload_clone
+                }
+                Action::Size => {
+                    action.key.is_none()
+                        && action.key_type.is_none()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.is_none()
+                        && action.source.is_none()
+                        && action.source_node.is_some()
+                        && action
+                            .source_type
+                            .as_ref()
+                            .is_some_and(|ty| v2_root_type_shape_supported(program, ty))
+                        && !action.payload_clone
+                }
+                Action::HasKey => {
+                    action.key.is_some()
+                        && action.key_type.is_some()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.is_none()
+                        && action.source.is_none()
+                        && action.source_node.is_some()
+                        && action
+                            .source_type
+                            .as_ref()
+                            .is_some_and(|ty| v2_root_type_shape_supported(program, ty))
+                        && !action.payload_clone
+                }
+                Action::IsEmpty => {
+                    action.key.is_none()
+                        && action.key_type.is_none()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.is_none()
+                        && action.source.is_none()
+                        && action.source_node.is_some()
+                        && action
+                            .source_type
+                            .as_ref()
+                            .is_some_and(|ty| v2_root_type_shape_supported(program, ty))
+                        && !action.payload_clone
+                }
+                Action::GetAny => {
+                    action.key.is_some()
+                        && action.key_type.is_some()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.as_ref() == Some(&action.local)
+                        && action.source.as_ref() == Some(&action.root)
+                        && action.source_node.is_some()
+                        && action.source_type.is_some()
+                        && action.result_type.is_some()
+                        && action.result_local.is_some()
+                        && !action.payload_clone
+                        && v2_result_type_shape_supported(program, action)
+                }
+                Action::Values => {
+                    action.key.is_none()
+                        && action.key_type.is_none()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.as_ref() == Some(&action.local)
+                        && action.source.as_ref() == Some(&action.root)
+                        && action.source_node.is_some()
+                        && action.source_type.is_some()
+                        && action.result_type.is_some()
+                        && action.result_local.is_some()
+                        && !action.payload_clone
+                        && v2_result_type_shape_supported(program, action)
+                }
+                Action::Drop => {
+                    action.key.is_none()
+                        && action.key_type.is_none()
+                        && action.value.is_none()
+                        && action.value_type.is_none()
+                        && action.source_local.is_none()
+                        && action.source.is_none()
+                        && !action.payload_clone
+                }
+            }
+    });
+
+    let action_matches_attempt =
+        |action: &OrdinaryMapOwnedAnyV2Action, attempt: &OrdinaryMapOwnedAnyV2Attempt| {
+            if action.point != attempt.point {
+                return false;
+            }
+            let kind_matches = match (action.kind, attempt.kind) {
+                (Action::New, Attempt::New)
+                | (Action::Set, Attempt::Set)
+                | (Action::Remove, Attempt::Remove)
+                | (Action::Size, Attempt::Size)
+                | (Action::HasKey, Attempt::HasKey)
+                | (Action::IsEmpty, Attempt::IsEmpty)
+                | (Action::GetAny, Attempt::GetAny)
+                | (Action::Values, Attempt::Values)
+                | (Action::Clone, Attempt::Clone)
+                | (Action::Drop, Attempt::Drop) => true,
+                _ => false,
+            };
+            let receiver_matches = match action.kind {
+                // Persistent updates borrow the source root and publish the
+                // separately bound result root.
+                Action::Clone | Action::Set | Action::Remove => {
+                    action.source_local == attempt.receiver_local
+                }
+                // New has no receiver; the result binding is the action local.
+                Action::New => attempt.receiver_local.is_none(),
+                // Read/drop operations borrow or consume their single root
+                // directly; their action local is the receiver.
+                Action::Size | Action::HasKey | Action::IsEmpty | Action::Drop => {
+                    attempt.receiver_local.as_ref() == Some(&action.local)
+                }
+                Action::GetAny | Action::Values => {
+                    action.source_local.as_ref() == attempt.receiver_local.as_ref()
+                }
+            };
+            let result_matches = match action.kind {
+                Action::New | Action::Clone | Action::Set | Action::Remove => {
+                    attempt.result_local.as_ref() == Some(&action.local)
+                }
+                Action::Size | Action::HasKey | Action::IsEmpty | Action::Drop => {
+                    attempt.result_local.is_none()
+                }
+                Action::GetAny | Action::Values => {
+                    attempt.result_local.as_ref() == action.result_local.as_ref()
+                }
+            };
+            kind_matches
+                && receiver_matches
+                && result_matches
+                && match action.kind {
+                    Action::New => {
+                        ordinary_map_owned_any_v2_attempt_first_argument_matches(action, attempt)
+                    }
+                    Action::Clone | Action::Size | Action::IsEmpty | Action::Drop => {
+                        attempt.arguments.len() == 1
+                            && ordinary_map_owned_any_v2_attempt_first_argument_matches(
+                                action, attempt,
+                            )
+                    }
+                    Action::Set => {
+                        attempt.arguments.len() == 3
+                            && ordinary_map_owned_any_v2_attempt_first_argument_matches(
+                                action, attempt,
+                            )
+                            && action.key.as_ref() == attempt.arguments.get(1)
+                            && action.value.as_ref() == attempt.arguments.get(2)
+                    }
+                    Action::Remove | Action::HasKey => {
+                        attempt.arguments.len() == 2
+                            && ordinary_map_owned_any_v2_attempt_first_argument_matches(
+                                action, attempt,
+                            )
+                            && action.key.as_ref() == attempt.arguments.get(1)
+                    }
+                    Action::GetAny => {
+                        attempt.arguments.len() == 2
+                            && ordinary_map_owned_any_v2_attempt_first_argument_matches(
+                                action, attempt,
+                            )
+                            && action.key.as_ref() == attempt.arguments.get(1)
+                    }
+                    Action::Values => {
+                        attempt.arguments.len() == 1
+                            && ordinary_map_owned_any_v2_attempt_first_argument_matches(
+                                action, attempt,
+                            )
+                    }
+                }
+        };
+    let mut unmatched = attempts.clone();
+    for (_, action) in &actions {
+        let Some(candidate) = unmatched
+            .iter()
+            .find(|(_, attempt)| action_matches_attempt(action, attempt))
+            .cloned()
+        else {
+            valid = false;
+            continue;
+        };
+        unmatched.remove(&candidate);
+    }
+    valid &= unmatched.is_empty();
+    let action_new = actions
+        .iter()
+        .filter(|(_, action)| action.kind == Action::New)
+        .map(|(owner, action)| (owner.clone(), action.point.clone()))
+        .collect::<BTreeSet<_>>();
+    let attempt_new = attempts
+        .iter()
+        .filter(|(_, attempt)| attempt.kind == Attempt::New)
+        .map(|(owner, attempt)| (owner.clone(), attempt.point.clone()))
+        .collect::<BTreeSet<_>>();
+    valid &= !attempt_new.is_empty() && action_new == attempt_new;
+    let read_actions = actions
+        .iter()
+        .filter(|(_, action)| matches!(action.kind, Action::GetAny | Action::Values))
+        .collect::<Vec<_>>();
+    let mut matched_result_receipts = BTreeSet::new();
+    for (owner, action) in &read_actions {
+        let matching = result_receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, (receipt_owner, result))| {
+                receipt_owner == owner
+                    && result.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && result.operation == action.point
+                    && result.kind == action.kind
+                    && result.source_local == action.local
+                    && result.source == action.root
+                    && action.source_node.as_ref() == Some(&result.source_node)
+                    && action.source_type.as_ref() == Some(&result.source_type)
+                    && result.key == action.key
+                    && result.key_type == action.key_type
+                    && action.result_type.as_ref() == Some(&result.result_type)
+                    && action.result_local.as_ref() == Some(&result.binding)
+                    && result.result == action.point
+                    && !result.binding_point.0.trim().is_empty()
+                    && result.settlement
+                        == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    && result.settlement_point.is_some()
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 || !matched_result_receipts.insert(matching[0]) {
+            valid = false;
+        }
+    }
+    valid &= result_receipts.len() == read_actions.len()
+        && matched_result_receipts.len() == result_receipts.len();
+    let mut matched_unpack_receipts = BTreeSet::new();
+    for (owner, unpack) in &unpack_receipts {
+        let matching_results = result_receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, (result_owner, result))| {
+                result_owner == owner
+                    && result.kind == Action::GetAny
+                    && result.operation == unpack.operation
+                    && result.binding == unpack.pair_binding
+                    && result.binding_point == unpack.pair_binding_point
+                    && result.settlement
+                        == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    && result.settlement_point.as_ref() == Some(&unpack.settlement_point)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let target_is_supported = v2_unpack_target_shape_supported(program, &unpack.conversion_to);
+        let source_is_dynamic_any = matches!(
+            program.resolved_types().get(&unpack.conversion_from),
+            Some(crate::core::ResolvedType::DynamicAny { capability })
+                if capability == "type.dynamic_value"
+        );
+        let checker_action_matches = actions.iter().any(|(action_owner, action)| {
+            action_owner == owner
+                && action.point == unpack.operation
+                && action.kind == Action::GetAny
+                && action.result_local.as_ref() == Some(&unpack.pair_binding)
+        });
+        if matching_results.len() != 1
+            || !matched_unpack_receipts.insert((owner.clone(), unpack.cast.clone()))
+            || !checker_action_matches
+            || !target_is_supported
+            || !source_is_dynamic_any
+            || unpack.conversion_from == unpack.conversion_to
+            || unpack.conversion_kind != crate::core::CheckedConversionKind::DynamicAnyUnpack
+            || unpack.settlement
+                != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+            || unpack.projection.0.trim().is_empty()
+            || unpack.cast.0.trim().is_empty()
+            || unpack.unpack_binding_point.0.trim().is_empty()
+        {
+            valid = false;
+        }
+    }
+    let cfg_unpack_count = program
+        .resource_analyses()
+        .values()
+        .filter_map(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        .map(|receipt| receipt.unpack_receipts.len())
+        .sum::<usize>();
+    valid &= matched_unpack_receipts.len() == unpack_receipts.len()
+        && unpack_receipts.len() == cfg_unpack_count;
+    let covered_get_any = unpack_receipts
+        .iter()
+        .filter(|(owner, unpack)| {
+            matched_unpack_receipts.contains(&(owner.clone(), unpack.cast.clone()))
+        })
+        .map(|(owner, unpack)| (owner.clone(), unpack.operation.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut matched_values_unpack_receipts = BTreeSet::new();
+    for (owner, unpack) in &values_unpack_receipts {
+        let matching_results = result_receipts
+            .iter()
+            .enumerate()
+            .filter(|(_, (result_owner, result))| {
+                result_owner == owner
+                    && result.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && result.operation == unpack.operation
+                    && result.kind == Action::Values
+                    && result.source_local == unpack.source_local
+                    && result.source == unpack.source
+                    && result.source_node == unpack.source_node
+                    && result.source_type == unpack.source_type
+                    && result.result_type == unpack.snapshot_type
+                    && result.binding == unpack.snapshot_binding
+                    && result.binding_point == unpack.snapshot_binding_point
+                    && result.settlement == unpack.settlement
+                    && result.settlement_point.as_ref() == Some(&unpack.settlement_point)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let checker_action_matches = actions.iter().any(|(action_owner, action)| {
+            action_owner == owner
+                && action.point == unpack.operation
+                && action.kind == Action::Values
+                && action.source_local.as_ref() == Some(&unpack.source_local)
+                && action.root == unpack.source
+                && action.source_node.as_ref() == Some(&unpack.source_node)
+                && action.source_type.as_ref() == Some(&unpack.source_type)
+                && action.result_local.as_ref() == Some(&unpack.snapshot_binding)
+                && action.result_type.as_ref() == Some(&unpack.snapshot_type)
+        });
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let index_type_supported = matches!(
+            program.resolved_types().get(&unpack.index_type),
+            Some(crate::core::ResolvedType::Primitive(
+                crate::core::PrimitiveType::I32 | crate::core::PrimitiveType::I64
+            ))
+        );
+        let owner_settlement_matches = match unpack.result_owner_settlement {
+            crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::NoOwnedPayload => {
+                unpack.conversion_to == i32_type
+                    && unpack.result_owner_settlement_point.is_none()
+                    && unpack.result_owner_settlement_index.is_none()
+            }
+            crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::CompilerOwnedStringDrop => {
+                unpack.conversion_to == string_type
+                    && unpack.result_owner_settlement_point.is_some()
+                    && unpack.result_owner_settlement_index.is_none()
+            }
+            crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::ExplicitWholeDrop => {
+                unpack.conversion_to != i32_type
+                    && unpack.conversion_to != string_type
+                    && unpack.result_owner_settlement_point.is_some()
+                    && unpack.result_owner_settlement_index.is_some()
+            }
+        };
+        if matching_results.len() != 1
+            || !matched_values_unpack_receipts.insert((owner.clone(), unpack.cast.clone()))
+            || !checker_action_matches
+            || !v2_unpack_target_shape_supported(program, &unpack.conversion_to)
+            || !index_type_supported
+            || !owner_settlement_matches
+            || !matches!(
+                program.resolved_types().get(&unpack.conversion_from),
+                Some(crate::core::ResolvedType::DynamicAny { capability })
+                    if capability == "type.dynamic_value"
+            )
+            || unpack.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            || unpack.conversion_from == unpack.conversion_to
+            || unpack.conversion_kind != crate::core::CheckedConversionKind::DynamicAnyUnpack
+            || unpack.settlement
+                != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+            || unpack.payload_selection.is_empty()
+            || unpack.snapshot_binding_point.0.trim().is_empty()
+            || unpack.index_projection.0.trim().is_empty()
+            || unpack.index_expression.0.trim().is_empty()
+            || unpack.cast.0.trim().is_empty()
+            || unpack.unpack_binding_point.0.trim().is_empty()
+            || unpack.settlement_point.0.trim().is_empty()
+        {
+            valid = false;
+        }
+    }
+    let cfg_values_unpack_count = program
+        .resource_analyses()
+        .values()
+        .filter_map(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        .map(|receipt| receipt.values_unpack_receipts.len())
+        .sum::<usize>();
+    valid &= matched_values_unpack_receipts.len() == values_unpack_receipts.len()
+        && values_unpack_receipts.len() == cfg_values_unpack_count;
+    let covered_values = values_unpack_receipts
+        .iter()
+        .filter(|(owner, unpack)| {
+            matched_values_unpack_receipts.contains(&(owner.clone(), unpack.cast.clone()))
+        })
+        .map(|(owner, unpack)| (owner.clone(), unpack.operation.clone()))
+        .collect::<BTreeSet<_>>();
+    let has_staged_get_values = read_actions
+        .iter()
+        .any(|(owner, action)| match action.kind {
+            Action::Values => !covered_values.contains(&(owner.clone(), action.point.clone())),
+            Action::GetAny => !covered_get_any.contains(&(owner.clone(), action.point.clone())),
+            _ => false,
+        });
+    if valid {
+        if has_staged_get_values {
+            OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        } else {
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        }
+    } else {
+        OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage
+    }
+}
+
+/// The Checker-side mirror of the deliberately narrow V2 payload ABI. The
+/// canonical MIR receipt performs the full TypeDesc/glue check; this early
+/// filter prevents any nominal target other than the one-field owned-String
+/// record shape from changing the route admission state.
+fn v2_unpack_target_shape_supported(
+    program: &CheckedProgram,
+    target: &crate::core::ResolvedTypeId,
+) -> bool {
+    use crate::core::ResolvedType as Type;
+
+    if matches!(
+        program.resolved_types().get(target),
+        Some(Type::Primitive(
+            crate::core::PrimitiveType::I32 | crate::core::PrimitiveType::String
+        ))
+    ) {
+        return true;
+    }
+    let Some(Type::Nominal {
+        item, arguments, ..
+    }) = program.resolved_types().get(target)
+    else {
+        return false;
+    };
+    if item.as_str().starts_with("builtin:type:") || !arguments.is_empty() {
+        return false;
+    }
+    let qualified_name = item.as_str().strip_prefix("type:").unwrap_or(item.as_str());
+    let Some(definition) = program.type_def(qualified_name) else {
+        return false;
+    };
+    if definition.kind != crate::core::ResolvedTypeKind::Record
+        || !definition.generic_parameters.is_empty()
+        || definition.fields.len() != 1
+        || definition.fields[0].0 != "text"
+        || definition.field_ids.len() != 1
+    {
+        return false;
+    }
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    definition
+        .field_ids
+        .get("text")
+        .and_then(|field| program.resolved_field_type(field))
+        == Some(&string_type)
+}
+
+/// Validate the Core-derived V2 unpack proof at the route boundary. In
+/// addition to joining it back to the private Checker receipt, this keeps
+/// route target/provenance rules aligned with the Core API: Set-selected
+/// payloads may be i32, String, or the exact Label TypeDesc, while the
+/// canonical miss source is i32 only. `validate_against_program` checks the
+/// exact payload-selection and TypeDesc digests plus the DynamicAny cast and
+/// GetAny-result/pair-Drop chain.
+fn validate_ordinary_map_owned_any_v2_unpack_receipt(
+    program: &MirProgram,
+    receipt: &OrdinaryMapOwnedAnyV2UnpackResultReceipt,
+) -> Result<(), String> {
+    receipt.validate_against_program(program)?;
+
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let target_supported = match receipt.payload_source {
+        OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload => {
+            receipt.conversion_to == i32_type
+                || receipt.conversion_to == string_type
+                || super::reference::is_canonical_v2_label_type(
+                    program.type_catalog(),
+                    &receipt.conversion_to,
+                )
+        }
+        OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss => {
+            receipt.conversion_to == i32_type
+        }
+    };
+    if !target_supported {
+        return Err(
+            "ordinary Map/Any owner-v2 unpack target or payload provenance is outside the route profile"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_ordinary_map_owned_any_v2_unpack_receipts(
+    checked: &CheckedProgram,
+    canonical: &MirProgram,
+) -> Result<(), String> {
+    let checker_receipts = checked
+        .resource_analyses()
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .iter()
+                .flat_map(move |cfg| {
+                    cfg.unpack_receipts
+                        .iter()
+                        .map(move |receipt| (owner, receipt))
+                })
+        })
+        .collect::<Vec<_>>();
+    let mir_receipts = canonical.ordinary_map_owned_any_v2_unpack_result_receipts()?;
+    if checker_receipts.len() != mir_receipts.len() {
+        return Err(
+            "AnyOwner-v2 Checker/MIR unpack receipt census differs at route admission".into(),
+        );
+    }
+    for (owner, checker) in checker_receipts {
+        let matching = mir_receipts
+            .iter()
+            .filter(|receipt| receipt.owner == *owner && receipt.cast == checker.cast)
+            .collect::<Vec<_>>();
+        let [receipt] = matching.as_slice() else {
+            return Err(format!(
+                "AnyOwner-v2 unpack '{}' has no unique Core route receipt",
+                checker.cast.0
+            ));
+        };
+        validate_ordinary_map_owned_any_v2_unpack_receipt(canonical, receipt)?;
+        if receipt.operation != checker.operation
+            || receipt.pair_binding_local != checker.pair_binding
+            || receipt.pair_binding_point != checker.pair_binding_point
+            || receipt.projection != checker.projection
+            || receipt.conversion_kind != checker.conversion_kind
+            || receipt.conversion_from != checker.conversion_from
+            || receipt.conversion_to != checker.conversion_to
+            || receipt.settlement != checker.settlement
+            || receipt.settlement_point != checker.settlement_point
+        {
+            return Err(format!(
+                "AnyOwner-v2 unpack '{}' Core route receipt disagrees with Checker evidence",
+                checker.cast.0
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ordinary_map_owned_any_v2_values_unpack_receipts(
+    checked: &CheckedProgram,
+    canonical: &MirProgram,
+) -> Result<(), String> {
+    let checker_receipts = checked
+        .resource_analyses()
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .iter()
+                .flat_map(move |cfg| {
+                    cfg.values_unpack_receipts
+                        .iter()
+                        .map(move |receipt| (owner, receipt))
+                })
+        })
+        .collect::<Vec<_>>();
+    let mir_receipts = canonical.ordinary_map_owned_any_v2_values_unpack_result_receipts()?;
+    if checker_receipts.len() != mir_receipts.len() {
+        return Err(
+            "AnyOwner-v2 Values Checker/MIR unpack receipt census differs at route admission"
+                .into(),
+        );
+    }
+    for (owner, checker) in checker_receipts {
+        let matching = mir_receipts
+            .iter()
+            .filter(|receipt| receipt.owner == *owner && receipt.cast == checker.cast)
+            .collect::<Vec<_>>();
+        let [receipt] = matching.as_slice() else {
+            return Err(format!(
+                "AnyOwner-v2 Values unpack '{}' has no unique Core route receipt",
+                checker.cast.0
+            ));
+        };
+        receipt.validate_against_program(canonical)?;
+        if receipt.operation != checker.operation
+            || receipt.values_binding_local != checker.snapshot_binding
+            || receipt.values_binding_point != checker.snapshot_binding_point
+            || receipt.projection != checker.index_projection
+            || receipt.index_expression != checker.index_expression
+            || receipt.index_type != checker.index_type
+            || receipt.result_binding_local != checker.unpack_binding
+            || receipt.result_binding_point != checker.unpack_binding_point
+            || receipt.conversion_kind != checker.conversion_kind
+            || receipt.conversion_from != checker.conversion_from
+            || receipt.conversion_to != checker.conversion_to
+            || receipt.settlement != checker.settlement
+            || receipt.settlement_point != checker.settlement_point
+        {
+            return Err(format!(
+                "AnyOwner-v2 Values unpack '{}' Core route receipt disagrees with Checker evidence",
+                checker.cast.0
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn v2_result_type_shape_supported(
+    program: &CheckedProgram,
+    action: &OrdinaryMapOwnedAnyV2Action,
+) -> bool {
+    use crate::core::ResolvedType as Type;
+
+    if !action
+        .source_type
+        .as_ref()
+        .is_some_and(|ty| v2_root_type_shape_supported(program, ty))
+    {
+        return false;
+    }
+    let Some(result) = action
+        .result_type
+        .as_ref()
+        .and_then(|ty| program.resolved_types().get(ty))
+    else {
+        return false;
+    };
+    let any_element = |ty: &crate::core::ResolvedTypeId| {
+        matches!(
+            program.resolved_types().get(ty),
+            Some(Type::DynamicAny { .. })
+        )
+    };
+    match action.kind {
+        OrdinaryMapOwnedAnyV2ActionKind::GetAny => {
+            matches!(result, Type::Tuple(elements)
+                if elements.len() == 2
+                    && matches!(program.resolved_types().get(&elements[0]), Some(Type::Primitive(crate::core::PrimitiveType::Bool)))
+                    && any_element(&elements[1]))
+                && action.key_type.as_ref().is_some_and(|key| {
+                    matches!(
+                        program.resolved_types().get(key),
+                        Some(Type::Primitive(crate::core::PrimitiveType::String))
+                    )
+                })
+        }
+        OrdinaryMapOwnedAnyV2ActionKind::Values => {
+            action.key_type.is_none()
+                && matches!(result, Type::Nominal { item, arguments, .. }
+                    if item.as_str() == "builtin:type:List"
+                        && arguments.len() == 1
+                        && any_element(&arguments[0]))
+        }
+        _ => false,
+    }
+}
+
+fn v2_root_type_shape_supported(
+    program: &CheckedProgram,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    matches!(
+        program.resolved_types().get(ty),
+        Some(crate::core::ResolvedType::Nominal { item, .. })
+            if item.as_str() == "builtin:type:Record"
+    )
+}
+
 fn classify_ordinary_map_owned_get_i32_string_v1_admission(
     program: &CheckedProgram,
     closure_source_plan: Option<&super::closure_callable::CheckedClosureCallablePlanV1>,
@@ -1221,6 +2168,159 @@ fn classify_ordinary_map_owned_get_i32_string_v1_admission(
     } else {
         OrdinaryMapOwnedGetI32StringV1Admission::IncompleteCoverage
     }
+}
+
+fn ordinary_map_owned_get_v1_attempts_are_covered_by_v2(program: &CheckedProgram) -> bool {
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as V2Action;
+    use crate::core::OrdinaryMapOwnedAnyV2AttemptKind as V2Attempt;
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind as V1Action;
+    use crate::core::OrdinaryMapOwnedGetI32StringV1AttemptKind as V1Attempt;
+
+    if super::closure_callable::CheckedClosureCallablePlanV1::has_source_candidate(program) {
+        return false;
+    }
+    let mut saw_v1_signal = false;
+    for analysis in program.resource_analyses().values() {
+        let v1_attempts = &analysis.ordinary_map_owned_get_i32_string_v1_operation_attempts;
+        let v1_actions = &analysis.ordinary_map_owned_get_i32_string_v1_actions;
+        let v1_new_attempts = &analysis.ordinary_map_owned_get_i32_string_v1_new_attempts;
+        if v1_attempts.is_empty() && v1_actions.is_empty() && v1_new_attempts.is_empty() {
+            continue;
+        }
+        saw_v1_signal = true;
+
+        let mut unmatched_v2_attempts = analysis
+            .ordinary_map_owned_any_v2_operation_attempts
+            .iter()
+            .collect::<Vec<_>>();
+        for attempt in v1_attempts {
+            let kind = match attempt.kind {
+                V1Attempt::New => V2Attempt::New,
+                V1Attempt::Clone => V2Attempt::Clone,
+                V1Attempt::UntypedGet => V2Attempt::GetAny,
+                V1Attempt::Set => V2Attempt::Set,
+                V1Attempt::Remove => V2Attempt::Remove,
+                V1Attempt::Size => V2Attempt::Size,
+                V1Attempt::HasKey => V2Attempt::HasKey,
+                V1Attempt::Drop => V2Attempt::Drop,
+                V1Attempt::ScopeDrop => V2Attempt::ScopeDrop,
+                V1Attempt::Keys => V2Attempt::Keys,
+                V1Attempt::Values => V2Attempt::Values,
+                V1Attempt::FromList => V2Attempt::FromList,
+                V1Attempt::MapLiteral => V2Attempt::MapLiteral,
+                // Typed getters remain independent profile signals. Clone is
+                // an exact root-value copy in both source ledgers and is
+                // compared below with the same point, operands, receiver,
+                // and destination local.
+                V1Attempt::GetI32 | V1Attempt::GetString => return false,
+            };
+            let Some(index) = unmatched_v2_attempts.iter().position(|candidate| {
+                let arguments_match = if attempt.kind == V1Attempt::Clone {
+                    let legacy_arguments_match = attempt
+                        .receiver_local
+                        .as_ref()
+                        .zip(attempt.result_local.as_ref())
+                        .is_some_and(|(source, result)| {
+                            attempt.arguments.as_slice() == [source.0.clone(), result.0.clone()]
+                        });
+                    legacy_arguments_match
+                        && candidate.arguments.as_slice() == [attempt.point.clone()]
+                } else {
+                    candidate.arguments == attempt.arguments
+                };
+                let result_local_matches = match attempt.kind {
+                    // V1 records the local receiving a scalar observation;
+                    // V2 intentionally records no owner result local for
+                    // Size/HasKey. The exact point, kind, operands, and
+                    // receiver still bind the same checked operation.
+                    V1Attempt::Size | V1Attempt::HasKey => candidate.result_local.is_none(),
+                    _ => candidate.result_local == attempt.result_local,
+                };
+                candidate.kind == kind
+                    && candidate.point == attempt.point
+                    && arguments_match
+                    && attempt
+                        .receiver_local
+                        .as_ref()
+                        .is_none_or(|receiver| candidate.receiver_local.as_ref() == Some(receiver))
+                    && result_local_matches
+            }) else {
+                return false;
+            };
+            unmatched_v2_attempts.remove(index);
+        }
+
+        let v2_new_points = analysis
+            .ordinary_map_owned_any_v2_operation_attempts
+            .iter()
+            .filter(|attempt| attempt.kind == V2Attempt::New)
+            .map(|attempt| attempt.point.clone())
+            .collect::<BTreeSet<_>>();
+        if !v1_new_attempts.is_subset(&v2_new_points) {
+            return false;
+        }
+
+        let mut unmatched_v2_actions = analysis
+            .ordinary_map_owned_any_v2_actions
+            .iter()
+            .collect::<Vec<_>>();
+        for action in v1_actions {
+            let kind = match action.kind {
+                V1Action::New => V2Action::New,
+                V1Action::Clone => V2Action::Clone,
+                V1Action::Set => V2Action::Set,
+                V1Action::Remove => V2Action::Remove,
+                V1Action::Size => V2Action::Size,
+                V1Action::HasKey => V2Action::HasKey,
+                V1Action::GetAny => V2Action::GetAny,
+                V1Action::Values => V2Action::Values,
+                V1Action::Drop => V2Action::Drop,
+                V1Action::GetI32 | V1Action::GetString => return false,
+            };
+            let Some(index) = unmatched_v2_actions.iter().position(|candidate| {
+                let result_type_matches = match action.kind {
+                    // V1 includes these copy-scalar result types in its Map
+                    // action ledger; V2 validates the expression types at
+                    // the call site but stores no owner-result TypeDesc.
+                    // Keep the cross-profile normalization limited to those
+                    // two exact primitive results.
+                    V1Action::Size => {
+                        candidate.result_type.is_none()
+                            && action.result_type.as_ref()
+                                == Some(&crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::I32,
+                                ))
+                    }
+                    V1Action::HasKey => {
+                        candidate.result_type.is_none()
+                            && action.result_type.as_ref()
+                                == Some(&crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::Bool,
+                                ))
+                    }
+                    _ => candidate.result_type == action.result_type,
+                };
+                candidate.kind == kind
+                    && candidate.point == action.point
+                    && candidate.local == action.local
+                    && candidate.key == action.key
+                    && candidate.key_type == action.key_type
+                    && candidate.value == action.value
+                    && candidate.value_type == action.value_type
+                    && result_type_matches
+                    && match action.kind {
+                        V1Action::GetAny | V1Action::Values => {
+                            candidate.source_local.as_ref() == Some(&action.local)
+                        }
+                        _ => candidate.source_local == action.source_local,
+                    }
+            }) else {
+                return false;
+            };
+            unmatched_v2_actions.remove(index);
+        }
+    }
+    saw_v1_signal
 }
 
 fn ordinary_map_owner_has_direct_string_key_local(program: &CheckedProgram) -> bool {
@@ -1721,9 +2821,67 @@ pub fn materialize_canonical_mir_route(
     program: &CheckedProgram,
     excluded_sources: Option<&HashSet<crate::span::SourceId>>,
 ) -> Result<CanonicalMirRouteMaterialization, CanonicalMirRouteMaterializationError> {
+    materialize_canonical_mir_route_impl(program, excluded_sources, false)
+}
+
+/// Materialize a non-production owner-v2 graph only for the verifier's
+/// explicitly diagnostic consumer. The result must not authorize execution or
+/// a caller-composed verifier readiness check.
+pub(crate) fn materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+) -> Result<CanonicalMirRouteMaterialization, CanonicalMirRouteMaterializationError> {
+    let admission = classify_canonical_mir_route_admission(program).ordinary_map_owned_any_v2;
+    if !matches!(
+        admission,
+        OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+            | OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+    ) {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message:
+                "verifier diagnostic materialization requires staged or complete owner-v2 admission"
+                    .into(),
+        });
+    }
+    materialize_canonical_mir_route_impl(program, excluded_sources, true)
+}
+
+fn materialize_canonical_mir_route_impl(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+    allow_nonproduction_ordinary_map_owned_any_v2_diagnostic: bool,
+) -> Result<CanonicalMirRouteMaterialization, CanonicalMirRouteMaterializationError> {
     #[cfg(test)]
     TEST_ROUTE_MATERIALIZATION_COUNT.with(|count| count.set(count.get() + 1));
     let admission = classify_canonical_mir_route_admission(program);
+    if admission.ordinary_map_owned_any_v2 == OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "Checker recognized an ordinary Map/Any owner-v2 candidate but withheld complete operation-attempt coverage".into(),
+        });
+    }
+    if admission.ordinary_map_owned_any_v2 == OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        && !allow_nonproduction_ordinary_map_owned_any_v2_diagnostic
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "Checker recognized StagedGetValues ordinary Map/Any owner-v2 coverage; only the verifier's staged diagnostic consumer may materialize this graph".into(),
+        });
+    }
+    if admission.ordinary_map_owned_any_v2 == OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        && !ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+        && !allow_nonproduction_ordinary_map_owned_any_v2_diagnostic
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "ordinary Map/Any owner-v2 has CompleteCoverage, but the shared production-readiness gate is closed; only the verifier diagnostic consumer may materialize this graph".into(),
+        });
+    }
     if admission.map_any_owner == MapAnyOwnerAdmission::IncompleteCoverage {
         return Err(CanonicalMirRouteMaterializationError::Complete {
             profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
@@ -1800,6 +2958,8 @@ pub fn materialize_canonical_mir_route(
             admission,
             materialized_map_root_candidate: false,
             materialized_map_any_owner_candidate: false,
+            materialized_ordinary_map_owned_any_v2_candidate: false,
+            ordinary_map_owned_any_v2_payload_selection: None,
             materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate: false,
             materialized_ordinary_map_owned_get_i32_string_v1_candidate: false,
             materialized_scalar_export_candidate: false,
@@ -1855,6 +3015,7 @@ pub fn materialize_canonical_mir_route(
         || admission.scalar_nested
         || admission.map_root_complete()
         || admission.map_any_owner_complete()
+        || admission.ordinary_map_owned_any_v2_complete()
         || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
         || admission.ordinary_map_owned_get_i32_string_v1_complete()
         || admission.scalar_generic_identity_i32_complete()
@@ -1896,6 +3057,27 @@ pub fn materialize_canonical_mir_route(
         }
     };
 
+    if admission.ordinary_map_owned_any_v2.is_type_materializable() {
+        validate_ordinary_map_owned_any_v2_unpack_receipts(program, &canonical).map_err(
+            |message| CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message: format!(
+                    "ordinary Map/Any owner-v2 unpack route receipt rejected: {message}"
+                ),
+            },
+        )?;
+        validate_ordinary_map_owned_any_v2_values_unpack_receipts(program, &canonical).map_err(
+            |message| CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                message: format!(
+                    "ordinary Map/Any owner-v2 Values unpack route receipt rejected: {message}"
+                ),
+            },
+        )?;
+    }
+
     let materialized_scalar_export_candidate =
         admission.scalar_export && !canonical.export_declarations().is_empty();
     let materialized_scalar_ffi_candidate = !canonical.ffi_calls().is_empty();
@@ -1909,6 +3091,13 @@ pub fn materialize_canonical_mir_route(
         .functions()
         .values()
         .any(|function| function.ownership.has_checker_map_any_owner_actions());
+    let materialized_ordinary_map_owned_any_v2_candidate = admission
+        .ordinary_map_owned_any_v2_complete()
+        && canonical.functions().values().any(|function| {
+            function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
+        });
     let materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate = admission
         .ordinary_map_owner_lifecycle_i32_string_v1_complete()
         && contains_ordinary_map_owner_lifecycle_i32_string_v1_candidate(&canonical);
@@ -1938,6 +3127,15 @@ pub fn materialize_canonical_mir_route(
             profile: CanonicalMirRouteProfile::MapAnyOwnerV1,
             stage: CanonicalMirRouteFailureStage::Coverage,
             message: "complete Checker MapAnyOwner v1 admission did not materialize an independent v1 action receipt".into(),
+        });
+    }
+    if admission.ordinary_map_owned_any_v2_complete()
+        && !materialized_ordinary_map_owned_any_v2_candidate
+    {
+        return Err(CanonicalMirRouteMaterializationError::Complete {
+            profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+            stage: CanonicalMirRouteFailureStage::Coverage,
+            message: "complete ordinary Map/Any owner-v2 admission did not materialize its independent operation receipt".into(),
         });
     }
     if admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
@@ -2324,11 +3522,38 @@ pub fn materialize_canonical_mir_route(
         });
     }
 
+    let ordinary_map_owned_any_v2_payload_selection =
+        if materialized_ordinary_map_owned_any_v2_candidate {
+            match canonical.ordinary_map_owned_any_v2_payload_selection_receipt() {
+                Ok(Some(receipt)) => Some(receipt),
+                Ok(None) => {
+                    return Err(CanonicalMirRouteMaterializationError::Complete {
+                    profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                    stage: CanonicalMirRouteFailureStage::Coverage,
+                    message: "complete ordinary Map/Any owner-v2 route has no Checker-derived payload selection receipt".into(),
+                });
+                }
+                Err(message) => {
+                    return Err(CanonicalMirRouteMaterializationError::Complete {
+                        profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                        stage: CanonicalMirRouteFailureStage::Coverage,
+                        message: format!(
+                            "ordinary Map/Any owner-v2 payload selection receipt rejected: {message}"
+                        ),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
         admission,
         materialized_map_root_candidate,
         materialized_map_any_owner_candidate,
+        materialized_ordinary_map_owned_any_v2_candidate,
+        ordinary_map_owned_any_v2_payload_selection,
         materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate,
         materialized_ordinary_map_owned_get_i32_string_v1_candidate,
         materialized_scalar_export_candidate,
@@ -3390,6 +4615,524 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_map_owned_any_v2_route_binds_source_and_drop_arguments_to_actions() {
+        use OrdinaryMapOwnedAnyV2ActionKind as Kind;
+
+        let program = checked(
+            r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let removed = map_remove(root, "label")
+    let size = map_size(root)
+    let present = has_key(root, "label")
+    let is_empty_root = is_empty(root)
+    drop(empty)
+    drop(root)
+    drop(removed)
+    drop(label)
+    size
+}
+"#,
+        );
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+        let analysis = program
+            .resource_analysis(&NodeId("function:main".into()))
+            .expect("main resource analysis");
+        for kind in [
+            Kind::Set,
+            Kind::Remove,
+            Kind::Size,
+            Kind::HasKey,
+            Kind::IsEmpty,
+            Kind::Drop,
+        ] {
+            let actions = analysis
+                .ordinary_map_owned_any_v2_actions
+                .iter()
+                .filter(|action| action.kind == kind)
+                .collect::<Vec<_>>();
+            assert!(!actions.is_empty(), "source fixture covers {kind:?}");
+            for action in actions {
+                let attempt = analysis
+                    .ordinary_map_owned_any_v2_operation_attempts
+                    .iter()
+                    .find(|attempt| attempt.point == action.point)
+                    .expect("matching operation attempt");
+                assert!(ordinary_map_owned_any_v2_attempt_first_argument_matches(
+                    action, attempt
+                ));
+
+                let mut forged = attempt.clone();
+                assert!(!forged.arguments.is_empty());
+                forged.arguments[0] = NodeId(format!("forged-source:{}", action.point.0));
+                assert!(
+                    !ordinary_map_owned_any_v2_attempt_first_argument_matches(action, &forged),
+                    "{:?} cannot borrow another call's first argument",
+                    action.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn public_route_materializer_rejects_staged_ordinary_map_owned_any_v2() {
+        let program = checked(
+            r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let pair = map_get(root, "label")
+    let _found = pair.0
+    drop(pair)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+"#,
+        );
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        );
+
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("public route materialization must reject staged V2 coverage");
+        assert!(matches!(
+            error,
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                ..
+            }
+        ));
+        assert!(error.to_string().contains("StagedGetValues"));
+
+        materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(&program, None)
+            .expect("the verifier's explicit staged diagnostic route remains available");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_label_hit_unpack_is_a_complete_route_candidate() {
+        let program = checked(
+            r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected label" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", label)
+    let pair = map_get(stored, "present")
+    let value = pair.1 as Label
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(label)
+    drop(value)
+    0
+}
+"#,
+        );
+
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+        assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("the Label receipt must not open production V2 materialization");
+        assert!(matches!(
+            error,
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                ..
+            }
+        ));
+        assert!(error
+            .to_string()
+            .contains("production-readiness gate is closed"));
+
+        let diagnostic =
+            materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(&program, None)
+                .expect("Core's exact selected-Label receipt is available to diagnostic routing");
+        assert_eq!(
+            diagnostic.admission.ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+        assert!(diagnostic.materialized_ordinary_map_owned_any_v2_candidate);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_clone_preserves_root_and_payload_lineage_receipts() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_clone.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2;
+        assert_eq!(admission, OrdinaryMapOwnedAnyV2Admission::CompleteCoverage);
+        assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("the V2 production gate remains closed for the Clone candidate");
+        assert!(error
+            .to_string()
+            .contains("production-readiness gate is closed"));
+
+        let diagnostic =
+            materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(&program, None)
+                .expect("the explicit diagnostic route may materialize its complete receipts");
+        assert!(diagnostic.materialized_ordinary_map_owned_any_v2_candidate);
+        let selection = diagnostic
+            .ordinary_map_owned_any_v2_payload_selection
+            .as_ref()
+            .expect("the Checker payload-selection receipt is materialized");
+        assert_eq!(selection.entries.len(), 2);
+        assert_eq!(
+            diagnostic
+                .program
+                .ordinary_map_owned_any_v2_get_any_result_receipts()
+                .expect("both GetAny roots retain selected Set lineage")
+                .len(),
+            2
+        );
+        assert_eq!(
+            diagnostic
+                .program
+                .ordinary_map_owned_any_v2_unpack_result_receipts()
+                .expect("both checked Label casts retain selected Set lineage")
+                .len(),
+            2
+        );
+
+        let clone_instructions = diagnostic
+            .program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                instruction
+                    .id
+                    .as_str()
+                    .starts_with("inst:ordinary_map_owned_any_v2_clone:")
+            })
+            .filter_map(|instruction| match &instruction.kind {
+                MirInstructionKind::Clone { result, source } => Some((result, source)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(clone_instructions.len(), 1);
+        assert_ne!(clone_instructions[0].0, clone_instructions[0].1);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_route_rejects_forged_unpack_receipt_digest_and_provenance() {
+        let program = checked(
+            r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected label" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", label)
+    let pair = map_get(stored, "present")
+    let value = pair.1 as Label
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(label)
+    drop(value)
+    0
+}
+"#,
+        );
+        let canonical = MirProgram::from_checked_program(&program)
+            .expect("canonical MIR for the route receipt negative cases");
+        let receipt = canonical
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("Core-derived Label unpack receipt")
+            .into_iter()
+            .next()
+            .expect("one selected Label unpack");
+        validate_ordinary_map_owned_any_v2_unpack_receipt(&canonical, &receipt)
+            .expect("the original Core receipt passes route admission");
+
+        let mut forged_digest = receipt.clone();
+        forged_digest.payload_type_desc_digest = "0".repeat(64);
+        assert!(
+            validate_ordinary_map_owned_any_v2_unpack_receipt(&canonical, &forged_digest).is_err()
+        );
+
+        let mut forged_provenance = receipt;
+        forged_provenance.payload_source =
+            OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss;
+        assert!(
+            validate_ordinary_map_owned_any_v2_unpack_receipt(&canonical, &forged_provenance)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_i32_miss_unpack_is_receipted_and_complete() {
+        let program = checked(
+            r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected label" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", label)
+    let pair = map_get(stored, "absent")
+    let value = pair.1 as i32
+    drop(pair)
+    drop(empty)
+    drop(stored)
+    drop(label)
+    value
+}
+"#,
+        );
+
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+        let diagnostic =
+            materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(&program, None)
+                .expect("the canonical i32 miss receipt is accepted by the route");
+        let unpack = diagnostic
+            .program
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("validated canonical miss receipt")
+            .into_iter()
+            .next()
+            .expect("one i32 miss unpack");
+        assert_eq!(
+            unpack.payload_source,
+            OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+        );
+        assert_eq!(
+            unpack.conversion_to,
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_keeps_admission_staged_with_a_complete_get_any_unpack() {
+        let program = checked(
+            r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "selected label" }
+    let empty = map_new()
+    let stored = map_set(empty, "present", label)
+    let pair = map_get(stored, "present")
+    let value = pair.1 as Label
+    drop(pair)
+    let snapshot = values(stored)
+    let count = snapshot.len()
+    drop(snapshot)
+    drop(empty)
+    drop(stored)
+    drop(label)
+    drop(value)
+    count
+}
+"#,
+        );
+
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        );
+        let diagnostic =
+            materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(&program, None)
+                .expect("the diagnostic route can validate GetAny while Values remains staged");
+        assert_eq!(
+            diagnostic.admission.ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        );
+        assert!(!diagnostic.materialized_ordinary_map_owned_any_v2_candidate);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_index_unpack_is_a_complete_candidate() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_unpack.mimi"
+        ));
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+
+        let canonical = MirProgram::from_checked_program(&program)
+            .expect("canonical MIR validates the direct indexed Values unpack receipts");
+        let receipts = canonical
+            .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            .expect("exact Values unpack receipt derivation")
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 4);
+        for receipt in &receipts {
+            receipt
+                .validate_against_program(&canonical)
+                .expect("the Checker, index, selection, binding, and Drop identities agree");
+            assert_eq!(receipt.conversion_to, receipt.result_type);
+        }
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt.result_type == i32_type)
+                .count(),
+            2,
+            "literal and dynamic integer indexes retain distinct receipts"
+        );
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt.result_type == string_type)
+                .count(),
+            1,
+            "the String result receipt proves compiler-owned tail cleanup"
+        );
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(
+                    |receipt| receipt.result_type != i32_type && receipt.result_type != string_type
+                )
+                .count(),
+            1,
+            "the Label result receipt proves explicit whole-value Drop"
+        );
+        assert!(
+            receipts.iter().all(|receipt| {
+                receipt.values_binding_local == receipts[0].values_binding_local
+            }),
+            "all indexed reads are tied to the same directly bound snapshot"
+        );
+
+        let mut forged = receipts[0].clone();
+        forged.result_binding_local =
+            crate::core::ir::ResolvedLocalId(NodeId("forged-result".into()));
+        assert!(forged.validate_against_program(&canonical).is_err());
+
+        let diagnostic = materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(
+            &program, None,
+        )
+        .expect("the verifier diagnostic path can materialize the receipted Values candidate");
+        assert_eq!(
+            diagnostic.admission.ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+        assert!(diagnostic.materialized_ordinary_map_owned_any_v2_candidate);
+        assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("CompleteCoverage must remain behind the production-readiness gate");
+        assert!(error
+            .to_string()
+            .contains("production-readiness gate is closed"));
+    }
+
+    #[test]
+    fn computed_key_v2_get_is_not_a_duplicate_owned_get_v1_candidate() {
+        let program = checked(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi"
+        ));
+        let admission = classify_canonical_mir_route_admission(&program);
+
+        assert_eq!(
+            admission.ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        );
+        assert_eq!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            OrdinaryMapOwnedGetI32StringV1Admission::OutsideProfile
+        );
+        assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_admits_receipted_empty_root_queries() {
+        let program = checked(
+            r#"
+func main() -> i32 {
+    let root = map_new()
+    let pair = map_get(root, "missing")
+    println(pair.0)
+    drop(pair)
+    let snapshot = values(root)
+    println(snapshot.len())
+    drop(snapshot)
+    drop(root)
+    0
+}
+"#,
+        );
+
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+        );
+        assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+    }
+
+    #[test]
+    fn public_route_materializer_rejects_complete_v2_until_production_readiness_opens() {
+        let program = checked(
+            r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "owned label" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    drop(empty)
+    drop(root)
+    drop(label)
+    0
+}
+"#,
+        );
+        assert_eq!(
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        );
+        assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+
+        let error = materialize_canonical_mir_route(&program, None)
+            .expect_err("complete coverage is diagnostic-only until the shared ready gate opens");
+        assert!(matches!(
+            error,
+            CanonicalMirRouteMaterializationError::Complete {
+                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
+                stage: CanonicalMirRouteFailureStage::Coverage,
+                ..
+            }
+        ));
+        assert!(error
+            .to_string()
+            .contains("production-readiness gate is closed"));
+
+        let diagnostic =
+            materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(&program, None)
+                .expect("internal verifier diagnostics can still inspect complete V2 MIR");
+        assert!(diagnostic.program.functions().values().any(|function| {
+            function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
+        }));
+    }
+
+    #[test]
     fn scalar_generic_identity_admission_is_exact_and_materializes_a_closed_route() {
         let program =
             checked("func pass<T>(value: T) -> T { value }\nfunc main() -> i32 { pass(41) }");
@@ -3817,8 +5560,7 @@ mod tests {
             "#,
         );
         assert_eq!(
-            classify_canonical_mir_route_admission(&program)
-                .ordinary_map_owned_get_i32_string_v1,
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_get_i32_string_v1,
             OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage,
             "Values operation and Map root lifecycle are checker-complete even though the result owner is only scope-cleaned"
         );
@@ -3895,8 +5637,7 @@ mod tests {
             "#,
         );
         assert_eq!(
-            classify_canonical_mir_route_admission(&program)
-                .ordinary_map_owned_get_i32_string_v1,
+            classify_canonical_mir_route_admission(&program).ordinary_map_owned_get_i32_string_v1,
             OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage,
             "GetAny operation and Map root lifecycle are checker-complete even though the tuple owner is only scope-cleaned"
         );
@@ -4251,7 +5992,8 @@ mod tests {
                 MapRootAdmission::CompleteCoverage,
                 MapAnyOwnerAdmission::CompleteCoverage,
                 OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
-                true),
+                true
+            ),
             (
                 MapRootAdmission::OutsideProfile,
                 MapAnyOwnerAdmission::CompleteCoverage
@@ -4263,7 +6005,8 @@ mod tests {
                 MapRootAdmission::CompleteCoverage,
                 MapAnyOwnerAdmission::IncompleteCoverage,
                 OrdinaryMapOwnerLifecycleI32StringV1Admission::IncompleteCoverage,
-                true),
+                true
+            ),
             (
                 MapRootAdmission::OutsideProfile,
                 MapAnyOwnerAdmission::IncompleteCoverage
@@ -4596,6 +6339,7 @@ mod tests {
         let admission = CanonicalMirRouteAdmission {
             map_root: MapRootAdmission::OutsideProfile,
             map_any_owner: MapAnyOwnerAdmission::OutsideProfile,
+            ordinary_map_owned_any_v2: OrdinaryMapOwnedAnyV2Admission::OutsideProfile,
             ordinary_map_owner_lifecycle_i32_string_v1:
                 OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile,
             ordinary_map_owned_get_i32_string_v1:

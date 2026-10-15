@@ -101,9 +101,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         return Err(NativeMirError::new(
                             subject,
                             format!(
-                            "aggregate clone layout {layout:?} is outside the native product ABI"
-                        ),
-                        ))
+                                "aggregate clone layout {layout:?} is outside the native product ABI"
+                            ),
+                        ));
                     }
                 };
                 let mut aggregate = value.into_struct_value();
@@ -457,6 +457,9 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .is_none()
             && catalog
                 .get(&crate::core::mir::types::managed_any_i32_string_v1_type_id())
+                .is_none()
+            && catalog
+                .get(&crate::core::mir::types::ordinary_map_owned_any_v2_type_id())
                 .is_none()
         {
             return Ok(());

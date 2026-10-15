@@ -5,8 +5,10 @@
 //! of the checker-owned body; it is the operation authority.
 use super::types::{
     managed_any_i32_string_v1_type_id, ordinary_map_get_any_tuple_i32_string_v1_type_id,
-    MirAbiClass, MirGlueContract, MirGlueKind, MirGlueOperation, MirLayout, MirOwnership,
-    MirTypeCatalog, MirTypeKind,
+    ordinary_map_owned_any_v2_get_result_type_id, ordinary_map_owned_any_v2_payload_type_id,
+    ordinary_map_owned_any_v2_type_id, ordinary_map_owned_any_v2_values_element_type_id,
+    ordinary_map_owned_any_v2_values_type_id, MirAbiClass, MirGlueContract, MirGlueKind,
+    MirGlueOperation, MirLayout, MirOwnership, MirTypeCatalog, MirTypeKind,
 };
 use super::{
     MirAggregateKind, MirBlockId, MirFunction, MirGenericInstanceContract, MirInstance,
@@ -832,8 +834,15 @@ impl MirTypeCatalog {
             };
             if matches!(
                 &descriptor.kind,
-                MirTypeKind::DynamicAny | MirTypeKind::ManagedAnyI32StringV1
+                MirTypeKind::DynamicAny
+                    | MirTypeKind::ManagedAnyI32StringV1
+                    | MirTypeKind::OrdinaryMapOwnedAnyV2
+                    | MirTypeKind::OrdinaryMapOwnedAnyV2Payload
+                    | MirTypeKind::OrdinaryMapOwnedAnyV2Values
+                    | MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement
             ) || ty == &managed_any_i32_string_v1_type_id()
+                || ty == &ordinary_map_owned_any_v2_type_id()
+                || ty == &ordinary_map_owned_any_v2_values_element_type_id()
             {
                 return true;
             }
@@ -881,8 +890,12 @@ impl MirTypeCatalog {
                 | MirLayout::MapAnyOwnerV1
                 | MirLayout::OrdinaryMapOwnerLifecycleI32StringV1
                 | MirLayout::OrdinaryMapOwnedGetI32StringV1
+                | MirLayout::OrdinaryMapOwnedAnyV2
                 | MirLayout::ManagedAnyI32StringV1
                 | MirLayout::Opaque => false,
+                MirLayout::OrdinaryMapOwnedAnyV2Payload => true,
+                MirLayout::OrdinaryMapOwnedAnyV2Values => true,
+                MirLayout::OrdinaryMapOwnedAnyV2ValuesElement => true,
             };
             let resolved_children_contain_any = catalog
                 .resolved_children
@@ -935,6 +948,41 @@ impl MirTypeCatalog {
             );
         }
         self.validate_recursive_tuple_abi(ty)
+    }
+
+    /// Validate the independent AnyOwner-v2 GetAny product. Its payload token
+    /// has a separate TypeDesc and must never be admitted by the V1
+    /// ManagedAny tuple contract above.
+    pub fn validate_ordinary_map_owned_any_v2_get_any_result_type(
+        &self,
+        ty: &ResolvedTypeId,
+    ) -> Result<(), String> {
+        let descriptor = self
+            .get(ty)
+            .ok_or("AnyOwner-v2 GetAny result TypeDesc is missing")?;
+        let boolean = crate::core::ir::primitive_type_id(PrimitiveType::Bool);
+        if ty != &ordinary_map_owned_any_v2_get_result_type_id()
+            || descriptor.kind != (MirTypeKind::Tuple { arity: 2 })
+            || descriptor.layout
+                != MirLayout::Tuple(vec![
+                    boolean.clone(),
+                    ordinary_map_owned_any_v2_payload_type_id(),
+                ])
+        {
+            return Err(
+                "AnyOwner-v2 GetAny must return its exact owned (bool, V2 payload token) tuple"
+                    .into(),
+            );
+        }
+        self.validate_copy_scalar(&boolean)?;
+        for operation in [
+            MirGlueOperation::MoveOut,
+            MirGlueOperation::Clone,
+            MirGlueOperation::Drop,
+        ] {
+            self.validate_glue(ty, operation)?;
+        }
+        Ok(())
     }
 
     pub fn validate_managed_any_contract(
@@ -1098,6 +1146,10 @@ pub(super) fn validate_managed_any_receipts(function: &MirFunction) -> Vec<MirVa
                 MirInstructionKind::ManagedAny { .. }
                     | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
                     | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. }
+                    | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                    | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+                    | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                    | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
             )
         });
     if !has_managed_any_marker {
@@ -1110,7 +1162,10 @@ pub(super) fn validate_managed_any_receipts(function: &MirFunction) -> Vec<MirVa
         })
     };
     let Some(seal) = &function.ownership.checker_managed_any else {
-        error(function.owner.0.clone(), "ManagedAny TypeDesc/value presence cannot authorize an owner: private Checker seal is missing");
+        error(
+            function.owner.0.clone(),
+            "ManagedAny TypeDesc/value presence cannot authorize an owner: private Checker seal is missing",
+        );
         return errors;
     };
     if seal.owner != function.owner
@@ -1227,23 +1282,123 @@ pub(super) fn validate_managed_any_receipts(function: &MirFunction) -> Vec<MirVa
             }),
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Values { .. } => true,
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, .. } => {
+                has_checker_ordinary_map_owned_any_v2_action(function, expected)
+                    && has_checker_ordinary_map_owned_any_v2_get_any_result(
+                        function,
+                        &expected.id,
+                        result,
+                    )
+                    && function.values.get(result).is_some_and(|value| {
+                        value.ty == ordinary_map_owned_any_v2_get_result_type_id()
+                    })
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, .. } => {
+                has_checker_ordinary_map_owned_any_v2_action(function, expected)
+                    && has_checker_ordinary_map_owned_any_v2_values_result(
+                        function,
+                        &expected.id,
+                        result,
+                    )
+                    && function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| value.ty == ordinary_map_owned_any_v2_values_type_id())
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection,
+            } => {
+                has_checker_ordinary_map_owned_any_v2_unpack(
+                    function,
+                    &expected.id,
+                    result,
+                    pair,
+                    projection,
+                ) && function
+                    .values
+                    .get(pair)
+                    .is_some_and(|value| value.ty == ordinary_map_owned_any_v2_get_result_type_id())
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                result,
+                values,
+                index,
+                projection,
+            } => {
+                has_checker_ordinary_map_owned_any_v2_values_unpack(
+                    function,
+                    &expected.id,
+                    result,
+                    values,
+                    index,
+                    projection,
+                ) && function
+                    .values
+                    .get(values)
+                    .is_some_and(|value| value.ty == ordinary_map_owned_any_v2_values_type_id())
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. } => {
+                has_checker_ordinary_map_owned_any_v2_action(function, expected)
+            }
             MirInstructionKind::ListOp {
                 operation: super::MirListOperation::Len,
                 list,
                 argument: None,
                 ..
             } => seal.managed_values.contains(list),
-            MirInstructionKind::Move { .. }
-            | MirInstructionKind::Clone { .. }
-            | MirInstructionKind::Drop { .. } => true,
+            MirInstructionKind::Move { source, result }
+            | MirInstructionKind::Clone { source, result } => {
+                let moves_v2_map = [source, result].iter().any(|value| {
+                    function.values.get(*value).is_some_and(|value| {
+                        value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                    })
+                });
+                !moves_v2_map || has_checker_ordinary_map_owned_any_v2_action(function, expected)
+            }
+            MirInstructionKind::MoveProject {
+                base, projection, ..
+            } => {
+                seal.managed_values.contains(base)
+                    && matches!(projection, MirProjection::Field(_))
+                    && has_checker_ordinary_map_owned_any_v2_unpack_lineage(function, base)
+            }
+            MirInstructionKind::Drop { value } => !function
+                .values
+                .get(value)
+                .is_some_and(|value| value.ty == super::types::ordinary_map_owned_any_v2_type_id()),
             MirInstructionKind::Construct {
                 kind: MirAggregateKind::Tuple,
                 ..
             } => true,
             MirInstructionKind::Project {
+                base,
                 projection: MirProjection::Tuple(_),
                 ..
-            } => true,
+            } => {
+                seal.managed_values.contains(base)
+                    && (function.values.get(base).is_none_or(|value| {
+                        value.ty != ordinary_map_owned_any_v2_get_result_type_id()
+                    }) || matches!(
+                        &expected.kind,
+                        MirInstructionKind::Project {
+                            base: project_base,
+                            result,
+                            projection: MirProjection::Tuple(0),
+                            ..
+                        } if project_base == base
+                            && function.values.get(result).is_some_and(|value| {
+                                value.ty == crate::core::ir::primitive_type_id(PrimitiveType::Bool)
+                            })
+                    ))
+            }
             MirInstructionKind::Binary {
                 result,
                 op,
@@ -1260,9 +1415,23 @@ pub(super) fn validate_managed_any_receipts(function: &MirFunction) -> Vec<MirVa
             .is_some(),
             MirInstructionKind::Call {
                 callee: crate::core::ir::ResolvedCallee::Function(_),
+                result,
+                arguments,
                 ..
             }
-            | MirInstructionKind::ClosureInvoke { .. } => true,
+            | MirInstructionKind::ClosureInvoke {
+                result, arguments, ..
+            } => {
+                !arguments.iter().any(|argument| {
+                    function.values.get(argument).is_some_and(|value| {
+                        value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                    })
+                }) && !result.as_ref().is_some_and(|result| {
+                    function.values.get(result).is_some_and(|value| {
+                        value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                    })
+                })
+            }
             _ => false,
         };
         if !permitted {
@@ -1309,6 +1478,16 @@ fn instruction_result_values(kind: &MirInstructionKind) -> Vec<&MirValueId> {
         | MirInstructionKind::OrdinaryMapOwnerLifecycleRemove { result, .. }
         | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { result, .. }
         | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { result, .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { result, .. }
@@ -1348,6 +1527,7 @@ fn instruction_result_values(kind: &MirInstructionKind) -> Vec<&MirValueId> {
         MirInstructionKind::SessionPairBind { lo, hi, .. } => vec![lo, hi],
         MirInstructionKind::MapRootDrop { .. }
         | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
         | MirInstructionKind::Drop { .. }
         | MirInstructionKind::EndBorrow { .. }
@@ -1455,6 +1635,909 @@ fn create_managed_any_cfg_owner(
     Ok(())
 }
 
+/// Bind one owner-v2 MIR operation to the complete Checker action and CFG
+/// census before the path ledger is allowed to create, borrow, or settle a
+/// Map root. The generic ManagedAny body seal commits the MIR itself; this
+/// second receipt is what grants the operation its Map-specific meaning.
+fn has_checker_ordinary_map_owned_any_v2_action(
+    function: &MirFunction,
+    instruction: &MirInstruction,
+) -> bool {
+    use crate::core::{
+        OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
+        OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind,
+        OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion,
+    };
+
+    let (kind, root_operand, result_operand, key_operand, value_operand) = match &instruction.kind {
+        MirInstructionKind::Clone { result, source } => {
+            (ActionKind::Clone, source, Some(result), None, None)
+        }
+        MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
+            (ActionKind::New, result, Some(result), None, None)
+        }
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+            result,
+            source,
+            key,
+            value,
+        } => (
+            ActionKind::Set,
+            source,
+            Some(result),
+            Some(key),
+            Some(value),
+        ),
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
+            result,
+            source,
+            key,
+        } => (ActionKind::Remove, source, Some(result), Some(key), None),
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, root } => {
+            (ActionKind::Size, root, Some(result), None, None)
+        }
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, root, key } => {
+            (ActionKind::HasKey, root, Some(result), Some(key), None)
+        }
+        MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, root, key } => {
+            (ActionKind::GetAny, root, Some(result), Some(key), None)
+        }
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, root } => {
+            (ActionKind::Values, root, Some(result), None, None)
+        }
+        MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
+            (ActionKind::IsEmpty, root, Some(result), None, None)
+        }
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => {
+            (ActionKind::Drop, root, None, None, None)
+        }
+        _ => return false,
+    };
+
+    let matching_actions = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .filter(|action| action.instruction == instruction.id)
+        .collect::<Vec<_>>();
+    let [action] = matching_actions.as_slice() else {
+        return false;
+    };
+    if action.profile_version != ProfileVersion::V2 || action.kind != kind {
+        return false;
+    }
+
+    let Some(cfg) = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    if cfg.owner != function.owner || cfg.profile_version != ProfileVersion::V2 {
+        return false;
+    }
+    if cfg.actions.len() != function.ownership.checker_ordinary_map_owned_any_v2.len()
+        || cfg.actions.len() != cfg.attempts.len()
+    {
+        return false;
+    }
+    let matching_cfg_actions = cfg
+        .actions
+        .iter()
+        .filter(|candidate| candidate.point == action.point && candidate.kind == kind)
+        .collect::<Vec<_>>();
+    let [cfg_action] = matching_cfg_actions.as_slice() else {
+        return false;
+    };
+
+    let local = MirValueId::new(format!("local:{}", cfg_action.local.0 .0)).ok();
+    let source_local = cfg_action
+        .source_local
+        .as_ref()
+        .and_then(|local| MirValueId::new(format!("local:{}", local.0 .0)).ok());
+    let key = cfg_action
+        .key_local
+        .as_ref()
+        .and_then(|local| MirValueId::new(format!("local:{}", local.0 .0)).ok())
+        .or_else(|| {
+            cfg_action
+                .key
+                .as_ref()
+                .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok())
+        });
+    let value = cfg_action
+        .value
+        .as_ref()
+        .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok());
+    let expected_result = match kind {
+        ActionKind::New | ActionKind::Clone | ActionKind::Set | ActionKind::Remove => local.clone(),
+        ActionKind::Drop => None,
+        ActionKind::Size
+        | ActionKind::HasKey
+        | ActionKind::IsEmpty
+        | ActionKind::GetAny
+        | ActionKind::Values => MirValueId::new(format!("expr:{}", action.point.0)).ok(),
+    };
+    let canonical_root_identity = format!("ordinary-map-owned-any-v2:{}", cfg_action.local.0 .0);
+    let expected_root_operand = source_local.as_ref().unwrap_or(&action.local);
+    let source_matches = match (&cfg_action.source_local, &cfg_action.source) {
+        (Some(source_local), Some(source)) => {
+            source.0 .0 == format!("ordinary-map-owned-any-v2:{}", source_local.0 .0)
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if cfg_action.profile_version != ProfileVersion::V2
+        || local.as_ref() != Some(&action.local)
+        || action.root != canonical_root_identity
+        || cfg_action.root.0 .0 != action.root
+        || action.key_node != cfg_action.key
+        || action.key_type != cfg_action.key_type
+        || action.key_local != cfg_action.key_local
+        || action.key_provenance != cfg_action.key_provenance
+        || action.key != key
+        || action.value != value
+        || action.value_type != cfg_action.value_type
+        || action.payload_clone != cfg_action.payload_clone
+        || action.source_local != source_local
+        || action.source != cfg_action.source.as_ref().map(|source| source.0 .0.clone())
+        || !source_matches
+        || action.source_node != cfg_action.source_node
+        || action.source_type != cfg_action.source_type
+        || action.result_source_type != cfg_action.result_type
+        || action.result_local != cfg_action.result_local
+        || action.result != expected_result
+        || root_operand != expected_root_operand
+        || result_operand != action.result.as_ref()
+        || key_operand != action.key.as_ref()
+        || value_operand != action.value.as_ref()
+    {
+        return false;
+    }
+
+    let attempt_kind = match kind {
+        ActionKind::New => AttemptKind::New,
+        ActionKind::Clone => AttemptKind::Clone,
+        ActionKind::Set => AttemptKind::Set,
+        ActionKind::Remove => AttemptKind::Remove,
+        ActionKind::Size => AttemptKind::Size,
+        ActionKind::HasKey => AttemptKind::HasKey,
+        ActionKind::IsEmpty => AttemptKind::IsEmpty,
+        ActionKind::GetAny => AttemptKind::GetAny,
+        ActionKind::Values => AttemptKind::Values,
+        ActionKind::Drop => AttemptKind::Drop,
+    };
+    let matching_attempts = cfg
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.point == action.point && attempt.kind == attempt_kind)
+        .collect::<Vec<_>>();
+    let [attempt] = matching_attempts.as_slice() else {
+        return false;
+    };
+    let expected_receiver = match kind {
+        ActionKind::New => None,
+        ActionKind::Clone | ActionKind::Set | ActionKind::Remove => {
+            cfg_action.source_local.as_ref()
+        }
+        ActionKind::Size
+        | ActionKind::HasKey
+        | ActionKind::IsEmpty
+        | ActionKind::GetAny
+        | ActionKind::Values
+        | ActionKind::Drop => Some(&cfg_action.local),
+    };
+    let expected_attempt_result = match kind {
+        ActionKind::New | ActionKind::Clone | ActionKind::Set | ActionKind::Remove => {
+            Some(&cfg_action.local)
+        }
+        ActionKind::GetAny | ActionKind::Values => cfg_action.result_local.as_ref(),
+        ActionKind::Size | ActionKind::HasKey | ActionKind::IsEmpty | ActionKind::Drop => None,
+    };
+    let arguments_match = match kind {
+        ActionKind::New => attempt.arguments.is_empty(),
+        ActionKind::Clone => {
+            attempt.arguments.len() == 1
+                && attempt.arguments.first() == cfg_action.source_node.as_ref()
+        }
+        ActionKind::Set => {
+            attempt.arguments.len() == 3
+                && attempt.arguments.get(1) == cfg_action.key.as_ref()
+                && attempt.arguments.get(2) == cfg_action.value.as_ref()
+        }
+        ActionKind::Remove | ActionKind::HasKey => {
+            attempt.arguments.len() == 2 && attempt.arguments.get(1) == cfg_action.key.as_ref()
+        }
+        ActionKind::Size | ActionKind::IsEmpty => attempt.arguments.len() == 1,
+        ActionKind::GetAny => {
+            attempt.arguments.len() == 2
+                && attempt.arguments.first() == cfg_action.source_node.as_ref()
+                && attempt.arguments.get(1) == cfg_action.key.as_ref()
+        }
+        ActionKind::Values => {
+            attempt.arguments.len() == 1
+                && attempt.arguments.first() == cfg_action.source_node.as_ref()
+        }
+        ActionKind::Drop => attempt.arguments.as_slice() == [cfg_action.local.0.clone()],
+    };
+    if attempt.receiver_local.as_ref() != expected_receiver
+        || attempt.result_local.as_ref() != expected_attempt_result
+        || !arguments_match
+    {
+        return false;
+    }
+
+    let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+    if key_operand.is_some_and(|key| {
+        action.key_type.as_ref() != Some(&string_type)
+            || function
+                .values
+                .get(key)
+                .is_none_or(|value| value.ty != string_type)
+    }) || value_operand.is_some_and(|payload| {
+        action.value_type.as_ref().is_none_or(|expected| {
+            function
+                .values
+                .get(payload)
+                .is_none_or(|actual| &actual.ty != expected)
+        })
+    }) {
+        return false;
+    }
+
+    let Some(root_value) = function.values.get(root_operand) else {
+        return false;
+    };
+    if root_value.ty != super::types::ordinary_map_owned_any_v2_type_id() {
+        return false;
+    }
+    if matches!(
+        kind,
+        ActionKind::New | ActionKind::Clone | ActionKind::Set | ActionKind::Remove
+    ) && result_operand.is_none_or(|result| {
+        function
+            .values
+            .get(result)
+            .is_none_or(|value| value.ty != super::types::ordinary_map_owned_any_v2_type_id())
+    }) {
+        return false;
+    }
+    match (
+        kind,
+        result_operand.and_then(|result| function.values.get(result)),
+    ) {
+        (ActionKind::Size, Some(value)) => {
+            value.ty == crate::core::ir::primitive_type_id(PrimitiveType::I32)
+        }
+        (ActionKind::HasKey | ActionKind::IsEmpty, Some(value)) => {
+            value.ty == crate::core::ir::primitive_type_id(PrimitiveType::Bool)
+        }
+        (ActionKind::GetAny, Some(value)) => {
+            value.ty == ordinary_map_owned_any_v2_get_result_type_id()
+        }
+        (ActionKind::Values, Some(value)) => value.ty == ordinary_map_owned_any_v2_values_type_id(),
+        (ActionKind::Drop, None)
+        | (ActionKind::New | ActionKind::Clone | ActionKind::Set | ActionKind::Remove, Some(_)) => {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn has_checker_ordinary_map_owned_any_v2_get_any_result(
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    result: &MirValueId,
+) -> bool {
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+    use crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind as Settlement;
+
+    let matching_actions = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .filter(|action| action.instruction == *instruction)
+        .collect::<Vec<_>>();
+    let [action] = matching_actions.as_slice() else {
+        return false;
+    };
+    if action.profile_version != ProfileVersion::V2
+        || action.kind != ActionKind::GetAny
+        || action.result.as_ref() != Some(result)
+        || action.result_source_type.is_none()
+    {
+        return false;
+    }
+    let Some(cfg) = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    if cfg.owner != function.owner || cfg.profile_version != ProfileVersion::V2 {
+        return false;
+    }
+    let matching_cfg_actions = cfg
+        .actions
+        .iter()
+        .filter(|candidate| candidate.point == action.point && candidate.kind == ActionKind::GetAny)
+        .collect::<Vec<_>>();
+    let [cfg_action] = matching_cfg_actions.as_slice() else {
+        return false;
+    };
+    let cfg_local_value = MirValueId::new(format!("local:{}", cfg_action.local.0 .0)).ok();
+    let cfg_key_value = cfg_action
+        .key_local
+        .as_ref()
+        .and_then(|local| MirValueId::new(format!("local:{}", local.0 .0)).ok())
+        .or_else(|| {
+            cfg_action
+                .key
+                .as_ref()
+                .and_then(|key| MirValueId::new(format!("expr:{}", key.0)).ok())
+        });
+    let action_matches = cfg_action.profile_version == ProfileVersion::V2
+        && cfg_local_value.as_ref() == Some(&action.local)
+        && cfg_action.root.0 .0 == action.root
+        && cfg_action.source_local.as_ref() == Some(&cfg_action.local)
+        && cfg_action.source.as_ref().map(|source| &source.0 .0) == Some(&action.root)
+        && cfg_action.source_node == action.source_node
+        && cfg_action.source_type == action.source_type
+        && cfg_action.key.as_ref() == action.key_node.as_ref()
+        && cfg_action.key_local == action.key_local
+        && cfg_key_value.as_ref() == action.key.as_ref()
+        && cfg_action.key_type == action.key_type
+        && cfg_action.result_type == action.result_source_type
+        && cfg_action.result_local == action.result_local;
+    if !action_matches {
+        return false;
+    }
+    let matching_results = cfg
+        .result_receipts
+        .iter()
+        .filter(|receipt| receipt.operation == action.point && receipt.kind == ActionKind::GetAny)
+        .collect::<Vec<_>>();
+    let [receipt] = matching_results.as_slice() else {
+        return false;
+    };
+    receipt.profile_version == ProfileVersion::V2
+        && receipt.result == action.point
+        && action
+            .result_source_type
+            .as_ref()
+            .is_some_and(|ty| receipt.result_type == *ty)
+        && Some(&receipt.binding) == action.result_local.as_ref()
+        && receipt.source_local == cfg_action.local
+        && receipt.source == cfg_action.root
+        && cfg_action.source_node.as_ref() == Some(&receipt.source_node)
+        && cfg_action.source_type.as_ref() == Some(&receipt.source_type)
+        && receipt.key == cfg_action.key
+        && receipt.key_type == cfg_action.key_type
+        && receipt.key_local == cfg_action.key_local
+        && receipt.settlement == Settlement::ExplicitDrop
+        && receipt.settlement_point.is_some()
+}
+
+fn has_checker_ordinary_map_owned_any_v2_unpack(
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    result: &MirValueId,
+    pair: &MirValueId,
+    projection: &crate::core::NodeId,
+) -> bool {
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+    use crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind as Settlement;
+
+    let Some(cfg) = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    if cfg.owner != function.owner || cfg.profile_version != ProfileVersion::V2 {
+        return false;
+    }
+    let matches = cfg
+        .unpack_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.profile_version == ProfileVersion::V2
+                && receipt.conversion_kind
+                    == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                && (receipt.conversion_to == crate::core::ir::primitive_type_id(PrimitiveType::I32)
+                    || receipt.conversion_to
+                        == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                    || function
+                        .ownership
+                        .checker_ordinary_map_owned_any_v2
+                        .iter()
+                        .any(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                                && action.value_type.as_ref() == Some(&receipt.conversion_to)
+                        }))
+                && receipt.settlement == Settlement::ExplicitDrop
+                && receipt.projection == *projection
+                && receipt.pair_binding.0 .0
+                    == pair.as_str().strip_prefix("local:").unwrap_or_default()
+                && receipt.cast.0 == result.as_str().strip_prefix("expr:").unwrap_or_default()
+                && instruction.as_str()
+                    == format!("inst:ordinary_map_owned_any_v2_unpack:{}", receipt.cast.0)
+                && receipt.operation.0.trim() != ""
+                && receipt.pair_binding_point.0.trim() != ""
+                && receipt.unpack_binding_point.0.trim() != ""
+                && receipt.settlement_point.0.trim() != ""
+        })
+        .collect::<Vec<_>>();
+    let [receipt] = matches.as_slice() else {
+        return false;
+    };
+
+    let action_matches = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .filter(|action| {
+            action.point == receipt.operation
+                && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                && action.result_local.as_ref() == Some(&receipt.pair_binding)
+                && action.result.is_some()
+        })
+        .collect::<Vec<_>>();
+    let [action] = action_matches.as_slice() else {
+        return false;
+    };
+    let get_any_instruction = action.instruction.clone();
+    let get_any_result = action.result.as_ref().expect("checked GetAny result");
+    has_checker_ordinary_map_owned_any_v2_get_any_result(
+        function,
+        &get_any_instruction,
+        get_any_result,
+    ) && function
+        .values
+        .get(pair)
+        .is_some_and(|value| value.ty == ordinary_map_owned_any_v2_get_result_type_id())
+        && function
+            .values
+            .get(result)
+            .is_some_and(|value| value.ty == receipt.conversion_to)
+}
+
+fn has_checker_ordinary_map_owned_any_v2_values_unpack(
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    result: &MirValueId,
+    values: &MirValueId,
+    index: &MirValueId,
+    projection: &crate::core::NodeId,
+) -> bool {
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+    use crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind as Settlement;
+
+    let Some(cfg) = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    if cfg.owner != function.owner || cfg.profile_version != ProfileVersion::V2 {
+        return false;
+    }
+    let candidates = cfg
+        .values_unpack_receipts
+        .iter()
+        .filter(|receipt| {
+            let expected_index = if let Some(local) = &receipt.index_local {
+                MirValueId::new(format!("local:{}", local.0 .0)).ok()
+            } else {
+                MirValueId::new(format!("expr:{}", receipt.index_expression.0)).ok()
+            };
+            receipt.profile_version == ProfileVersion::V2
+                && receipt.conversion_kind
+                    == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                && receipt.settlement == Settlement::ExplicitDrop
+                && receipt.cast.0 == result.as_str().strip_prefix("expr:").unwrap_or_default()
+                && receipt.snapshot_binding.0 .0
+                    == values.as_str().strip_prefix("local:").unwrap_or_default()
+                && expected_index.as_ref() == Some(index)
+                && receipt.index_projection == *projection
+                && instruction.as_str()
+                    == format!(
+                        "inst:ordinary_map_owned_any_v2_values_unpack:{}",
+                        receipt.cast.0
+                    )
+                && !receipt.payload_selection.is_empty()
+                && function
+                    .values
+                    .get(values)
+                    .is_some_and(|value| value.ty == ordinary_map_owned_any_v2_values_type_id())
+                && function
+                    .values
+                    .get(index)
+                    .is_some_and(|value| value.ty == receipt.index_type)
+                && function
+                    .values
+                    .get(result)
+                    .is_some_and(|value| value.ty == receipt.conversion_to)
+        })
+        .collect::<Vec<_>>();
+    let [receipt] = candidates.as_slice() else {
+        return false;
+    };
+    let values_results = cfg
+        .result_receipts
+        .iter()
+        .filter(|candidate| {
+            candidate.operation == receipt.operation
+                && candidate.kind == ActionKind::Values
+                && candidate.binding == receipt.snapshot_binding
+                && candidate.binding_point == receipt.snapshot_binding_point
+                && candidate.result_type == receipt.snapshot_type
+                && candidate.source_local == receipt.source_local
+                && candidate.source == receipt.source
+                && candidate.source_node == receipt.source_node
+                && candidate.source_type == receipt.source_type
+                && candidate.settlement == Settlement::ExplicitDrop
+                && candidate.settlement_point.as_ref() == Some(&receipt.settlement_point)
+        })
+        .count();
+    if values_results != 1 {
+        return false;
+    }
+
+    let mut current = receipt.source_local.clone();
+    let mut seen = BTreeSet::new();
+    let mut lineage = Vec::new();
+    loop {
+        if !seen.insert(current.clone()) {
+            return false;
+        }
+        let actions = cfg
+            .actions
+            .iter()
+            .filter(|action| {
+                action.local == current
+                    && matches!(
+                        action.kind,
+                        ActionKind::New | ActionKind::Clone | ActionKind::Set | ActionKind::Remove
+                    )
+            })
+            .collect::<Vec<_>>();
+        let [action] = actions.as_slice() else {
+            return false;
+        };
+        match action.kind {
+            ActionKind::New => return false,
+            ActionKind::Set => {
+                lineage.push(action.point.clone());
+                if action.payload_clone
+                    && action.value_type.as_ref() == Some(&receipt.conversion_to)
+                {
+                    return lineage == receipt.payload_selection;
+                }
+                let Some(source) = action.source_local.as_ref() else {
+                    return false;
+                };
+                current = source.clone();
+            }
+            ActionKind::Remove => {
+                lineage.push(action.point.clone());
+                let Some(source) = action.source_local.as_ref() else {
+                    return false;
+                };
+                current = source.clone();
+            }
+            ActionKind::Clone => {
+                lineage.push(action.point.clone());
+                let Some(source) = action.source_local.as_ref() else {
+                    return false;
+                };
+                current = source.clone();
+            }
+            _ => unreachable!("root action filter is exhaustive"),
+        }
+    }
+}
+
+/// Recognize a value produced by an exact V2 GetAny or Values unpack,
+/// optionally moved through same-type MIR locals. This lets the body receipt
+/// validator admit a candidate consuming field projection while keeping
+/// unrelated ManagedAny values outside its vocabulary. Type/layout/glue
+/// validity is checked by the catalog's ManagedAny flow validator before any
+/// consumer executes or emits the MIR.
+fn has_checker_ordinary_map_owned_any_v2_unpack_lineage(
+    function: &MirFunction,
+    value: &MirValueId,
+) -> bool {
+    let instructions = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .collect::<Vec<_>>();
+    let mut unpacked_values = instructions
+        .iter()
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection,
+            } => has_checker_ordinary_map_owned_any_v2_unpack(
+                function,
+                &instruction.id,
+                result,
+                pair,
+                projection,
+            )
+            .then(|| result.clone()),
+            MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                result,
+                values,
+                index,
+                projection,
+            } => has_checker_ordinary_map_owned_any_v2_values_unpack(
+                function,
+                &instruction.id,
+                result,
+                values,
+                index,
+                projection,
+            )
+            .then(|| result.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    loop {
+        let mut changed = false;
+        for instruction in &instructions {
+            let (source, result) = match &instruction.kind {
+                MirInstructionKind::Move { source, result }
+                | MirInstructionKind::Clone { source, result } => (source, result),
+                _ => continue,
+            };
+            let same_type = function
+                .values
+                .get(source)
+                .zip(function.values.get(result))
+                .is_some_and(|(source, result)| source.ty == result.ty);
+            if same_type && unpacked_values.contains(source) {
+                changed |= unpacked_values.insert(result.clone());
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    unpacked_values.contains(value)
+}
+
+fn has_checker_ordinary_map_owned_any_v2_values_result(
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    result: &MirValueId,
+) -> bool {
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+    use crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind as Settlement;
+
+    let matching_actions = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .filter(|action| action.instruction == *instruction)
+        .collect::<Vec<_>>();
+    let [action] = matching_actions.as_slice() else {
+        return false;
+    };
+    if action.profile_version != ProfileVersion::V2
+        || action.kind != ActionKind::Values
+        || action.result.as_ref() != Some(result)
+        || action.result_source_type.is_none()
+        || action.key.is_some()
+        || action.key_type.is_some()
+        || action.key_node.is_some()
+        || action.key_local.is_some()
+        || action.value.is_some()
+        || action.value_type.is_some()
+        || action.payload_clone
+    {
+        return false;
+    }
+    let Some(cfg) = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    if cfg.owner != function.owner || cfg.profile_version != ProfileVersion::V2 {
+        return false;
+    }
+    let matching_cfg_actions = cfg
+        .actions
+        .iter()
+        .filter(|candidate| candidate.point == action.point && candidate.kind == ActionKind::Values)
+        .collect::<Vec<_>>();
+    let [cfg_action] = matching_cfg_actions.as_slice() else {
+        return false;
+    };
+    let cfg_local_value = MirValueId::new(format!("local:{}", cfg_action.local.0 .0)).ok();
+    let action_matches = cfg_action.profile_version == ProfileVersion::V2
+        && cfg_local_value.as_ref() == Some(&action.local)
+        && cfg_action.root.0 .0 == action.root
+        && cfg_action.source_local.as_ref() == Some(&cfg_action.local)
+        && cfg_action.source.as_ref().map(|source| &source.0 .0) == Some(&action.root)
+        && cfg_action.source_node == action.source_node
+        && cfg_action.source_type == action.source_type
+        && cfg_action.key.is_none()
+        && cfg_action.key_type.is_none()
+        && cfg_action.value.is_none()
+        && cfg_action.value_type.is_none()
+        && !cfg_action.payload_clone
+        && cfg_action.result_type == action.result_source_type
+        && cfg_action.result_local == action.result_local;
+    if !action_matches {
+        return false;
+    }
+    let matching_results = cfg
+        .result_receipts
+        .iter()
+        .filter(|receipt| receipt.operation == action.point && receipt.kind == ActionKind::Values)
+        .collect::<Vec<_>>();
+    let [receipt] = matching_results.as_slice() else {
+        return false;
+    };
+    receipt.profile_version == ProfileVersion::V2
+        && receipt.result == action.point
+        && action
+            .result_source_type
+            .as_ref()
+            .is_some_and(|ty| receipt.result_type == *ty)
+        && Some(&receipt.binding) == action.result_local.as_ref()
+        && receipt.source_local == cfg_action.local
+        && receipt.source == cfg_action.root
+        && cfg_action.source_node.as_ref() == Some(&receipt.source_node)
+        && cfg_action.source_type.as_ref() == Some(&receipt.source_type)
+        && receipt.result == action.point
+        && receipt.key.is_none()
+        && receipt.key_type.is_none()
+        && receipt.settlement == Settlement::ExplicitDrop
+        && receipt.settlement_point.is_some()
+}
+
+fn managed_any_values_for_function(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    static_closure_values: &BTreeSet<MirValueId>,
+) -> BTreeSet<MirValueId> {
+    let mut managed_values = function
+        .values
+        .values()
+        .filter(|value| {
+            !static_closure_values.contains(&value.id)
+                && catalog.contains_dynamic_or_managed_any(&value.ty)
+        })
+        .map(|value| value.id.clone())
+        .collect::<BTreeSet<_>>();
+    // A typed AnyOwner-v2 unpack can produce a move-only concrete payload
+    // whose TypeDesc does not itself contain DynamicAny (for example the
+    // canonical `Label { text: string }` ABI). Keep that exact Checker-sealed
+    // result in the ownership ledger so a later field move cannot bypass the
+    // aggregate owner's settlement checks. Existing DynamicAny-containing
+    // values are already covered by the catalog predicate above.
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        let MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+            result,
+            pair,
+            projection,
+        } = &instruction.kind
+        else {
+            continue;
+        };
+        let Some(value) = function.values.get(result) else {
+            continue;
+        };
+        let Some(descriptor) = catalog.get(&value.ty) else {
+            continue;
+        };
+        if descriptor.ownership != MirOwnership::Copy
+            && matches!(&descriptor.layout, MirLayout::Record { .. })
+            && !catalog.contains_dynamic_or_managed_any(&value.ty)
+            && has_checker_ordinary_map_owned_any_v2_unpack(
+                function,
+                &instruction.id,
+                result,
+                pair,
+                projection,
+            )
+        {
+            managed_values.insert(result.clone());
+        }
+    }
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        let MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+            result,
+            values,
+            index,
+            projection,
+        } = &instruction.kind
+        else {
+            continue;
+        };
+        let Some(value) = function.values.get(result) else {
+            continue;
+        };
+        let Some(descriptor) = catalog.get(&value.ty) else {
+            continue;
+        };
+        if descriptor.ownership != MirOwnership::Copy
+            && matches!(&descriptor.layout, MirLayout::Record { .. })
+            && !catalog.contains_dynamic_or_managed_any(&value.ty)
+            && has_checker_ordinary_map_owned_any_v2_values_unpack(
+                function,
+                &instruction.id,
+                result,
+                values,
+                index,
+                projection,
+            )
+        {
+            managed_values.insert(result.clone());
+        }
+    }
+    // MIR materializes a let-bound cast as an exact Move from the typed cast
+    // result into its local. Carry the receipt-derived aggregate owner through
+    // those same-type owner transfers so the later field projection/Drop is
+    // checked against the live binding, not the already-consumed expression.
+    loop {
+        let transferred_records = function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| {
+                let (source, result) = match &instruction.kind {
+                    MirInstructionKind::Move { source, result }
+                    | MirInstructionKind::Clone { source, result } => (source, result),
+                    _ => return None,
+                };
+                if !managed_values.contains(source) {
+                    return None;
+                }
+                let source_type = function.values.get(source)?.ty.clone();
+                let result_value = function.values.get(result)?;
+                let result_type = &result_value.ty;
+                let descriptor = catalog.get(result_type)?;
+                (source_type == *result_type
+                    && descriptor.ownership != MirOwnership::Copy
+                    && matches!(&descriptor.layout, MirLayout::Record { .. }))
+                .then(|| result.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for result in transferred_records {
+            changed |= managed_values.insert(result);
+        }
+        if !changed {
+            break;
+        }
+    }
+    managed_values
+}
+
 pub(super) fn seal_checked_lowering(
     function: &MirFunction,
     catalog: &MirTypeCatalog,
@@ -1474,15 +2557,7 @@ pub(super) fn seal_checked_lowering(
             _ => None,
         })
         .collect::<BTreeSet<_>>();
-    let managed_values = function
-        .values
-        .values()
-        .filter(|value| {
-            !static_closure_values.contains(&value.id)
-                && catalog.contains_dynamic_or_managed_any(&value.ty)
-        })
-        .map(|value| value.id.clone())
-        .collect::<BTreeSet<_>>();
+    let managed_values = managed_any_values_for_function(function, catalog, &static_closure_values);
     if managed_values.is_empty() {
         return None;
     }
@@ -1991,6 +3066,54 @@ impl MirTypeCatalog {
         managed_values: &BTreeSet<MirValueId>,
         state: &ManagedAnyCfgFlowState,
     ) -> Result<(), String> {
+        let ordinary_map_observation = match &instruction.kind {
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, root } => Some((
+                result,
+                root,
+                crate::core::ir::primitive_type_id(PrimitiveType::I32),
+                None,
+            )),
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, root, key } => Some((
+                result,
+                root,
+                crate::core::ir::primitive_type_id(PrimitiveType::Bool),
+                Some(key),
+            )),
+            MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => Some((
+                result,
+                root,
+                crate::core::ir::primitive_type_id(PrimitiveType::Bool),
+                None,
+            )),
+            _ => None,
+        };
+        if let Some((result, root, expected_result_type, key)) = ordinary_map_observation {
+            let root_type = super::types::ordinary_map_owned_any_v2_type_id();
+            let has_checker_receipt =
+                has_checker_ordinary_map_owned_any_v2_action(function, instruction);
+            let root_is_live = managed_values.contains(root) && state.owners.contains(root);
+            let actual_root_type = Self::managed_any_value_type(function, root)?;
+            let actual_result_type = Self::managed_any_value_type(function, result)?;
+            let key_is_string = key.is_none_or(|key| self.managed_any_is_string(function, key));
+            if !has_checker_receipt
+                || !root_is_live
+                || actual_root_type != &root_type
+                || actual_result_type != &expected_result_type
+                || !key_is_string
+            {
+                return Err(format!(
+                    "ManagedAny CFG branch Map observation '{}' lacks a live root, exact result/key type, or Checker borrow receipt (checker={}, live={}, root_type={}, result_type={}, expected_result_type={}, key_is_string={})",
+                    instruction.id,
+                    has_checker_receipt,
+                    root_is_live,
+                    actual_root_type.as_str(),
+                    actual_result_type.as_str(),
+                    expected_result_type.as_str(),
+                    key_is_string,
+                ));
+            }
+            return Ok(());
+        }
         if let MirInstructionKind::ManagedAny {
             result,
             source,
@@ -2273,6 +3396,12 @@ impl MirTypeCatalog {
                         block_id
                     )
                 })?;
+                if value.ty == super::types::ordinary_map_owned_any_v2_type_id() {
+                    return Err(format!(
+                        "ManagedAny CFG block '{}' has an AnyOwner-v2 root parameter without a callable transfer receipt",
+                        block_id
+                    ));
+                }
                 let is_string = self.managed_any_is_string(function, &parameter.value);
                 let descriptor = self.get(&value.ty).ok_or_else(|| {
                     format!(
@@ -2444,6 +3573,11 @@ impl MirTypeCatalog {
                             operation: MirManagedAnyOperation::UnpackString,
                             ..
                         } => Some(result),
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, .. }
+                            if self.managed_any_is_string(function, result) =>
+                        {
+                            Some(result)
+                        }
                         MirInstructionKind::Const {
                             result,
                             literal: ResolvedLiteral::String(_),
@@ -2568,6 +3702,317 @@ impl MirTypeCatalog {
                     )?;
                 }
                 match &instruction.kind {
+                    MirInstructionKind::Clone { result, source }
+                        if function
+                            .values
+                            .get(source)
+                            .is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            }) =>
+                    {
+                        if in_read_arm {
+                            return Err(format!(
+                                "ManagedAny CFG read arm '{}' cannot clone an AnyOwner-v2 Map root",
+                                instruction.id
+                            ));
+                        }
+                        let owner_type = super::types::ordinary_map_owned_any_v2_type_id();
+                        if !has_checker_ordinary_map_owned_any_v2_action(function, instruction)
+                            || Self::managed_any_value_type(function, result)? != &owner_type
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 Clone '{}' has no exact Checker root-owner receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, source)?;
+                        self.validate_glue(&owner_type, MirGlueOperation::Clone)?;
+                        self.validate_glue(&owner_type, MirGlueOperation::Drop)?;
+                        create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
+                        if in_read_arm {
+                            return Err(format!(
+                                "ManagedAny CFG read arm '{}' cannot create an AnyOwner-v2 Map root",
+                                instruction.id
+                            ));
+                        }
+                        if !has_checker_ordinary_map_owned_any_v2_action(function, instruction)
+                            || Self::managed_any_value_type(function, result)?
+                                != &super::types::ordinary_map_owned_any_v2_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 New '{}' has no exact Checker root-owner receipt",
+                                instruction.id
+                            ));
+                        }
+                        self.validate_glue(
+                            Self::managed_any_value_type(function, result)?,
+                            MirGlueOperation::Drop,
+                        )?;
+                        create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+                        result, source, ..
+                    }
+                    | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
+                        result, source, ..
+                    } => {
+                        if in_read_arm {
+                            return Err(format!(
+                                "ManagedAny CFG read arm '{}' cannot create an AnyOwner-v2 persistent root",
+                                instruction.id
+                            ));
+                        }
+                        if !has_checker_ordinary_map_owned_any_v2_action(function, instruction)
+                            || Self::managed_any_value_type(function, source)?
+                                != &super::types::ordinary_map_owned_any_v2_type_id()
+                            || Self::managed_any_value_type(function, result)?
+                                != &super::types::ordinary_map_owned_any_v2_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 persistent update '{}' has no exact Checker root lineage receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, source)?;
+                        self.validate_glue(
+                            Self::managed_any_value_type(function, result)?,
+                            MirGlueOperation::Drop,
+                        )?;
+                        create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, root }
+                    | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { result, root, .. }
+                    | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
+                        if !has_checker_ordinary_map_owned_any_v2_action(function, instruction)
+                            || Self::managed_any_value_type(function, root)?
+                                != &super::types::ordinary_map_owned_any_v2_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 root observation '{}' has no exact Checker borrow receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, root)?;
+                        let result_type = Self::managed_any_value_type(function, result)?;
+                        if result_type == &ordinary_map_owned_any_v2_type_id()
+                            || self.contains_dynamic_or_managed_any(result_type)
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 root observation '{}' has an owner-bearing result",
+                                instruction.id
+                            ));
+                        }
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => {
+                        if !has_checker_ordinary_map_owned_any_v2_action(function, instruction)
+                            || Self::managed_any_value_type(function, root)?
+                                != &super::types::ordinary_map_owned_any_v2_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 Drop '{}' has no exact Checker owner-disposition receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, root)?;
+                        self.validate_glue(
+                            Self::managed_any_value_type(function, root)?,
+                            MirGlueOperation::Drop,
+                        )?;
+                        state.owners.remove(root);
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+                        result, root, ..
+                    } => {
+                        if in_read_arm {
+                            return Err(format!(
+                                "ManagedAny CFG read arm '{}' cannot create an AnyOwner-v2 GetAny result",
+                                instruction.id
+                            ));
+                        }
+                        if !has_checker_ordinary_map_owned_any_v2_action(function, instruction)
+                            || Self::managed_any_value_type(function, root)?
+                                != &super::types::ordinary_map_owned_any_v2_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 GetAny '{}' has no exact Checker root borrow receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, root)?;
+                        self.validate_ordinary_map_owned_any_v2_get_any_result_type(
+                            Self::managed_any_value_type(function, result)?,
+                        )?;
+                        if !has_checker_ordinary_map_owned_any_v2_get_any_result(
+                            function,
+                            &instruction.id,
+                            result,
+                        ) {
+                            return Err(format!(
+                                "AnyOwner-v2 GetAny '{}' has no exact Checker CFG result/settlement receipt",
+                                instruction.id
+                            ));
+                        }
+                        create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                        result,
+                        pair,
+                        projection,
+                    } => {
+                        if !has_checker_ordinary_map_owned_any_v2_unpack(
+                            function,
+                            &instruction.id,
+                            result,
+                            pair,
+                            projection,
+                        ) || Self::managed_any_value_type(function, pair)?
+                            != &ordinary_map_owned_any_v2_get_result_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 unpack '{}' has no exact Checker pair/projection/conversion/Drop receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, pair)?;
+                        let result_type = Self::managed_any_value_type(function, result)?;
+                        let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+                        let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                        let selected_set_payload = function
+                            .ownership
+                            .checker_ordinary_map_owned_any_v2
+                            .iter()
+                            .any(|action| {
+                                action.kind
+                                    == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                                    && action.value_type.as_ref() == Some(result_type)
+                            });
+                        if result_type != &i32_type
+                            && result_type != &string_type
+                            && !selected_set_payload
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 unpack '{}' target is outside the receipted i32/String/selected-Set profile",
+                                instruction.id
+                            ));
+                        }
+                        if result_type == &i32_type {
+                            self.validate_copy_scalar(result_type)?;
+                        } else if result_type == &string_type {
+                            self.validate_owned_string(result_type)?;
+                        }
+                        self.validate_glue(result_type, MirGlueOperation::Clone)?;
+                        self.validate_glue(result_type, MirGlueOperation::Drop)?;
+                        create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
+                        if result_type == &string_type
+                            && !state.unpacked_strings.insert(result.clone())
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 unpacked String '{}' is produced more than once",
+                                result
+                            ));
+                        }
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                        result,
+                        values,
+                        index,
+                        projection,
+                    } => {
+                        if !has_checker_ordinary_map_owned_any_v2_values_unpack(
+                            function,
+                            &instruction.id,
+                            result,
+                            values,
+                            index,
+                            projection,
+                        ) || Self::managed_any_value_type(function, values)?
+                            != &ordinary_map_owned_any_v2_values_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 Values unpack '{}' has no exact Checker snapshot/index/conversion/Drop receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, values)?;
+                        let result_type = Self::managed_any_value_type(function, result)?;
+                        let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+                        let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                        if result_type != &i32_type
+                            && result_type != &string_type
+                            && !function
+                                .ownership
+                                .checker_ordinary_map_owned_any_v2_cfg_receipt
+                                .as_ref()
+                                .is_some_and(|cfg| {
+                                    cfg.values_unpack_receipts.iter().any(|receipt| {
+                                        receipt.cast.0
+                                            == result.as_str().strip_prefix("expr:").unwrap_or_default()
+                                            && receipt.conversion_to == *result_type
+                                            && !receipt.payload_selection.is_empty()
+                                    })
+                                })
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 Values unpack '{}' target is outside its selected Set payload profile",
+                                instruction.id
+                            ));
+                        }
+                        if result_type == &i32_type {
+                            self.validate_copy_scalar(result_type)?;
+                        } else if result_type == &string_type {
+                            self.validate_owned_string(result_type)?;
+                        }
+                        self.validate_glue(result_type, MirGlueOperation::Clone)?;
+                        self.validate_glue(result_type, MirGlueOperation::Drop)?;
+                        create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
+                        if result_type == &string_type
+                            && !state.unpacked_strings.insert(result.clone())
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 Values unpacked String '{}' is produced more than once",
+                                result
+                            ));
+                        }
+                    }
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, root } => {
+                        if in_read_arm {
+                            return Err(format!(
+                                "ManagedAny CFG read arm '{}' cannot create an AnyOwner-v2 Values result",
+                                instruction.id
+                            ));
+                        }
+                        if !has_checker_ordinary_map_owned_any_v2_action(function, instruction)
+                            || Self::managed_any_value_type(function, root)?
+                                != &super::types::ordinary_map_owned_any_v2_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 Values '{}' has no exact Checker root borrow receipt",
+                                instruction.id
+                            ));
+                        }
+                        require_managed_any_cfg_owner(&state.owners, managed_values, root)?;
+                        let result_type = Self::managed_any_value_type(function, result)?;
+                        if result_type != &ordinary_map_owned_any_v2_values_type_id() {
+                            return Err(format!(
+                                "AnyOwner-v2 Values '{}' has a noncanonical MIR result TypeDesc",
+                                instruction.id
+                            ));
+                        }
+                        self.validate_list_glue(result_type, MirGlueOperation::MoveOut)?;
+                        if !has_checker_ordinary_map_owned_any_v2_values_result(
+                            function,
+                            &instruction.id,
+                            result,
+                        ) {
+                            return Err(format!(
+                                "AnyOwner-v2 Values '{}' has no exact Checker CFG result/settlement receipt",
+                                instruction.id
+                            ));
+                        }
+                        create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
+                    }
                     MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetAny { result, .. } => {
                         if in_read_arm {
                             return Err(format!(
@@ -2668,6 +4113,16 @@ impl MirTypeCatalog {
                     MirInstructionKind::Move { source, result }
                         if managed_values.contains(source) || managed_values.contains(result) =>
                     {
+                        if [source, result].iter().any(|value| {
+                            function.values.get(*value).is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            })
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root Move '{}' has no exact Checker transfer receipt",
+                                instruction.id
+                            ));
+                        }
                         require_managed_any_cfg_owner(&state.owners, managed_values, source)?;
                         if Self::managed_any_value_type(function, source)?
                             != Self::managed_any_value_type(function, result)?
@@ -2680,6 +4135,16 @@ impl MirTypeCatalog {
                     MirInstructionKind::Clone { source, result }
                         if managed_values.contains(source) || managed_values.contains(result) =>
                     {
+                        if [source, result].iter().any(|value| {
+                            function.values.get(*value).is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            })
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root Clone '{}' has no exact Checker clone receipt",
+                                instruction.id
+                            ));
+                        }
                         require_managed_any_cfg_owner(&state.owners, managed_values, source)?;
                         if Self::managed_any_value_type(function, source)?
                             != Self::managed_any_value_type(function, result)?
@@ -2695,6 +4160,14 @@ impl MirTypeCatalog {
                         create_managed_any_cfg_owner(&mut state.owners, managed_values, result)?;
                     }
                     MirInstructionKind::Drop { value } if managed_values.contains(value) => {
+                        if function.values.get(value).is_some_and(|value| {
+                            value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root Drop '{}' must use its dedicated Checker action",
+                                instruction.id
+                            ));
+                        }
                         require_managed_any_cfg_owner(&state.owners, managed_values, value)?;
                         self.validate_glue(
                             Self::managed_any_value_type(function, value)?,
@@ -2711,7 +4184,11 @@ impl MirTypeCatalog {
                     } if managed_values.contains(list) => {
                         require_managed_any_cfg_owner(&state.owners, managed_values, list)?;
                         let list_type = Self::managed_any_value_type(function, list)?;
-                        self.validate_managed_any_list_type(list_type)?;
+                        if list_type == &ordinary_map_owned_any_v2_values_type_id() {
+                            self.validate_list_glue(list_type, MirGlueOperation::MoveOut)?;
+                        } else {
+                            self.validate_managed_any_list_type(list_type)?;
+                        }
                         self.validate_list_operation_receipt(
                             Self::managed_any_value_type(function, result)?,
                             list_type,
@@ -2724,6 +4201,16 @@ impl MirTypeCatalog {
                         kind: MirAggregateKind::Tuple,
                         fields,
                     } if managed_values.contains(result) => {
+                        if fields.iter().any(|field| {
+                            function.values.get(field).is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            })
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root aggregate construction '{}' has no exact Checker transfer receipt",
+                                instruction.id
+                            ));
+                        }
                         let result_type = Self::managed_any_value_type(function, result)?;
                         self.validate_recursive_tuple_abi(result_type)?;
                         let Some(MirLayout::Tuple(elements)) = self
@@ -2761,7 +4248,26 @@ impl MirTypeCatalog {
                         projection: MirProjection::Tuple(index),
                         ..
                     } if managed_values.contains(base) => {
+                        if Self::managed_any_value_type(function, result)?
+                            == &super::types::ordinary_map_owned_any_v2_type_id()
+                        {
+                            return Err(format!(
+                                "AnyOwner-v2 root projection '{}' has no exact Checker transfer receipt",
+                                instruction.id
+                            ));
+                        }
                         require_managed_any_cfg_owner(&state.owners, managed_values, base)?;
+                        if Self::managed_any_value_type(function, base)?
+                            == &ordinary_map_owned_any_v2_get_result_type_id()
+                            && (*index != 0
+                                || Self::managed_any_value_type(function, result)?
+                                    != &crate::core::ir::primitive_type_id(PrimitiveType::Bool))
+                        {
+                            return Err(
+                                "AnyOwner-v2 GetAny permits only its non-owning bool result projection"
+                                    .into(),
+                            );
+                        }
                         self.validate_projection(
                             Self::managed_any_value_type(function, base)?,
                             Self::managed_any_value_type(function, result)?,
@@ -2783,6 +4289,16 @@ impl MirTypeCatalog {
                         || managed_values.contains(result)
                         || self.managed_any_is_string(function, result) =>
                     {
+                        if [base, result].iter().any(|value| {
+                            function.values.get(*value).is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            })
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root projection move '{}' has no exact Checker transfer receipt",
+                                instruction.id
+                            ));
+                        }
                         if !managed_values.contains(base) {
                             return Err(format!(
                                 "ManagedAny MoveProject '{}' has no tracked aggregate owner",
@@ -2819,6 +4335,16 @@ impl MirTypeCatalog {
                         || managed_values.contains(result)
                         || self.managed_any_is_string(function, result) =>
                     {
+                        if [base, result].iter().any(|value| {
+                            function.values.get(*value).is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            })
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root residual projection '{}' has no exact Checker transfer receipt",
+                                instruction.id
+                            ));
+                        }
                         if !managed_values.contains(base) {
                             return Err(format!(
                                 "ManagedAny MoveProjectDrop '{}' has no tracked aggregate owner",
@@ -2867,6 +4393,20 @@ impl MirTypeCatalog {
                     | MirInstructionKind::ClosureInvoke {
                         result, arguments, ..
                     } => {
+                        if arguments.iter().any(|argument| {
+                            function.values.get(argument).is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            })
+                        }) || result.as_ref().is_some_and(|result| {
+                            function.values.get(result).is_some_and(|value| {
+                                value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                            })
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root callable transfer '{}' has no exact Checker boundary receipt",
+                                instruction.id
+                            ));
+                        }
                         for argument in arguments {
                             require_managed_any_cfg_owner(&state.owners, managed_values, argument)?;
                             if managed_values.contains(argument) {
@@ -2899,6 +4439,39 @@ impl MirTypeCatalog {
                                 }
                             }
                         }
+                    }
+                    MirInstructionKind::BuiltinCall {
+                        result,
+                        kind: super::types::MirBuiltinKind::PrintlnString,
+                        arguments,
+                        string_field_contract: None,
+                    } if arguments
+                        .iter()
+                        .any(|argument| state.unpacked_strings.contains(argument)) =>
+                    {
+                        let [argument] = arguments.as_slice() else {
+                            return Err(format!(
+                                "ManagedAny-derived String println '{}' does not have one exact argument",
+                                instruction.id
+                            ));
+                        };
+                        if !state.unpacked_strings.contains(argument)
+                            || !self.managed_any_is_string(function, argument)
+                            || function.values.get(result).is_none_or(|value| {
+                                value.ty
+                                    != crate::core::ir::primitive_type_id(PrimitiveType::Unit)
+                            })
+                        {
+                            return Err(format!(
+                                "ManagedAny-derived String println '{}' disagrees with its owned String/Unit ABI",
+                                instruction.id
+                            ));
+                        }
+                        self.validate_glue(
+                            Self::managed_any_value_type(function, argument)?,
+                            MirGlueOperation::MoveOut,
+                        )?;
+                        state.unpacked_strings.remove(argument);
                     }
                     MirInstructionKind::Drop { value }
                         if state.unpacked_strings.contains(value) =>
@@ -3045,6 +4618,14 @@ impl MirTypeCatalog {
                 }
                 MirTerminator::Return { value } => {
                     if let Some(value) = value {
+                        if function.values.get(value).is_some_and(|value| {
+                            value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                        }) {
+                            return Err(format!(
+                                "AnyOwner-v2 root return from '{}' has no exact Checker escape receipt",
+                                block_id
+                            ));
+                        }
                         if managed_values.contains(value) {
                             require_managed_any_cfg_owner(&state.owners, managed_values, value)?;
                             state.owners.remove(value);
@@ -3059,8 +4640,8 @@ impl MirTypeCatalog {
                     }
                     if !state.owners.is_empty() || !state.unpacked_strings.is_empty() {
                         return Err(format!(
-                            "ManagedAny owners or unpacked String values remain live at return from '{}'",
-                            block_id
+                            "ManagedAny owners or unpacked String values remain live at return from '{}': owners={:?}, unpacked_strings={:?}",
+                            block_id, state.owners, state.unpacked_strings
                         ));
                     }
                 }
@@ -3710,15 +5291,21 @@ impl MirTypeCatalog {
         function: &MirFunction,
         static_closure_values: &BTreeSet<MirValueId>,
     ) -> Result<(), String> {
-        let managed_values = function
-            .values
-            .values()
-            .filter(|value| {
-                !static_closure_values.contains(&value.id)
-                    && self.contains_dynamic_or_managed_any(&value.ty)
+        let v2_root_type = super::types::ordinary_map_owned_any_v2_type_id();
+        if function.result == v2_root_type
+            || function.parameters.iter().any(|parameter| {
+                function
+                    .values
+                    .get(parameter)
+                    .is_some_and(|value| value.ty == v2_root_type)
             })
-            .map(|value| value.id.clone())
-            .collect::<BTreeSet<_>>();
+        {
+            return Err(
+                "AnyOwner-v2 callable root parameters/returns need an exact Checker boundary receipt"
+                    .into(),
+            );
+        }
+        let managed_values = managed_any_values_for_function(function, self, static_closure_values);
         let any_in_signature = self.contains_dynamic_or_managed_any(&function.result)
             || function.parameters.iter().any(|parameter| {
                 function
@@ -5557,7 +7144,10 @@ func main() -> i32 {
         for (_, origin, instruction) in pattern_instructions {
             assert!(
                 source_cfg.reachable_blocks.values().any(|block| {
-                    block.points.iter().any(|point| &point.source.node == origin)
+                    block
+                        .points
+                        .iter()
+                        .any(|point| &point.source.node == origin)
                 }),
                 "synthetic pattern instruction '{}' must use its enclosing Checker binding point '{}'",
                 instruction.id,

@@ -49,10 +49,13 @@ pub fn verify_mir(
     program: &crate::core::mir::reference::MirProgram,
     source_hash: String,
 ) -> Result<Vec<VerificationResult>, String> {
-    let receipt = program.route_receipt("verifier-mir-v1");
-    let results = verify_mir_results_with_route_receipt(program, source_hash.clone(), &receipt)?;
-    validate_mir_result_provenance(&results, &receipt, &source_hash, "verify_mir")?;
-    Ok(results)
+    let profile = if mir_program_has_ordinary_map_owned_any_v2_actions(program) {
+        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND
+    } else {
+        "verifier-mir-v1"
+    };
+    let receipt = program.route_receipt(profile);
+    verify_mir_with_route_receipt(program, &receipt, source_hash)
 }
 
 fn verify_mir_results_with_route_receipt(
@@ -79,7 +82,9 @@ pub fn verify_mir_with_route_receipt(
                 crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
             )
         })?;
+    validate_ordinary_map_owned_any_v2_receipt_binding(program, receipt)?;
     let results = verify_mir_results_with_route_receipt(program, source_hash.clone(), receipt)?;
+    let results = enforce_ordinary_map_owned_any_v2_mir_readiness(program, receipt, results);
     validate_mir_result_provenance(
         &results,
         receipt,
@@ -87,6 +92,54 @@ pub fn verify_mir_with_route_receipt(
         "verify_mir_with_route_receipt",
     )?;
     Ok(results)
+}
+
+/// Internal verifier diagnostic path. It validates graph identity and keeps
+/// raw symbolic observations so the CheckedProgram layer can add one
+/// source-owner NITS row after correlating MIR owner IDs with source names.
+/// Public execution-verifier APIs must use `verify_mir_with_route_receipt`.
+fn verify_mir_diagnostic_with_route_receipt(
+    program: &crate::core::mir::reference::MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            format!(
+                "{}: canonical route receipt rejected: {message}",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            )
+        })?;
+    let results = verify_mir_results_with_route_receipt(program, source_hash.clone(), receipt)?;
+    validate_mir_result_provenance(&results, receipt, &source_hash, "verifier_diagnostic")?;
+    Ok(results)
+}
+
+fn mir_program_has_ordinary_map_owned_any_v2_actions(
+    program: &crate::core::mir::reference::MirProgram,
+) -> bool {
+    program.functions().values().any(|function| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owned_any_v2_actions()
+    })
+}
+
+fn validate_ordinary_map_owned_any_v2_receipt_binding(
+    program: &crate::core::mir::reference::MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), String> {
+    let program_has_v2 = mir_program_has_ordinary_map_owned_any_v2_actions(program);
+    let receipt_is_v2 = receipt.profile == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND;
+    if program_has_v2 != receipt_is_v2 {
+        return Err(format!(
+            "{}: ordinary Map/Any owner-v2 MIR and route receipt profile must be bound together (program_v2={program_has_v2}, receipt_profile='{}')",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            receipt.profile
+        ));
+    }
+    Ok(())
 }
 
 /// Enforce that one MIR verifier result batch carries one immutable execution
@@ -162,6 +215,17 @@ pub fn canonical_execution_route_verifier_ready(
     allow_recoverable_float_boundary: bool,
     allow_flow_union_boundary: bool,
 ) -> bool {
+    if !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+        && results.iter().any(|result| {
+            result.artifact.as_ref().is_some_and(|artifact| {
+                artifact.mir_route_receipt.as_ref().is_some_and(|receipt| {
+                    receipt.profile == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND
+                })
+            })
+        })
+    {
+        return false;
+    }
     let runtime_only_boundary = |result: &VerificationResult| {
         result.status == VerifStatus::NotInTrustedSubset
             && ((allow_recoverable_float_boundary
@@ -320,6 +384,166 @@ fn deferred_verification_results(
             }
         })
         .collect()
+}
+
+/// Enforce the checked verifier's owner-scoped V2 coverage boundary. MIR
+/// observations remain useful for staged diagnostics, but neither staged nor
+/// incomplete coverage may leave a proof-shaped result for one of its source
+/// owners. Results for unrelated callable owners stay intact alongside these
+/// explicit boundaries.
+pub(super) fn enforce_ordinary_map_owned_any_v2_coverage(
+    program: &crate::core::CheckedProgram,
+    mut results: Vec<VerificationResult>,
+) -> Vec<VerificationResult> {
+    let admission =
+        crate::core::mir::classify_canonical_mir_route_admission(program).ordinary_map_owned_any_v2;
+    let coverage = match admission {
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::StagedGetValues => "StagedGetValues",
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage => {
+            "IncompleteCoverage"
+        }
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+            if !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY =>
+        {
+            "CompleteCoverage (production readiness disabled)"
+        }
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::OutsideProfile
+        | crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage => return results,
+    };
+    let owners = program
+        .resource_analyses()
+        .iter()
+        .filter_map(|(owner, analysis)| {
+            (!analysis.ordinary_map_owned_any_v2_actions.is_empty()
+                || !analysis
+                    .ordinary_map_owned_any_v2_operation_attempts
+                    .is_empty())
+            .then_some(owner.clone())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for owner in owners {
+        let name = program
+            .functions()
+            .get(&owner)
+            .map(|function| function.qualified_name.clone())
+            .unwrap_or_else(|| owner.0.clone());
+        let message = format!(
+            "{}: ordinary Map/Any owner-v2 callable '{}' remains NotInTrustedSubset because Checker admission is {coverage} and V2 production readiness is disabled",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            name
+        );
+        let span = program
+            .node_meta()
+            .get(&owner)
+            .map(|meta| meta.origin.user_span())
+            .or_else(|| program.entry_span())
+            .unwrap_or(crate::span::Span::UNKNOWN);
+        let mut matched = false;
+        for result in &mut results {
+            // The owner NodeId is the identity boundary. Public result rows
+            // use the checked callable's qualified source name, so match it
+            // exactly (or its canonical `function:` spelling) rather than
+            // relying on substring/name suffix heuristics.
+            let result_owner = result
+                .func_name
+                .strip_prefix("function:")
+                .unwrap_or(&result.func_name);
+            if result_owner != name && result.func_name != owner.0 {
+                continue;
+            }
+            matched = true;
+            result.status = VerifStatus::NotInTrustedSubset;
+            result.message = message.clone();
+            result.diagnostic = Some(crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                message.clone(),
+                span,
+            ));
+            result.duration_us = 0;
+            result.constraint_count = 0;
+            result.artifact = None;
+            result.trusted_subset_domain = Some(TrustedSubsetDomain::Contract);
+        }
+        if !matched {
+            results.push(VerificationResult {
+                func_name: format!("{name} [ordinary-map-owned-any-v2 coverage]"),
+                status: VerifStatus::NotInTrustedSubset,
+                diagnostic: Some(crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    message.clone(),
+                    span,
+                )),
+                message,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+            });
+        }
+    }
+    results
+}
+
+/// Make the public MIR proof API's result batch visibly diagnostic while
+/// owner-v2 production readiness is closed. The verifier may still analyze
+/// the MIR, but neither a proof artifact nor a `Proven` owner row can be fed
+/// through the public execution-readiness predicate.
+fn enforce_ordinary_map_owned_any_v2_mir_readiness(
+    program: &crate::core::mir::reference::MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    mut results: Vec<VerificationResult>,
+) -> Vec<VerificationResult> {
+    if crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+        || receipt.profile != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND
+    {
+        return results;
+    }
+    for (owner, function) in program.functions().iter().filter(|(_, function)| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owned_any_v2_actions()
+    }) {
+        let message = format!(
+            "{}: ordinary Map/Any owner-v2 callable '{}' is diagnostic-only while V2 production readiness is disabled",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            owner.0
+        );
+        let mut matched = false;
+        for result in &mut results {
+            if result.func_name != owner.0 {
+                continue;
+            }
+            matched = true;
+            result.status = VerifStatus::NotInTrustedSubset;
+            result.message = message.clone();
+            result.diagnostic = Some(crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                message.clone(),
+                crate::span::Span::UNKNOWN,
+            ));
+            result.duration_us = 0;
+            result.constraint_count = 0;
+            result.artifact = None;
+            result.trusted_subset_domain = Some(TrustedSubsetDomain::Contract);
+        }
+        if !matched {
+            results.push(VerificationResult {
+                func_name: owner.0.clone(),
+                status: VerifStatus::NotInTrustedSubset,
+                message: message.clone(),
+                diagnostic: Some(crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    message,
+                    crate::span::Span::UNKNOWN,
+                )),
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+            });
+        }
+    }
+    results
 }
 
 fn actor_ffi_error_result(message: String) -> VerificationResult {
@@ -547,6 +771,7 @@ pub fn verify_source_with(
     let admission = crate::core::mir::classify_canonical_mir_route_admission(&program);
     if admission.map_root.is_candidate()
         || admission.map_any_owner.is_candidate()
+        || admission.ordinary_map_owned_any_v2.has_profile_signal()
         || admission
             .ordinary_map_owner_lifecycle_i32_string_v1
             .has_profile_signal()
@@ -607,6 +832,14 @@ fn validate_public_verifier_mir_boundary(
     if admission.map_any_owner.is_candidate() && !admission.map_any_owner_complete() {
         return Err(format!(
             "{}: Checker recognized a MapAnyOwner v1 candidate but withheld its complete independent lifecycle receipt",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if admission.ordinary_map_owned_any_v2
+        == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage
+    {
+        return Err(format!(
+            "{}: Checker recognized an ordinary Map/Any owner-v2 candidate but withheld complete operation-attempt and result-receipt coverage",
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
     }
@@ -840,6 +1073,29 @@ pub fn verify_checked(
     validate_public_verifier_mir_boundary(program)?;
     let z3_available = is_z3_available();
     let actor_compatibility = is_actor_proof_compatibility(program);
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if z3_available
+        && admission.ordinary_map_owned_any_v2
+            == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+    {
+        return verify_staged_ordinary_map_owned_any_v2(program, source_hash);
+    }
+    // A complete owner-v2 profile remains diagnostic-only while the shared
+    // production gate is closed. Keep this ahead of the generic typed request
+    // fast path so a future request model cannot produce a proof artifact for
+    // an owner whose backend route is not production-ready.
+    if z3_available
+        && admission.ordinary_map_owned_any_v2
+            == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+        && !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+    {
+        return verify_closed_mir_program(program, source_hash)?.ok_or_else(|| {
+            format!(
+                "{}: complete ordinary Map/Any owner-v2 diagnostic verifier did not materialize a route",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )
+        });
+    }
     let deferred_boundaries = if z3_available {
         match mir_request::prepare(program) {
             mir_request::Preparation::Complete(request) => {
@@ -1528,6 +1784,7 @@ fn verify_dual_literal_ffi_declaration_root(
     if crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_admitted(admission)
         || admission.map_root.is_candidate()
         || admission.map_any_owner.is_candidate()
+        || admission.ordinary_map_owned_any_v2.has_profile_signal()
         || admission
             .ordinary_map_owner_lifecycle_i32_string_v1
             .has_profile_signal()
@@ -1806,16 +2063,38 @@ pub fn verify_checked_dual(
         return Ok(ctx::mock_verify_checked(program));
     }
 
-    // Ordinary Map/Any ownership is a checker-owned canonical profile.  Once
-    // its receipt is complete, running the retained Resolved body verifier
-    // first would manufacture an E0439 disagreement for obligations that the
-    // canonical MIR verifier already proves (the Resolved encoder does not
-    // model the Map/Any i32 definedness facts).  Bind this profile directly to
-    // the same receipt consumed by the single-engine verifier.  Incomplete
-    // candidates still fall through to the explicit coverage path below.
+    // Owner-v2 is a checker-owned canonical profile, but CompleteCoverage is
+    // still diagnostic-only while the shared production gate is closed. Keep
+    // it out of the generic typed-request merge so a raw MIR proof cannot be
+    // counted as production readiness; the internal profile verifier adds
+    // the owner-scoped NITS result after collecting diagnostic observations.
     let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    match admission.ordinary_map_owned_any_v2 {
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::StagedGetValues => {
+            return verify_staged_ordinary_map_owned_any_v2(program, source_hash);
+        }
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+            if !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY =>
+        {
+            return verify_closed_mir_program(program, source_hash)?.ok_or_else(|| {
+                format!(
+                    "{}: complete ordinary Map/Any owner-v2 diagnostic verifier did not materialize a route",
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                )
+            });
+        }
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage => {
+            return Err(format!(
+                "{}: Checker recognized an ordinary Map/Any owner-v2 candidate but withheld complete operation-attempt and result-receipt coverage",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::OutsideProfile
+        | crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage => {}
+    }
     let map_profile_complete = admission.map_root_complete()
         || admission.map_any_owner_complete()
+        || admission.ordinary_map_owned_any_v2_complete()
         || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete()
         || admission.ordinary_map_owned_get_i32_string_v1_complete();
     if map_profile_complete {
@@ -2125,6 +2404,14 @@ fn verify_closed_mir_program(
         return Ok(None);
     }
     let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if admission.ordinary_map_owned_any_v2
+        == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage
+    {
+        return Err(format!(
+            "{}: Checker recognized an ordinary Map/Any owner-v2 candidate but withheld complete operation-attempt and result-receipt coverage",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
     if admission
         .ordinary_map_owned_get_i32_string_v1
         .has_profile_signal()
@@ -2156,9 +2443,10 @@ fn verify_closed_mir_program(
         return Ok(None);
     }
 
-    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 27] = [
+    const PROFILES: [crate::core::mir::CanonicalMirRouteProfile; 28] = [
         crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
         crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1,
+        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
         crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1,
         crate::core::mir::CanonicalMirRouteProfile::MapRoot,
         crate::core::mir::CanonicalMirRouteProfile::ScalarActor,
@@ -2191,6 +2479,21 @@ fn verify_closed_mir_program(
         }
     }
     Ok(None)
+}
+
+/// Run the staged V2 consumer through canonical MIR for diagnostic evidence.
+/// Its owner-scoped coverage NITS are appended by `verify_closed_mir_profile`;
+/// callers must not fall through to a compatibility proof engine.
+fn verify_staged_ordinary_map_owned_any_v2(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    verify_closed_mir_program(program, source_hash)?.ok_or_else(|| {
+        format!(
+            "{}: staged ordinary Map/Any owner-v2 consumer did not materialize a verifier profile",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        )
+    })
 }
 
 pub(crate) fn verify_scalar_actor_checked(
@@ -2302,6 +2605,28 @@ fn verify_closed_mir_profile(
             crate::codegen::mir::validate_mir_native(&canonical).map_err(|errors| {
                 format!(
                     "MIR-CAPABILITY-001: canonical verifier rejected the MapRoot native consumer: {errors:?}"
+                )
+            })?;
+        }
+        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2 => {
+            crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the ordinary Map/Any owner-v2 capability: {errors:?}"
+                )
+            })?;
+            let receipt = canonical.route_receipt(profile.as_str());
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(
+                &canonical,
+                &receipt,
+            )
+            .map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the ordinary Map/Any owner-v2 bytecode consumer: {errors:?}"
+                )
+            })?;
+            crate::codegen::mir::validate_mir_native(&canonical).map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: canonical verifier rejected the ordinary Map/Any owner-v2 native consumer: {errors:?}"
                 )
             })?;
         }
@@ -2459,9 +2784,10 @@ fn verify_closed_mir_profile(
             | crate::core::mir::CanonicalMirRouteProfile::ScalarNested
             | crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleI32StringV1
             | crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1
+            | crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2
     ) {
         let receipt = canonical.route_receipt(profile.as_str());
-        crate::verifier::verify_mir_with_route_receipt(&canonical, &receipt, source_hash)?
+        verify_mir_diagnostic_with_route_receipt(&canonical, &receipt, source_hash)?
     } else {
         crate::verifier::verify_mir(&canonical, source_hash)?
     };
@@ -2497,6 +2823,11 @@ fn verify_closed_mir_profile(
             result.func_name = name.to_string();
         }
     }
+    if profile == crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2
+        && !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+    {
+        results = enforce_ordinary_map_owned_any_v2_coverage(program, results);
+    }
     Ok(Some(results))
 }
 
@@ -2510,6 +2841,22 @@ fn materialize_closed_mir_island(
     island: crate::core::mir::CanonicalMirRouteProfile,
 ) -> Result<Option<crate::core::mir::reference::MirProgram>, String> {
     let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    if island == crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2
+        && admission.ordinary_map_owned_any_v2
+            == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage
+    {
+        return Err(format!(
+            "{}: Checker recognized an ordinary Map/Any owner-v2 candidate but withheld complete operation-attempt and result-receipt coverage",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    let v2_verifier_diagnostic = island
+        == crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2
+        && (admission.ordinary_map_owned_any_v2
+            == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::StagedGetValues
+            || (admission.ordinary_map_owned_any_v2
+                == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
+                && !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY));
     let ordinary_map_v1_exception = admission.map_any_owner_complete()
         && program
             .resource_analyses()
@@ -2522,6 +2869,7 @@ fn materialize_closed_mir_island(
     // a compatibility/mock result for a program the run/build route rejects.
     let conflicting_map_owner_ffi_profiles = (admission.map_root_complete()
         || admission.map_any_owner_complete()
+        || admission.ordinary_map_owned_any_v2_complete()
         || admission.ordinary_map_owned_get_i32_string_v1_complete()
         || admission.ordinary_map_owner_lifecycle_i32_string_v1_complete())
         && admission.scalar_ffi;
@@ -2585,6 +2933,13 @@ fn materialize_closed_mir_island(
                 "MIR-VERIFY-001: ordinary Map owned-get Checker receipt profile requires the MIR contract verifier; compatibility fallback is forbidden".into(),
             );
         }
+        if island == crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2
+            && admission.ordinary_map_owned_any_v2_complete()
+        {
+            return Err(
+                "MIR-VERIFY-001: ordinary Map/Any owner-v2 Checker receipt profile requires the MIR contract verifier; compatibility fallback is forbidden".into(),
+            );
+        }
         if island == crate::core::mir::CanonicalMirRouteProfile::MapRoot
             && admission.map_root_complete()
         {
@@ -2603,10 +2958,17 @@ fn materialize_closed_mir_island(
         // without Z3 the public API does not claim a MIR proof.
         return Ok(None);
     }
-    if !island.is_admitted(admission) {
+    if !island.is_admitted(admission) && !v2_verifier_diagnostic {
         return Ok(None);
     }
-    let route = match crate::core::mir::materialize_canonical_mir_route(program, None) {
+    let materialized_route = if v2_verifier_diagnostic {
+        crate::core::mir::materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics(
+            program, None,
+        )
+    } else {
+        crate::core::mir::materialize_canonical_mir_route(program, None)
+    };
+    let route = match materialized_route {
         Ok(route) => route,
         Err(crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility { .. }) => {
             return Ok(None)
@@ -2618,7 +2980,13 @@ fn materialize_closed_mir_island(
             return Err(format!("{code}: {error}"));
         }
     };
-    if !island.is_materialized(&route) {
+    let nonproduction_v2_has_checker_actions = v2_verifier_diagnostic
+        && route.program.functions().values().any(|function| {
+            function
+                .ownership
+                .has_checker_ordinary_map_owned_any_v2_actions()
+        });
+    if !island.is_materialized(&route) && !nonproduction_v2_has_checker_actions {
         return Err(format!(
             "{}: {} admission did not materialize its canonical operation",
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,

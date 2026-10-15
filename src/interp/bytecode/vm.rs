@@ -11,8 +11,19 @@ use super::registry::{self, BuiltinFastPath, BuiltinRegistry};
 use crate::ast::Lit;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Weak};
+
+/// i32 bytes copied alongside an Any-v2 owner at GetAny/Values creation. The Any-v2
+/// payload is intentionally private in `value.rs`; this VM-local backing is
+/// the extraction path for Copy i32 and is keyed by the exact owner Arc
+/// identity. Owned String extraction copies directly from the private Any
+/// token into a separate result allocation.
+struct OrdinaryMapOwnedAnyV2I32UnpackBacking {
+    owner: Weak<crate::interp::value::CanonicalManagedAnyV2>,
+    type_id: crate::core::ResolvedTypeId,
+    value: i32,
+}
 
 /// A single function activation frame.
 struct Frame {
@@ -107,6 +118,11 @@ pub struct BytecodeVM {
     program: std::sync::Arc<BytecodeProgram>,
     /// Call stack of frames.
     stack: Vec<Frame>,
+    /// Exact i32 payload snapshots for Any-v2 owners created by V2 GetAny.
+    /// Weak owner keys preserve identity through register moves without
+    /// extending the checked pair's lifetime.
+    ordinary_map_owned_any_v2_i32_unpack_backings:
+        HashMap<usize, OrdinaryMapOwnedAnyV2I32UnpackBacking>,
     /// Captured stdout output (for testing).
     stdout: String,
     /// Shared stdout capture buffer (for actor worker threads).
@@ -158,6 +174,18 @@ fn ordinary_map_owned_get_allocation_checkpoint() -> Result<(), ()> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_root_publish_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_root_publish_checkpoint_for_test()
+            .map_err(|_| {
+                InterpError::new("[E0800] ordinary Map/Any owner-v2 root publication failed")
+            });
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn try_copy_ordinary_map_owned_get_string(value: &str, reserve_terminator: bool) -> Option<String> {
     let needs_terminator = value.is_empty() || value.as_bytes().last() != Some(&0);
     let capacity = if reserve_terminator && needs_terminator {
@@ -170,6 +198,299 @@ fn try_copy_ordinary_map_owned_get_string(value: &str, reserve_terminator: bool)
     copy.try_reserve_exact(capacity).ok()?;
     copy.push_str(value);
     Some(copy)
+}
+
+fn clone_ordinary_map_owned_any_v2_entries(
+    root: &BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value>,
+) -> Result<BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value>, InterpError>
+{
+    let mut entries = BTreeMap::new();
+    for (key, value) in root {
+        let key = try_copy_ordinary_map_owned_get_string(key, false)
+            .ok_or_else(|| InterpError::new("ordinary Map/Any owner-v2 root snapshot failed"))?;
+        let value = match value {
+            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 { type_id, value } => {
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                    type_id: type_id.clone(),
+                    value: *value,
+                }
+            }
+            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String { type_id, text } => {
+                let text =
+                    try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+                        InterpError::new("ordinary Map/Any owner-v2 root snapshot failed")
+                    })?;
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
+                    type_id: type_id.clone(),
+                    text: Arc::new(text),
+                }
+            }
+            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                type_id,
+                nominal,
+                text,
+            } => {
+                let text =
+                    try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+                        InterpError::new("ordinary Map/Any owner-v2 root snapshot failed")
+                    })?;
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                    type_id: type_id.clone(),
+                    nominal: nominal.clone(),
+                    text: Arc::new(text),
+                }
+            }
+        };
+        entries.insert(key, value);
+    }
+    Ok(entries)
+}
+
+fn stage_ordinary_map_owned_any_v2_set_payload(
+    value: &Value,
+    binding: &super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+) -> Result<crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value, InterpError> {
+    use crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value as Payload;
+
+    match (&binding.kind, value) {
+        (super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32, Value::Int(value)) => {
+            Ok(Payload::I32 {
+                type_id: binding.type_id.clone(),
+                value: i32::try_from(*value).map_err(|_| {
+                    InterpError::integer_overflow(
+                        "E0802: ordinary Map/Any owner-v2 Set value overflows i32",
+                    )
+                })?,
+            })
+        }
+        (super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String, Value::String(text)) => {
+            let text = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+                InterpError::new("ordinary Map/Any owner-v2 Set String snapshot failed")
+            })?;
+            Ok(Payload::String {
+                type_id: binding.type_id.clone(),
+                text: Arc::new(text),
+            })
+        }
+        (
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record {
+                nominal: expected_nominal,
+            },
+            Value::Record(Some(actual_nominal), fields),
+        ) if actual_nominal == expected_nominal
+            && fields.len() == 1
+            && fields.contains_key("text") =>
+        {
+            let Value::String(text) = fields.get("text").expect("checked field") else {
+                return Err(InterpError::new(format!(
+                    "ordinary Map/Any owner-v2 Set TypeDesc '{}' has a non-String text field",
+                    binding.type_id.as_str()
+                )));
+            };
+            let text = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+                InterpError::new("ordinary Map/Any owner-v2 Set record snapshot failed")
+            })?;
+            Ok(Payload::Record {
+                type_id: binding.type_id.clone(),
+                nominal: actual_nominal.clone(),
+                text: Arc::new(text),
+            })
+        }
+        (_, other) => Err(InterpError::new(format!(
+            "ordinary Map/Any owner-v2 Set value does not match bound TypeDesc '{}': got {other}",
+            binding.type_id.as_str()
+        ))),
+    }
+}
+
+fn copy_ordinary_map_owned_any_v2_payload(
+    payload: &crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value,
+    binding: &super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+) -> Result<crate::interp::value::CanonicalManagedAnyV2, InterpError> {
+    use crate::interp::value::{
+        CanonicalManagedAnyV2, CanonicalOrdinaryMapOwnedAnyV2Value as Payload,
+    };
+    match (payload, &binding.kind) {
+        (
+            Payload::I32 { type_id, value },
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32,
+        ) if type_id == &binding.type_id => {
+            Ok(CanonicalManagedAnyV2::from_i32(type_id.clone(), *value))
+        }
+        (
+            Payload::String { type_id, text },
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String,
+        ) if type_id == &binding.type_id => {
+            let text = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+                InterpError::new("ordinary Map/Any owner-v2 GetAny snapshot failed")
+            })?;
+            Ok(CanonicalManagedAnyV2::from_string(type_id.clone(), text))
+        }
+        (
+            Payload::Record {
+                type_id,
+                nominal,
+                text,
+            },
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record {
+                nominal: expected_nominal,
+            },
+        ) if type_id == &binding.type_id && nominal == expected_nominal => {
+            let text = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+                InterpError::new("ordinary Map/Any owner-v2 GetAny snapshot failed")
+            })?;
+            Ok(CanonicalManagedAnyV2::from_record(
+                type_id.clone(),
+                nominal.clone(),
+                text,
+            ))
+        }
+        _ => Err(InterpError::new(format!(
+            "ordinary Map/Any owner-v2 GetAny payload does not match its Core-selected TypeDesc '{}'",
+            binding.type_id.as_str()
+        ))),
+    }
+}
+
+fn copy_ordinary_map_owned_any_v2_string_for_unpack(
+    owner: &crate::interp::value::CanonicalManagedAnyV2,
+    expected_type_id: &crate::core::ResolvedTypeId,
+) -> Result<String, InterpError> {
+    let text = owner.string_for_type_id(expected_type_id).ok_or_else(|| {
+        InterpError::new(
+            "ordinary Map/Any owner-v2 unpack String payload TypeDesc does not exactly match its target",
+        )
+    })?;
+    try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+        InterpError::new("ordinary Map/Any owner-v2 unpack String result snapshot failed")
+    })
+}
+
+fn copy_ordinary_map_owned_any_v2_record_for_unpack(
+    owner: &crate::interp::value::CanonicalManagedAnyV2,
+    expected_type_id: &crate::core::ResolvedTypeId,
+    expected_nominal: &str,
+) -> Result<Value, InterpError> {
+    let text = owner
+        .record_text_for_type_id(expected_type_id, expected_nominal)
+        .ok_or_else(|| {
+            InterpError::new(
+                "ordinary Map/Any owner-v2 unpack record payload TypeDesc or nominal identity does not exactly match its target",
+            )
+        })?;
+    let text = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+        InterpError::new("ordinary Map/Any owner-v2 unpack record result snapshot failed")
+    })?;
+    Ok(Value::Record(
+        Some(expected_nominal.to_owned()),
+        HashMap::from([("text".to_owned(), Value::String(Arc::new(text)))]),
+    ))
+}
+
+fn contains_managed_any_v2(value: &Value) -> bool {
+    match value {
+        Value::CanonicalManagedAnyV2(_) => true,
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => values.iter().any(contains_managed_any_v2),
+        Value::List(values) => values.iter().any(contains_managed_any_v2),
+        Value::Record(_, fields) => fields.values().any(contains_managed_any_v2),
+        Value::Newtype(_, value) => contains_managed_any_v2(value),
+        _ => false,
+    }
+}
+
+fn validate_unique_managed_any_v2_owners(value: &Value, context: &str) -> Result<(), InterpError> {
+    match value {
+        Value::CanonicalManagedAnyV2(owner) if Arc::strong_count(owner) != 1 => {
+            Err(InterpError::new(format!(
+                "{context}: dynamic Any-v2 owner has a stale or duplicate alias"
+            )))
+        }
+        Value::CanonicalManagedAnyV2(_) => Ok(()),
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => {
+            for value in values {
+                validate_unique_managed_any_v2_owners(value, context)?;
+            }
+            Ok(())
+        }
+        Value::List(values) => {
+            if values.iter().any(contains_managed_any_v2) && Arc::strong_count(values) != 1 {
+                return Err(InterpError::new(format!(
+                    "{context}: collection containing dynamic Any-v2 has a duplicate owner"
+                )));
+            }
+            for value in values.iter() {
+                validate_unique_managed_any_v2_owners(value, context)?;
+            }
+            Ok(())
+        }
+        Value::Record(_, fields) => {
+            for value in fields.values() {
+                validate_unique_managed_any_v2_owners(value, context)?;
+            }
+            Ok(())
+        }
+        Value::Newtype(_, value) => validate_unique_managed_any_v2_owners(value, context),
+        _ => Ok(()),
+    }
+}
+
+/// Remove i32 extraction metadata when an owned Any-v2 aggregate is settled.
+/// The sidecar stores only a Weak identity, but eagerly removing entries here
+/// keeps repeated GetAny/Drop loops bounded and makes Drop the point where
+/// the owner-specific snapshot ceases to be addressable.
+fn forget_managed_any_v2_i32_unpack_backings_for_value(
+    value: &Value,
+    backings: &mut HashMap<usize, OrdinaryMapOwnedAnyV2I32UnpackBacking>,
+) {
+    match value {
+        Value::CanonicalManagedAnyV2(owner) => {
+            let owner_ptr = Arc::as_ptr(owner);
+            let key = owner_ptr as usize;
+            if backings
+                .get(&key)
+                .is_some_and(|backing| backing.owner.as_ptr() == owner_ptr)
+            {
+                backings.remove(&key);
+            }
+        }
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => {
+            for value in values {
+                forget_managed_any_v2_i32_unpack_backings_for_value(value, backings);
+            }
+        }
+        Value::List(values) => {
+            for value in values.iter() {
+                forget_managed_any_v2_i32_unpack_backings_for_value(value, backings);
+            }
+        }
+        Value::Record(_, fields) => {
+            for value in fields.values() {
+                forget_managed_any_v2_i32_unpack_backings_for_value(value, backings);
+            }
+        }
+        Value::Newtype(_, value) => {
+            forget_managed_any_v2_i32_unpack_backings_for_value(value, backings)
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +525,7 @@ impl BytecodeVM {
         BytecodeVM {
             program,
             stack: Vec::with_capacity(64),
+            ordinary_map_owned_any_v2_i32_unpack_backings: HashMap::new(),
             stdout: String::new(),
             stdout_capture: None,
             depth: 0,
@@ -225,6 +547,56 @@ impl BytecodeVM {
     /// Access the compiled program (for builtins that need type info).
     pub fn program(&self) -> &BytecodeProgram {
         &self.program
+    }
+
+    fn remember_ordinary_map_owned_any_v2_i32_unpack_payload(
+        &mut self,
+        owner: &Arc<crate::interp::value::CanonicalManagedAnyV2>,
+        type_id: crate::core::ResolvedTypeId,
+        value: i32,
+    ) {
+        self.ordinary_map_owned_any_v2_i32_unpack_backings
+            .retain(|_, backing| backing.owner.strong_count() > 0);
+        self.ordinary_map_owned_any_v2_i32_unpack_backings.insert(
+            Arc::as_ptr(owner) as usize,
+            OrdinaryMapOwnedAnyV2I32UnpackBacking {
+                owner: Arc::downgrade(owner),
+                type_id,
+                value,
+            },
+        );
+    }
+
+    fn ordinary_map_owned_any_v2_i32_unpack_payload(
+        &self,
+        owner: &Arc<crate::interp::value::CanonicalManagedAnyV2>,
+        expected_type: &crate::core::ResolvedTypeId,
+    ) -> Result<i32, InterpError> {
+        if owner.type_id() != expected_type {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 unpack payload TypeDesc does not exactly match its target",
+            ));
+        }
+        let key = Arc::as_ptr(owner) as usize;
+        let backing = self
+            .ordinary_map_owned_any_v2_i32_unpack_backings
+            .get(&key)
+            .ok_or_else(|| {
+                InterpError::new(
+                    "ordinary Map/Any owner-v2 unpack has no owner-bound i32 payload snapshot",
+                )
+            })?;
+        let Some(backing_owner) = backing.owner.upgrade() else {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 unpack payload owner is stale",
+            ));
+        };
+        if !Arc::ptr_eq(&backing_owner, owner) || backing.type_id != *expected_type {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 unpack payload snapshot identity is stale or mismatched",
+            ));
+        }
+        Ok(backing.value)
     }
 
     /// Execute one compiler-emitted Any/String comparison with test-seeded
@@ -318,6 +690,207 @@ impl BytecodeVM {
         frame.regs[any as usize] = any_value;
         frame.pc = pc;
         self.exec_loop()
+    }
+
+    /// Execute a compiler-emitted V2 GetAny with test-seeded root and key
+    /// values. A follow-up Size read proves GetAny left the source root live;
+    /// preflight validates the original Core-derived bytecode bindings before
+    /// the harness substitutes those runtime inputs.
+    #[cfg(test)]
+    pub(crate) fn execute_ordinary_map_owned_any_v2_get_any_for_test(
+        &mut self,
+        function_idx: FuncIdx,
+        root_value: Value,
+        key_value: Value,
+    ) -> Result<Value, InterpError> {
+        self.preflight_canonical_program_structure()?;
+        let (pc, result, root, key, register_count) = self
+            .program
+            .functions
+            .get(function_idx as usize)
+            .ok_or_else(|| InterpError::new("test owner-v2 GetAny function is absent"))?
+            .code
+            .iter()
+            .enumerate()
+            .find_map(|(pc, op)| match op {
+                Op::MirOrdinaryMapOwnedAnyV2GetAny { rd, ra, key } => Some((
+                    pc,
+                    *rd,
+                    *ra,
+                    *key,
+                    self.program.functions[function_idx as usize].register_count,
+                )),
+                _ => None,
+            })
+            .ok_or_else(|| InterpError::new("test owner-v2 GetAny opcode is absent"))?;
+        let size_result = (0..register_count)
+            .find(|register| *register != result && *register != root && *register != key)
+            .ok_or_else(|| {
+                InterpError::new(
+                    "test owner-v2 GetAny has no register for the source-liveness probe",
+                )
+            })?;
+
+        // Replace the unexecuted suffix only after authenticating the original
+        // bytecode snapshot. The probe reads the same root after GetAny.
+        let program = std::sync::Arc::make_mut(&mut self.program);
+        let proto = &mut program.functions[function_idx as usize];
+        proto.code.truncate(pc + 1);
+        proto.code.push(Op::MirOrdinaryMapOwnedAnyV2Size {
+            rd: size_result,
+            ra: root,
+        });
+        proto.code.push(Op::Ret { ra: result });
+        self.push_frame(function_idx, Vec::new(), None)?;
+        let frame = self.cur_frame_mut();
+        frame.regs[root as usize] = root_value;
+        frame.regs[key as usize] = key_value;
+        frame.pc = pc;
+        self.exec_loop()
+    }
+
+    /// Execute one compiler-emitted V2 Values snapshot with a test-seeded
+    /// source Map. The value is returned before its source binding or result
+    /// Drop executes so tests can inspect the copied owner identities.
+    #[cfg(test)]
+    pub(crate) fn execute_ordinary_map_owned_any_v2_values_for_test(
+        &mut self,
+        function_idx: FuncIdx,
+        root_value: Value,
+    ) -> Result<Value, InterpError> {
+        self.preflight_canonical_program_structure()?;
+        let (pc, result, root, register_count) = self
+            .program
+            .functions
+            .get(function_idx as usize)
+            .ok_or_else(|| InterpError::new("test owner-v2 Values function is absent"))?
+            .code
+            .iter()
+            .enumerate()
+            .find_map(|(pc, op)| match op {
+                Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra } => Some((
+                    pc,
+                    *rd,
+                    *ra,
+                    self.program.functions[function_idx as usize].register_count,
+                )),
+                _ => None,
+            })
+            .ok_or_else(|| InterpError::new("test owner-v2 Values opcode is absent"))?;
+        let root_probe = (0..register_count)
+            .find(|register| *register != result && *register != root)
+            .ok_or_else(|| {
+                InterpError::new(
+                    "test owner-v2 Values has no register for the source-liveness probe",
+                )
+            })?;
+
+        if root as usize >= register_count as usize || result as usize >= register_count as usize {
+            return Err(InterpError::new(
+                "test owner-v2 Values register is outside its emitted frame",
+            ));
+        }
+        // Authenticate the original receipt and instruction before truncating
+        // the body. The source Map register remains live during the snapshot;
+        // the returned list owns detached V2 payload copies. Restore the
+        // authenticated program afterward so the same VM can execute the
+        // paired indexed unpack with its owner-bound i32 sidecar intact.
+        let original_program = Arc::clone(&self.program);
+        {
+            let program = std::sync::Arc::make_mut(&mut self.program);
+            let proto = &mut program.functions[function_idx as usize];
+            proto.code.truncate(pc + 1);
+            proto.code.push(Op::MirOrdinaryMapOwnedAnyV2Size {
+                rd: root_probe,
+                ra: root,
+            });
+            proto.code.push(Op::Ret { ra: result });
+        }
+        let result_value = (|| {
+            self.push_frame(function_idx, Vec::new(), None)?;
+            let frame = self.cur_frame_mut();
+            frame.regs[root as usize] = root_value;
+            frame.pc = pc;
+            self.exec_loop()
+        })();
+        self.program = original_program;
+        result_value
+    }
+
+    /// Execute one receipted indexed Values unpack against a test-seeded
+    /// snapshot and signed index. A following List Len is an observable
+    /// liveness probe: unpack must leave the source register intact.
+    #[cfg(test)]
+    pub(crate) fn execute_ordinary_map_owned_any_v2_values_unpack_for_test(
+        &mut self,
+        function_idx: FuncIdx,
+        snapshot: Value,
+        index_value: i64,
+        result_type: &crate::core::ResolvedTypeId,
+    ) -> Result<Value, InterpError> {
+        self.preflight_canonical_program_structure()?;
+        let function = self
+            .program
+            .functions
+            .get(function_idx as usize)
+            .ok_or_else(|| InterpError::new("test owner-v2 Values unpack function is absent"))?;
+        let receipt = self
+            .program
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .ok_or_else(|| InterpError::new("test owner-v2 Values unpack receipt is absent"))?;
+        let selected_site = function.code.iter().enumerate().find_map(|(pc, op)| {
+            let Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, ra, index } = op else {
+                return None;
+            };
+            let pc = u32::try_from(pc).ok()?;
+            let binding =
+                receipt.ordinary_map_owned_any_v2_values_unpack_binding_at_pc(function_idx, pc)?;
+            (binding.result_type == *result_type).then_some((
+                pc as usize,
+                *rd,
+                *ra,
+                *index,
+                function.register_count,
+            ))
+        });
+        let (pc, result, values, index, register_count) = selected_site.ok_or_else(|| {
+            InterpError::new(format!(
+                "test owner-v2 Values unpack has no receipted site for target type '{}'",
+                result_type.as_str()
+            ))
+        })?;
+        let probe = (0..register_count)
+            .find(|register| *register != result && *register != values && *register != index)
+            .ok_or_else(|| {
+                InterpError::new(
+                    "test owner-v2 Values unpack has no register for the snapshot-liveness probe",
+                )
+            })?;
+
+        // Preflight authenticates the original program and binding before
+        // the harness limits execution to this op and its liveness probe.
+        let original_program = Arc::clone(&self.program);
+        {
+            let program = std::sync::Arc::make_mut(&mut self.program);
+            let proto = &mut program.functions[function_idx as usize];
+            proto.code.truncate(pc + 1);
+            proto.code.push(Op::Len {
+                rd: probe,
+                ra: values,
+            });
+            proto.code.push(Op::Ret { ra: result });
+        }
+        let result_value = (|| {
+            self.push_frame(function_idx, Vec::new(), None)?;
+            let frame = self.cur_frame_mut();
+            frame.regs[values as usize] = snapshot;
+            frame.regs[index as usize] = Value::Int(index_value);
+            frame.pc = pc;
+            self.exec_loop()
+        })();
+        self.program = original_program;
+        result_value
     }
 
     #[cfg(test)]
@@ -872,13 +1445,13 @@ impl BytecodeVM {
                         return Err(InterpError::new(format!(
                             "canonical FFI instruction identity constant {instruction} at function '{}' pc {pc} is not a string",
                             proto.name
-                        )))
+                        )));
                     }
                     None => {
                         return Err(InterpError::new(format!(
                             "canonical FFI instruction identity constant {instruction} out of range at function '{}' pc {pc}",
                             proto.name
-                        )))
+                        )));
                     }
                 };
                 if binding.instruction_text != *expected_instruction {
@@ -962,6 +1535,7 @@ impl BytecodeVM {
         self.validate_canonical_map_any_owner_v1_program()?;
         self.validate_canonical_ordinary_map_owner_lifecycle_i32_string_v1_program()?;
         self.validate_canonical_ordinary_map_owned_get_i32_string_v1_program()?;
+        self.validate_canonical_ordinary_map_owned_any_v2_program()?;
         self.validate_canonical_managed_any_cfg_program()?;
         self.validate_canonical_managed_any_identity_program()?;
         self.validate_canonical_managed_any_trap_cleanup_program()?;
@@ -1068,6 +1642,25 @@ impl BytecodeVM {
         }
     }
 
+    /// Concrete-record ordinary Map/Any owner-v2 bytecode has its own
+    /// Checker snapshot and cannot borrow a v1 owner receipt.
+    fn validate_canonical_ordinary_map_owned_any_v2_program(&self) -> Result<(), InterpError> {
+        let has_v2 = self
+            .program
+            .functions
+            .iter()
+            .any(super::instr::function_has_ordinary_map_owned_any_v2_ops);
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owned_any_v2(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None if has_v2 => Err(InterpError::new(
+                "ordinary Map/Any owner-v2 bytecode has no independent Checker receipt",
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Independently check the full-program Any/CFG snapshot before FFI
     /// symbol resolution or Actor `begin_execution`.  Canonical MIR always
     /// carries the older private MapRoot admission slot as a marker, so
@@ -1169,6 +1762,22 @@ impl BytecodeVM {
         &mut self,
         execute: impl FnOnce(&mut Self) -> Result<T, InterpError>,
     ) -> Result<T, InterpError> {
+        self.with_canonical_actor_execution_inner(execute, true)
+    }
+
+    #[cfg(test)]
+    fn with_canonical_actor_component_execution<T>(
+        &mut self,
+        execute: impl FnOnce(&mut Self) -> Result<T, InterpError>,
+    ) -> Result<T, InterpError> {
+        self.with_canonical_actor_execution_inner(execute, false)
+    }
+
+    fn with_canonical_actor_execution_inner<T>(
+        &mut self,
+        execute: impl FnOnce(&mut Self) -> Result<T, InterpError>,
+        enforce_production_readiness: bool,
+    ) -> Result<T, InterpError> {
         if !self.stack.is_empty() {
             return execute(self);
         }
@@ -1178,6 +1787,18 @@ impl BytecodeVM {
         // Any-bearing generic CFG/call receipts, not only generic identity and
         // trap-cleanup instances. Worker VMs also get this fresh-entry gate.
         self.preflight_canonical_program_structure()?;
+        if enforce_production_readiness
+            && !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
+            && self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err(InterpError::new(
+                "MIR-COVERAGE-001: ordinary Map/Any owner-v2 bytecode execution is diagnostic-only while V2 production readiness is disabled",
+            ));
+        }
         if self.canonical_actor_runtime.is_worker() {
             self.preflight_canonical_ffi_symbols()?;
             return execute(self);
@@ -1244,6 +1865,14 @@ impl BytecodeVM {
     /// Used by test infrastructure that needs the actual return value.
     pub fn run_value(&mut self) -> Result<Value, InterpError> {
         self.with_canonical_actor_execution(Self::run_value_inner)
+    }
+
+    /// Execute a checker-sealed MIR artifact for L1/L2 component tests. This
+    /// keeps receipt and ABI preflight while making the diagnostic-only status
+    /// explicit; production callers must use `run_value`.
+    #[cfg(test)]
+    pub(crate) fn run_value_for_component(&mut self) -> Result<Value, InterpError> {
+        self.with_canonical_actor_component_execution(Self::run_value_inner)
     }
 
     fn run_value_inner(&mut self) -> Result<Value, InterpError> {
@@ -1638,10 +2267,17 @@ impl BytecodeVM {
                 Op::Mov { rd, rs } => {
                     self.ensure_reg(rd, "mov destination")?;
                     self.ensure_reg(rs, "mov source")?;
+                    if rd != rs && contains_managed_any_v2(self.get_reg(rs)) {
+                        return Err(InterpError::new(
+                            "dynamic Any-v2 owner cannot be copied by generic Mov",
+                        ));
+                    }
                     match self.get_reg(rs) {
-                        Value::CanonicalMapRoot(_) | Value::CanonicalMapAnyOwnerV1(_) => {
+                        Value::CanonicalMapRoot(_)
+                        | Value::CanonicalMapAnyOwnerV1(_)
+                        | Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
                             return Err(InterpError::new(
-                                "canonical MapRoot and MapAnyOwner v1 values require their profile-specific Checker-receipted MIR operations",
+                                "canonical MapRoot and owned Map/Any values require their profile-specific Checker-receipted MIR operations",
                             ));
                         }
                         Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(_) => {
@@ -1655,7 +2291,9 @@ impl BytecodeVM {
                             ));
                         }
                         Value::CanonicalManagedAnyI32StringV1(_) => {
-                            return Err(InterpError::new("managed Any leaf requires its dedicated checker-receipted operation"));
+                            return Err(InterpError::new(
+                                "managed Any leaf requires its dedicated checker-receipted operation",
+                            ));
                         }
                         _ => {}
                     }
@@ -1668,9 +2306,11 @@ impl BytecodeVM {
                     self.ensure_reg(rd, "move destination")?;
                     self.ensure_reg(rs, "move source")?;
                     match self.get_reg(rs) {
-                        Value::CanonicalMapRoot(_) | Value::CanonicalMapAnyOwnerV1(_) => {
+                        Value::CanonicalMapRoot(_)
+                        | Value::CanonicalMapAnyOwnerV1(_)
+                        | Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
                             return Err(InterpError::new(
-                                "canonical MapRoot and MapAnyOwner v1 values require their profile-specific Checker-receipted MIR operations",
+                                "canonical MapRoot and owned Map/Any values require their profile-specific Checker-receipted MIR operations",
                             ));
                         }
                         Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(_) => {
@@ -1694,10 +2334,17 @@ impl BytecodeVM {
                 Op::Clone { rd, rs } => {
                     self.ensure_reg(rd, "clone destination")?;
                     self.ensure_reg(rs, "clone source")?;
+                    if contains_managed_any_v2(self.get_reg(rs)) {
+                        return Err(InterpError::new(
+                            "dynamic Any-v2 owner requires its Checker-receipted ownership operation",
+                        ));
+                    }
                     match self.get_reg(rs) {
-                        Value::CanonicalMapRoot(_) | Value::CanonicalMapAnyOwnerV1(_) => {
+                        Value::CanonicalMapRoot(_)
+                        | Value::CanonicalMapAnyOwnerV1(_)
+                        | Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
                             return Err(InterpError::new(
-                                "canonical MapRoot and MapAnyOwner v1 values require their profile-specific Checker-receipted MIR operations",
+                                "canonical MapRoot and owned Map/Any values require their profile-specific Checker-receipted MIR operations",
                             ));
                         }
                         Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(_) => {
@@ -1711,7 +2358,9 @@ impl BytecodeVM {
                             ));
                         }
                         Value::CanonicalManagedAnyI32StringV1(_) => {
-                            return Err(InterpError::new("managed Any leaf requires its dedicated checker-receipted operation"));
+                            return Err(InterpError::new(
+                                "managed Any leaf requires its dedicated checker-receipted operation",
+                            ));
                         }
                         _ => {}
                     }
@@ -1722,10 +2371,17 @@ impl BytecodeVM {
                 }
                 Op::Drop { ra } => {
                     self.ensure_reg(ra, "drop source")?;
+                    if contains_managed_any_v2(self.get_reg(ra)) {
+                        return Err(InterpError::new(
+                            "dynamic Any-v2 owner requires its Checker-receipted aggregate Drop",
+                        ));
+                    }
                     match self.get_reg(ra) {
-                        Value::CanonicalMapRoot(_) | Value::CanonicalMapAnyOwnerV1(_) => {
+                        Value::CanonicalMapRoot(_)
+                        | Value::CanonicalMapAnyOwnerV1(_)
+                        | Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
                             return Err(InterpError::new(
-                                "canonical MapRoot and MapAnyOwner v1 values require their profile-specific Checker-receipted MIR operations",
+                                "canonical MapRoot and owned Map/Any values require their profile-specific Checker-receipted MIR operations",
                             ));
                         }
                         Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(_) => {
@@ -1739,7 +2395,9 @@ impl BytecodeVM {
                             ));
                         }
                         Value::CanonicalManagedAnyI32StringV1(_) => {
-                            return Err(InterpError::new("managed Any leaf requires its dedicated checker-receipted operation"));
+                            return Err(InterpError::new(
+                                "managed Any leaf requires its dedicated checker-receipted operation",
+                            ));
                         }
                         _ => {}
                     }
@@ -1747,9 +2405,8 @@ impl BytecodeVM {
                 }
                 Op::DropAggregate { ra, arity } => {
                     self.ensure_reg(ra, "aggregate drop source")?;
-                    let frame = self.cur_frame_mut();
-                    let value = std::mem::replace(&mut frame.regs[ra as usize], Value::Unit);
-                    let valid_shape = match &value {
+                    let value = self.get_reg(ra);
+                    let valid_shape = match value {
                         Value::Tuple(items) => items.len() == arity as usize,
                         Value::Record(_, fields) => fields.len() == arity as usize,
                         _ => false,
@@ -1760,8 +2417,22 @@ impl BytecodeVM {
                             arity, value
                         )));
                     }
+                    validate_unique_managed_any_v2_owners(
+                        value,
+                        "aggregate drop of ordinary Map/Any owner-v2 result",
+                    )?;
+                    {
+                        let value = &self.stack.last().expect("active VM frame").regs[ra as usize];
+                        forget_managed_any_v2_i32_unpack_backings_for_value(
+                            value,
+                            &mut self.ordinary_map_owned_any_v2_i32_unpack_backings,
+                        );
+                    }
+                    let frame = self.cur_frame_mut();
+                    let value = std::mem::replace(&mut frame.regs[ra as usize], Value::Unit);
                     // Dropping the owned product recursively drops its fields;
                     // the MIR emitter already proved the TypeDesc schedule.
+                    drop(value);
                 }
                 Op::DropVariant { ra, shapes } => {
                     self.ensure_reg(ra, "variant drop source")?;
@@ -2049,7 +2720,7 @@ impl BytecodeVM {
                                     return Err(InterpError::new(format!(
                                         "expected number, found {}",
                                         other
-                                    )))
+                                    )));
                                 }
                             };
                             Value::Int(a.checked_neg().ok_or_else(|| {
@@ -2129,7 +2800,7 @@ impl BytecodeVM {
                         Value::Float(v) => *v,
                         Value::Int(v) => *v as f64,
                         other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                            return Err(InterpError::new(format!("expected Float, got {}", other)));
                         }
                     };
                     frame.regs[rd as usize] = Value::Float(-a);
@@ -2140,7 +2811,7 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     frame.regs[rd as usize] = Value::Float(a as f64);
@@ -2151,7 +2822,7 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Float(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Float, got {}", other)))
+                            return Err(InterpError::new(format!("expected Float, got {}", other)));
                         }
                     };
                     frame.regs[rd as usize] = Value::Float((a as f32) as f64);
@@ -2241,7 +2912,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "expected Float, got {} and {}",
                                 a, b
-                            )))
+                            )));
                         }
                     };
                     frame.regs[rd as usize] = Value::Bool(a == b);
@@ -2255,7 +2926,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "expected Float, got {} and {}",
                                 a, b
-                            )))
+                            )));
                         }
                     };
                     frame.regs[rd as usize] = Value::Bool(a < b);
@@ -2269,7 +2940,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "expected Float, got {} and {}",
                                 a, b
-                            )))
+                            )));
                         }
                     };
                     frame.regs[rd as usize] = Value::Bool(a > b);
@@ -2283,7 +2954,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "expected Float, got {} and {}",
                                 a, b
-                            )))
+                            )));
                         }
                     };
                     frame.regs[rd as usize] = Value::Bool(a <= b);
@@ -2297,7 +2968,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "expected Float, got {} and {}",
                                 a, b
-                            )))
+                            )));
                         }
                     };
                     frame.regs[rd as usize] = Value::Bool(a >= b);
@@ -2375,13 +3046,13 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     frame.regs[rd as usize] = Value::Int(a & b);
@@ -2392,13 +3063,13 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     frame.regs[rd as usize] = Value::Int(a | b);
@@ -2409,13 +3080,13 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     frame.regs[rd as usize] = Value::Int(a ^ b);
@@ -2426,13 +3097,13 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     // 0.34.34 (L1 parity with codegen): hardware-mask semantics.
@@ -2450,13 +3121,13 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     // 0.34.34: masked arithmetic shift, same parity rationale as Shl.
@@ -2473,7 +3144,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "internal: CHECK_I32 applied to non-integer {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     if v < i32::MIN as i64 || v > i32::MAX as i64 {
@@ -2496,7 +3167,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "internal: CHECK_I32_DIVREM on non-integer {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
@@ -2505,7 +3176,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "internal: CHECK_I32_DIVREM on non-integer {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     // i32::MIN / -1 (and %) overflows i32 but NOT i64, so the
@@ -2525,7 +3196,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "internal: WRAP_I32 applied to non-integer {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     frame.regs[rd as usize] = Value::Int((v as i32) as i64);
@@ -2539,7 +3210,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "internal: MASK_SHIFT_AMT on non-integer {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     frame.regs[rb as usize] = Value::Int(((v as u64) & (mask as u64)) as i64);
@@ -2550,13 +3221,13 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     let b = match &frame.regs[rb as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     let exp = u32::try_from(b).map_err(|_| {
@@ -2586,7 +3257,7 @@ impl BytecodeVM {
                                     return Err(InterpError::new(format!(
                                         "expected Float, got {}",
                                         other
-                                    )))
+                                    )));
                                 }
                             },
                             match &frame.regs[rb as usize] {
@@ -2596,7 +3267,7 @@ impl BytecodeVM {
                                     return Err(InterpError::new(format!(
                                         "expected Float, got {}",
                                         other
-                                    )))
+                                    )));
                                 }
                             },
                         )
@@ -2616,7 +3287,7 @@ impl BytecodeVM {
                     let a = match &frame.regs[ra as usize] {
                         Value::Int(v) => *v,
                         other => {
-                            return Err(InterpError::new(format!("expected Int, got {}", other)))
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
                         }
                     };
                     frame.regs[rd as usize] = Value::Int(!a);
@@ -2972,12 +3643,12 @@ impl BytecodeVM {
                         Some(_) => {
                             return Err(InterpError::new(format!(
                                 "canonical FFI instruction identity constant {instruction} is not a string"
-                            )))
+                            )));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "canonical FFI instruction identity constant {instruction} out of range"
-                            )))
+                            )));
                         }
                     };
                     let result = match self.program.canonical_ffi.get(extern_idx as usize) {
@@ -3051,7 +3722,9 @@ impl BytecodeVM {
                         | Some(ConstValue::VariantPredicate(_))
                         | Some(ConstValue::VariantProjectionFallback(_))
                         | None => {
-                            return Err(InterpError::new("QuotePushLit: constant is not a literal"))
+                            return Err(InterpError::new(
+                                "QuotePushLit: constant is not a literal",
+                            ));
                         }
                     };
                     self.quote_stack
@@ -3079,7 +3752,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "QuoteAstPush: expected QuoteAst value, got {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -3201,7 +3874,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(InterpError::new(
                                 "QuoteWhileLet: constant is not a pattern",
-                            ))
+                            ));
                         }
                     };
                     let body = self.quote_pop()?;
@@ -3241,7 +3914,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(InterpError::new(
                                 "QuoteLambda: constant is not a lambda spec",
-                            ))
+                            ));
                         }
                     };
                     // Capture only the lambda's free variables from quote_captures
@@ -3296,7 +3969,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(InterpError::new(
                                 "QuoteRecord: names constant is not a StrVec",
-                            ))
+                            ));
                         }
                     };
                     let ty = match proto.constants.get(ty_idx as usize) {
@@ -3394,7 +4067,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "push: expected List, got {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -3414,7 +4087,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "pop: expected List, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, popped);
@@ -3426,6 +4099,11 @@ impl BytecodeVM {
                     contract,
                 } => {
                     self.ensure_binary_regs(rd, ra, rb, "list-get")?;
+                    if contains_managed_any_v2(self.get_reg(ra)) {
+                        return Err(InterpError::new(
+                            "collection projection cannot copy a dynamic Any-v2 owner",
+                        ));
+                    }
                     let canonical_shape = self.list_projection_contract(contract)?;
                     if let Some(shape) = canonical_shape.as_ref() {
                         Self::validate_canonical_list_projection(
@@ -3523,7 +4201,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "index: expected List, String, or Set, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, v);
@@ -3556,7 +4234,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "index set: expected List, got {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -3573,7 +4251,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "len: unsupported type {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Int(len as i64));
@@ -3627,6 +4305,11 @@ impl BytecodeVM {
                 } => {
                     self.ensure_reg(rd, "tuple get destination")?;
                     self.ensure_reg(ra, "tuple get source")?;
+                    if contains_managed_any_v2(self.get_reg(ra)) {
+                        return Err(InterpError::new(
+                            "tuple projection cannot copy a dynamic Any-v2 owner",
+                        ));
+                    }
                     let shape = Self::tuple_projection_contract(proto, idx, contract)?;
                     let v = self.get_reg(ra).clone();
                     let elem = if let Some(shape) = shape.as_ref() {
@@ -3670,7 +4353,7 @@ impl BytecodeVM {
                                 return Err(InterpError::new(format!(
                                     "tuple get: expected Tuple, got {}",
                                     other
-                                )))
+                                )));
                             }
                         }
                     };
@@ -3907,6 +4590,11 @@ impl BytecodeVM {
                 } => {
                     self.ensure_reg(rd, "record get destination")?;
                     self.ensure_reg(ra, "record get source")?;
+                    if contains_managed_any_v2(self.get_reg(ra)) {
+                        return Err(InterpError::new(
+                            "record projection cannot copy a dynamic Any-v2 owner",
+                        ));
+                    }
                     let (field_name, contract) =
                         Self::record_projection_contract(proto, field, contract)?;
                     // Borrow record, extract only the field value (avoid cloning entire record).
@@ -3950,7 +4638,7 @@ impl BytecodeVM {
                                     return Err(InterpError::new(format!(
                                         "record get: shared inner is not a Record, got {}",
                                         other
-                                    )))
+                                    )));
                                 }
                             }
                         }
@@ -3968,14 +4656,14 @@ impl BytecodeVM {
                                 return Err(InterpError::new(format!(
                                     "record get: variant payload is not a Record, got {}",
                                     other
-                                )))
+                                )));
                             }
                         },
                         other => {
                             return Err(InterpError::new(format!(
                                 "record get: expected Record or Actor, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, v);
@@ -4016,7 +4704,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "record move get: expected Record, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, value);
@@ -4069,7 +4757,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "record move/drop get: expected Record, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, value);
@@ -4106,7 +4794,7 @@ impl BytecodeVM {
                                     return Err(InterpError::new(format!(
                                         "record set: shared inner is not a Record, got {}",
                                         other
-                                    )))
+                                    )));
                                 }
                             }
                         }
@@ -4114,7 +4802,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "record set: expected Record or Actor, got {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -4145,7 +4833,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "tuple set: expected Tuple, got {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -4168,7 +4856,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical Set.size: expected Set, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Int(size));
@@ -4181,7 +4869,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical Set.is_empty: expected Set, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Bool(empty));
@@ -4195,7 +4883,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical Set.contains: expected Set, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Bool(contains));
@@ -4240,7 +4928,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical Set.to_list: expected Set, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     // Canonical Set<T> currently admits only scalar signed
@@ -4269,7 +4957,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical List.len: expected List, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     if len > i32::MAX as usize {
@@ -4369,15 +5057,13 @@ impl BytecodeVM {
                         return Err(InterpError::new("MapRoot key contains NUL"));
                     }
                     let value = match self.get_reg(value) {
-                        Value::Int(value) => {
-                            crate::interp::value::CanonicalMapRootValue::I32(
-                                i32::try_from(*value).map_err(|_| {
-                                    InterpError::integer_overflow(
-                                        "E0802: canonical MapRoot.set value overflows i32",
-                                    )
-                                })?,
-                            )
-                        }
+                        Value::Int(value) => crate::interp::value::CanonicalMapRootValue::I32(
+                            i32::try_from(*value).map_err(|_| {
+                                InterpError::integer_overflow(
+                                    "E0802: canonical MapRoot.set value overflows i32",
+                                )
+                            })?,
+                        ),
                         Value::String(value) => {
                             crate::interp::value::CanonicalMapRootValue::String(Arc::clone(value))
                         }
@@ -4385,7 +5071,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical MapRoot.set: expected receipted i32 or String runtime value, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let root = {
@@ -4459,7 +5145,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical MapRoot.size: expected MapRoot runtime value, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Int(i64::from(size)));
@@ -4479,9 +5165,9 @@ impl BytecodeVM {
                         Value::CanonicalMapRoot(root) => root.contains_key(&key),
                         other => {
                             return Err(InterpError::new(format!(
-                            "canonical MapRoot.contains: expected MapRoot runtime value, got {}",
-                            other
-                        )))
+                                "canonical MapRoot.contains: expected MapRoot runtime value, got {}",
+                                other
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Bool(contains));
@@ -4525,15 +5211,15 @@ impl BytecodeVM {
                             )
                         }
                         Value::String(value) => {
-                            crate::interp::value::CanonicalMapAnyOwnerV1Value::String(
-                                Arc::clone(value),
-                            )
+                            crate::interp::value::CanonicalMapAnyOwnerV1Value::String(Arc::clone(
+                                value,
+                            ))
                         }
                         other => {
                             return Err(InterpError::new(format!(
                                 "canonical MapAnyOwner v1 set: expected receipted i32 or String runtime value, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let root = {
@@ -4600,16 +5286,14 @@ impl BytecodeVM {
                     }
                     let size = match self.get_reg(ra) {
                         Value::CanonicalMapAnyOwnerV1(root) => {
-                            crate::core::mir::types::canonical_map_root_size_i32(
-                                root.len() as u128,
-                            )
-                            .map_err(InterpError::integer_overflow)?
+                            crate::core::mir::types::canonical_map_root_size_i32(root.len() as u128)
+                                .map_err(InterpError::integer_overflow)?
                         }
                         other => {
                             return Err(InterpError::new(format!(
                                 "canonical MapAnyOwner v1 size: expected MapAnyOwner v1 runtime value, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Int(i64::from(size)));
@@ -4631,7 +5315,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "canonical MapAnyOwner v1 contains: expected MapAnyOwner v1 runtime value, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Bool(contains));
@@ -4669,16 +5353,24 @@ impl BytecodeVM {
                 Op::MirOrdinaryMapOwnerLifecycleI32StringV1Clone { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map owner lifecycle v1 clone")?;
                     if rd == ra {
-                        return Err(InterpError::new("ordinary Map owner lifecycle v1 Clone result aliases its source register"));
+                        return Err(InterpError::new(
+                            "ordinary Map owner lifecycle v1 Clone result aliases its source register",
+                        ));
                     }
                     let copied = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(root) => {
                             if Arc::strong_count(root) != 1 {
-                                return Err(InterpError::new("ordinary Map owner lifecycle v1 Clone source has an unreceipted alias"));
+                                return Err(InterpError::new(
+                                    "ordinary Map owner lifecycle v1 Clone source has an unreceipted alias",
+                                ));
                             }
                             Arc::new((**root).clone())
                         }
-                        _ => return Err(InterpError::new("ordinary Map owner lifecycle v1 Clone expected its dedicated profile root")),
+                        _ => {
+                            return Err(InterpError::new(
+                                "ordinary Map owner lifecycle v1 Clone expected its dedicated profile root",
+                            ));
+                        }
                     };
                     self.set_reg(
                         rd,
@@ -4704,7 +5396,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owner lifecycle v1 Set: expected String key, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let value = match self.get_reg(value) {
@@ -4735,7 +5427,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owner lifecycle v1 Set: expected source Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     if Arc::strong_count(root) != 1 {
@@ -4766,9 +5458,9 @@ impl BytecodeVM {
                         Value::String(key) => key.as_str().to_owned(),
                         other => {
                             return Err(InterpError::new(format!(
-                            "ordinary Map owner lifecycle v1 Remove: expected String key, got {}",
-                            other
-                        )))
+                                "ordinary Map owner lifecycle v1 Remove: expected String key, got {}",
+                                other
+                            )));
                         }
                     };
                     let root = match self.get_reg(ra) {
@@ -4777,7 +5469,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owner lifecycle v1 Remove: expected source Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     if Arc::strong_count(root) != 1 {
@@ -4820,7 +5512,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owner lifecycle v1 Size: expected Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Int(i64::from(size)));
@@ -4841,9 +5533,9 @@ impl BytecodeVM {
                         Value::String(key) => key.as_str(),
                         other => {
                             return Err(InterpError::new(format!(
-                            "ordinary Map owner lifecycle v1 Contains: expected String key, got {}",
-                            other
-                        )))
+                                "ordinary Map owner lifecycle v1 Contains: expected String key, got {}",
+                                other
+                            )));
                         }
                     };
                     let contains = match self.get_reg(ra) {
@@ -4857,9 +5549,9 @@ impl BytecodeVM {
                         }
                         other => {
                             return Err(InterpError::new(format!(
-                            "ordinary Map owner lifecycle v1 Contains: expected Map owner, got {}",
-                            other
-                        )))
+                                "ordinary Map owner lifecycle v1 Contains: expected Map owner, got {}",
+                                other
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Bool(contains));
@@ -4899,13 +5591,17 @@ impl BytecodeVM {
                     let copied = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
                             if Arc::strong_count(root) != 1 {
-                                return Err(InterpError::new("ordinary Map owned-Get v1 Clone source has an unreceipted alias"));
+                                return Err(InterpError::new(
+                                    "ordinary Map owned-Get v1 Clone source has an unreceipted alias",
+                                ));
                             }
                             Arc::new((**root).clone())
                         }
-                        _ => return Err(InterpError::new(
-                            "ordinary Map owned-Get v1 Clone expected its dedicated profile root",
-                        )),
+                        _ => {
+                            return Err(InterpError::new(
+                                "ordinary Map owned-Get v1 Clone expected its dedicated profile root",
+                            ));
+                        }
                     };
                     self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedGetI32StringV1(copied));
                 }
@@ -4925,7 +5621,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 Set: expected String key, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let value = match self.get_reg(value) {
@@ -4963,7 +5659,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 Set: expected source Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     entries.insert(key, value);
@@ -4990,7 +5686,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 Remove: expected String key, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let mut entries = match self.get_reg(ra) {
@@ -5004,9 +5700,9 @@ impl BytecodeVM {
                         }
                         other => {
                             return Err(InterpError::new(format!(
-                            "ordinary Map owned-Get v1 Remove: expected source Map owner, got {}",
-                            other
-                        )))
+                                "ordinary Map owned-Get v1 Remove: expected source Map owner, got {}",
+                                other
+                            )));
                         }
                     };
                     entries.remove(key);
@@ -5039,7 +5735,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 Size: expected Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Int(i64::from(size)));
@@ -5058,7 +5754,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 Contains: expected String key, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let contains = match self.get_reg(ra) {
@@ -5074,7 +5770,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 Contains: expected Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, Value::Bool(contains));
@@ -5098,7 +5794,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 GetI32: expected String key, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let root = match self.get_reg(ra) {
@@ -5114,7 +5810,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 GetI32: expected Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     // Validate both result constructors before any fallible
@@ -5168,7 +5864,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 GetString: expected String key, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let root = match self.get_reg(ra) {
@@ -5184,7 +5880,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 GetString: expected Map owner, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     let ok_shape = Self::ordinary_map_owned_get_result_shape(proto, shapes, true)?;
@@ -5237,15 +5933,25 @@ impl BytecodeVM {
                         _ => {
                             return Err(InterpError::new(
                                 "ordinary Map owned-Get v1 GetAny: expected String key",
-                            ))
+                            ));
                         }
                     };
                     let root = match self.get_reg(ra) {
-                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) if Arc::strong_count(root) == 1 => root,
-                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => return Err(InterpError::new(
-                            "ordinary Map owned-Get v1 GetAny: root has a stale or duplicate owner",
-                        )),
-                        _ => return Err(InterpError::new("ordinary Map owned-Get v1 GetAny: expected Map owner")),
+                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root)
+                            if Arc::strong_count(root) == 1 =>
+                        {
+                            root
+                        }
+                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => {
+                            return Err(InterpError::new(
+                                "ordinary Map owned-Get v1 GetAny: root has a stale or duplicate owner",
+                            ));
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "ordinary Map owned-Get v1 GetAny: expected Map owner",
+                            ));
+                        }
                     };
                     // Snapshot the dynamic key and payload before publishing the destination.
                     // The independent VM Any owner contains its own String, never an entry Arc.
@@ -5275,16 +5981,19 @@ impl BytecodeVM {
                     self.ensure_reg(ra, "ordinary Map owned-Get v1 Values root")?;
                     let root = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root)
-                            if Arc::strong_count(root) == 1 => root,
+                            if Arc::strong_count(root) == 1 =>
+                        {
+                            root
+                        }
                         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => {
                             return Err(InterpError::new(
                                 "ordinary Map owned-Get v1 Values: root has a stale or duplicate owner",
-                            ))
+                            ));
                         }
                         _ => {
                             return Err(InterpError::new(
                                 "ordinary Map owned-Get v1 Values: expected Map owner",
-                            ))
+                            ));
                         }
                     };
                     // Materialize every element as an independent Any owner.
@@ -5335,7 +6044,7 @@ impl BytecodeVM {
                             _ => {
                                 return Err(InterpError::new(
                                     "managed Any PackI32 source is not an i32 scalar",
-                                ))
+                                ));
                             }
                         };
                         let rd = rd.ok_or_else(|| {
@@ -5356,7 +6065,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(InterpError::new(
                                 "managed Any: expected owned i32/String v1 value",
-                            ))
+                            ));
                         }
                     };
                     if any.descriptor_version() != receipt.descriptor_version {
@@ -5490,6 +6199,999 @@ impl BytecodeVM {
                     }
                     drop(root);
                 }
+                Op::MirOrdinaryMapOwnedAnyV2New { rd } => {
+                    self.ensure_reg(rd, "ordinary Map/Any owner-v2 New destination")?;
+                    ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                    self.set_reg(
+                        rd,
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(BTreeMap::new())),
+                    );
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Clone { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Clone")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Clone result aliases its source register",
+                        ));
+                    }
+                    let copied = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root) => {
+                            if Arc::strong_count(root) != 1 {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Clone source has an unreceipted alias",
+                                ));
+                            }
+                            Arc::new(clone_ordinary_map_owned_any_v2_entries(root)?)
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Clone expected its dedicated profile root",
+                            ));
+                        }
+                    };
+                    ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedAnyV2(copied));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Set { rd, ra, key, value } => {
+                    self.ensure_reg(rd, "ordinary Map/Any owner-v2 Set destination")?;
+                    self.ensure_reg(ra, "ordinary Map/Any owner-v2 Set source")?;
+                    self.ensure_reg(key, "ordinary Map/Any owner-v2 Set String key")?;
+                    self.ensure_reg(value, "ordinary Map/Any owner-v2 Set payload")?;
+                    if rd == ra || rd == key || rd == value {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Set result aliases a source register",
+                        ));
+                    }
+                    let key = match self.get_reg(key) {
+                        Value::String(key) => try_copy_ordinary_map_owned_get_string(key, false)
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Set key snapshot failed",
+                                )
+                            })?,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Set: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Set has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let proto = self
+                        .program
+                        .functions
+                        .get(function_index as usize)
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Set function index is invalid",
+                            )
+                        })?;
+                    let set_ordinal = proto
+                        .code
+                        .iter()
+                        .take(pc)
+                        .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Set { .. }))
+                        .count();
+                    let payload_binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_payload_binding(
+                                function_index,
+                                set_ordinal,
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Set has no bound MIR payload TypeDesc",
+                            )
+                        })?;
+                    let value = stage_ordinary_map_owned_any_v2_set_payload(
+                        self.get_reg(value),
+                        &payload_binding,
+                    )?;
+                    let mut entries = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root) => {
+                            if Arc::strong_count(root) != 1 {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Set source has an unreceipted alias",
+                                ));
+                            }
+                            clone_ordinary_map_owned_any_v2_entries(root)?
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Set: expected source owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    entries.insert(key, value);
+                    ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries)));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Remove { rd, ra, key } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Remove")?;
+                    self.ensure_reg(key, "ordinary Map/Any owner-v2 Remove String key")?;
+                    if rd == ra || rd == key {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Remove result aliases a source register",
+                        ));
+                    }
+                    let key = match self.get_reg(key) {
+                        Value::String(key) => key.as_str(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Remove: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let mut entries = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root) => {
+                            if Arc::strong_count(root) != 1 {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Remove source has an unreceipted alias",
+                                ));
+                            }
+                            clone_ordinary_map_owned_any_v2_entries(root)?
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Remove: expected source owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    entries.remove(key);
+                    ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries)));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Size { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Size")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Size result aliases its root",
+                        ));
+                    }
+                    let size = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root) => i32::try_from(root.len())
+                            .map_err(|_| {
+                                InterpError::integer_overflow(
+                                    "E0802: ordinary Map/Any owner-v2 size overflows i32",
+                                )
+                            })?,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Size: expected owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, Value::Int(i64::from(size)));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Contains { rd, ra, key } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Contains")?;
+                    self.ensure_reg(key, "ordinary Map/Any owner-v2 Contains String key")?;
+                    if rd == ra || rd == key {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Contains result aliases a source register",
+                        ));
+                    }
+                    let key = match self.get_reg(key) {
+                        Value::String(key) => key.as_str(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Contains: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let contains = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root) => root.contains_key(key),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Contains: expected owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, Value::Bool(contains));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2GetAny {
+                    rd,
+                    ra,
+                    key: key_reg,
+                } => {
+                    self.ensure_reg(rd, "ordinary Map/Any owner-v2 GetAny destination")?;
+                    self.ensure_reg(ra, "ordinary Map/Any owner-v2 GetAny root")?;
+                    self.ensure_reg(key_reg, "ordinary Map/Any owner-v2 GetAny key")?;
+                    if rd == ra || rd == key_reg {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 GetAny result aliases a source register",
+                        ));
+                    }
+                    let key = match self.get_reg(key_reg) {
+                        Value::String(key) => key,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 GetAny: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let (function_index, pc, get_any_ordinal) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetAny has no current bytecode PC",
+                            )
+                        })?;
+                        let proto = self
+                            .program
+                            .functions
+                            .get(frame.proto_idx as usize)
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 GetAny function index is invalid",
+                                )
+                            })?;
+                        let ordinal = proto
+                            .code
+                            .iter()
+                            .take(pc)
+                            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }))
+                            .count();
+                        (frame.proto_idx, pc, ordinal)
+                    };
+                    let get_binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_get_any_binding(
+                                function_index,
+                                get_any_ordinal,
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetAny has no Core result-settlement binding",
+                            )
+                        })?;
+                    if get_binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        || get_binding.rd != rd
+                        || get_binding.ra != ra
+                        || get_binding.key_reg != key_reg
+                        || match &get_binding.temporary_root {
+                            Some(temporary_root) => {
+                                let root_receipt = &temporary_root.receipt;
+                                temporary_root.get_any_pc != get_binding.pc
+                                    || temporary_root.root_reg != ra
+                                    || temporary_root.drop_pc
+                                        != get_binding.pc.saturating_add(1)
+                                    || root_receipt.local != get_binding.source_local
+                                    || root_receipt.root != get_binding.root
+                                    || root_receipt.get_any != get_binding.operation
+                                    || root_receipt.get_any_instruction != get_binding.instruction
+                                    || root_receipt.settlement_point != get_binding.operation
+                                    || root_receipt.settlement
+                                        != crate::core::OrdinaryMapOwnedAnyV2RootSettlementKind::ImmediateGetAnyDrop
+                            }
+                            None => get_binding
+                                .source_local
+                                .0
+                                 .0
+                                .starts_with("ordinary-map-owned-any-v2:temporary-root:"),
+                        }
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 GetAny disagrees with its exact Core site binding",
+                        ));
+                    }
+                    let key =
+                        try_copy_ordinary_map_owned_get_string(key, false).ok_or_else(|| {
+                            InterpError::new("ordinary Map/Any owner-v2 GetAny key snapshot failed")
+                        })?;
+                    let (found, any, unpack_backing) = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root)
+                            if Arc::strong_count(root) == 1 =>
+                        {
+                            match root.get(&key) {
+                                None => {
+                                    let expected_i32 = crate::core::ir::primitive_type_id(
+                                        crate::core::PrimitiveType::I32,
+                                    );
+                                    if get_binding.miss_payload_type != expected_i32 {
+                                        return Err(InterpError::new(
+                                            "ordinary Map/Any owner-v2 GetAny miss binding is not canonical i32",
+                                        ));
+                                    }
+                                    (
+                                        false,
+                                        crate::interp::value::CanonicalManagedAnyV2::from_i32(
+                                            expected_i32.clone(),
+                                            0,
+                                        ),
+                                        Some((expected_i32, 0)),
+                                    )
+                                }
+                                Some(payload) => {
+                                    let payload_binding = self
+                                        .program
+                                        .canonical_map_any_owner_v1_receipt
+                                        .as_ref()
+                                        .and_then(|receipt| {
+                                            receipt
+                                                .ordinary_map_owned_any_v2_selected_payload_binding(
+                                                    match payload {
+                                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
+                                                        | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
+                                                        | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record { type_id, .. } => type_id,
+                                                    },
+                                                )
+                                        })
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                            InterpError::new(
+                                                "ordinary Map/Any owner-v2 GetAny hit uses a TypeDesc outside the Core-selected payload table",
+                                            )
+                                        })?;
+                                    let unpack_backing = match payload {
+                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                                            type_id,
+                                            value,
+                                        } => Some((type_id.clone(), *value)),
+                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
+                                            ..
+                                        }
+                                        |
+                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                                            ..
+                                        } => None,
+                                    };
+                                    (
+                                        true,
+                                        copy_ordinary_map_owned_any_v2_payload(
+                                            payload,
+                                            &payload_binding,
+                                        )?,
+                                        unpack_backing,
+                                    )
+                                }
+                            }
+                        }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 GetAny root has a stale or duplicate owner",
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 GetAny: expected Map owner, got {other}"
+                            )));
+                        }
+                    };
+                    let any = Arc::new(any);
+                    if let Some((type_id, value)) = unpack_backing {
+                        self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
+                            &any, type_id, value,
+                        );
+                    }
+                    self.set_reg(
+                        rd,
+                        Value::Tuple(vec![Value::Bool(found), Value::CanonicalManagedAnyV2(any)]),
+                    );
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra } => {
+                    self.ensure_reg(rd, "ordinary Map/Any owner-v2 unpack destination")?;
+                    self.ensure_reg(ra, "ordinary Map/Any owner-v2 unpack pair")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack result aliases its owner pair",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 unpack has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_unpack_binding_at_pc(
+                                function_index,
+                                u32::try_from(pc).unwrap_or(u32::MAX),
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 unpack has no exact Core/MIR binding",
+                            )
+                        })?;
+                    let i32_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                    let string_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                    if binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        || binding.rd != rd
+                        || binding.ra != ra
+                        || binding.conversion_to != binding.target_type
+                        || binding.miss_payload_type != i32_type
+                        || binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack disagrees with its exact Core/MIR binding",
+                        ));
+                    }
+                    let pair = self.get_reg(ra);
+                    let Value::Tuple(fields) = pair else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack expected its exact GetAny pair",
+                        ));
+                    };
+                    if fields.len() != 2 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack pair has an invalid arity",
+                        ));
+                    }
+                    let found = match &fields[0] {
+                        Value::Bool(found) => *found,
+                        _ => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 unpack pair has a non-boolean found field",
+                            ));
+                        }
+                    };
+                    let Value::CanonicalManagedAnyV2(owner) = &fields[1] else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack pair has no V2 Any owner",
+                        ));
+                    };
+                    if Arc::strong_count(owner) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack pair has a stale or duplicate Any owner",
+                        ));
+                    }
+                    let selected = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                &binding.target_type,
+                            )
+                        });
+                    let source_matches = match &binding.payload_source {
+                        crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload => {
+                            selected.is_some()
+                        }
+                        crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss => {
+                            binding.target_type == i32_type && !found
+                        }
+                    };
+                    if !source_matches {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack payload source disagrees with its exact Core provenance receipt",
+                        ));
+                    }
+                    if found {
+                        let selected = selected.ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 unpack hit target is absent from the Core-selected payload table",
+                            )
+                        })?;
+                        let expected_kind_matches = match &selected.kind {
+                            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32 => {
+                                binding.target_type == i32_type
+                            }
+                            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String => {
+                                binding.target_type == string_type
+                            }
+                            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record {
+                                nominal,
+                            } => {
+                                binding.target_type != i32_type
+                                    && binding.target_type != string_type
+                                    && !nominal.is_empty()
+                            }
+                        };
+                        if selected.type_id != binding.target_type
+                            || selected.type_desc_digest != binding.target_type_desc_digest
+                            || !expected_kind_matches
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 unpack target disagrees with the Core-selected payload",
+                            ));
+                        }
+                    } else if binding.miss_payload_type != binding.target_type {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 unpack miss target is not the exact canonical i32 payload",
+                        ));
+                    }
+                    if binding.target_type == i32_type {
+                        let value = self.ordinary_map_owned_any_v2_i32_unpack_payload(
+                            owner,
+                            &binding.target_type,
+                        )?;
+                        self.set_reg(rd, Value::Int(value as i64));
+                    } else if binding.target_type == string_type {
+                        let owned = copy_ordinary_map_owned_any_v2_string_for_unpack(
+                            owner,
+                            &binding.target_type,
+                        )?;
+                        self.set_reg(rd, Value::String(Arc::new(owned)));
+                    } else {
+                        let selected_nominal = selected
+                            .as_ref()
+                            .and_then(|selected| match &selected.kind {
+                                super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record {
+                                    nominal,
+                                } => Some(nominal.clone()),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 unpack target is not an exact selected record payload",
+                                )
+                            })?;
+                        let owned = copy_ordinary_map_owned_any_v2_record_for_unpack(
+                            owner,
+                            &binding.target_type,
+                            &selected_nominal,
+                        )?;
+                        self.set_reg(rd, owned);
+                    }
+                }
+                Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, ra, index } => {
+                    self.ensure_reg(rd, "ordinary Map/Any owner-v2 Values unpack destination")?;
+                    self.ensure_reg(ra, "ordinary Map/Any owner-v2 Values unpack snapshot")?;
+                    self.ensure_reg(index, "ordinary Map/Any owner-v2 Values unpack index")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values unpack result aliases its live snapshot",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values unpack has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+                                function_index,
+                                u32::try_from(pc).unwrap_or(u32::MAX),
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values unpack has no exact Core/MIR binding",
+                            )
+                        })?;
+                    if binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        || binding.rd != rd
+                        || binding.ra != ra
+                        || binding.index_reg != index
+                        || binding.conversion_kind
+                            != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                        || binding.conversion_to != binding.result_type
+                        || binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        || binding.payload_selection_digest.len() != 64
+                        || binding.payload_type_desc_digest.len() != 64
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values unpack disagrees with its exact Core/MIR binding",
+                        ));
+                    }
+
+                    let selected = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                &binding.conversion_to,
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values unpack target is absent from the Core-selected payload table",
+                            )
+                        })?;
+                    if selected.type_id != binding.conversion_to
+                        || selected.type_desc_digest != binding.payload_type_desc_digest
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values unpack target disagrees with the selected TypeDesc digest",
+                        ));
+                    }
+
+                    let raw_index = self.get_int(index)?;
+                    let snapshot = self.get_reg(ra);
+                    let Value::List(elements) = snapshot else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values unpack expected its dedicated live List snapshot",
+                        ));
+                    };
+                    if Arc::strong_count(elements) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values unpack snapshot has a stale or duplicate owner",
+                        ));
+                    }
+                    let length = elements.len();
+                    let selected_index = if raw_index < 0 {
+                        let distance = raw_index.unsigned_abs();
+                        if distance > u64::try_from(length).unwrap_or(u64::MAX) {
+                            return Err(InterpError::index_out_of_bounds(format!(
+                                "index {raw_index} out of bounds (len {length})"
+                            )));
+                        }
+                        length
+                            - usize::try_from(distance).map_err(|_| {
+                                InterpError::index_out_of_bounds(format!(
+                                    "index {raw_index} out of bounds (len {length})"
+                                ))
+                            })?
+                    } else {
+                        let distance = u64::try_from(raw_index).unwrap_or(u64::MAX);
+                        if distance >= u64::try_from(length).unwrap_or(u64::MAX) {
+                            return Err(InterpError::index_out_of_bounds(format!(
+                                "index {raw_index} out of bounds (len {length})"
+                            )));
+                        }
+                        usize::try_from(distance).map_err(|_| {
+                            InterpError::index_out_of_bounds(format!(
+                                "index {raw_index} out of bounds (len {length})"
+                            ))
+                        })?
+                    };
+                    let value = elements.get(selected_index).ok_or_else(|| {
+                        InterpError::index_out_of_bounds(format!(
+                            "index {raw_index} out of bounds (len {length})"
+                        ))
+                    })?;
+                    let Value::CanonicalManagedAnyV2(owner) = value else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values unpack selected element has no V2 Any owner",
+                        ));
+                    };
+                    if Arc::strong_count(owner) != 1 || owner.type_id() != &binding.conversion_to {
+                        return Err(InterpError::new(
+                            "E0800: ordinary Map/Any owner-v2 Values payload tag/type does not match the checked cast",
+                        ));
+                    }
+                    let result = match &selected.kind {
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+                            if binding.conversion_to
+                                == crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::I32,
+                                ) =>
+                        {
+                            let value = self.ordinary_map_owned_any_v2_i32_unpack_payload(
+                                owner,
+                                &binding.conversion_to,
+                            )?;
+                            Value::Int(i64::from(value))
+                        }
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                            if binding.conversion_to
+                                == crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::String,
+                                ) =>
+                        {
+                            let text = copy_ordinary_map_owned_any_v2_string_for_unpack(
+                                owner,
+                                &binding.conversion_to,
+                            )?;
+                            Value::String(Arc::new(text))
+                        }
+                        CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal }
+                            if binding.conversion_to
+                                != crate::core::ir::primitive_type_id(
+                                    crate::core::PrimitiveType::I32,
+                                )
+                                && binding.conversion_to
+                                    != crate::core::ir::primitive_type_id(
+                                        crate::core::PrimitiveType::String,
+                                    )
+                                && !nominal.is_empty() =>
+                        {
+                            copy_ordinary_map_owned_any_v2_record_for_unpack(
+                                owner,
+                                &binding.conversion_to,
+                                nominal,
+                            )?
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "E0800: ordinary Map/Any owner-v2 Values payload tag/type does not match the checked cast",
+                            ));
+                        }
+                    };
+                    // The selected Any owner is borrowed from `elements` and
+                    // the Values snapshot register is untouched. String and
+                    // Label helpers allocate fresh output storage; their
+                    // owned Value is released normally if a later VM action
+                    // fails before the result is moved or dropped.
+                    self.set_reg(rd, result);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Values")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values result aliases its source root",
+                        ));
+                    }
+                    let (function_index, pc, values_ordinal) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values has no current bytecode PC",
+                            )
+                        })?;
+                        let proto = self
+                            .program
+                            .functions
+                            .get(frame.proto_idx as usize)
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values function index is invalid",
+                                )
+                            })?;
+                        let ordinal = proto
+                            .code
+                            .iter()
+                            .take(pc)
+                            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Values { .. }))
+                            .count();
+                        (frame.proto_idx, pc, ordinal)
+                    };
+                    let values_binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_values_binding(
+                                function_index,
+                                values_ordinal,
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values has no Core result-settlement binding",
+                            )
+                        })?;
+                    if values_binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        || values_binding.rd != rd
+                        || values_binding.ra != ra
+                        || values_binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values disagrees with its exact Core site binding",
+                        ));
+                    }
+                    let (values, i32_backings) = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root)
+                            if Arc::strong_count(root) == 1 =>
+                        {
+                            let mut values = Vec::new();
+                            let mut i32_backings = Vec::new();
+                            values.try_reserve_exact(root.len()).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values snapshot allocation failed",
+                                )
+                            })?;
+                            // The root is a BTreeMap<String, _>; iteration is
+                            // lexicographic in UTF-8 key bytes, the canonical
+                            // Values ordering contract.
+                            for payload in root.values() {
+                                let type_id = match payload {
+                                    crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                                        type_id, ..
+                                    }
+                                    | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
+                                        type_id, ..
+                                    }
+                                    | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                                        type_id, ..
+                                    } => type_id,
+                                };
+                                let payload_binding = self
+                                    .program
+                                    .canonical_map_any_owner_v1_receipt
+                                    .as_ref()
+                                    .and_then(|receipt| {
+                                        receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                            type_id,
+                                        )
+                                    })
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        InterpError::new(
+                                            "ordinary Map/Any owner-v2 Values payload uses a TypeDesc outside the exact Core-selected payload table",
+                                        )
+                                    })?;
+                                let owner = copy_ordinary_map_owned_any_v2_payload(
+                                    payload,
+                                    &payload_binding,
+                                )?;
+                                let owner = Arc::new(owner);
+                                if let crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                                    type_id,
+                                    value,
+                                } = payload
+                                {
+                                    i32_backings.push((
+                                        Arc::clone(&owner),
+                                        type_id.clone(),
+                                        *value,
+                                    ));
+                                }
+                                values.push(Value::CanonicalManagedAnyV2(owner));
+                            }
+                            (values, i32_backings)
+                        }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values root has a stale or duplicate owner",
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 Values: expected Map owner, got {other}"
+                            )));
+                        }
+                    };
+                    for (owner, type_id, value) in i32_backings {
+                        self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
+                            &owner, type_id, value,
+                        );
+                    }
+                    self.set_reg(rd, Value::List(Arc::new(values)));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2IsEmpty { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 IsEmpty")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 IsEmpty result aliases its root",
+                        ));
+                    }
+                    let is_empty = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root) => root.is_empty(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 IsEmpty: expected owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, Value::Bool(is_empty));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Drop { ra } => {
+                    self.ensure_reg(ra, "ordinary Map/Any owner-v2 Drop source")?;
+                    let root = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    let Value::CanonicalOrdinaryMapOwnedAnyV2(root) = root else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Drop: expected owner-v2 root",
+                        ));
+                    };
+                    if Arc::strong_count(&root) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Drop: root has a stale or duplicate owner",
+                        ));
+                    }
+                    drop(root);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra } => {
+                    self.ensure_reg(ra, "ordinary Map/Any owner-v2 Values Drop source")?;
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Drop has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let drop_binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_values_drop_binding_at_pc(
+                                function_index,
+                                u32::try_from(pc).unwrap_or(u32::MAX),
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Drop has no exact Core settlement binding",
+                            )
+                        })?;
+                    if drop_binding.drop_pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        || drop_binding.drop_ra != ra
+                        || drop_binding.settlement
+                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values Drop disagrees with its exact Core settlement binding",
+                        ));
+                    }
+                    let Value::List(values) = self.get_reg(ra) else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values Drop expected its dedicated List owner",
+                        ));
+                    };
+                    if Arc::strong_count(values) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values List has a stale or duplicate owner",
+                        ));
+                    }
+                    for value in values.iter() {
+                        let Value::CanonicalManagedAnyV2(owner) = value else {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values List contains a non-V2 payload owner",
+                            ));
+                        };
+                        let selected = self
+                            .program
+                            .canonical_map_any_owner_v1_receipt
+                            .as_ref()
+                            .and_then(|receipt| {
+                                receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                    owner.type_id(),
+                                )
+                            });
+                        if selected.is_none() {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Drop found an unselected payload TypeDesc",
+                            ));
+                        }
+                    }
+                    validate_unique_managed_any_v2_owners(
+                        self.get_reg(ra),
+                        "explicit Drop of ordinary Map/Any owner-v2 Values result",
+                    )?;
+                    {
+                        let value = &self.stack.last().expect("active VM frame").regs[ra as usize];
+                        forget_managed_any_v2_i32_unpack_backings_for_value(
+                            value,
+                            &mut self.ordinary_map_owned_any_v2_i32_unpack_backings,
+                        );
+                    }
+                    let value = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
+                    };
+                    drop(value);
+                }
                 Op::MirVariantPredicate {
                     rd,
                     ra,
@@ -5567,7 +7269,7 @@ impl BytecodeVM {
                             _ => {
                                 return Err(InterpError::new(
                                     "consuming variant projection fallback: expected canonical Variant source",
-                                ))
+                                ));
                             }
                         };
                         if nominal != shape.nominal {
@@ -5635,18 +7337,19 @@ impl BytecodeVM {
                     }
                     let value = self.get_reg(ra).clone();
                     let fallback = self.get_reg(rb).clone();
-                    let (nominal, variant, tag, payload) =
-                        match value {
-                            Value::CanonicalVariant {
-                                nominal,
-                                variant,
-                                tag,
-                                payload,
-                            } => (nominal, variant, tag, payload),
-                            _ => return Err(InterpError::new(
+                    let (nominal, variant, tag, payload) = match value {
+                        Value::CanonicalVariant {
+                            nominal,
+                            variant,
+                            tag,
+                            payload,
+                        } => (nominal, variant, tag, payload),
+                        _ => {
+                            return Err(InterpError::new(
                                 "variant projection fallback: expected canonical Variant source",
-                            )),
-                        };
+                            ));
+                        }
+                    };
                     if nominal != shape.nominal {
                         return Err(InterpError::new(
                             "variant projection fallback: runtime nominal disagrees with receipt",
@@ -5727,7 +7430,7 @@ impl BytecodeVM {
                         _ => {
                             return Err(InterpError::new(
                                 "map_contains: expected (Map, String key)",
-                            ))
+                            ));
                         }
                     };
                     self.set_reg(rd, Value::Bool(contains));
@@ -6164,13 +7867,13 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "is-variant tag constant {} is not a string",
                                 tag
-                            )))
+                            )));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "is-variant tag constant {} out of range",
                                 tag
-                            )))
+                            )));
                         }
                     };
                     let matches = match v {
@@ -6211,7 +7914,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "variant get: expected Variant, got {}",
                                 value
-                            )))
+                            )));
                         }
                     };
                     let expected_tag = match proto.constants.get(variant_tag as usize) {
@@ -6315,7 +8018,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "variant move get: expected Variant, got {}",
                                 value
-                            )))
+                            )));
                         }
                     };
                     let expected_tag = match proto.constants.get(variant_tag as usize) {
@@ -6324,13 +8027,13 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "variant move get: tag constant {} is not a string",
                                 variant_tag
-                            )))
+                            )));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "variant move get: tag constant {} is absent",
                                 variant_tag
-                            )))
+                            )));
                         }
                     };
                     if actual_tag != expected_tag {
@@ -6347,9 +8050,9 @@ impl BytecodeVM {
                             let Some(shape) = shapes.iter().find(|shape| shape.tag == actual_tag)
                             else {
                                 return Err(InterpError::new(format!(
-                                        "variant move get: tag '{}' is absent from canonical shape table",
-                                        actual_tag
-                                    )));
+                                    "variant move get: tag '{}' is absent from canonical shape table",
+                                    actual_tag
+                                )));
                             };
                             (shape.nominal.clone(), shape.variant.clone(), shape.arity)
                         }
@@ -6357,13 +8060,13 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "variant move get: shapes constant {} is not a VariantShapes table",
                                 shapes
-                            )))
+                            )));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "variant move get: shapes constant {} is absent",
                                 shapes
-                            )))
+                            )));
                         }
                     };
                     if let Some((nominal, variant)) = identity {
@@ -6433,7 +8136,7 @@ impl BytecodeVM {
                         other => {
                             return Err(InterpError::new(format!(
                                 "pattern field: expected Record or Variant, got {other}"
-                            )))
+                            )));
                         }
                     }
                 }
@@ -6455,7 +8158,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "variant tag: expected Variant, got {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -6483,7 +8186,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "variant payload: expected Variant, got {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -6507,7 +8210,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "new-cap name constant {} out of range",
                                 name
-                            )))
+                            )));
                         }
                     };
                     // Components stored as comma-separated string.
@@ -6588,7 +8291,7 @@ impl BytecodeVM {
                                 return Err(InterpError::new(format!(
                                     "cannot cast {} to i64",
                                     other
-                                )))
+                                )));
                             }
                         },
                         1 => match v {
@@ -6598,7 +8301,7 @@ impl BytecodeVM {
                                 return Err(InterpError::new(format!(
                                     "cannot cast {} to f64",
                                     other
-                                )))
+                                )));
                             }
                         },
                         2 => match v {
@@ -6613,14 +8316,14 @@ impl BytecodeVM {
                                 return Err(InterpError::new(format!(
                                     "cannot cast {} to i32",
                                     other
-                                )))
+                                )));
                             }
                         },
                         _ => {
                             return Err(InterpError::new(format!(
                                 "Cast: unknown target {}",
                                 target
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, result);
@@ -6657,7 +8360,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "trap message constant {} out of range",
                                 msg
-                            )))
+                            )));
                         }
                     };
                     return Err(InterpError::new(msg_str));
@@ -6782,7 +8485,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "ActorSpawn: actor name constant {} out of range",
                                 actor
-                            )))
+                            )));
                         }
                     };
                     let val = self.spawn_actor(&actor_name, false)?;
@@ -6794,13 +8497,13 @@ impl BytecodeVM {
                     let actor_name = match proto.constants.get(actor as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => {
-                            return Err(InterpError::new("ActorSpawnDetached: invalid actor name"))
+                            return Err(InterpError::new("ActorSpawnDetached: invalid actor name"));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "ActorSpawnDetached: actor name constant {} out of range",
                                 actor
-                            )))
+                            )));
                         }
                     };
                     let val = self.spawn_actor(&actor_name, true)?;
@@ -6825,25 +8528,25 @@ impl BytecodeVM {
                     let flow_name = match proto.constants.get(flow as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => {
-                            return Err(InterpError::new("FlowTransition: invalid flow name"))
+                            return Err(InterpError::new("FlowTransition: invalid flow name"));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "FlowTransition: flow name constant {} out of range",
                                 flow
-                            )))
+                            )));
                         }
                     };
                     let method_name = match proto.constants.get(method as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => {
-                            return Err(InterpError::new("FlowTransition: invalid method name"))
+                            return Err(InterpError::new("FlowTransition: invalid method name"));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "FlowTransition: method name constant {} out of range",
                                 method
-                            )))
+                            )));
                         }
                     };
                     // Extract from-state name from the first argument.
@@ -6853,7 +8556,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "FlowTransition: first arg must be a state Record, got {}",
                                 other
-                            )))
+                            )));
                         }
                     };
                     // A checked state.method call carries the exact source
@@ -6949,13 +8652,13 @@ impl BytecodeVM {
                     let method_name = match proto.constants.get(method as usize) {
                         Some(ConstValue::Str(s)) => s.clone(),
                         Some(_) => {
-                            return Err(InterpError::new("DynMethodCall: invalid method name"))
+                            return Err(InterpError::new("DynMethodCall: invalid method name"));
                         }
                         None => {
                             return Err(InterpError::new(format!(
                                 "DynMethodCall: method name constant {} out of range",
                                 method
-                            )))
+                            )));
                         }
                     };
                     let receiver = self.get_reg(args_base).clone();
@@ -7335,7 +9038,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "cannot write through non-shared reference: {}",
                                 other
-                            )))
+                            )));
                         }
                     }
                 }
@@ -7349,7 +9052,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(format!(
                                 "weak requires a shared value, got {}",
                                 v
-                            )))
+                            )));
                         }
                     };
                     self.set_reg(rd, weak);
@@ -8566,13 +10269,13 @@ impl BytecodeVM {
                 return Err(InterpError::new(format!(
                     "tuple projection: contract constant {} is not a TupleProjection",
                     contract_idx
-                )))
+                )));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "tuple projection: contract constant {} is absent",
                     contract_idx
-                )))
+                )));
             }
         };
         if shape.index != index {
@@ -8714,8 +10417,7 @@ impl BytecodeVM {
         let Some(contract_idx) = contract else {
             return Ok(None);
         };
-        match self.current_proto()?.constants.get(contract_idx as usize)
-        {
+        match self.current_proto()?.constants.get(contract_idx as usize) {
             Some(ConstValue::VariantProjectionFallback(shape)) => Ok(Some(shape.clone())),
             Some(_) => Err(InterpError::new(format!(
                 "variant projection fallback: contract constant {} is not a VariantProjectionFallback",
@@ -8833,13 +10535,13 @@ impl BytecodeVM {
             Some(_) => {
                 return Err(InterpError::new(
                     "record projection: field constant is not a string",
-                ))
+                ));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "record projection: field constant {} is absent",
                     field
-                )))
+                )));
             }
         };
         let Some(contract_idx) = contract else {
@@ -8851,13 +10553,13 @@ impl BytecodeVM {
                 return Err(InterpError::new(format!(
                     "record projection: contract constant {} is not a RecordProjection",
                     contract_idx
-                )))
+                )));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "record projection: contract constant {} is absent",
                     contract_idx
-                )))
+                )));
             }
         };
         if shape.name != field_name {
@@ -8879,13 +10581,13 @@ impl BytecodeVM {
             Some(_) => {
                 return Err(InterpError::new(
                     "record move/drop projection: field constant is not a string",
-                ))
+                ));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "record move/drop projection: field constant {} is absent",
                     field
-                )))
+                )));
             }
         };
         let shape = match proto.constants.get(contract as usize) {
@@ -8894,13 +10596,13 @@ impl BytecodeVM {
                 return Err(InterpError::new(format!(
                     "record move/drop projection: contract constant {} is not a RecordMoveDropProjection",
                     contract
-                )))
+                )));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "record move/drop projection: contract constant {} is absent",
                     contract
-                )))
+                )));
             }
         };
         if shape.base.name != field_name {
@@ -9018,13 +10720,13 @@ impl BytecodeVM {
                 return Err(InterpError::new(format!(
                     "variant construction: tag constant {} is not a string",
                     type_name
-                )))
+                )));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "variant construction: tag constant {} is absent",
                     type_name
-                )))
+                )));
             }
         };
 
@@ -9039,13 +10741,13 @@ impl BytecodeVM {
                 return Err(InterpError::new(format!(
                     "variant construction: shapes constant {} is not a VariantShapes table",
                     shapes_idx
-                )))
+                )));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "variant construction: shapes constant {} is absent",
                     shapes_idx
-                )))
+                )));
             }
         };
         let Some(shape) = shape else {
@@ -9083,7 +10785,7 @@ impl BytecodeVM {
             _ => {
                 return Err(InterpError::new(
                     "managed Any: checker contract constant is missing or wrong",
-                ))
+                ));
             }
         };
         let receipt = &shape.contract;
@@ -9174,12 +10876,12 @@ impl BytecodeVM {
             Some(_) => {
                 return Err(InterpError::new(format!(
                     "ordinary Map owned-Get result: shape constant {shapes_idx} is not a VariantShapes table"
-                )))
+                )));
             }
             None => {
                 return Err(InterpError::new(format!(
                     "ordinary Map owned-Get result: shape constant {shapes_idx} is absent"
-                )))
+                )));
             }
         };
         if shapes.len() != 2 {
@@ -9630,6 +11332,265 @@ impl BytecodeVM {
         );
         self.spawn_count += 1;
         Ok(Value::Actor(handle))
+    }
+}
+
+#[cfg(test)]
+mod ordinary_map_owned_any_v2_tests {
+    use super::{
+        clone_ordinary_map_owned_any_v2_entries, copy_ordinary_map_owned_any_v2_payload,
+        copy_ordinary_map_owned_any_v2_record_for_unpack,
+        copy_ordinary_map_owned_any_v2_string_for_unpack,
+        forget_managed_any_v2_i32_unpack_backings_for_value,
+        stage_ordinary_map_owned_any_v2_set_payload, validate_unique_managed_any_v2_owners,
+        OrdinaryMapOwnedAnyV2I32UnpackBacking,
+    };
+    use crate::interp::bytecode::instr::{
+        CanonicalOrdinaryMapOwnedAnyV2PayloadBinding, CanonicalOrdinaryMapOwnedAnyV2PayloadKind,
+    };
+    use crate::interp::value::{
+        CanonicalManagedAnyV2, CanonicalOrdinaryMapOwnedAnyV2Value as Payload, Value,
+    };
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::{Arc, Weak};
+
+    #[test]
+    fn v2_snapshot_clone_preserves_nominal_identity_and_copies_string_owners() {
+        let text = Arc::new(String::from("same payload shape"));
+        let first_type_id =
+            crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:first");
+        let second_type_id =
+            crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:second");
+        let entries = BTreeMap::from([
+            (
+                String::from("first"),
+                Payload::Record {
+                    type_id: first_type_id.clone(),
+                    nominal: String::from("item:type:demo::First"),
+                    text: Arc::clone(&text),
+                },
+            ),
+            (
+                String::from("second"),
+                Payload::Record {
+                    type_id: second_type_id.clone(),
+                    nominal: String::from("item:type:demo::Second"),
+                    text: Arc::clone(&text),
+                },
+            ),
+        ]);
+
+        let cloned = clone_ordinary_map_owned_any_v2_entries(&entries)
+            .expect("clone every V2 entry into independent VM-owned storage");
+
+        assert_eq!(cloned, entries);
+        let Payload::Record {
+            type_id: first_cloned_type_id,
+            nominal: first_nominal,
+            text: first_text,
+        } = cloned.get("first").expect("first record entry")
+        else {
+            panic!("first entry retained its record payload descriptor");
+        };
+        let Payload::Record {
+            type_id: second_cloned_type_id,
+            nominal: second_nominal,
+            text: second_text,
+        } = cloned.get("second").expect("second record entry")
+        else {
+            panic!("second entry retained its record payload descriptor");
+        };
+        assert_eq!(first_cloned_type_id, &first_type_id);
+        assert_eq!(second_cloned_type_id, &second_type_id);
+        assert_eq!(first_nominal, "item:type:demo::First");
+        assert_eq!(second_nominal, "item:type:demo::Second");
+        assert!(!Arc::ptr_eq(first_text, &text));
+        assert!(!Arc::ptr_eq(second_text, &text));
+        assert!(!Arc::ptr_eq(first_text, second_text));
+    }
+
+    #[test]
+    fn v2_same_shaped_records_remain_distinct_by_nominal_identity() {
+        let first_type_id =
+            crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:first");
+        let second_type_id =
+            crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:second");
+        let first = Payload::Record {
+            type_id: first_type_id,
+            nominal: String::from("item:type:demo::First"),
+            text: Arc::new(String::from("same")),
+        };
+        let second = Payload::Record {
+            type_id: second_type_id,
+            nominal: String::from("item:type:demo::Second"),
+            text: Arc::new(String::from("same")),
+        };
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn v2_direct_string_set_getany_and_unpack_each_own_their_payload() {
+        let type_id = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let source_text = Arc::new(String::from("detached string payload"));
+        let binding = CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
+            type_id: type_id.clone(),
+            type_desc_digest: "a".repeat(64),
+            kind: CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String,
+        };
+        let staged = stage_ordinary_map_owned_any_v2_set_payload(
+            &Value::String(Arc::clone(&source_text)),
+            &binding,
+        )
+        .expect("Set snapshots a direct String payload");
+        let Payload::String {
+            text: staged_text, ..
+        } = &staged
+        else {
+            panic!("Set staged the payload as direct String");
+        };
+        assert!(!Arc::ptr_eq(&source_text, staged_text));
+
+        let entries = BTreeMap::from([(String::from("text"), staged)]);
+        let cloned = clone_ordinary_map_owned_any_v2_entries(&entries)
+            .expect("a direct String payload can be independently cloned");
+        let Payload::String {
+            text: cloned_text, ..
+        } = cloned.get("text").expect("cloned direct String payload")
+        else {
+            panic!("String payload retained its direct String representation");
+        };
+        assert!(!Arc::ptr_eq(&source_text, cloned_text));
+
+        let any = copy_ordinary_map_owned_any_v2_payload(
+            entries.get("text").expect("source direct String payload"),
+            &binding,
+        )
+        .expect("GetAny deep-copies a direct String into the Any token");
+        assert!(any.matches_string(&type_id, "detached string payload"));
+        let any_text = any
+            .string_for_type_id(&type_id)
+            .expect("Any token retains the exact String TypeDesc");
+        assert_eq!(any_text, source_text.as_str());
+        assert_ne!(any_text.as_ptr(), source_text.as_ptr());
+
+        let unpacked = copy_ordinary_map_owned_any_v2_string_for_unpack(&any, &type_id)
+            .expect("unpack deep-copies into its own output allocation");
+        assert_eq!(unpacked, source_text.as_str());
+        assert_ne!(unpacked.as_ptr(), any_text.as_ptr());
+        drop(any);
+        assert_eq!(unpacked, "detached string payload");
+    }
+
+    #[test]
+    fn v2_record_unpack_requires_exact_type_and_nominal_and_copies_the_field() {
+        let type_id =
+            crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:label");
+        let nominal = String::from("item:type:demo::Label");
+        let owner = CanonicalManagedAnyV2::from_record(
+            type_id.clone(),
+            nominal.clone(),
+            String::from("independent record payload"),
+        );
+        let source_ptr = owner
+            .record_text_for_type_id(&type_id, &nominal)
+            .expect("exact selected record identity")
+            .as_ptr();
+        let unpacked = copy_ordinary_map_owned_any_v2_record_for_unpack(&owner, &type_id, &nominal)
+            .expect("exact concrete record payload unpacks");
+        let Value::Record(Some(unpacked_nominal), fields) = unpacked else {
+            panic!("record unpack returns a nominal Record value");
+        };
+        assert_eq!(unpacked_nominal, nominal);
+        assert_eq!(fields.len(), 1, "only the receipted field is materialized");
+        let Value::String(unpacked_text) = fields.get("text").expect("text field") else {
+            panic!("Label.text remains an owned String");
+        };
+        assert_eq!(unpacked_text.as_str(), "independent record payload");
+        assert_ne!(unpacked_text.as_ptr(), source_ptr);
+
+        let wrong_nominal = copy_ordinary_map_owned_any_v2_record_for_unpack(
+            &owner,
+            &type_id,
+            "item:type:demo::Other",
+        )
+        .expect_err("same shaped but different nominal records are rejected");
+        assert_eq!(wrong_nominal.code(), "E0800", "{wrong_nominal}");
+
+        let wrong_type_id =
+            crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:other-label");
+        let wrong_type =
+            copy_ordinary_map_owned_any_v2_record_for_unpack(&owner, &wrong_type_id, &nominal)
+                .expect_err("a different selected TypeDesc is rejected");
+        assert_eq!(wrong_type.code(), "E0800", "{wrong_type}");
+
+        let wrong_tag = CanonicalManagedAnyV2::from_string(
+            type_id.clone(),
+            String::from("not a record payload"),
+        );
+        let wrong_tag =
+            copy_ordinary_map_owned_any_v2_record_for_unpack(&wrong_tag, &type_id, &nominal)
+                .expect_err("a direct String tag cannot satisfy a Record target");
+        assert_eq!(wrong_tag.code(), "E0800", "{wrong_tag}");
+    }
+
+    #[test]
+    fn v2_i32_unpack_sidecar_is_identity_bound_and_cleared_on_owner_drop() {
+        let type_id = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let owner = Arc::new(CanonicalManagedAnyV2::from_i32(type_id.clone(), 7));
+        let other_owner = Arc::new(CanonicalManagedAnyV2::from_i32(type_id.clone(), 9));
+        let owner_ptr = Arc::as_ptr(&owner);
+        let key = owner_ptr as usize;
+        let mut backings = HashMap::from([(
+            key,
+            OrdinaryMapOwnedAnyV2I32UnpackBacking {
+                owner: Arc::downgrade(&other_owner),
+                type_id: type_id.clone(),
+                value: 7,
+            },
+        )]);
+        let aggregate = Value::Tuple(vec![
+            Value::Bool(true),
+            Value::CanonicalManagedAnyV2(Arc::clone(&owner)),
+        ]);
+
+        // A stale map entry at a reused address is not removed as if it
+        // belonged to this owner.
+        forget_managed_any_v2_i32_unpack_backings_for_value(&aggregate, &mut backings);
+        assert!(backings.contains_key(&key));
+
+        backings.insert(
+            key,
+            OrdinaryMapOwnedAnyV2I32UnpackBacking {
+                owner: Arc::downgrade(&owner),
+                type_id,
+                value: 7,
+            },
+        );
+        forget_managed_any_v2_i32_unpack_backings_for_value(&aggregate, &mut backings);
+        assert!(!backings.contains_key(&key));
+        assert_eq!(
+            Arc::strong_count(&owner),
+            2,
+            "aggregate still owns the Any token"
+        );
+    }
+
+    #[test]
+    fn v2_aggregate_drop_rejects_a_duplicated_owned_any_leaf() {
+        let type_id = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let owner = Arc::new(CanonicalManagedAnyV2::from_i32(type_id, 0));
+        let aggregate = Value::Tuple(vec![
+            Value::CanonicalManagedAnyV2(Arc::clone(&owner)),
+            Value::CanonicalManagedAnyV2(owner),
+        ]);
+
+        let error = validate_unique_managed_any_v2_owners(
+            &aggregate,
+            "aggregate drop of ordinary Map/Any owner-v2 result",
+        )
+        .expect_err("one Any owner cannot be settled through two aggregate fields");
+        assert!(error.message().contains("stale or duplicate alias"));
     }
 }
 

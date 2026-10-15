@@ -45,7 +45,15 @@ pub use ownership::{
 };
 pub(crate) use ownership::{
     ManagedAnyCfgMatchCase, ManagedAnyCfgReceipt, MapAnyOwnerAction, MapAnyOwnerActionKind,
-    MapAnyOwnerProfileVersion, MapRootAction, MapRootActionKind,
+    MapAnyOwnerProfileVersion, MapRootAction, MapRootActionKind, OrdinaryMapOwnedAnyV2Action,
+    OrdinaryMapOwnedAnyV2ActionKind, OrdinaryMapOwnedAnyV2Attempt,
+    OrdinaryMapOwnedAnyV2AttemptKind, OrdinaryMapOwnedAnyV2CfgBlock,
+    OrdinaryMapOwnedAnyV2CfgFlowReceipt, OrdinaryMapOwnedAnyV2CfgReceipt,
+    OrdinaryMapOwnedAnyV2KeyProvenance, OrdinaryMapOwnedAnyV2LiveOwner,
+    OrdinaryMapOwnedAnyV2ProfileVersion, OrdinaryMapOwnedAnyV2ResultReceipt,
+    OrdinaryMapOwnedAnyV2ResultSettlementKind, OrdinaryMapOwnedAnyV2RootSettlementKind,
+    OrdinaryMapOwnedAnyV2TemporaryRootReceipt, OrdinaryMapOwnedAnyV2UnpackReceipt,
+    OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind, OrdinaryMapOwnedAnyV2ValuesUnpackReceipt,
     OrdinaryMapOwnedGetI32StringV1Action, OrdinaryMapOwnedGetI32StringV1ActionKind,
     OrdinaryMapOwnedGetI32StringV1Attempt, OrdinaryMapOwnedGetI32StringV1AttemptKind,
     OrdinaryMapOwnedGetI32StringV1CfgBlock, OrdinaryMapOwnedGetI32StringV1CfgProfileVersion,

@@ -14,8 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::core::ir::{
-    CheckedConversionKind, NominalTypeId, ResolvedBinaryOp, ResolvedBlock, ResolvedCall,
-    ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedPattern,
+    primitive_type_id, CheckedConversionKind, NominalTypeId, ResolvedBinaryOp, ResolvedBlock,
+    ResolvedCall, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedPattern,
     ResolvedPatternKind, ResolvedStmtKind, ResolvedType, ResolvedUnaryOp,
 };
 use crate::core::{
@@ -24,7 +24,7 @@ use crate::core::{
 };
 
 use super::islands::is_owned_generic_record_update_callable;
-use super::types::MirTypeCatalog;
+use super::types::{MirBuiltinKind, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirCheckerLoanContract,
     MirCheckerLoanEndSite, MirCheckerLoanLocation, MirCheckerMapRootAction,
@@ -168,6 +168,16 @@ fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
         | OrdinaryMapOwnerLifecycleRemove { result, .. }
         | OrdinaryMapOwnerLifecycleSize { result, .. }
         | OrdinaryMapOwnerLifecycleContains { result, .. } => vec![result],
+        OrdinaryMapOwnedAnyV2New { result }
+        | OrdinaryMapOwnedAnyV2Set { result, .. }
+        | OrdinaryMapOwnedAnyV2Remove { result, .. }
+        | OrdinaryMapOwnedAnyV2Size { result, .. }
+        | OrdinaryMapOwnedAnyV2Contains { result, .. }
+        | OrdinaryMapOwnedAnyV2GetAny { result, .. }
+        | OrdinaryMapOwnedAnyV2Unpack { result, .. }
+        | OrdinaryMapOwnedAnyV2ValuesUnpack { result, .. }
+        | OrdinaryMapOwnedAnyV2Values { result, .. }
+        | OrdinaryMapOwnedAnyV2IsEmpty { result, .. } => vec![result],
         Const { result, .. }
         | Load { result, .. }
         | Copy { result, .. }
@@ -201,6 +211,7 @@ fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
             .unwrap_or_default(),
         SessionPairBind { lo, hi, .. } => vec![lo, hi],
         OrdinaryMapOwnerLifecycleDrop { .. }
+        | OrdinaryMapOwnedAnyV2Drop { .. }
         | OrdinaryMapOwnedGetI32StringV1Drop { .. }
         | MapRootDrop { .. }
         | Drop { .. }
@@ -8111,6 +8122,18 @@ fn ownership_summary(
     analysis: &ResourceAnalysis,
     type_catalog: Option<&MirTypeCatalog>,
 ) -> MirOwnershipSummary {
+    // The independent V1 scanner also recognizes GetAny/Values and the
+    // shared New/Drop lifecycle. Once the exact V2 TypeDesc is selected, its
+    // sealed Checker CFG receipt owns these overlapping source actions. Keep
+    // the V1 attempt census in ResourceAnalysis for arbitration, but do not
+    // project a second V1 receipt into MIR.
+    let ordinary_map_owned_get_v1_shadowed_by_v2 = analysis.has_ordinary_map_owned_any_v2_receipt()
+        && analysis.ordinary_map_owned_any_v2_cfg_receipt.is_some()
+        && type_catalog.is_some_and(|catalog| {
+            catalog
+                .get(&super::types::ordinary_map_owned_any_v2_type_id())
+                .is_some()
+        });
     let map_any_owner_v1_receipt_present = analysis.has_map_any_owner_v1_receipt();
     let ordinary_attempts_fully_covered_by_map_any_owner_v1 =
         analysis.ordinary_map_attempts_fully_covered_by_map_any_owner_v1();
@@ -8373,40 +8396,109 @@ fn ownership_summary(
                     })
                     .collect()
             },
-        checker_ordinary_map_owned_get_i32_string_v1: analysis
-            .ordinary_map_owned_get_i32_string_v1_actions
+        checker_ordinary_map_owned_get_i32_string_v1: if ordinary_map_owned_get_v1_shadowed_by_v2 {
+            Vec::new()
+        } else {
+            analysis
+                .ordinary_map_owned_get_i32_string_v1_actions
+                .iter()
+                .filter_map(|action| {
+                    let local = mir_value_for_local(&action.local);
+                    let role = format!(
+                        "ordinary_map_owned_get_i32_string_v1_{}:{local}",
+                        action.kind.as_str()
+                    );
+                    let instruction =
+                        MirInstructionId::new(format!("inst:{role}:{}", action.point.0)).ok()?;
+                    let result = match action.kind {
+                        crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Set
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Remove
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Clone => {
+                            Some(local.clone())
+                        }
+                        crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Size
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::HasKey
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetI32
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetString
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Values => {
+                            MirValueId::new(format!("expr:{}", action.point.0)).ok()
+                        }
+                        crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop => None,
+                    };
+                    Some(super::MirCheckerOrdinaryMapOwnedGetI32StringV1Action {
+                        profile_version: action.profile_version,
+                        kind: action.kind,
+                        point: action.point.clone(),
+                        local,
+                        result,
+                        root: action.root.0 .0.clone(),
+                        key_node: action.key.clone(),
+                        key: action
+                            .key_local
+                            .as_ref()
+                            .map(mir_value_for_local)
+                            .or_else(|| {
+                                action.key.as_ref().and_then(|node| {
+                                    MirValueId::new(format!("expr:{}", node.0)).ok()
+                                })
+                            }),
+                        key_type: action.key_type.clone(),
+                        key_local: action.key_local.clone(),
+                        value: action
+                            .value
+                            .as_ref()
+                            .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok()),
+                        value_type: action.value_type.clone(),
+                        result_type: action.result_type.as_ref().map(|ty| {
+                            type_catalog.map_or_else(
+                                || ty.clone(),
+                                |catalog| catalog.canonical_managed_any_type(ty),
+                            )
+                        }),
+                        source_local: action.source_local.as_ref().map(mir_value_for_local),
+                        source: action.source.as_ref().map(|resource| resource.0 .0.clone()),
+                        instruction,
+                    })
+                })
+                .collect()
+        },
+        checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt:
+            if ordinary_map_owned_get_v1_shadowed_by_v2 {
+                None
+            } else {
+                analysis
+                    .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+                    .clone()
+            },
+        checker_ordinary_map_owned_any_v2: analysis
+            .ordinary_map_owned_any_v2_actions
             .iter()
             .filter_map(|action| {
                 let local = mir_value_for_local(&action.local);
-                let role = format!(
-                    "ordinary_map_owned_get_i32_string_v1_{}:{local}",
-                    action.kind.as_str()
-                );
+                let role = format!("ordinary_map_owned_any_v2_{}:{local}", action.kind.as_str());
                 let instruction =
                     MirInstructionId::new(format!("inst:{role}:{}", action.point.0)).ok()?;
-                let result = match action.kind {
-                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Set
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Remove
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Clone => {
-                        Some(local.clone())
-                    }
-                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Size
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::HasKey
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetI32
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetString
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::GetAny
-                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Values => {
-                        MirValueId::new(format!("expr:{}", action.point.0)).ok()
-                    }
-                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop => None,
-                };
-                Some(super::MirCheckerOrdinaryMapOwnedGetI32StringV1Action {
+                Some(super::MirCheckerOrdinaryMapOwnedAnyV2Action {
                     profile_version: action.profile_version,
                     kind: action.kind,
                     point: action.point.clone(),
-                    local,
-                    result,
+                    local: local.clone(),
+                    result: match action.kind {
+                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Clone
+                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Remove => Some(local),
+                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::Size
+                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::HasKey
+                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
+                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::IsEmpty => {
+                            MirValueId::new(format!("expr:{}", action.point.0)).ok()
+                        }
+                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop => None,
+                    },
                     root: action.root.0 .0.clone(),
                     key_node: action.key.clone(),
                     key: action
@@ -8421,25 +8513,25 @@ fn ownership_summary(
                         }),
                     key_type: action.key_type.clone(),
                     key_local: action.key_local.clone(),
+                    key_provenance: action.key_provenance,
                     value: action
                         .value
                         .as_ref()
                         .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok()),
                     value_type: action.value_type.clone(),
-                    result_type: action.result_type.as_ref().map(|ty| {
-                        type_catalog.map_or_else(
-                            || ty.clone(),
-                            |catalog| catalog.canonical_managed_any_type(ty),
-                        )
-                    }),
+                    payload_clone: action.payload_clone,
                     source_local: action.source_local.as_ref().map(mir_value_for_local),
                     source: action.source.as_ref().map(|resource| resource.0 .0.clone()),
+                    source_node: action.source_node.clone(),
+                    source_type: action.source_type.clone(),
+                    result_source_type: action.result_type.clone(),
+                    result_local: action.result_local.clone(),
                     instruction,
                 })
             })
             .collect(),
-        checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt: analysis
-            .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+        checker_ordinary_map_owned_any_v2_cfg_receipt: analysis
+            .ordinary_map_owned_any_v2_cfg_receipt
             .clone(),
         checker_managed_any_cfg_receipt: analysis.managed_any_cfg_receipt.clone(),
     }
@@ -9270,9 +9362,42 @@ impl<'a> Lowerer<'a> {
                 message: error.to_string(),
             }]
         })?;
-        self.insert_value(value.clone(), definition.ty.clone(), &local.0);
+        let ty = self
+            .ordinary_map_owned_any_v2_read_result_type(local, &definition.ty)
+            .unwrap_or_else(|| definition.ty.clone());
+        self.insert_value(value.clone(), ty, &local.0);
         self.locals.insert(local.clone(), value.clone());
         Ok(value)
+    }
+
+    fn ordinary_map_owned_any_v2_read_result_type(
+        &self,
+        local: &ResolvedLocalId,
+        checker_type: &crate::core::ResolvedTypeId,
+    ) -> Option<crate::core::ResolvedTypeId> {
+        let action = self
+            .resource_analysis?
+            .ordinary_map_owned_any_v2_actions
+            .iter()
+            .find(|action| {
+                action.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && matches!(
+                        action.kind,
+                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
+                    )
+                    && action.result_local.as_ref() == Some(local)
+                    && action.result_type.as_ref() == Some(checker_type)
+            })?;
+        Some(match action.kind {
+            crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny => {
+                super::types::ordinary_map_owned_any_v2_get_result_type_id()
+            }
+            crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values => {
+                super::types::ordinary_map_owned_any_v2_values_type_id()
+            }
+            _ => unreachable!("the result lookup filters V2 read actions"),
+        })
     }
 
     fn direct_local_value(&mut self, expression: &ResolvedExpr) -> Option<MirValueId> {
@@ -9283,6 +9408,14 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         self.local_value(&place.base).ok()
+    }
+
+    fn lower_string_comparison_operand(&mut self, expression: &ResolvedExpr) -> (MirValueId, bool) {
+        if let Some(value) = self.direct_local_value(expression) {
+            (value, false)
+        } else {
+            (self.lower_expr(expression), true)
+        }
     }
 
     fn lower_closure_binding(
@@ -9827,10 +9960,222 @@ impl<'a> Lowerer<'a> {
     /// binding to the normal compatibility/error path.
     fn lower_map_any_owner_v2_binding(
         &mut self,
-        _target: &ResolvedLocalId,
-        _initializer: &ResolvedExpr,
+        target: &ResolvedLocalId,
+        initializer: &ResolvedExpr,
     ) -> bool {
-        false
+        let Some(analysis) = self.resource_analysis else {
+            return false;
+        };
+        if !analysis.has_ordinary_map_owned_any_v2_receipt() {
+            return false;
+        }
+        let Some(action) = analysis
+            .ordinary_map_owned_any_v2_actions
+            .iter()
+            .find(|a| {
+                a.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && a.point == initializer.node_id
+                    && a.local == *target
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        let result = self.ordinary_map_owned_any_v2_local_value(target, &initializer.node_id);
+        use crate::core::OrdinaryMapOwnedAnyV2ActionKind as K;
+        if action.kind == K::Clone {
+            let ResolvedExprKind::Load(place) = &initializer.kind else {
+                self.error(
+                    &initializer.node_id,
+                    "ordinary Map/Any v2 Clone source is not a direct local",
+                );
+                return true;
+            };
+            if !place.projections.is_empty()
+                || action.source_local.as_ref() != Some(&place.base)
+                || action.source_node.as_ref() != Some(&initializer.node_id)
+                || action.source_type.as_ref() != Some(&initializer.ty)
+            {
+                self.error(
+                    &initializer.node_id,
+                    "ordinary Map/Any v2 Clone source disagrees with Checker receipt",
+                );
+                return true;
+            }
+            let source = self.v2_root_arg(initializer, &action, &initializer.node_id);
+            self.emit(
+                &initializer.node_id,
+                &format!(
+                    "ordinary_map_owned_any_v2_{}:{result}",
+                    action.kind.as_str()
+                ),
+                MirInstructionKind::Clone { result, source },
+            );
+            return true;
+        }
+        let ResolvedExprKind::Call(call) = &initializer.kind else {
+            self.error(
+                &initializer.node_id,
+                "ordinary Map/Any v2 root action must be a call",
+            );
+            return true;
+        };
+        let mut key_cleanup = None;
+        let inst = match action.kind {
+            K::New if call.arguments.is_empty() => MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                result: result.clone(),
+            },
+            K::Set if call.arguments.len() == 3 => {
+                let source =
+                    self.v2_root_arg(&call.arguments[0].value, &action, &initializer.node_id);
+                let Some((key, key_is_temporary)) = self.lower_ordinary_map_owned_any_v2_key(
+                    &action,
+                    &call.arguments[1].value,
+                    &initializer.node_id,
+                ) else {
+                    return true;
+                };
+                let value = self.lower_expr(&call.arguments[2].value);
+                key_cleanup = Some((
+                    key.clone(),
+                    key_is_temporary,
+                    action.value_type.clone(),
+                    value.clone(),
+                ));
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+                    result: result.clone(),
+                    source,
+                    key,
+                    value,
+                }
+            }
+            K::Remove if call.arguments.len() == 2 => {
+                let source =
+                    self.v2_root_arg(&call.arguments[0].value, &action, &initializer.node_id);
+                let Some((key, key_is_temporary)) = self.lower_ordinary_map_owned_any_v2_key(
+                    &action,
+                    &call.arguments[1].value,
+                    &initializer.node_id,
+                ) else {
+                    return true;
+                };
+                key_cleanup = Some((key.clone(), key_is_temporary, None, key.clone()));
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
+                    result: result.clone(),
+                    source,
+                    key,
+                }
+            }
+            _ => {
+                self.error(
+                    &initializer.node_id,
+                    "ordinary Map/Any v2 binding shape disagrees with Checker receipt",
+                );
+                return true;
+            }
+        };
+        self.emit(
+            &initializer.node_id,
+            &format!(
+                "ordinary_map_owned_any_v2_{}:{result}",
+                action.kind.as_str()
+            ),
+            inst,
+        );
+        if let Some((key, key_is_temporary, value_type, value)) = key_cleanup {
+            self.drop_ordinary_map_string_temporaries(
+                &initializer.node_id,
+                action.key_type.as_ref(),
+                &key,
+                key_is_temporary,
+                value_type.as_ref(),
+                &value,
+            );
+        }
+        true
+    }
+
+    fn lower_ordinary_map_owned_any_v2_key(
+        &mut self,
+        action: &crate::core::OrdinaryMapOwnedAnyV2Action,
+        expression: &ResolvedExpr,
+        subject: &NodeId,
+    ) -> Option<(MirValueId, bool)> {
+        let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+        let direct_local = match &expression.kind {
+            ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                Some(place.base.clone())
+            }
+            _ => None,
+        };
+        if expression.ty != string_type
+            || action.key.as_ref() != Some(&expression.node_id)
+            || action.key_type.as_ref() != Some(&string_type)
+            || action.key_local != direct_local
+            || action.key_provenance.is_none()
+            || (direct_local.is_some()
+                != (action.key_provenance
+                    == Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::DirectLocal)))
+        {
+            self.error(
+                subject,
+                "ordinary Map/Any v2 key disagrees with the exact Checker String-key receipt",
+            );
+            return None;
+        }
+        let (key, key_is_temporary) = self.lower_ordinary_map_v1_string_key(expression);
+        if self
+            .values
+            .get(&key)
+            .is_none_or(|value| value.ty != string_type)
+        {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any v2 key did not lower to a String value",
+            );
+            return None;
+        }
+        Some((key, key_is_temporary))
+    }
+
+    fn ordinary_map_owned_any_v2_local_value(
+        &mut self,
+        local: &ResolvedLocalId,
+        node: &NodeId,
+    ) -> MirValueId {
+        let value = self.locals.get(local).cloned().unwrap_or_else(|| {
+            MirValueId::new(format!("local:{}", local.0 .0)).expect("resolved local id is MIR-safe")
+        });
+        self.insert_value(
+            value.clone(),
+            super::types::ordinary_map_owned_any_v2_type_id(),
+            node,
+        );
+        self.locals.insert(local.clone(), value.clone());
+        value
+    }
+
+    fn v2_root_arg(
+        &mut self,
+        expression: &ResolvedExpr,
+        action: &crate::core::OrdinaryMapOwnedAnyV2Action,
+        node: &NodeId,
+    ) -> MirValueId {
+        let ResolvedExprKind::Load(place) = &expression.kind else {
+            self.error(
+                node,
+                "ordinary Map/Any v2 source root is not a direct local",
+            );
+            return self.fallback_value(expression);
+        };
+        let expected_root = action.source_local.as_ref().unwrap_or(&action.local);
+        if !place.projections.is_empty() || expected_root != &place.base {
+            self.error(
+                node,
+                "ordinary Map/Any v2 source root disagrees with Checker receipt",
+            );
+        }
+        self.ordinary_map_owned_any_v2_local_value(&place.base, &expression.node_id)
     }
 
     /// Emit a direct Map Drop only when the exact source point and local have
@@ -9838,6 +10183,21 @@ impl<'a> Lowerer<'a> {
     /// branch-local action identity in MIR and lets the same implementation
     /// serve root and nested blocks.
     fn lower_checker_map_drop(&mut self, node: &NodeId, local: &ResolvedLocalId) -> bool {
+        if self.resource_analysis.is_some_and(|a| {
+            a.ordinary_map_owned_any_v2_actions.iter().any(|x| {
+                x.point == *node
+                    && x.local == *local
+                    && x.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+            })
+        }) {
+            let value = self.ordinary_map_owned_any_v2_local_value(local, node);
+            self.emit(
+                node,
+                &format!("ordinary_map_owned_any_v2_drop:{value}"),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root: value },
+            );
+            return true;
+        }
         if self
             .ordinary_map_owned_get_i32_string_v1_action(
                 node,
@@ -10602,11 +10962,13 @@ impl<'a> Lowerer<'a> {
                         arguments.iter().any(|argument| argument == value)
                     }
                     MirInstructionKind::BuiltinCall {
+                        kind,
                         arguments,
                         string_field_contract,
                         ..
                     } => {
-                        string_field_contract.is_none()
+                        *kind == MirBuiltinKind::PrintlnString
+                            && string_field_contract.is_none()
                             && arguments.iter().any(|argument| argument == value)
                     }
                     MirInstructionKind::SessionCall { endpoint, .. } => endpoint == value,
@@ -10773,7 +11135,36 @@ impl<'a> Lowerer<'a> {
             .flat_map(|block| block.instructions.iter())
             .map(|instruction| instruction.id.clone())
             .collect::<BTreeSet<_>>();
-        if self.ordinary_map_owned_get_i32_string_v1_profile() {
+        if self
+            .resource_analysis
+            .is_some_and(|a| a.has_ordinary_map_owned_any_v2_receipt())
+        {
+            let actions = self
+                .resource_analysis
+                .map(|a| a.ordinary_map_owned_any_v2_actions.clone())
+                .unwrap_or_default();
+            for action in actions {
+                if action.kind != crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop {
+                    continue;
+                }
+                let value =
+                    self.ordinary_map_owned_any_v2_local_value(&action.local, &action.point);
+                let role = format!("ordinary_map_owned_any_v2_drop:{value}");
+                let Ok(id) = MirInstructionId::new(format!(
+                    "inst:ordinary_map_owned_any_v2_drop:{value}:{}",
+                    action.point.0
+                )) else {
+                    continue;
+                };
+                if !emitted.contains(&id) {
+                    self.emit(
+                        &action.point,
+                        &role,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root: value },
+                    );
+                }
+            }
+        } else if self.ordinary_map_owned_get_i32_string_v1_profile() {
             let actions = self
                 .resource_analysis
                 .map(|analysis| {
@@ -11365,6 +11756,354 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn lower_ordinary_map_owned_any_v2_call(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &crate::core::ir::ResolvedCall,
+    ) -> Option<MirValueId> {
+        let analysis = self.resource_analysis?;
+        if !analysis.has_ordinary_map_owned_any_v2_receipt() {
+            return None;
+        }
+        let action = analysis
+            .ordinary_map_owned_any_v2_actions
+            .iter()
+            .find(|a| a.point == expression.node_id)?
+            .clone();
+        use crate::core::OrdinaryMapOwnedAnyV2ActionKind as K;
+        if action.kind == K::New {
+            let temporary_roots = analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()?
+                .temporary_root_receipts
+                .iter()
+                .filter(|receipt| {
+                    receipt.local == action.local
+                        && receipt.construction == expression.node_id
+                        && receipt.source_node == expression.node_id
+                        && receipt.root_type == expression.ty
+                })
+                .count();
+            let ResolvedExprKind::Call(new_call) = &expression.kind else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 temporary root construction is not a call",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            if temporary_roots != 1
+                || !matches!(
+                    &new_call.callee,
+                    crate::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "map_new"
+                )
+                || !new_call.arguments.is_empty()
+                || action.source_local.is_some()
+                || action.source.is_some()
+                || action.key.is_some()
+                || action.value.is_some()
+            {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 temporary New disagrees with its exact Checker root receipt",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            let result =
+                self.ordinary_map_owned_any_v2_local_value(&action.local, &expression.node_id);
+            self.emit(
+                &expression.node_id,
+                &format!("ordinary_map_owned_any_v2_new:{result}"),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: result.clone(),
+                },
+            );
+            return Some(result);
+        }
+        if action.kind == K::Values {
+            let valid_call = matches!(
+                &call.callee,
+                crate::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "values"
+            );
+            let Some(root_arg) = call.arguments.first() else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 Values requires one direct Map root argument",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let source_local = match &root_arg.value.kind {
+                ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            };
+            let Some(binding_local) = action.result_local.as_ref() else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 Values receipt has no direct result binding",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let binding_type = self.body.locals.get(binding_local).map(|local| &local.ty);
+            if !valid_call
+                || call.arguments.len() != 1
+                || action.source_local.as_ref() != Some(&action.local)
+                || action.source.as_ref().map(|resource| &resource.0 .0) != Some(&action.root.0 .0)
+                || source_local.as_ref() != Some(&action.local)
+                || action.source_node.as_ref() != Some(&root_arg.value.node_id)
+                || action.source_type.as_ref() != Some(&root_arg.value.ty)
+                || action.result_type.as_ref() != Some(&expression.ty)
+                || binding_type != Some(&expression.ty)
+                || action.key.is_some()
+                || action.key_type.is_some()
+                || action.value.is_some()
+                || action.value_type.is_some()
+                || action.payload_clone
+            {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 Values operands/result disagree with its exact Checker receipt",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            let root = self.v2_root_arg(&root_arg.value, &action, &expression.node_id);
+            let Some(result) = self.id("expr", &expression.node_id) else {
+                return Some(self.fallback_value(expression));
+            };
+            self.insert_value(
+                result.clone(),
+                super::types::ordinary_map_owned_any_v2_values_type_id(),
+                &expression.node_id,
+            );
+            let owner_value =
+                self.ordinary_map_owned_any_v2_local_value(&action.local, &expression.node_id);
+            self.emit(
+                &expression.node_id,
+                &format!("ordinary_map_owned_any_v2_values:{owner_value}"),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Values {
+                    result: result.clone(),
+                    root,
+                },
+            );
+            return Some(result);
+        }
+        if action.kind == K::GetAny {
+            let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+            let valid_call = matches!(
+                &call.callee,
+                crate::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "map_get"
+            );
+            let Some((root_arg, key_arg)) = call.arguments.first().zip(call.arguments.get(1))
+            else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 GetAny requires exactly a root and String key",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let source_local = match &root_arg.value.kind {
+                ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            };
+            let temporary_roots = analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .map(|receipt| {
+                    receipt
+                        .temporary_root_receipts
+                        .iter()
+                        .filter(|root| {
+                            root.local == action.local
+                                && root.get_any == expression.node_id
+                                && root.source_node == root_arg.value.node_id
+                                && root.source_type == root_arg.value.ty
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let temporary_root = temporary_roots.first();
+            let is_immediate_map_new = matches!(
+                &root_arg.value.kind,
+                ResolvedExprKind::Call(new_call)
+                    if matches!(
+                        &new_call.callee,
+                        crate::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "map_new"
+                    ) && new_call.arguments.is_empty()
+            );
+            let Some(binding_local) = action.result_local.as_ref() else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 GetAny receipt has no direct result binding",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let binding_type = self.body.locals.get(binding_local).map(|local| &local.ty);
+            if !valid_call
+                || call.arguments.len() != 2
+                || action.source_local.as_ref() != Some(&action.local)
+                || action.source.as_ref().map(|resource| &resource.0 .0) != Some(&action.root.0 .0)
+                || (source_local.as_ref() != Some(&action.local)
+                    && !(source_local.is_none()
+                        && temporary_roots.len() == 1
+                        && is_immediate_map_new
+                        && temporary_root.is_some_and(|root| {
+                            root.root_type == root_arg.value.ty
+                                && root.construction == root_arg.value.node_id
+                                && root.settlement_point == expression.node_id
+                                && root.settlement
+                                    == crate::core::OrdinaryMapOwnedAnyV2RootSettlementKind::ImmediateGetAnyDrop
+                        })))
+                || (source_local.is_some() && !temporary_roots.is_empty())
+                || (source_local.is_none() && !is_immediate_map_new)
+                || action.source_node.as_ref() != Some(&root_arg.value.node_id)
+                || action.source_type.as_ref() != Some(&root_arg.value.ty)
+                || action.result_type.as_ref() != Some(&expression.ty)
+                || binding_type != Some(&expression.ty)
+                || action.key.as_ref() != Some(&key_arg.value.node_id)
+                || action.key_type.as_ref() != Some(&key_arg.value.ty)
+                || action.key_type.as_ref() != Some(&string_type)
+                || key_arg.value.ty != string_type
+                || action.key_local
+                    != match &key_arg.value.kind {
+                        ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                            Some(place.base.clone())
+                        }
+                        _ => None,
+                    }
+                || action.value.is_some()
+                || action.value_type.is_some()
+                || action.payload_clone
+            {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 GetAny operands/result disagree with its exact Checker receipt",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            let root = if temporary_root.is_some() {
+                self.lower_expr(&root_arg.value)
+            } else {
+                self.ordinary_map_owned_any_v2_local_value(&action.local, &root_arg.value.node_id)
+            };
+            let Some((key, key_is_temporary)) = self.lower_ordinary_map_owned_any_v2_key(
+                &action,
+                &key_arg.value,
+                &expression.node_id,
+            ) else {
+                return Some(self.fallback_value(expression));
+            };
+            let Some(result) = self.id("expr", &expression.node_id) else {
+                return Some(self.fallback_value(expression));
+            };
+            self.insert_value(
+                result.clone(),
+                super::types::ordinary_map_owned_any_v2_get_result_type_id(),
+                &expression.node_id,
+            );
+            let owner_value =
+                self.ordinary_map_owned_any_v2_local_value(&action.local, &expression.node_id);
+            self.emit(
+                &expression.node_id,
+                &format!("ordinary_map_owned_any_v2_get_any:{owner_value}"),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+                    result: result.clone(),
+                    root,
+                    key: key.clone(),
+                },
+            );
+            if temporary_root.is_some()
+                && !self.lower_checker_map_drop(&expression.node_id, &action.local)
+            {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 temporary root has no immediate Checker Drop action",
+                );
+            }
+            self.drop_ordinary_map_string_temporaries(
+                &expression.node_id,
+                action.key_type.as_ref(),
+                &key,
+                key_is_temporary,
+                None,
+                &key,
+            );
+            return Some(result);
+        }
+        if !matches!(action.kind, K::Size | K::HasKey | K::IsEmpty) {
+            return None;
+        }
+        let root_arg = call.arguments.first()?;
+        let root = self.v2_root_arg(&root_arg.value, &action, &expression.node_id);
+        let result = self.id("expr", &expression.node_id)?;
+        self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+        let mut key_cleanup = None;
+        let instruction = if action.kind == K::Size {
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Size {
+                result: result.clone(),
+                root,
+            }
+        } else if action.kind == K::HasKey {
+            let valid_call = matches!(
+                &call.callee,
+                crate::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "has_key"
+            );
+            let key_arg = call.arguments.get(1)?;
+            if !valid_call || call.arguments.len() != 2 {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 Contains call disagrees with its exact Checker receipt",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            let Some((key, key_is_temporary)) = self.lower_ordinary_map_owned_any_v2_key(
+                &action,
+                &key_arg.value,
+                &expression.node_id,
+            ) else {
+                return Some(self.fallback_value(expression));
+            };
+            key_cleanup = Some((key.clone(), key_is_temporary));
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Contains {
+                result: result.clone(),
+                root,
+                key,
+            }
+        } else {
+            MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty {
+                result: result.clone(),
+                root,
+            }
+        };
+        // Receipt identities are keyed by the owner local for every action,
+        // including scalar reads whose MIR result is a fresh expression
+        // value.  Keep the operation result separate from that stable owner
+        // identity so the validator can match the Checker ledger exactly.
+        let owner_value =
+            self.ordinary_map_owned_any_v2_local_value(&action.local, &expression.node_id);
+        self.emit(
+            &expression.node_id,
+            &format!(
+                "ordinary_map_owned_any_v2_{}:{owner_value}",
+                action.kind.as_str()
+            ),
+            instruction,
+        );
+        if let Some((key, key_is_temporary)) = key_cleanup {
+            self.drop_ordinary_map_string_temporaries(
+                &expression.node_id,
+                action.key_type.as_ref(),
+                &key,
+                key_is_temporary,
+                None,
+                &key,
+            );
+        }
+        Some(result)
+    }
+
     fn lower_ordinary_map_owner_lifecycle_v1_call(
         &mut self,
         expression: &ResolvedExpr,
@@ -11521,6 +12260,9 @@ impl<'a> Lowerer<'a> {
 
     fn lower_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
         if let ResolvedExprKind::Call(call) = &expression.kind {
+            if let Some(result) = self.lower_ordinary_map_owned_any_v2_call(expression, call) {
+                return result;
+            }
             if let Some(result) =
                 self.lower_ordinary_map_owned_get_i32_string_v1_call(expression, call)
             {
@@ -11695,6 +12437,15 @@ impl<'a> Lowerer<'a> {
             }
             ResolvedExprKind::Load(place) => {
                 if let Ok(local) = self.local_value(&place.base) {
+                    if place.projections.is_empty() {
+                        if let Some(result_type) = self
+                            .ordinary_map_owned_any_v2_read_result_type(&place.base, &expression.ty)
+                        {
+                            if let Some(value) = self.values.get_mut(&result) {
+                                value.ty = result_type;
+                            }
+                        }
+                    }
                     if matches!(
                         place.projections.as_slice(),
                         [crate::core::ir::ResolvedProjection::Deref { .. }]
@@ -11871,6 +12622,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Binary { op, left, right } => {
+                let owned_string_add = *op == ResolvedBinaryOp::Add
+                    && expression.ty == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                    && left.ty == expression.ty
+                    && right.ty == expression.ty;
                 if matches!(*op, ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual) {
                     let left_owner = self
                         .direct_local_value(left)
@@ -11942,10 +12697,55 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                 }
-                let left = self.lower_expr(left);
-                let right = self.lower_expr(right);
-                let (left, right) =
-                    self.materialize_numeric_binary_widening(&expression.node_id, left, right);
+                let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                if matches!(*op, ResolvedBinaryOp::Equal | ResolvedBinaryOp::NotEqual)
+                    && left.ty == string_type
+                    && right.ty == string_type
+                {
+                    // String equality borrows its operands. A direct local is
+                    // already the stable owner identity; materializing an
+                    // ordinary Load would clone it and require a separate
+                    // Drop after the comparison. Non-local expressions do
+                    // produce owned temporaries, so settle those immediately.
+                    let (left_value, left_is_temporary) =
+                        self.lower_string_comparison_operand(left);
+                    let (right_value, right_is_temporary) =
+                        self.lower_string_comparison_operand(right);
+                    self.emit(
+                        &expression.node_id,
+                        "binary",
+                        MirInstructionKind::Binary {
+                            result: result.clone(),
+                            op: *op,
+                            left: left_value.clone(),
+                            right: right_value.clone(),
+                        },
+                    );
+                    if left_is_temporary {
+                        self.emit(
+                            &expression.node_id,
+                            "drop.string_equality_left",
+                            MirInstructionKind::Drop {
+                                value: left_value.clone(),
+                            },
+                        );
+                    }
+                    if right_is_temporary && right_value != left_value {
+                        self.emit(
+                            &expression.node_id,
+                            "drop.string_equality_right",
+                            MirInstructionKind::Drop { value: right_value },
+                        );
+                    }
+                    return result;
+                }
+                let lowered_left = self.lower_expr(left);
+                let lowered_right = self.lower_expr(right);
+                let (left, right) = self.materialize_numeric_binary_widening(
+                    &expression.node_id,
+                    lowered_left.clone(),
+                    lowered_right.clone(),
+                );
                 self.emit(
                     &expression.node_id,
                     "binary",
@@ -11956,6 +12756,24 @@ impl<'a> Lowerer<'a> {
                         right,
                     },
                 );
+                if owned_string_add {
+                    self.emit(
+                        &expression.node_id,
+                        "drop.binary_string_left",
+                        MirInstructionKind::Drop {
+                            value: lowered_left.clone(),
+                        },
+                    );
+                    if lowered_right != lowered_left {
+                        self.emit(
+                            &expression.node_id,
+                            "drop.binary_string_right",
+                            MirInstructionKind::Drop {
+                                value: lowered_right,
+                            },
+                        );
+                    }
+                }
             }
             ResolvedExprKind::Project { value, projection } => {
                 if let Some((base, receipt)) =
@@ -12713,6 +13531,22 @@ impl<'a> Lowerer<'a> {
                     return result;
                 }
                 if conversion.kind == CheckedConversionKind::DynamicAnyUnpack {
+                    if self.lower_ordinary_map_owned_any_v2_values_unpack(
+                        expression,
+                        value,
+                        result.clone(),
+                        conversion,
+                    ) {
+                        return result;
+                    }
+                    if self.lower_ordinary_map_owned_any_v2_unpack(
+                        expression,
+                        value,
+                        result.clone(),
+                        conversion,
+                    ) {
+                        return result;
+                    }
                     let source = self.managed_any_borrow_source(value);
                     if self.lower_managed_any_unpack(
                         &expression.node_id,
@@ -15440,6 +16274,279 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.lower_expr(value)
+    }
+
+    fn lower_ordinary_map_owned_any_v2_unpack(
+        &mut self,
+        expression: &ResolvedExpr,
+        value: &ResolvedExpr,
+        result: MirValueId,
+        conversion: &crate::core::ir::CheckedConversion,
+    ) -> bool {
+        let Some(analysis) = self.resource_analysis else {
+            return false;
+        };
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return false;
+        };
+        let matching = cfg
+            .unpack_receipts
+            .iter()
+            .filter(|receipt| receipt.cast == expression.node_id)
+            .collect::<Vec<_>>();
+        let [receipt] = matching.as_slice() else {
+            if !matching.is_empty() {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any owner-v2 unpack has ambiguous Checker receipts",
+                );
+                return true;
+            }
+            return false;
+        };
+        // The resolved lowerer uses `Load(place)` for a tuple field in the
+        // common local-place form, while expression-built tuple projections
+        // use `Project`. Accept both representations only when they identify
+        // the same direct local pair and field 1 recorded by Checker.
+        let pair_local = match &value.kind {
+            ResolvedExprKind::Load(place) => match place.projections.as_slice() {
+                [crate::core::ir::ResolvedProjection::Tuple { index: 1, ty }]
+                    if ty == &conversion.from =>
+                {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            },
+            ResolvedExprKind::Project {
+                value: pair_expr,
+                projection: crate::core::ir::ResolvedValueProjection::Tuple(1),
+            } => match &pair_expr.kind {
+                ResolvedExprKind::Load(place)
+                    if place.projections.is_empty()
+                        && pair_expr.node_id == receipt.pair_binding.0 =>
+                {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(pair_local) = pair_local else {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 unpack is not the receipted direct tuple field-1 projection",
+            );
+            return true;
+        };
+        if receipt.profile_version != crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            || receipt.projection != value.node_id
+            || receipt.conversion_kind != conversion.kind
+            || receipt.conversion_from != conversion.from
+            || receipt.conversion_to != conversion.to
+            || receipt.conversion_to != expression.ty
+            || pair_local != receipt.pair_binding
+        {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 unpack differs from its exact Checker conversion/source receipt",
+            );
+            return true;
+        }
+        let target_supported = self.type_catalog.is_some_and(|catalog| {
+            if conversion.to == primitive_type_id(PrimitiveType::I32) {
+                catalog.validate_copy_scalar(&conversion.to).is_ok()
+            } else if conversion.to == primitive_type_id(PrimitiveType::String) {
+                catalog.validate_owned_string(&conversion.to).is_ok()
+            } else {
+                super::reference::is_canonical_v2_label_type(catalog, &conversion.to)
+            }
+        });
+        if !target_supported {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 unpack target has no exact selected i32/String/Label TypeDesc",
+            );
+            return true;
+        }
+        let pair = match self.local_value(&receipt.pair_binding) {
+            Ok(pair) => pair,
+            Err(errors) => {
+                self.errors.extend(errors);
+                return true;
+            }
+        };
+        if self.values.get(&pair).is_none_or(|value| {
+            value.ty != super::types::ordinary_map_owned_any_v2_get_result_type_id()
+        }) {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 unpack pair lacks its exact GetAny tuple TypeDesc",
+            );
+            return true;
+        }
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_unpack",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection: receipt.projection.clone(),
+            },
+        );
+        true
+    }
+
+    fn lower_ordinary_map_owned_any_v2_values_unpack(
+        &mut self,
+        expression: &ResolvedExpr,
+        value: &ResolvedExpr,
+        result: MirValueId,
+        conversion: &crate::core::ir::CheckedConversion,
+    ) -> bool {
+        let Some(analysis) = self.resource_analysis else {
+            return false;
+        };
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return false;
+        };
+        let matching = cfg
+            .values_unpack_receipts
+            .iter()
+            .filter(|receipt| receipt.cast == expression.node_id)
+            .collect::<Vec<_>>();
+        let [receipt] = matching.as_slice() else {
+            if !matching.is_empty() {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any owner-v2 Values unpack has ambiguous Checker receipts",
+                );
+                return true;
+            }
+            return false;
+        };
+
+        let (values_local, index_expr) = match &value.kind {
+            ResolvedExprKind::Project {
+                value: values_expr,
+                projection: crate::core::ir::ResolvedValueProjection::Index(index_expr),
+            } => {
+                let values_local = match &values_expr.kind {
+                    ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                        Some(place.base.clone())
+                    }
+                    _ => None,
+                };
+                (values_local, Some(index_expr.as_ref()))
+            }
+            _ => (None, None),
+        };
+        let Some(index_expr) = index_expr else {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Values unpack is not one direct indexed snapshot cast",
+            );
+            return true;
+        };
+        if receipt.profile_version != crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            || receipt.index_projection != value.node_id
+            || receipt.index_expression != index_expr.node_id
+            || receipt.index_type != index_expr.ty
+            || receipt.conversion_kind != conversion.kind
+            || receipt.conversion_from != conversion.from
+            || receipt.conversion_to != conversion.to
+            || receipt.conversion_to != expression.ty
+            || values_local.as_ref() != Some(&receipt.snapshot_binding)
+            || value.ty != receipt.conversion_from
+            || !self.type_catalog.is_some_and(|catalog| {
+                if conversion.to == primitive_type_id(PrimitiveType::I32) {
+                    catalog.validate_copy_scalar(&conversion.to).is_ok()
+                } else if conversion.to == primitive_type_id(PrimitiveType::String) {
+                    catalog.validate_owned_string(&conversion.to).is_ok()
+                } else {
+                    super::reference::is_canonical_v2_label_type(catalog, &conversion.to)
+                }
+            })
+        {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Values unpack differs from its exact Checker index/conversion/root receipt",
+            );
+            return true;
+        }
+
+        if let Some(index_local) = &receipt.index_local {
+            let exact_local = matches!(
+                &index_expr.kind,
+                ResolvedExprKind::Load(place)
+                    if place.projections.is_empty() && &place.base == index_local
+            );
+            if !exact_local {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any owner-v2 Values index local differs from its Checker receipt",
+                );
+                return true;
+            }
+        } else if matches!(
+            &index_expr.kind,
+            ResolvedExprKind::Load(_) | ResolvedExprKind::Project { .. }
+        ) {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Values index expression is not its exact checked value",
+            );
+            return true;
+        }
+
+        let values = match self.local_value(&receipt.snapshot_binding) {
+            Ok(values) => values,
+            Err(errors) => {
+                self.errors.extend(errors);
+                return true;
+            }
+        };
+        if self.values.get(&values).is_none_or(|value| {
+            value.ty != super::types::ordinary_map_owned_any_v2_values_type_id()
+        }) {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Values unpack source has no exact Values TypeDesc",
+            );
+            return true;
+        }
+        let index = if let Some(local) = &receipt.index_local {
+            match self.local_value(local) {
+                Ok(index) => index,
+                Err(errors) => {
+                    self.errors.extend(errors);
+                    return true;
+                }
+            }
+        } else {
+            self.lower_expr(index_expr)
+        };
+        if self
+            .values
+            .get(&index)
+            .is_none_or(|value| value.ty != receipt.index_type)
+        {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Values unpack index TypeDesc differs from Checker receipt",
+            );
+            return true;
+        }
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_values_unpack",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                result,
+                values,
+                index,
+                projection: receipt.index_projection.clone(),
+            },
+        );
+        true
     }
 
     fn lower_managed_any_unpack(
