@@ -562,6 +562,32 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .program
             .type_catalog()
+            .get(&crate::core::mir::types::ordinary_map_owned_any_v2_type_id())
+            .is_some()
+            && self
+                .generator
+                .module
+                .get_function("mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string")
+                .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string",
+                i32.fn_type(
+                    &[
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::IntType(i64),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+
+        if self
+            .program
+            .type_catalog()
             .get(&crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id())
             .is_some()
         {

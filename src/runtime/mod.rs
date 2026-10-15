@@ -54,6 +54,7 @@ pub use map_any_snapshot::{
     mimi_mir_ordinary_map_any_owner_v2_record_set_label,
     mimi_mir_ordinary_map_any_owner_v2_record_size, mimi_mir_ordinary_map_any_owner_v2_set_i32,
     mimi_mir_ordinary_map_any_owner_v2_set_label,
+    mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_clone,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_contains,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_drop,
@@ -95,6 +96,10 @@ pub(crate) use map_any_snapshot::{
     ordinary_map_owned_any_v2_unpack_checkpoint_for_test,
     ordinary_map_owned_any_v2_values_publish_attempts_for_test,
     ordinary_map_owned_any_v2_values_publish_checkpoint_for_test,
+    ordinary_map_owned_any_v2_values_unpack_owner_attempts_for_test,
+    ordinary_map_owned_any_v2_values_unpack_owner_checkpoint_for_test,
+    ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test,
+    ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test,
     ordinary_map_owned_get_allocation_attempts_for_test,
     ordinary_map_owned_get_allocation_checkpoint_for_test,
     ordinary_map_owned_get_allocation_failure_triggered_for_test,
@@ -102,6 +107,9 @@ pub(crate) use map_any_snapshot::{
     with_ordinary_map_owned_any_v2_root_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_unpack_failure_for_test,
     with_ordinary_map_owned_any_v2_values_publish_failure_for_test,
+    with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_test,
+    with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test,
+    with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test,
     with_ordinary_map_owned_get_allocation_failure_for_test,
 };
 pub use mir_map_root::{
@@ -2079,6 +2087,9 @@ pub unsafe extern "C" fn mimi_mir_list_get_managed_any_v2(
     // SAFETY: normalized index is in [0, len), and list validation proved its
     // i64 storage and owner receipt are valid.
     let owner = unsafe { *((*list).data as *const i64).add(index as usize) };
+    if map_any_snapshot::ordinary_map_owned_any_v2_values_unpack_owner_checkpoint().is_err() {
+        return map_any_snapshot::MIMI_MAP_ANY_OWNER_V2_CAPACITY;
+    }
     let status = unsafe { map_any_snapshot::mimi_any_payload_v2_clone(owner, out_owner) };
     if status == map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_OK {
         unsafe { *out_found = 1 };

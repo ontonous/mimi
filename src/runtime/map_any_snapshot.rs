@@ -887,6 +887,10 @@ thread_local! {
     static OWNED_ANY_V2_VALUES_PUBLISH_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
     static OWNED_ANY_V2_UNPACK_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
     static OWNED_ANY_V2_UNPACK_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    static OWNED_ANY_V2_VALUES_UNPACK_OWNER_FAIL_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static OWNED_ANY_V2_VALUES_UNPACK_OWNER_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+    static OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL: Cell<bool> = const { Cell::new(false) };
+    static OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Test-only allocation oracle shared by the independent owned-Get consumers.
@@ -1154,6 +1158,142 @@ pub(crate) fn with_ordinary_map_owned_any_v2_unpack_failure_for_test<T>(
         attempts: OWNED_ANY_V2_UNPACK_ATTEMPTS.with(|value| value.replace(0)),
     };
     operation()
+}
+
+/// Capacity oracle for the first ValuesUnpack boundary: cloning the selected
+/// list owner after bounds succeeds but before the requested TypeDesc is
+/// checked. This ordering is observable for a valid index with a wrong cast.
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint_for_test() -> Result<(), ()>
+{
+    OWNED_ANY_V2_VALUES_UNPACK_OWNER_FAIL_AFTER.with(|fail_after| match fail_after.get() {
+        Some(remaining) => {
+            OWNED_ANY_V2_VALUES_UNPACK_OWNER_ATTEMPTS
+                .with(|attempts| attempts.set(attempts.get().saturating_add(1)));
+            if remaining == 0 {
+                Err(())
+            } else {
+                fail_after.set(Some(remaining - 1));
+                Ok(())
+            }
+        }
+        None => Ok(()),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_values_unpack_owner_attempts_for_test() -> usize {
+    OWNED_ANY_V2_VALUES_UNPACK_OWNER_ATTEMPTS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_test<T>(
+    stages_before_failure: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreFailpoint {
+        fail_after: Option<usize>,
+        attempts: usize,
+    }
+    impl Drop for RestoreFailpoint {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_VALUES_UNPACK_OWNER_FAIL_AFTER.with(|value| value.set(self.fail_after));
+            OWNED_ANY_V2_VALUES_UNPACK_OWNER_ATTEMPTS.with(|value| value.set(self.attempts));
+        }
+    }
+
+    let _restore = RestoreFailpoint {
+        fail_after: OWNED_ANY_V2_VALUES_UNPACK_OWNER_FAIL_AFTER
+            .with(|value| value.replace(Some(stages_before_failure))),
+        attempts: OWNED_ANY_V2_VALUES_UNPACK_OWNER_ATTEMPTS.with(|value| value.replace(0)),
+    };
+    operation()
+}
+
+/// Test-only failure at the final canonical String allocation for a V2
+/// ValuesUnpack. Reference and bytecode use this at their corresponding
+/// output-copy boundary; native calls the status-returning copy helper below.
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test(
+) -> Result<(), ()> {
+    if OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL.with(Cell::get) {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test(
+) -> Result<(), ()> {
+    if OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL.with(Cell::get) {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test<T>(
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreFailpoint(bool);
+    impl Drop for RestoreFailpoint {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL.with(|value| value.set(self.0));
+        }
+    }
+    let _restore = RestoreFailpoint(
+        OWNED_ANY_V2_VALUES_UNPACK_STRING_CLONE_FAIL.with(|value| value.replace(true)),
+    );
+    operation()
+}
+
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test<T>(
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestoreFailpoint(bool);
+    impl Drop for RestoreFailpoint {
+        fn drop(&mut self) {
+            OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL.with(|value| value.set(self.0));
+        }
+    }
+    let _restore = RestoreFailpoint(
+        OWNED_ANY_V2_VALUES_UNPACK_STRING_PUBLISH_FAIL.with(|value| value.replace(true)),
+    );
+    operation()
+}
+
+pub(super) fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return ordinary_map_owned_any_v2_values_unpack_owner_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint() -> Result<(), ManagedAnyStatus>
+{
+    #[cfg(test)]
+    {
+        return ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test()
+            .map_err(|_| ManagedAnyStatus::Capacity);
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint(
+) -> Result<(), ManagedAnyStatus> {
+    #[cfg(test)]
+    {
+        return ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test()
+            .map_err(|_| ManagedAnyStatus::Capacity);
+    }
+    #[cfg(not(test))]
+    Ok(())
 }
 
 fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ManagedAnyStatus> {
@@ -3007,6 +3147,88 @@ pub unsafe extern "C" fn mimi_any_payload_v2_unpack(
     }
 }
 
+/// Clone a V2 ValuesUnpack String/Label text into the canonical String domain
+/// and publish its pointer only after registration succeeds. Unlike
+/// `mimi_str_clone`, this status ABI distinguishes a failed empty-string
+/// allocation from the valid empty representation and has no artificial
+/// length cap.
+///
+/// # Safety
+/// `source` points to `length` readable bytes when length is nonzero. Each
+/// non-null output points to one writable, non-overlapping value.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+    source: *const std::ffi::c_char,
+    length: i64,
+    out_pointer: *mut *mut std::ffi::c_char,
+    out_length: *mut i64,
+) -> i32 {
+    if !out_pointer.is_null() {
+        unsafe { *out_pointer = std::ptr::null_mut() };
+    }
+    if !out_length.is_null() {
+        unsafe { *out_length = 0 };
+    }
+    if out_pointer.is_null()
+        || out_length.is_null()
+        || length < 0
+        || (length > 0 && source.is_null())
+    {
+        return status_code(ManagedAnyStatus::InvalidInput);
+    }
+    let Ok(length_usize) = usize::try_from(length) else {
+        return status_code(ManagedAnyStatus::Capacity);
+    };
+    if length_usize > isize::MAX as usize {
+        return status_code(ManagedAnyStatus::Capacity);
+    }
+
+    let bytes = if length_usize == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the ABI contract supplies `length` readable bytes for a
+        // non-null source, checked above.
+        unsafe { std::slice::from_raw_parts(source.cast::<u8>(), length_usize) }
+    };
+    let result = (|| {
+        ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()?;
+        let pointer = super::alloc_c_string_from_bytes(bytes);
+        if pointer.is_null() {
+            return Err(ManagedAnyStatus::Capacity);
+        }
+        ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint().map_err(|error| {
+            super::mimi_free(pointer.cast());
+            error
+        })?;
+        if let Err(error) =
+            super::ordinary_map_domain::register_fresh_owned_string(pointer, length_usize)
+        {
+            // Registration returns after releasing its registry lock. Retire
+            // this unpublished allocation exactly once on every failure.
+            super::mimi_free(pointer.cast());
+            return Err(match error {
+                super::ordinary_map_domain::StringRegistrationError::Capacity => {
+                    ManagedAnyStatus::Capacity
+                }
+                super::ordinary_map_domain::StringRegistrationError::ConflictingReceipt => {
+                    ManagedAnyStatus::DomainConflict
+                }
+            });
+        }
+        Ok(pointer)
+    })();
+    match result {
+        Ok(pointer) => {
+            unsafe {
+                *out_pointer = pointer;
+                *out_length = length;
+            }
+            status_code(ManagedAnyStatus::Ok)
+        }
+        Err(status) => status_code(status),
+    }
+}
+
 /// Create an empty V2 ordinary Map root with its exact profile.
 #[no_mangle]
 pub unsafe extern "C" fn mimi_ordinary_map_owned_any_v2_new(out_root: *mut i64) -> i32 {
@@ -3977,6 +4199,147 @@ mod tests {
             "the borrowed source owner survives"
         );
         assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+    }
+
+    #[test]
+    fn v2_values_unpack_selected_owner_capacity_keeps_outputs_empty_and_source_live() {
+        let empty = new_v2_map();
+        let owner = new_v2_i32_owner(37);
+        let root = set_v2_owner(empty, b"number", owner, 1, V2_I32_TYPE_ID, &V2_I32_HASH);
+        assert_eq!(super::mimi_any_payload_v2_drop(owner), 0);
+        let (selection_bytes, selection_hash) = selection(1, V2_I32_TYPE_ID, &V2_I32_HASH);
+        let (values_status, list) = values_list_v2(root, &selection_bytes, &selection_hash);
+        assert_eq!(values_status, super::ORDINARY_MAP_OWNED_ANY_V2_OK);
+        assert!(!list.is_null());
+
+        let (status, found, selected, attempts) =
+            super::with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_test(0, || {
+                let mut found = -1;
+                let mut selected = -1;
+                let status = unsafe {
+                    super::super::mimi_mir_list_get_managed_any_v2(
+                        list,
+                        0,
+                        &mut found,
+                        &mut selected,
+                    )
+                };
+                (
+                    status,
+                    found,
+                    selected,
+                    super::ordinary_map_owned_any_v2_values_unpack_owner_attempts_for_test(),
+                )
+            });
+        assert_eq!(status, super::MIMI_MAP_ANY_OWNER_V2_CAPACITY);
+        assert_eq!((found, selected), (0, 0));
+        assert_eq!(attempts, 1);
+        assert_eq!(size_v2(root), (super::ORDINARY_MAP_OWNED_ANY_V2_OK, 1));
+
+        let mut found = 0;
+        let mut selected = 0;
+        assert_eq!(
+            unsafe {
+                super::super::mimi_mir_list_get_managed_any_v2(list, 0, &mut found, &mut selected)
+            },
+            super::ORDINARY_MAP_OWNED_ANY_V2_OK
+        );
+        assert_eq!(found, 1);
+        assert_eq!(unpack_v2_i32(selected), 37);
+        assert_eq!(super::mimi_any_payload_v2_drop(selected), 0);
+        unsafe { super::super::mimi_mir_list_drop_managed_any_v2(list) };
+        drop_v2_map(empty);
+        drop_v2_map(root);
+    }
+
+    #[test]
+    fn v2_values_unpack_string_copy_is_transactional_for_empty_nul_and_unicode() {
+        let bytes = b"before\0\xe9\x9b\xaa";
+        let counts_before = crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .expect("ownership domains before copy");
+        let mut pointer = std::ptr::null_mut();
+        let mut length = -1;
+        let status =
+            super::with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test(
+                || unsafe {
+                    super::mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+                        bytes.as_ptr().cast(),
+                        bytes.len() as i64,
+                        &mut pointer,
+                        &mut length,
+                    )
+                },
+            );
+        assert_eq!(status, ManagedAnyStatus::Capacity as i32);
+        assert!(pointer.is_null());
+        assert_eq!(length, 0);
+
+        let status =
+            super::with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test(
+                || unsafe {
+                    super::mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+                        bytes.as_ptr().cast(),
+                        bytes.len() as i64,
+                        &mut pointer,
+                        &mut length,
+                    )
+                },
+            );
+        assert_eq!(status, ManagedAnyStatus::Capacity as i32);
+        assert!(pointer.is_null());
+        assert_eq!(length, 0);
+        assert_eq!(
+            crate::runtime::ordinary_map_domain_live_counts_for_test()
+                .expect("ownership domains after failed copy")
+                .owned_strings,
+            counts_before.owned_strings,
+            "failed publication retires the fresh allocation"
+        );
+
+        assert_eq!(
+            unsafe {
+                super::mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+                    bytes.as_ptr().cast(),
+                    bytes.len() as i64,
+                    &mut pointer,
+                    &mut length,
+                )
+            },
+            ManagedAnyStatus::Ok as i32
+        );
+        assert!(!pointer.is_null());
+        assert_eq!(length, bytes.len() as i64);
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), length as usize) },
+            bytes
+        );
+        unsafe { super::super::mimi_string_free(pointer) };
+
+        pointer = std::ptr::null_mut();
+        length = -1;
+        assert_eq!(
+            unsafe {
+                super::mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string(
+                    std::ptr::null(),
+                    0,
+                    &mut pointer,
+                    &mut length,
+                )
+            },
+            ManagedAnyStatus::Ok as i32
+        );
+        assert!(
+            !pointer.is_null(),
+            "empty output has explicit allocation status"
+        );
+        assert_eq!(length, 0);
+        unsafe { super::super::mimi_string_free(pointer) };
+        assert_eq!(
+            crate::runtime::ordinary_map_domain_live_counts_for_test()
+                .expect("ownership domains after successful copies")
+                .owned_strings,
+            counts_before.owned_strings
+        );
     }
 
     fn selection(tag: i32, type_id: &[u8; 35], hash: &[u8; 32]) -> (Vec<u8>, [u8; 32]) {

@@ -3687,6 +3687,134 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     /// check its runtime TypeDesc, and clone it into the ordinary Mimi owner
     /// domain. The list snapshot retains its own token; the per-index token
     /// is always released on both successful and failing unpack paths.
+    fn emit_v2_values_unpack_copy_string(
+        &mut self,
+        source: inkwell::values::PointerValue<'ctx>,
+        length: inkwell::values::IntValue<'ctx>,
+        temporary_payload: inkwell::values::PointerValue<'ctx>,
+        payload_drop_glue: inkwell::values::FunctionValue<'ctx>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let pointer_type = self
+            .generator
+            .context
+            .ptr_type(inkwell::AddressSpace::default());
+        let output_pointer = self
+            .generator
+            .builder
+            .build_alloca(
+                pointer_type,
+                "mir_map_any_v2_values_unpack_string_output_ptr",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let output_length = self
+            .generator
+            .builder
+            .build_alloca(
+                self.generator.context.i64_type(),
+                "mir_map_any_v2_values_unpack_string_output_len",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_store(output_pointer, pointer_type.const_null())
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_store(
+                output_length,
+                self.generator.context.i64_type().const_zero(),
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        let copy = self
+            .generator
+            .get_runtime_fn("mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let status = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    copy,
+                    &[
+                        BasicMetadataValueEnum::from(source),
+                        BasicMetadataValueEnum::from(length),
+                        BasicMetadataValueEnum::from(output_pointer),
+                        BasicMetadataValueEnum::from(output_length),
+                    ],
+                    "mir_map_any_v2_values_unpack_string_copy_status",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| NativeMirError::new(subject, "Values String copy helper returned void"))?
+        .into_int_value();
+
+        // The typed temporary is no longer needed regardless of whether the
+        // final String allocation or domain publication succeeds.
+        self.generator
+            .builder
+            .build_call(
+                payload_drop_glue,
+                &[BasicMetadataValueEnum::from(temporary_payload)],
+                "mir_map_any_v2_values_unpack_string_temporary_drop",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        let ok = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                self.generator.context.i32_type().const_zero(),
+                "mir_map_any_v2_values_unpack_string_copy_ok",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let success = self.generator.context.append_basic_block(
+            self.llvm_function,
+            "mir_map_any_v2_values_unpack_string_copy_success",
+        );
+        let failure = self.generator.context.append_basic_block(
+            self.llvm_function,
+            "mir_map_any_v2_values_unpack_string_copy_failure",
+        );
+        self.generator
+            .builder
+            .build_conditional_branch(ok, success, failure)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator.builder.position_at_end(failure);
+        self.emit_abort_with_message(
+            "[E0800] ordinary Map/Any owner-v2 Values String allocation or publication failed",
+            subject,
+        )?;
+
+        self.generator.builder.position_at_end(success);
+        let data = self
+            .generator
+            .builder
+            .build_load(
+                pointer_type,
+                output_pointer,
+                "mir_map_any_v2_values_unpack_string_data",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_pointer_value();
+        let output_length = self
+            .generator
+            .builder
+            .build_load(
+                self.generator.context.i64_type(),
+                output_length,
+                "mir_map_any_v2_values_unpack_string_length",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        self.generator
+            .build_string_struct(data, output_length)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
     pub(super) fn emit_ordinary_map_owned_any_v2_values_unpack(
         &mut self,
         result: &MirValueId,
@@ -4366,40 +4494,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_extract_value(string, 1, "mir_map_any_v2_values_unpack_string_len")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_int_value();
-            let clone_fn = self
-                .generator
-                .get_runtime_fn("mimi_str_clone")
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            let handle = call_try_basic_value(
-                &self
-                    .generator
-                    .builder
-                    .build_call(
-                        clone_fn,
-                        &[
-                            BasicMetadataValueEnum::from(data),
-                            BasicMetadataValueEnum::from(len),
-                        ],
-                        "mir_map_any_v2_values_unpack_string_domain_clone",
-                    )
-                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
-            )
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    "ordinary Map/Any V2 Values String clone returned void",
-                )
-            })?
-            .into_int_value();
-            self.generator
-                .builder
-                .build_call(
-                    payload_drop_glue,
-                    &[BasicMetadataValueEnum::from(output)],
-                    "mir_map_any_v2_values_unpack_string_temporary_drop",
-                )
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            return self.emit_owned_string_from_handle(handle, len, subject);
+            return self.emit_v2_values_unpack_copy_string(
+                data,
+                len,
+                output,
+                payload_drop_glue,
+                subject,
+            );
         }
         if target_is_label {
             let label = unpacked.into_struct_value();
@@ -4427,40 +4528,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .build_extract_value(text, 1, "mir_map_any_v2_values_unpack_label_text_len")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?
                 .into_int_value();
-            let clone_fn = self
-                .generator
-                .get_runtime_fn("mimi_str_clone")
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            let handle = call_try_basic_value(
-                &self
-                    .generator
-                    .builder
-                    .build_call(
-                        clone_fn,
-                        &[
-                            BasicMetadataValueEnum::from(data),
-                            BasicMetadataValueEnum::from(len),
-                        ],
-                        "mir_map_any_v2_values_unpack_label_domain_clone",
-                    )
-                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
-            )
-            .ok_or_else(|| {
-                NativeMirError::new(
-                    subject,
-                    "ordinary Map/Any V2 Values Label String clone returned void",
-                )
-            })?
-            .into_int_value();
-            self.generator
-                .builder
-                .build_call(
-                    payload_drop_glue,
-                    &[BasicMetadataValueEnum::from(output)],
-                    "mir_map_any_v2_values_unpack_label_temporary_drop",
-                )
-                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-            let owned_text = self.emit_owned_string_from_handle(handle, len, subject)?;
+            let owned_text = self.emit_v2_values_unpack_copy_string(
+                data,
+                len,
+                output,
+                payload_drop_glue,
+                subject,
+            )?;
             let owned_label = self
                 .generator
                 .builder

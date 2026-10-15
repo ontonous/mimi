@@ -211,6 +211,48 @@ fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), InterpError> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_owner_checkpoint_for_test()
+            .map_err(|_| {
+                InterpError::new(
+                    "[E0800] ordinary Map/Any owner-v2 Values selected-owner capacity failure",
+                )
+            });
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test()
+            .map_err(|_| {
+                InterpError::new(
+                    "[E0800] ordinary Map/Any owner-v2 Values String result allocation failed",
+                )
+            });
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test()
+            .map_err(|_| {
+                InterpError::new(
+                    "[E0800] ordinary Map/Any owner-v2 Values String result publication failed",
+                )
+            });
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn ordinary_map_owned_any_v2_values_publish_checkpoint() -> Result<(), InterpError> {
     #[cfg(test)]
     {
@@ -6931,11 +6973,13 @@ impl BytecodeVM {
                             "ordinary Map/Any owner-v2 Values unpack selected element has no V2 Any owner",
                         ));
                     };
+                    ordinary_map_owned_any_v2_values_unpack_owner_checkpoint()?;
                     if Arc::strong_count(owner) != 1 || owner.type_id() != &binding.conversion_to {
                         return Err(InterpError::new(
                             "E0800: ordinary Map/Any owner-v2 Values payload tag/type does not match the checked cast",
                         ));
                     }
+                    ordinary_map_owned_any_v2_unpack_checkpoint()?;
                     let result = match &selected.kind {
                         CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
                             if binding.conversion_to
@@ -6955,10 +6999,18 @@ impl BytecodeVM {
                                     crate::core::PrimitiveType::String,
                                 ) =>
                         {
-                            let text = copy_ordinary_map_owned_any_v2_string_for_unpack(
+                            let temporary = copy_ordinary_map_owned_any_v2_string_for_unpack(
                                 owner,
                                 &binding.conversion_to,
                             )?;
+                            ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()?;
+                            let text = try_copy_ordinary_map_owned_get_string(&temporary, false)
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "E0800: ordinary Map/Any owner-v2 Values String result allocation failed",
+                                    )
+                                })?;
+                            ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()?;
                             Value::String(Arc::new(text))
                         }
                         CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal }
@@ -6972,11 +7024,36 @@ impl BytecodeVM {
                                     )
                                 && !nominal.is_empty() =>
                         {
-                            copy_ordinary_map_owned_any_v2_record_for_unpack(
+                            let temporary = copy_ordinary_map_owned_any_v2_record_for_unpack(
                                 owner,
                                 &binding.conversion_to,
                                 nominal,
-                            )?
+                            )?;
+                            let Value::Record(record_nominal, fields) = temporary else {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values temporary Label clone changed representation",
+                                ));
+                            };
+                            let text = match fields.get("text") {
+                                Some(Value::String(text)) => text,
+                                _ => {
+                                    return Err(InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values temporary Label text is absent",
+                                    ));
+                                }
+                            };
+                            ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()?;
+                            let text = try_copy_ordinary_map_owned_get_string(text, false)
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "E0800: ordinary Map/Any owner-v2 Values Label text allocation failed",
+                                    )
+                                })?;
+                            ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()?;
+                            Value::Record(
+                                record_nominal,
+                                HashMap::from([("text".to_owned(), Value::String(Arc::new(text)))]),
+                            )
                         }
                         _ => {
                             return Err(InterpError::new(

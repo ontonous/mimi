@@ -560,11 +560,11 @@ fn ordinary_map_owned_any_v2_instruction_may_fail(
 
 /// New, persistent Set/Remove, and a direct root Clone all build a private
 /// replacement and publish it only after staging succeeds. GetAny similarly
-/// stages a private selected payload (or canonical miss owner), Unpack stages
-/// an exact typed clone, and Values stages a sorted owned list before exposing
-/// their results. These modeled capacity outcomes each have an E0800 edge at
-/// the corresponding publication boundary. Other V2 allocation sites remain
-/// outside this model and continue to receive an owner-scoped NITS result.
+/// stages a private selected payload, Unpack stages an exact typed clone,
+/// Values stages a sorted owned list, and ValuesUnpack models selected-owner,
+/// typed-clone, and final String/Label publication failures. Other V2
+/// allocation sites remain outside this model and continue to receive an
+/// owner-scoped NITS result.
 fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
     instruction: &crate::core::mir::MirInstruction,
     function: &MirFunction,
@@ -576,7 +576,8 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
         | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
         | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
         | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
-        | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. } => true,
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+        | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. } => true,
         MirInstructionKind::Clone { source, .. } => {
             function.values.get(source).is_some_and(|value| {
                 value.ty == crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
@@ -12444,6 +12445,12 @@ fn eval_instruction(
             let backward = Bool::and(&[&negative, &raw.ge(&length_value.unary_minus())]);
             let in_bounds = Bool::or(&[&forward, &backward]);
             add_definedness(state, in_bounds, "E0803")?;
+            // Native first clones the selected element into a temporary
+            // managed owner before checking the requested cast TypeDesc.
+            add_ordinary_map_owned_any_v2_values_unpack_owner_capacity_failure(
+                state,
+                instruction_id,
+            )?;
             let normalized = negative.ite(&(&raw + &length_value), &raw);
 
             let mut target_matches = Vec::new();
@@ -12489,10 +12496,26 @@ fn eval_instruction(
             }
             let payload_matches = bool_disjunction(&target_matches);
             add_definedness(state, payload_matches, "E0800")?;
+            // Exact type validation precedes the typed payload clone in all
+            // three consumers. Capacity is a separate owner-scoped E0800.
+            add_ordinary_map_owned_any_v2_unpack_capacity_failure(state, instruction_id)?;
             if !symbolic_matches_type(catalog, &target_ty, &selected_result) {
                 return Err(format!(
                     "{instruction_id}: Values unpack clone does not match the checked result TypeDesc"
                 ));
+            }
+            let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+            // The admitted non-i32 profile consists of String and records
+            // whose owned text leaf needs a second canonical String copy.
+            if target_ty != i32_type {
+                add_ordinary_map_owned_any_v2_values_unpack_string_clone_capacity_failure(
+                    state,
+                    instruction_id,
+                )?;
+                add_ordinary_map_owned_any_v2_values_unpack_string_publish_capacity_failure(
+                    state,
+                    instruction_id,
+                )?;
             }
             ensure_result_shape(function, catalog, result, &selected_result)?;
             state.values.insert(result.clone(), selected_result);
@@ -19487,6 +19510,39 @@ fn add_ordinary_map_owned_any_v2_values_capacity_failure(
     add_definedness(state, published, "E0800")
 }
 
+fn add_ordinary_map_owned_any_v2_values_unpack_owner_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    let selected = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.values_unpack.selected_owner.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, selected, "E0800")
+}
+
+fn add_ordinary_map_owned_any_v2_values_unpack_string_clone_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    let cloned = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.values_unpack.string_clone.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, cloned, "E0800")
+}
+
+fn add_ordinary_map_owned_any_v2_values_unpack_string_publish_capacity_failure(
+    state: &mut SymbolicState,
+    instruction_id: &crate::core::mir::MirInstructionId,
+) -> Result<(), String> {
+    let published = Bool::fresh_const(&format!(
+        "mir.ordinary_map_owned_any_v2.values_unpack.string_publish.{}",
+        instruction_id.as_str()
+    ));
+    add_definedness(state, published, "E0800")
+}
+
 fn expect_bool(value: SymbolicValue, context: &str) -> Result<Bool, String> {
     match value {
         SymbolicValue::Bool(value) => Ok(value),
@@ -24976,7 +25032,7 @@ mod managed_any_verifier_tests {
     }
 
     #[test]
-    fn ordinary_map_owned_any_v2_values_unpack_withholds_proof_and_keeps_traps() {
+    fn ordinary_map_owned_any_v2_values_unpack_models_capacity_and_keeps_traps() {
         let program = canonical(
             r#"
             type Label { text: string }
@@ -25044,19 +25100,29 @@ mod managed_any_verifier_tests {
         assert_eq!(receipts.len(), 3);
 
         for (name, expected) in [
-            ("values_unpack_hit", VerifStatus::NotInTrustedSubset),
-            (
-                "values_unpack_out_of_bounds",
-                VerifStatus::NotInTrustedSubset,
-            ),
-            ("values_unpack_wrong_tag", VerifStatus::NotInTrustedSubset),
+            ("values_unpack_hit", VerifStatus::Disproven),
+            ("values_unpack_out_of_bounds", VerifStatus::Disproven),
+            ("values_unpack_wrong_tag", VerifStatus::Disproven),
         ] {
             assert_contract(&program, name, expected);
         }
 
+        let results = verify_program(&program, "v2-values-unpack-capacity-edges".into())
+            .expect("ValuesUnpack capacity stages are explicit symbolic traps");
+        let hit = results
+            .iter()
+            .find(|result| result.func_name.ends_with("values_unpack_hit"))
+            .expect("ValuesUnpack hit contract result");
+        assert!(
+            hit.message.contains("can reach trap 'E0800'"),
+            "selected-owner and typed-clone Capacity failures must remain visible: {}",
+            hit.message
+        );
+
         for name in ["values_unpack_out_of_bounds", "values_unpack_wrong_tag"] {
+            let owner = crate::core::NodeId(format!("function:{name}"));
             let error = MirReferenceInterpreter::new(&program)
-                .execute(&crate::core::NodeId(format!("function:{name}")), &[])
+                .execute(&owner, &[])
                 .expect_err("invalid indexed cast reaches its checked runtime trap");
             let expected = if name.ends_with("out_of_bounds") {
                 "E0803"
@@ -25065,6 +25131,275 @@ mod managed_any_verifier_tests {
             };
             assert!(error.message.contains(expected), "{error:?}");
         }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_has_isolated_stage_traps() {
+        let program = canonical(
+            r#"
+            type Label { text: string }
+
+            func observe() -> i32 {
+                let label = Label { text: "selected label" }
+                let text = "selected string"
+                let empty = map_new()
+                let number = map_set(empty, "a-number", 41)
+                let strings = map_set(number, "b-string", text)
+                let root = map_set(strings, "c-label", label)
+                let snapshot = values(root)
+                let selected_number = snapshot[0] as i32
+                let selected_text = snapshot[1] as string
+                let selected_label = snapshot[2] as Label
+                drop(selected_number)
+                drop(selected_text)
+                drop(selected_label)
+                drop(snapshot)
+                drop(empty)
+                drop(number)
+                drop(strings)
+                drop(root)
+                drop(label)
+                drop(text)
+                0
+            }
+
+            func main() -> i32 { 0 }
+            "#,
+        );
+        let function = program
+            .functions()
+            .get(&crate::core::NodeId("function:observe".into()))
+            .expect("V2 ValuesUnpack observer");
+        let catalog = program.type_catalog();
+        let instructions = function
+            .blocks
+            .values()
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(instructions.len(), 3);
+
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("payload-selection receipt")
+            .expect("i32, String, and Label selection profile");
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let label_type = selection
+            .selected_types
+            .iter()
+            .find(|selected| selected.type_id != i32_type && selected.type_id != string_type)
+            .expect("selected Label TypeDesc")
+            .type_id
+            .clone();
+        let mut entries = BTreeMap::new();
+        for (key, ty) in [
+            ("a-number", i32_type.clone()),
+            ("b-string", string_type.clone()),
+            ("c-label", label_type.clone()),
+        ] {
+            let (payload, _) = super::symbolic_value_for_type(
+                catalog,
+                &ty,
+                &format!("v2.values.unpack.capacity.{key}"),
+            )
+            .expect("selected profile has a symbolic payload");
+            entries.insert(
+                key.to_string(),
+                super::SymbolicOrdinaryMapOwnedAnyV2Entry {
+                    payload_type: ty,
+                    payload: Box::new(payload),
+                },
+            );
+        }
+        let snapshot = super::symbolic_ordinary_map_owned_any_v2_values_snapshot(
+            catalog,
+            crate::core::mir::types::ordinary_map_owned_any_v2_values_element_type_id(),
+            &entries,
+        )
+        .expect("selected payloads form the exact sorted Values snapshot");
+
+        let seed = |instruction: &crate::core::mir::MirInstruction, index_value: i64| {
+            let MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                values: values_id,
+                index,
+                ..
+            } = &instruction.kind
+            else {
+                unreachable!()
+            };
+            SymbolicState {
+                values: BTreeMap::from([
+                    (
+                        values_id.clone(),
+                        SymbolicValue::OrdinaryMapOwnedAnyV2Values {
+                            entries: snapshot.clone(),
+                        },
+                    ),
+                    (
+                        index.clone(),
+                        SymbolicValue::Int(Int::from_i64(index_value)),
+                    ),
+                ]),
+                constraints: Vec::new(),
+                callable_entry_values: None,
+                callable_entry_constraints: None,
+                traps: Vec::new(),
+                list_shapes: BTreeMap::new(),
+                known_ints: BTreeMap::new(),
+                known_strings: BTreeMap::new(),
+                ffi_checks: Vec::new(),
+                normal_path_terminated: false,
+            }
+        };
+        let trap_statuses = |state: &SymbolicState| {
+            let mut session = super::SolverSession::new(crate::verifier::ctx::DEFAULT_TIMEOUT_MS)
+                .expect("trap reachability solver");
+            state
+                .traps
+                .iter()
+                .map(|trap| session.check_scope(&super::conjunction(&trap.condition)).0)
+                .collect::<Vec<_>>()
+        };
+
+        for (target_type, index_value, expected_markers) in [
+            (
+                i32_type.clone(),
+                0,
+                vec!["E0803", "selected_owner", "E0800", "unpack_capacity"],
+            ),
+            (
+                string_type.clone(),
+                1,
+                vec![
+                    "E0803",
+                    "selected_owner",
+                    "E0800",
+                    "unpack_capacity",
+                    "string_clone",
+                    "string_publish",
+                ],
+            ),
+            (
+                label_type.clone(),
+                2,
+                vec![
+                    "E0803",
+                    "selected_owner",
+                    "E0800",
+                    "unpack_capacity",
+                    "string_clone",
+                    "string_publish",
+                ],
+            ),
+        ] {
+            let instruction = instructions
+                .iter()
+                .copied()
+                .find(|instruction| {
+                    let MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { result, .. } =
+                        &instruction.kind
+                    else {
+                        unreachable!()
+                    };
+                    function.values.get(result).map(|value| &value.ty) == Some(&target_type)
+                })
+                .expect("one exact indexed unpack per selected TypeDesc");
+            let mut state = seed(instruction, index_value);
+            eval_instruction(
+                function,
+                &program,
+                catalog,
+                &mut state,
+                &instruction.id,
+                &instruction.kind,
+            )
+            .expect("isolated ValuesUnpack symbolic execution");
+            assert_eq!(state.traps.len(), expected_markers.len());
+            assert_eq!(state.traps[0].code, "E0803");
+            for (index, marker) in expected_markers.iter().enumerate().skip(1) {
+                assert_eq!(state.traps[index].code, "E0800");
+                if *marker != "E0800" {
+                    assert!(
+                        state.traps[index]
+                            .condition
+                            .iter()
+                            .any(|condition| condition.to_string().contains(marker)),
+                        "trap {index} for {} lacks stage {marker}: {:?}",
+                        target_type.as_str(),
+                        state.traps[index].condition
+                    );
+                }
+            }
+            let mut expected = vec![SatResult::Sat; expected_markers.len()];
+            expected[0] = SatResult::Unsat;
+            expected[2] = SatResult::Unsat;
+            assert_eq!(
+                trap_statuses(&state),
+                expected,
+                "only bounds is impossible for a correctly selected {} payload",
+                target_type.as_str()
+            );
+        }
+
+        let i32_instruction = instructions
+            .iter()
+            .copied()
+            .find(|instruction| {
+                let MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { result, .. } =
+                    &instruction.kind
+                else {
+                    unreachable!()
+                };
+                function.values.get(result).map(|value| &value.ty) == Some(&i32_type)
+            })
+            .expect("i32 ValuesUnpack instruction");
+        let mut out_of_bounds = seed(i32_instruction, 3);
+        eval_instruction(
+            function,
+            &program,
+            catalog,
+            &mut out_of_bounds,
+            &i32_instruction.id,
+            &i32_instruction.kind,
+        )
+        .expect("out-of-bounds ValuesUnpack symbolic execution");
+        assert_eq!(
+            trap_statuses(&out_of_bounds),
+            vec![
+                SatResult::Sat,
+                SatResult::Unsat,
+                SatResult::Unsat,
+                SatResult::Unsat
+            ],
+            "OOB must stop before selected-owner, type, and clone capacity stages"
+        );
+
+        let mut wrong_tag = seed(i32_instruction, 2);
+        eval_instruction(
+            function,
+            &program,
+            catalog,
+            &mut wrong_tag,
+            &i32_instruction.id,
+            &i32_instruction.kind,
+        )
+        .expect("wrong-tag ValuesUnpack symbolic execution");
+        assert_eq!(
+            trap_statuses(&wrong_tag),
+            vec![
+                SatResult::Unsat,
+                SatResult::Sat,
+                SatResult::Sat,
+                SatResult::Unsat
+            ],
+            "wrong-tag must reach selected-owner and mismatch traps, but not typed clone"
+        );
     }
 
     #[test]

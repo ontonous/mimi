@@ -270,6 +270,33 @@ fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ()> {
     Ok(())
 }
 
+fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_owner_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
 fn ordinary_map_owned_any_v2_values_publish_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
@@ -10460,6 +10487,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "ordinary Map/Any owner-v2 Values unpack selected element has another owner shape",
                     ));
                 };
+                ordinary_map_owned_any_v2_values_unpack_owner_checkpoint().map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 Values selected-owner capacity failure",
+                    )
+                })?;
                 let payload_type = match payload {
                     MirOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
                     | MirOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
@@ -10473,6 +10506,12 @@ impl<'a> MirReferenceInterpreter<'a> {
                         "E0800: ordinary Map/Any owner-v2 Values payload tag/type does not match the checked cast",
                     ));
                 }
+                ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                    self.error(
+                        &function.owner,
+                        "[E0800] ordinary Map/Any owner-v2 Values typed-unpack capacity failure",
+                    )
+                })?;
                 self.program
                     .type_catalog()
                     .validate_glue(payload_type, MirGlueOperation::Clone)
@@ -10492,6 +10531,26 @@ impl<'a> MirReferenceInterpreter<'a> {
                     MirOrdinaryMapOwnedAnyV2Value::String { value, .. }
                         if result_type.ty == string_type =>
                     {
+                        ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()
+                            .map_err(|_| {
+                                self.error(
+                                    &function.owner,
+                                    "[E0800] ordinary Map/Any owner-v2 Values String result allocation failed",
+                                )
+                            })?;
+                        let value = try_copy_owned_get_string(&value, false).ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "E0800: ordinary Map/Any owner-v2 Values String result allocation failed",
+                            )
+                        })?;
+                        ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()
+                            .map_err(|_| {
+                                self.error(
+                                    &function.owner,
+                                    "[E0800] ordinary Map/Any owner-v2 Values String result publication failed",
+                                )
+                            })?;
                         MirRuntimeValue::String(value)
                     }
                     MirOrdinaryMapOwnedAnyV2Value::Label { type_id, text }
@@ -10515,6 +10574,26 @@ impl<'a> MirReferenceInterpreter<'a> {
                                 "E0800: ordinary Map/Any owner-v2 Label layout differs from its exact TypeDesc",
                             ));
                         }
+                        ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()
+                            .map_err(|_| {
+                                self.error(
+                                    &function.owner,
+                                    "[E0800] ordinary Map/Any owner-v2 Values Label text allocation failed",
+                                )
+                            })?;
+                        let text = try_copy_owned_get_string(&text, false).ok_or_else(|| {
+                            self.error(
+                                &function.owner,
+                                "E0800: ordinary Map/Any owner-v2 Values Label text allocation failed",
+                            )
+                        })?;
+                        ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()
+                            .map_err(|_| {
+                                self.error(
+                                    &function.owner,
+                                    "[E0800] ordinary Map/Any owner-v2 Values Label result publication failed",
+                                )
+                            })?;
                         MirRuntimeValue::Record {
                             nominal: nominal.clone(),
                             fields: vec![MirRuntimeValue::String(text)],
@@ -24970,5 +25049,181 @@ func main() -> i64 { println(foreign(1 as i64)); 0 }
         assert!(error.message().contains("E0800"), "{error}");
         assert_eq!(output, "before\n", "failed Values exposes no result");
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_unpack_capacity_matches_stage_order() {
+        let make_program = |index: usize, target: &str, cleanup: &str| {
+            let source = format!(
+                r#"
+                    type Label {{ text: string }}
+                    func main() -> i32 {{
+                        let text = "selected string"
+                        let label = Label {{ text: "selected label" }}
+                        let empty = map_new()
+                        let numbers = map_set(empty, "number", 42)
+                        let strings = map_set(numbers, "text", text)
+                        let mixed = map_set(strings, "label", label)
+                        let snapshot = values(mixed)
+                        println("before")
+                        let selected = snapshot[{index}] as {target}
+                        println("after")
+                        {cleanup}
+                        drop(snapshot)
+                        drop(empty)
+                        drop(numbers)
+                        drop(strings)
+                        drop(mixed)
+                        drop(text)
+                        drop(label)
+                        0
+                    }}
+                "#
+            );
+            let (_, program) = direct_v2_program_with_main(&source);
+            program
+        };
+
+        // A valid index reaches selected-owner staging before the wrong-tag
+        // E0800. An out-of-bounds index does not enter that allocation stage.
+        for (index, expected_code, expected_attempts) in [(0, "E0800", 1), (3, "E0803", 0)] {
+            let program = make_program(index, "i32", "");
+            let owner = NodeId("function:main".into());
+            let (reference, reference_output, reference_attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_test(
+                    0,
+                    || {
+                        let interpreter = MirReferenceInterpreter::new(&program);
+                        let execution = interpreter.execute_with_output(&owner, &[]);
+                        (
+                            execution,
+                            interpreter.captured_output(),
+                            crate::runtime::ordinary_map_owned_any_v2_values_unpack_owner_attempts_for_test(),
+                        )
+                    },
+                );
+            let reference_error = reference.expect_err("reference selected-owner stage must fail");
+            assert!(
+                reference_error.message.contains(expected_code),
+                "{reference_error:?}"
+            );
+            assert_eq!(reference_output, "before\n");
+            assert_eq!(reference_attempts, expected_attempts);
+
+            let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+                .expect("compile ValuesUnpack stage-order MIR");
+            let (bytecode_result, bytecode_output, bytecode_attempts) =
+                crate::runtime::with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_test(
+                    0,
+                    || {
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                        let execution = vm.run_value_for_component().map(|_| ());
+                        (
+                            execution,
+                            vm.take_stdout(),
+                            crate::runtime::ordinary_map_owned_any_v2_values_unpack_owner_attempts_for_test(),
+                        )
+                    },
+                );
+            let bytecode_error =
+                bytecode_result.expect_err("bytecode selected-owner stage must fail");
+            assert_eq!(
+                bytecode_error.code(),
+                expected_code,
+                "allocation failures are E0800; index bounds are E0803: {bytecode_error:?}"
+            );
+            assert_eq!(bytecode_output, "before\n");
+            assert_eq!(bytecode_attempts, expected_attempts);
+        }
+
+        let i32_program = make_program(1, "i32", "");
+        let owner = NodeId("function:main".into());
+        let (reference, output, attempts) =
+            crate::runtime::with_ordinary_map_owned_any_v2_unpack_failure_for_test(0, || {
+                let interpreter = MirReferenceInterpreter::new(&i32_program);
+                let execution = interpreter.execute_with_output(&owner, &[]);
+                (
+                    execution,
+                    interpreter.captured_output(),
+                    crate::runtime::ordinary_map_owned_any_v2_unpack_attempts_for_test(),
+                )
+            });
+        assert!(reference
+            .expect_err("typed Values clone fails")
+            .message
+            .contains("E0800"));
+        assert_eq!(output, "before\n");
+        assert_eq!(attempts, 1);
+        let bytecode = crate::interp::bytecode::compile_mir_program(&i32_program)
+            .expect("compile typed ValuesUnpack MIR");
+        let (bytecode, output, attempts) =
+            crate::runtime::with_ordinary_map_owned_any_v2_unpack_failure_for_test(0, || {
+                let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                let execution = vm.run_value_for_component().map(|_| ());
+                (
+                    execution,
+                    vm.take_stdout(),
+                    crate::runtime::ordinary_map_owned_any_v2_unpack_attempts_for_test(),
+                )
+            });
+        assert!(bytecode
+            .expect_err("bytecode typed Values clone fails")
+            .message()
+            .contains("E0800"));
+        assert_eq!(output, "before\n");
+        assert_eq!(attempts, 1);
+
+        macro_rules! assert_string_stage_failure {
+            ($program:ident, $failure:path, $name:literal) => {{
+                let (reference, output) = $failure(|| {
+                    let interpreter = MirReferenceInterpreter::new(&$program);
+                    let execution = interpreter.execute_with_output(&owner, &[]);
+                    (execution, interpreter.captured_output())
+                });
+                assert!(reference.expect_err($name).message.contains("E0800"));
+                assert_eq!(
+                    output, "before\n",
+                    "{} must precede result visibility",
+                    $name
+                );
+
+                let bytecode = crate::interp::bytecode::compile_mir_program(&$program)
+                    .expect("compile String ValuesUnpack MIR");
+                let (bytecode, output) = $failure(|| {
+                    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+                    let execution = vm.run_value_for_component().map(|_| ());
+                    (execution, vm.take_stdout())
+                });
+                assert!(bytecode.expect_err($name).message().contains("E0800"));
+                assert_eq!(
+                    output, "before\n",
+                    "{} must precede result visibility",
+                    $name
+                );
+            }};
+        }
+        let string_program = make_program(2, "string", "drop(selected)");
+        assert_string_stage_failure!(
+            string_program,
+            crate::runtime::with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test,
+            "String allocation"
+        );
+        assert_string_stage_failure!(
+            string_program,
+            crate::runtime::with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test,
+            "String publication"
+        );
+
+        let label_program = make_program(0, "Label", "drop(selected)");
+        assert_string_stage_failure!(
+            label_program,
+            crate::runtime::with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test,
+            "Label text allocation"
+        );
+        assert_string_stage_failure!(
+            label_program,
+            crate::runtime::with_ordinary_map_owned_any_v2_values_unpack_string_publish_failure_for_test,
+            "Label text publication"
+        );
     }
 }
