@@ -778,7 +778,8 @@ def _canonical_mir_function_observations(
     events: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     for line in (stderr + "\n" + stdout).splitlines():
-        match = MIR_EMIT_SUCCESS_RE.match(line)
+        match_line = _strip_ansi(line)
+        match = MIR_EMIT_SUCCESS_RE.match(match_line)
         if match:
             events.append({
                 "function": match.group(1),
@@ -790,7 +791,7 @@ def _canonical_mir_function_observations(
                 "source_line": line,
             })
             continue
-        match = MIR_EMIT_SUMMARY_RE.match(line)
+        match = MIR_EMIT_SUMMARY_RE.match(match_line)
         if match:
             summaries.append({
                 "compiled": int(match.group(1)),
@@ -899,7 +900,8 @@ def _function_observations(
     events: list[dict[str, Any]] = []
     summaries: list[dict[str, int]] = []
     for line in (stderr + "\n" + stdout).splitlines():
-        match = SKIP_RE.match(line)
+        match_line = _strip_ansi(line)
+        match = SKIP_RE.match(match_line)
         if match:
             events.append({
                 "function": match.group(1),
@@ -911,7 +913,7 @@ def _function_observations(
                 "source_line": line,
             })
             continue
-        match = EMIT_FALLBACK_RE.match(line)
+        match = EMIT_FALLBACK_RE.match(match_line)
         if match:
             events.append({
                 "function": match.group(1),
@@ -924,7 +926,7 @@ def _function_observations(
                 "source_line": line,
             })
             continue
-        match = EMIT_VERIFY_FAIL_RE.match(line)
+        match = EMIT_VERIFY_FAIL_RE.match(match_line)
         if match:
             events.append({
                 "function": match.group(1),
@@ -937,7 +939,7 @@ def _function_observations(
                 "source_line": line,
             })
             continue
-        match = EMIT_SUCCESS_RE.match(line)
+        match = EMIT_SUCCESS_RE.match(match_line)
         if match:
             events.append({
                 "function": match.group(1),
@@ -949,7 +951,7 @@ def _function_observations(
                 "source_line": line,
             })
             continue
-        match = EMIT_SUMMARY_RE.match(line)
+        match = EMIT_SUMMARY_RE.match(match_line)
         if match:
             summaries.append({
                 "compiled": int(match.group(1)),

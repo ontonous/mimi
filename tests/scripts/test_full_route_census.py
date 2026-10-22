@@ -236,6 +236,38 @@ class PerFunctionEligibilityTests(unittest.TestCase):
         self.assertEqual(details["counts"]["compiled_resolved"], 1)
         self.assertTrue(details["has_fallback"])
 
+    def test_ansi_wrapped_emitter_fallback_is_recorded_without_changing_source_line(self) -> None:
+        fallback_line = (
+            "\x1b[33mwarning: resolved emitter fallback for 'Actor::handler': "
+            "unsupported expression\x1b[0m"
+        )
+        details = census._function_observations(
+            "",
+            "\n".join(
+                [
+                    fallback_line,
+                    "info: resolved emitter emitted 'main'",
+                    "info: resolved emitter compiled 1/2 function(s), 1 fell back to legacy",
+                ]
+            ),
+            {
+                "program": "ansi-fallback",
+                "total_functions": 2,
+                "eligible": 2,
+                "legacy_fallback": 0,
+                "emit_failed": 0,
+                "skip_reasons": {},
+            },
+        )
+
+        self.assertTrue(details["named_roster_complete"])
+        self.assertTrue(details["has_fallback"])
+        self.assertEqual(details["counts"]["named_emission_fallbacks"], 1)
+        fallback = next(event for event in details["functions"] if event["fallback"])
+        self.assertEqual(fallback["status"], "emission_fallback")
+        self.assertEqual(fallback["function"], "Actor::handler")
+        self.assertEqual(fallback["source_line"], fallback_line)
+
     def test_aggregate_success_count_never_fabricates_function_names(self) -> None:
         details = census._function_observations(
             "",
