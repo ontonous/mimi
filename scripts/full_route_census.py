@@ -23,39 +23,68 @@ report every verified MIR owner and reconcile those names, counts, and graph
 digest; resolved-native builds reconcile their named events against dispatch
 and emitter totals.
 
-Expected failing inputs must be declared in a JSON file, e.g.:
+Expectations are a typed, evidence-backed overlay. A mapped input binds its
+Mimi source digest to a named test assertion and the digest/location of that
+assertion's source file. Missing entries are reported as ``unmapped``; there is
+no implicit success expectation. For example:
 
-    {"schema_version": 1, "inputs": {
-      "tests/fixtures/expected-reject.mimi": {
-        "exit_code": 1, "route": "rejected", "reason": "negative fixture"
+    {"schema_version": 2, "inputs": {
+      "tests/fixtures/required.mimi": {
+        "class": "required_compile",
+        "reason": "fixture must compile through the canonical route",
+        "source_sha256": "<64 lowercase hex characters>",
+        "authority": {"test_id": "test_required_fixture_compiles",
+          "assertion": {"path": "tests/route_contract.rs", "line": 12,
+            "sha256": "<64 lowercase hex characters>"}}
       }
     }}
 
-An expectation only records the expected outcome; it never removes the input,
-logs, route, or failure from the report.  The manifest includes all tracked
-``*.mimi`` paths (including tracked paths missing from disk) and all regular
-``*.mimi`` files below the root outside the declared generated/vendor
-directory exclusions. Symlinks and excluded directory names are listed as
-scope limitations. Build stdout/stderr are retained inline and as exact-byte
-sidecars. Failure classes are ``capability``, ``library_target``,
-``environment``, ``unknown`` and ``none``; the collector does not relabel an
-unknown cause as a pass.
+``expected_build_rejection`` entries also require a nonzero
+``expected_exit_code``, a non-empty ``expected_diagnostic_codes`` list, and a
+non-empty ``required_output_substrings`` list. Those diagnostics must match the
+captured output exactly, and the build must leave no output artifact. A valid
+``interpreter_only`` entry skips the build and records ``run_status=not_run``.
+
+An expected build rejection's named authority must be an active Rust ``#[test]``
+that builds the same repository-relative Mimi path with the default ``build``
+command and asserts that command's failure plus every expected diagnostic code
+and output substring. The census independently checks the observed command
+exit, exact diagnostic-code set, required substrings, and artifact absence.
+
+Expectations never remove an input from the denominator. A valid
+``interpreter_only`` mapping records an intentional no-build row with an
+explicit reason; when a build runs, its stdout/stderr bytes and route remain
+independent observations. An expected build rejection requires an exact set of
+diagnostic codes, required output substrings, and no output artifact. The
+manifest includes all tracked
+``*.mimi`` paths (including tracked paths missing from disk) and all present
+regular or symlink ``*.mimi`` files outside root-level ``devdocs/`` and
+``evidence/`` archive roots and generated/vendor directory exclusions. Mimi
+sources below archive roots remain in ``scope_exclusions`` with hashes.
+Negative fixtures remain candidates and are classified as intentional
+rejections only when an explicit expectation matches the observed diagnostics.
+Symlinks and excluded directory names are listed as scope limitations. Build
+stdout/stderr are retained inline and as exact-byte sidecars. Failure classes
+are ``capability``, ``library_target``, ``environment``, ``unknown`` and
+``none``; the collector does not relabel an unknown cause as a pass.
 
 The JSON report is the top-level index. Full execution also writes
 ``<output>.artifacts/inventory.json`` (the frozen denominator),
-``journal.jsonl`` (one durable record per attempted input), and ``logs/``
+``journal.jsonl`` (one durable record per inventory input), and ``logs/``
 (exact stdout/stderr bytes for each build and the legacy-owner audit). The
-scope excludes files below the named generated/vendor directories; Git-indexed
-Mimi paths remain in the denominator even when they are below an excluded
-directory or missing from disk. Symlinked directories are not traversed and
-Mimi file symlinks are recorded but not followed. These boundaries are explicit
-in the report and block ``--check`` when an in-scope Mimi symlink is found.
+scope excludes untracked files below generated/vendor directories and root-level
+archive roots. Git-indexed Mimi paths remain accounted for below generated/vendor
+directories or when missing, while archive sources stay in the exclusion ledger.
+Symlinked directories are not traversed and Mimi file symlinks are recorded but
+not followed. These boundaries are explicit and in-scope Mimi symlinks block
+``--check``.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
@@ -72,11 +101,35 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = "0.1.11-full-route-census-v2"
+SCHEMA_VERSION = "0.1.11-full-route-census-v3"
+EXPECTATION_SCHEMA_VERSION = 2
+EXPECTATION_CLASSES = {
+    "required_compile",
+    "expected_build_rejection",
+    "interpreter_only",
+    "known_gap",
+    "unmapped",
+    "environment_failure",
+}
+ARCHIVAL_SOURCE_PREFIXES = {
+    "devdocs": "historical_or_staging_copy",
+    "evidence": "preserved_evidence_source_copy",
+}
+ROUTE_CANDIDATE_CLASSIFICATIONS = {
+    "canonical",
+    "compatibility",
+    "intentional_reject",
+    "unmapped",
+    "unknown",
+}
 ACTOR_FALLBACK_INPUTS = (
     "tests/real_world/actor_nested_func_capture.mimi",
     "tests/real_world/actor_nested_func_shadow.mimi",
 )
+ACTOR_EXPECTED_STDOUT = {
+    ACTOR_FALLBACK_INPUTS[0]: b"15\n",
+    ACTOR_FALLBACK_INPUTS[1]: b"42\n101\n",
+}
 LEGACY_OWNER_NAMES = (
     "CodegenLegacyRemainder",
     "FlowVerifierCompatibility",
@@ -107,6 +160,20 @@ DIAGNOSTIC_RE = re.compile(
 SOURCE_DIAGNOSTIC_RE = re.compile(
     r"(?i)^[ \t]*error(?:\[[A-Z][A-Z0-9_-]*\])?(?:[ \t]+|[ \t]*:[ \t]+)"
     r"(?P<location>.*?\.mimi:\d+:\d+(?:-(?:\d+:)?\d+)?)(?:[ \t]+|$)"
+)
+DIAGNOSTIC_ERROR_CODE_RE = re.compile(
+    r"(?i)^[ \t]*(?:"
+    r"error[ \t]*\[[ \t]*(?P<bracketed>E\d{4}|MIR-[A-Z0-9_-]+-\d{3,})[ \t]*\](?=[ \t:]|$)"
+    r"|error[ \t]*:[ \t]*(?P<error_code>E\d{4}|MIR-[A-Z0-9_-]+-\d{3,})(?=[ \t:]|$)"
+    r"|(?P<bare>E\d{4})[ \t]*:"
+    r")"
+)
+DIAGNOSTIC_CODE_FULL_RE = re.compile(r"(?:E\d{4}|MIR-[A-Z0-9_-]+-\d{3,})\Z", re.I)
+TEST_DECLARATION_TEMPLATE = r"(?m)^[ \t]*(?:(?:pub|async|unsafe)[ \t]+)*(?:fn|def)[ \t]+{name}[ \t]*\("
+ASSERTION_MARKER_RE = re.compile(
+    r"\b(?:assert(?:_[A-Za-z0-9_]+)?|debug_assert(?:_[A-Za-z0-9_]+)?)(?:[ \t]*![ \t]*\(|[ \t]*\(|[ \t]+)"
+    r"|\b(?:self\.)?assert[A-Z][A-Za-z0-9_]*[ \t]*\("
+    r"|\b(?:ASSERT|EXPECT)_[A-Z0-9_]+[ \t]*\("
 )
 TOOLCHAIN_FAILURE_RE = re.compile(
     r"(?:failed to run linker|could not execute process|unable to execute|"
@@ -165,6 +232,39 @@ MIR_EMIT_SUMMARY_RE = re.compile(
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _raw_capture(data: bytes, path: str | None = None) -> dict[str, Any]:
+    capture: dict[str, Any] = {
+        "sha256": sha256_bytes(data),
+        "bytes": len(data),
+        "base64": base64.b64encode(data).decode("ascii"),
+    }
+    if path is not None:
+        capture["path"] = path
+    return capture
+
+
+def _captured_bytes(value: Any) -> bytes | None:
+    if not isinstance(value, Mapping):
+        return None
+    encoded = value.get("base64")
+    expected_hash = value.get("sha256")
+    expected_bytes = value.get("bytes")
+    if not isinstance(encoded, str) or not isinstance(expected_hash, str):
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error):
+        return None
+    if (
+        sha256_bytes(raw) != expected_hash
+        or not isinstance(expected_bytes, int)
+        or isinstance(expected_bytes, bool)
+        or len(raw) != expected_bytes
+    ):
+        return None
+    return raw
 
 
 def _strip_ansi(text: str) -> str:
@@ -255,6 +355,56 @@ def missing_source_record(path: Path, root: Path) -> dict[str, Any]:
     }
 
 
+def _symlinked_parent(path: Path, root: Path) -> Path | None:
+    """Return the first symlinked parent without resolving through it."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return None
+    parent = root
+    for part in relative.parts[:-1]:
+        parent = parent / part
+        try:
+            metadata = parent.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(metadata.st_mode):
+            return parent
+        if not stat.S_ISDIR(metadata.st_mode):
+            return None
+    return None
+
+
+def blocked_source_record(
+    path: Path, root: Path, *, tracked: bool, symlink_parent: Path
+) -> dict[str, Any]:
+    """Represent a tracked path unavailable behind a symlinked directory."""
+    try:
+        target_bytes = os.fsencode(os.readlink(symlink_parent))
+        target_text: str | None = os.fsdecode(target_bytes)
+        target_digest: str | None = sha256_bytes(target_bytes)
+    except OSError:
+        target_text = None
+        target_digest = None
+    return {
+        "path": relative_path(path, root),
+        "category": source_category(path, root),
+        "target_kind": "unknown",
+        "target_kind_basis": "tracked source is unavailable behind a symlinked parent directory",
+        "main_detected_by_surface_scan": None,
+        "present": False,
+        "presence_kind": "blocked_by_symlinked_parent",
+        "buildable": False,
+        "tracked_by_git": tracked,
+        "bytes": None,
+        "sha256": None,
+        "mode": None,
+        "symlink_parent_path": relative_path(symlink_parent, root),
+        "symlink_parent_target": target_text,
+        "symlink_parent_target_sha256": target_digest,
+    }
+
+
 def symlink_source_record(path: Path, root: Path, *, tracked: bool) -> dict[str, Any]:
     try:
         target_bytes = os.fsencode(os.readlink(path))
@@ -283,6 +433,36 @@ def symlink_source_record(path: Path, root: Path, *, tracked: bool) -> dict[str,
     }
 
 
+def _is_archival_source_path(name: str) -> bool:
+    return name.split("/", 1)[0] in ARCHIVAL_SOURCE_PREFIXES
+
+
+def _scope_exclusion_record(path: Path, root: Path, *, tracked: bool) -> dict[str, Any]:
+    """Retain a historical/evidence Mimi path without treating it as a route input."""
+    name = relative_path(path, root)
+    prefix = name.split("/", 1)[0]
+    symlink_parent = _symlinked_parent(path, root)
+    if symlink_parent is not None:
+        record = blocked_source_record(
+            path, root, tracked=tracked, symlink_parent=symlink_parent
+        )
+    elif path.is_symlink():
+        record = symlink_source_record(path, root, tracked=tracked)
+    elif path.is_file():
+        record = source_record(path, root, tracked=tracked)
+    else:
+        record = missing_source_record(path, root)
+    record.update({
+        "route_candidate": False,
+        "scope_classification": ARCHIVAL_SOURCE_PREFIXES[prefix],
+        "scope_exclusion_reason": (
+            "archived documentation, staging, or preserved evidence; retained in the source-scope "
+            "ledger but outside the active route-candidate inventory"
+        ),
+    })
+    return record
+
+
 def tracked_mimi_paths(root: Path) -> tuple[list[str], dict[str, Any]]:
     """List Git-indexed Mimi paths without dropping deleted tracked inputs."""
     try:
@@ -308,10 +488,17 @@ def tracked_mimi_paths(root: Path) -> tuple[list[str], dict[str, Any]]:
     }
 
 
-def enumerate_sources(
+def enumerate_source_scope(
     root: Path, tracked_paths: Sequence[str] | None = None
-) -> list[dict[str, Any]]:
-    """Return tracked Mimi inputs plus all in-scope regular files, tracked or not."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Partition discoverable Mimi paths into active candidates and retained archives.
+
+    ``devdocs`` and ``evidence`` often contain source snapshots and probes. They
+    remain visible in ``scope_exclusions`` with a reason and hash, while all
+    active source/test roots (including difficult and negative test fixtures)
+    remain route candidates. This is a scope partition, not a build-result
+    filter.
+    """
     if tracked_paths is None:
         tracked_paths, _ = tracked_mimi_paths(root)
     tracked = set(tracked_paths)
@@ -341,15 +528,79 @@ def enumerate_sources(
     # as intentional source inputs.
     all_paths = tracked | present_paths | symlink_paths
     sources: list[dict[str, Any]] = []
+    scope_exclusions: list[dict[str, Any]] = []
     for name in sorted(all_paths):
         path = root / name
+        symlink_parent = _symlinked_parent(path, root)
+        if symlink_parent is not None:
+            record = blocked_source_record(
+                path, root, tracked=name in tracked, symlink_parent=symlink_parent
+            )
+            if _is_archival_source_path(name):
+                prefix = name.split("/", 1)[0]
+                record.update({
+                    "route_candidate": False,
+                    "scope_classification": ARCHIVAL_SOURCE_PREFIXES[prefix],
+                    "scope_exclusion_reason": (
+                        "archived source path is unavailable behind a symlinked parent directory"
+                    ),
+                })
+                scope_exclusions.append(record)
+            else:
+                record["route_candidate"] = True
+                record["scope_classification"] = "route_candidate"
+                sources.append(record)
+            continue
+        if _is_archival_source_path(name):
+            scope_exclusions.append(
+                _scope_exclusion_record(path, root, tracked=name in tracked)
+            )
+            continue
         if path.is_symlink():
-            sources.append(symlink_source_record(path, root, tracked=name in tracked))
+            record = symlink_source_record(path, root, tracked=name in tracked)
+            record["route_candidate"] = True
+            record["scope_classification"] = "route_candidate"
+            sources.append(record)
             continue
         if path.is_file():
-            sources.append(source_record(path, root, tracked=name in tracked))
+            record = source_record(path, root, tracked=name in tracked)
+            record["route_candidate"] = True
+            record["scope_classification"] = "route_candidate"
+            sources.append(record)
         elif name in tracked:
-            sources.append(missing_source_record(path, root))
+            record = missing_source_record(path, root)
+            record["route_candidate"] = True
+            record["scope_classification"] = "route_candidate"
+            sources.append(record)
+    scoped_paths = [str(item["path"]) for item in sources + scope_exclusions]
+    duplicate_paths = sorted(
+        name for name, count in Counter(scoped_paths).items() if count > 1
+    )
+    scope = {
+        "discoverable_mimi_path_count": len(all_paths),
+        "candidate_count": len(sources),
+        "excluded_count": len(scope_exclusions),
+        "classification_counts": dict(sorted(Counter(
+            str(item.get("scope_classification", "unknown"))
+            for item in sources + scope_exclusions
+        ).items())),
+        "duplicate_paths": duplicate_paths,
+        "unaccounted_paths": sorted(set(all_paths) - set(scoped_paths)),
+        "exactly_once": (
+            len(scoped_paths) == len(all_paths)
+            and not duplicate_paths
+            and not (set(all_paths) - set(scoped_paths))
+        ),
+        "archival_prefixes": dict(sorted(ARCHIVAL_SOURCE_PREFIXES.items())),
+    }
+    return sources, scope_exclusions, scope
+
+
+def enumerate_sources(
+    root: Path, tracked_paths: Sequence[str] | None = None
+) -> list[dict[str, Any]]:
+    """Return active route candidates; archival/evidence paths remain separately auditable."""
+    sources, _scope_exclusions, _scope = enumerate_source_scope(root, tracked_paths)
     return sources
 
 
@@ -385,6 +636,39 @@ def source_symlink_exclusions(root: Path) -> list[dict[str, str]]:
                     "symlink_target_sha256": sha256_bytes(target_bytes),
                 })
     return sorted(excluded, key=lambda item: (item["path"], item["kind"]))
+
+
+def tracked_symlink_parent_blockers(
+    root: Path, tracked_paths: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Record tracked Mimi paths whose parent directory is a symlink."""
+    blocked_paths: dict[str, set[str]] = {}
+    targets: dict[str, tuple[str, str]] = {}
+    for name in tracked_paths:
+        path = root / name
+        symlink_parent = _symlinked_parent(path, root)
+        if symlink_parent is None:
+            continue
+        symlink_name = relative_path(symlink_parent, root)
+        try:
+            target_bytes = os.fsencode(os.readlink(symlink_parent))
+            target_text = os.fsdecode(target_bytes)
+            target_digest = sha256_bytes(target_bytes)
+        except OSError:
+            target_text = ""
+            target_digest = ""
+        blocked_paths.setdefault(symlink_name, set()).add(name)
+        targets[symlink_name] = (target_text, target_digest)
+    return [
+        {
+            "path": symlink_name,
+            "kind": "tracked_mimi_path_parent_symlink_not_followed",
+            "tracked_paths": sorted(names),
+            "symlink_target": targets[symlink_name][0],
+            "symlink_target_sha256": targets[symlink_name][1],
+        }
+        for symlink_name, names in sorted(blocked_paths.items())
+    ]
 
 
 def _compiler_snapshot_files(root: Path) -> list[Path]:
@@ -429,6 +713,7 @@ def source_snapshot(root: Path, sources: Sequence[Mapping[str, Any]]) -> dict[st
             "kind": {
                 "regular_file": "mimi",
                 "missing_tracked_path": "mimi_missing_tracked_input",
+                "blocked_by_symlinked_parent": "mimi_blocked_by_symlinked_parent",
                 "symlink": "mimi_symlink_not_followed",
             }.get(str(item.get("presence_kind")), "mimi_unknown_presence"),
             "symlink_target_sha256": item.get("symlink_target_sha256"),
@@ -663,13 +948,559 @@ def repository_identity(root: Path) -> dict[str, Any]:
     return result
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{64}", value))
+
+
+def _test_authority_is_structurally_valid(
+    test_id: Any, source_text: str, lines: Sequence[str], line_number: Any
+) -> tuple[bool, bool]:
+    """Check that authority names a test declaration and cites an assertion-shaped line.
+
+    Expected rejections receive an additional command/path/diagnostic check in
+    ``_expected_rejection_test_authority_is_valid``.
+    """
+    if not isinstance(test_id, str) or not test_id.strip():
+        return False, False
+    declaration = re.compile(
+        TEST_DECLARATION_TEMPLATE.format(name=re.escape(test_id))
+    )
+    test_id_present = bool(declaration.search(source_text))
+    assertion_line_valid = (
+        isinstance(line_number, int)
+        and not isinstance(line_number, bool)
+        and 1 <= line_number <= len(lines)
+    )
+    if not assertion_line_valid:
+        return test_id_present, False
+    line = lines[line_number - 1].lstrip()
+    is_comment = line.startswith(("#", "//", "/*", "*"))
+    return test_id_present, not is_comment and bool(ASSERTION_MARKER_RE.search(line))
+
+
+def _find_rust_delimiter_end(text: str, opening_index: int, opening: str, closing: str) -> int | None:
+    """Return the matching Rust delimiter, skipping strings and comments."""
+    depth = 0
+    index = opening_index
+    while index < len(text):
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            index = len(text) if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", index):
+            comment_depth = 1
+            index += 2
+            while index < len(text) and comment_depth:
+                if text.startswith("/*", index):
+                    comment_depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    comment_depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            continue
+        raw_string = re.match(r"r(#{0,})\"", text[index:])
+        if raw_string:
+            terminator = '"' + raw_string.group(1)
+            end = text.find(terminator, index + len(raw_string.group(0)))
+            if end < 0:
+                return None
+            index = end + len(terminator)
+            continue
+        char = text[index]
+        if char == '"':
+            index += 1
+            while index < len(text):
+                if text[index] == "\\":
+                    index += 2
+                elif text[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            continue
+        if char == "'":
+            # Skip a bounded char literal while leaving Rust lifetimes alone.
+            literal_end = index + 1
+            if literal_end < len(text) and text[literal_end] == "\\":
+                literal_end += 2
+            else:
+                literal_end += 1
+            if literal_end < len(text) and text[literal_end] == "'":
+                index = literal_end + 1
+                continue
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _mask_rust_comments_and_strings(text: str) -> str:
+    """Blank Rust comments and literals while preserving offsets and line breaks."""
+    masked = list(text)
+    raw_string_prefix = re.compile(r"(?:br|cr|r)(#{0,})\"")
+
+    def blank(start: int, end: int) -> None:
+        for position in range(start, end):
+            if masked[position] not in "\r\n":
+                masked[position] = " "
+
+    index = 0
+    while index < len(text):
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            end = len(text) if newline < 0 else newline
+            blank(index, end)
+            index = end
+            continue
+        if text.startswith("/*", index):
+            comment_start = index
+            depth = 1
+            index += 2
+            while index < len(text) and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            blank(comment_start, index)
+            continue
+
+        raw_string = (
+            raw_string_prefix.match(text, index) if text[index] in "brc" else None
+        )
+        if raw_string:
+            terminator = '"' + raw_string.group(1)
+            end = text.find(terminator, index + len(raw_string.group(0)))
+            end = len(text) if end < 0 else end + len(terminator)
+            blank(index, end)
+            index = end
+            continue
+
+        char = text[index]
+        if char == '"':
+            literal_start = index
+            index += 1
+            while index < len(text):
+                if text[index] == "\\":
+                    index += 2
+                elif text[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            blank(literal_start, min(index, len(text)))
+            continue
+        if char == "'":
+            # Mask bounded char literals, but leave Rust lifetimes intact.
+            literal_end = index + 1
+            if literal_end < len(text) and text[literal_end] == "\\":
+                literal_end += 2
+            elif literal_end < len(text) and text[literal_end] not in "\r\n'":
+                literal_end += 1
+            if literal_end < len(text) and text[literal_end] == "'":
+                blank(index, literal_end + 1)
+                index = literal_end + 1
+                continue
+        index += 1
+    return "".join(masked)
+
+
+def _rust_call_argument_slices(
+    source_text: str,
+    masked_text: str,
+    start: int,
+    end: int,
+    function_name: str,
+) -> Iterable[tuple[list[str], int]]:
+    """Yield source argument spellings and offsets for syntactic Rust calls."""
+    pattern = re.compile(rf"\b{re.escape(function_name)}[ \t\r\n]*\(")
+    for match in pattern.finditer(masked_text, start, end):
+        opening = match.end() - 1
+        closing_end = _find_rust_delimiter_end(masked_text, opening, "(", ")")
+        if closing_end is None or closing_end > end:
+            continue
+        if not masked_text[closing_end:end].lstrip(" \t\r\n").startswith(";"):
+            continue
+        arguments_start = opening + 1
+        arguments_end = closing_end - 1
+        argument_start = arguments_start
+        paren_depth = bracket_depth = brace_depth = 0
+        arguments: list[str] = []
+        for position in range(arguments_start, arguments_end):
+            char = masked_text[position]
+            if char == "(":
+                paren_depth += 1
+            elif char == ")":
+                paren_depth -= 1
+            elif char == "[":
+                bracket_depth += 1
+            elif char == "]":
+                bracket_depth -= 1
+            elif char == "{":
+                brace_depth += 1
+            elif char == "}":
+                brace_depth -= 1
+            elif char == "," and not (paren_depth or bracket_depth or brace_depth):
+                arguments.append(source_text[argument_start:position].strip())
+                argument_start = position + 1
+        trailing = source_text[argument_start:arguments_end].strip()
+        if trailing or arguments:
+            arguments.append(trailing)
+        yield arguments, match.start()
+
+
+def _rust_outer_attributes_before(code_text: str, item_start: int) -> list[str] | None:
+    """Read the contiguous outer attributes immediately before an item.
+
+    Rust permits arbitrary whitespace, including blank lines, between an
+    attribute and its item. ``code_text`` must already have comments and
+    literals masked so delimiters inside them cannot affect this scan.
+    """
+    attributes: list[str] = []
+    cursor = item_start
+    while True:
+        while cursor > 0 and code_text[cursor - 1].isspace():
+            cursor -= 1
+        if cursor == 0 or code_text[cursor - 1] != "]":
+            break
+
+        closing = cursor - 1
+        depth = 1
+        opening = closing - 1
+        while opening >= 0 and depth:
+            if code_text[opening] == "]":
+                depth += 1
+            elif code_text[opening] == "[":
+                depth -= 1
+            opening -= 1
+        if depth != 0:
+            return None
+        opening += 1
+        hash_index = opening - 1
+        if hash_index < 0 or code_text[hash_index] != "#":
+            break
+        attributes.append(code_text[hash_index:closing + 1])
+        cursor = hash_index
+
+    attributes.reverse()
+    return attributes
+
+
+def _rust_delimiter_depth_at(text: str, start: int, stop: int) -> tuple[int, int, int] | None:
+    """Return brace/paren/bracket depth at ``stop`` within masked Rust text."""
+    stack: list[str] = []
+    closing = {"}": "{", ")": "(", "]": "["}
+    for char in text[start:stop]:
+        if char in "{([":
+            stack.append(char)
+        elif char in closing:
+            if not stack or stack.pop() != closing[char]:
+                return None
+    return (
+        stack.count("{"),
+        stack.count("("),
+        stack.count("["),
+    )
+
+
+def _rust_test_function_span(source_text: str, test_id: str) -> tuple[int, int] | None:
+    """Return one provably active, nonignored top-level test function span."""
+    declaration = re.compile(
+        r"(?m)^[ \t]*(?:(?:pub(?:\([^)]*\))?|async|unsafe)[ \t]+)*"
+        rf"fn[ \t]+{re.escape(test_id)}[ \t]*\([^)]*\)[^{{;]*\{{"
+    )
+    code_text = _mask_rust_comments_and_strings(source_text)
+    matches = list(declaration.finditer(code_text))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+
+    # Actor authority lives at file scope. Requiring depth zero also prevents
+    # matching declarations written as tokens inside a macro or nested item.
+    if _rust_delimiter_depth_at(code_text, 0, match.start()) != (0, 0, 0):
+        return None
+
+    attributes = _rust_outer_attributes_before(code_text, match.start())
+    if attributes is None:
+        return None
+    normalized = [re.sub(r"\s+", "", attribute) for attribute in attributes]
+    if normalized.count("#[test]") != 1:
+        return None
+    if any(
+        re.match(r"#\[(?:ignore)(?:=|\(|\])", attribute)
+        or re.match(r"#\[(?:cfg|cfg_attr)\(", attribute)
+        for attribute in normalized
+    ):
+        # Any conditional attribute makes activity dependent on the build
+        # environment. Fail closed instead of guessing at the active cfg set.
+        return None
+
+    opening_index = match.end() - 1
+    end = _find_rust_delimiter_end(code_text, opening_index, "{", "}")
+    if end is None:
+        return None
+    return match.start(), end
+
+
+def actor_fixture_test_contracts(root: Path) -> dict[str, dict[str, Any]]:
+    """Bind each required Actor fixture to an active test's exact helper call."""
+    authority_path = "tests/real_world_cli.rs"
+    authority_file = root / authority_path
+    try:
+        authority_bytes = authority_file.read_bytes()
+        authority_text = authority_bytes.decode("utf-8")
+        authority_digest = sha256_bytes(authority_bytes)
+    except (OSError, UnicodeDecodeError):
+        authority_text = ""
+        authority_digest = None
+    bindings = (
+        (
+            ACTOR_FALLBACK_INPUTS[0],
+            "canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback",
+        ),
+        (
+            ACTOR_FALLBACK_INPUTS[1],
+            "canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback",
+        ),
+    )
+    contracts: dict[str, dict[str, Any]] = {}
+    for source_path, test_id in bindings:
+        expected_stdout = ACTOR_EXPECTED_STDOUT[source_path]
+        span = _rust_test_function_span(authority_text, test_id)
+        assertion: dict[str, Any] | None = None
+        if span is not None and authority_digest is not None:
+            function_start, function_end = span
+            code_text = _mask_rust_comments_and_strings(authority_text)
+            body_open = code_text.find("{", function_start, function_end)
+            body_start = body_open + 1 if body_open >= 0 else function_end
+            body_end = function_end - 1
+            body_text = code_text[body_start:body_end]
+            fixture_literal = json.dumps(Path(source_path).name)
+            stdout_literal = json.dumps(expected_stdout.decode("ascii"))
+            expected_arguments = [fixture_literal, "b" + stdout_literal, "false"]
+            calls = list(
+                _rust_call_argument_slices(
+                    authority_text,
+                    code_text,
+                    body_start,
+                    body_end,
+                    "assert_original_actor_cli_routes",
+                )
+            )
+
+            def is_top_level_unconditional_call(call_start: int) -> bool:
+                call_attributes = _rust_outer_attributes_before(code_text, call_start)
+                return (
+                    _rust_delimiter_depth_at(code_text, body_start, call_start)
+                    == (0, 0, 0)
+                    and call_attributes is not None
+                    and not any(
+                        re.match(r"#\[(?:cfg|cfg_attr)\(", re.sub(r"\s+", "", attr))
+                        for attr in call_attributes
+                    )
+                )
+
+            has_conditional_body_attributes = bool(
+                re.search(r"#\s*\[\s*(?:cfg|cfg_attr)\s*\(", body_text)
+            )
+            matching_calls = [] if has_conditional_body_attributes else [
+                call_start
+                for arguments, call_start in calls
+                if arguments == expected_arguments
+                and is_top_level_unconditional_call(call_start)
+            ]
+            if len(calls) == 1 and len(matching_calls) == 1:
+                matching_call = matching_calls[0]
+                line = authority_text.count("\n", 0, matching_call) + 1
+                assertion = {
+                    "path": authority_path,
+                    "line": line,
+                    "sha256": authority_digest,
+                }
+        contracts[source_path] = {
+            "test_id": test_id,
+            "authority_valid": assertion is not None,
+            "authority": {
+                "test_id": test_id,
+                "assertion": assertion,
+            } if assertion is not None else None,
+            "expected_stdout": _raw_capture(expected_stdout),
+        }
+    return contracts
+
+
+def _rust_string_literals(text: str) -> list[str]:
+    return [match.group(1) for match in re.finditer(r'"((?:\\.|[^"\\])*)"', text)]
+
+
+def _expected_rejection_test_authority_is_valid(
+    *,
+    test_id: Any,
+    source_path: str,
+    target_kind: str,
+    source_text: str,
+    assertion_line: Any,
+    expected_diagnostic_codes: Any,
+    required_output_substrings: Any,
+) -> bool:
+    """Require an active test to invoke the exact input's default build and assert its refusal."""
+    if (
+        not isinstance(test_id, str)
+        or Path(source_path).suffix != ".mimi"
+        or target_kind not in {"executable", "shared_library_probe"}
+        or not isinstance(assertion_line, int)
+        or isinstance(assertion_line, bool)
+        or not isinstance(expected_diagnostic_codes, list)
+        or not expected_diagnostic_codes
+        or not isinstance(required_output_substrings, list)
+        or not required_output_substrings
+    ):
+        return False
+    span = _rust_test_function_span(source_text, test_id)
+    if span is None:
+        return False
+    function_start, function_end = span
+    function_text = source_text[function_start:function_end]
+
+    source_parts = Path(source_path).parts
+    matching_fixture_variables: set[str] = set()
+    for variable_match in re.finditer(
+        r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);", function_text, re.S
+    ):
+        initializer = variable_match.group(2)
+        joined_parts = re.findall(
+            r"\.join\(\s*\"((?:\\.|[^\"\\])*)\"\s*\)", initializer
+        )
+        if any(
+            tuple(joined_parts[index : index + len(source_parts)]) == tuple(source_parts)
+            for index in range(max(0, len(joined_parts) - len(source_parts) + 1))
+        ):
+            matching_fixture_variables.add(variable_match.group(1))
+    if not matching_fixture_variables:
+        return False
+
+    command_bindings: list[str] = []
+    for variable_match in re.finditer(
+        r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);", function_text, re.S
+    ):
+        initializer = variable_match.group(2)
+        command_match = re.search(
+            r"Command::new\s*\(\s*mimi_bin\s*\(\s*\)\s*\)"
+            r"(?P<chain>[\s\S]*?)\.output\s*\(\s*\)",
+            initializer,
+        )
+        if command_match is None:
+            continue
+        chain = command_match.group("chain")
+        arguments = re.findall(
+            r"\.arg\(\s*(&?[A-Za-z_][A-Za-z0-9_]*|\"(?:\\.|[^\"\\])*\")\s*\)",
+            chain,
+        )
+        shared_argument = ['"--shared"'] if target_kind == "shared_library_probe" else []
+        for fixture_variable in matching_fixture_variables:
+            expected_prefix = ['"build"', *shared_argument, f"&{fixture_variable}", '"-o"']
+            if (
+                len(arguments) == len(expected_prefix) + 1
+                and arguments[:-1] == expected_prefix
+                and not arguments[-1].startswith("&")
+            ):
+                command_bindings.append(variable_match.group(1))
+    if not command_bindings:
+        return False
+
+    expected_literals = [
+        *[str(code).upper() for code in expected_diagnostic_codes],
+        *[str(item) for item in required_output_substrings],
+    ]
+    for command_variable in command_bindings:
+        if not re.search(
+            rf"assert!\s*\(\s*!\s*{re.escape(command_variable)}\.status\.success\s*\(\s*\)",
+            function_text,
+        ):
+            continue
+        stderr_binding = re.search(
+            rf"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*String::from_utf8_lossy\s*"
+            rf"\(\s*&{re.escape(command_variable)}\.stderr\s*\)",
+            function_text,
+        )
+        if stderr_binding is None:
+            continue
+        stderr_variable = stderr_binding.group(1)
+        diagnostic_assertions: list[tuple[int, int, str, set[str]]] = []
+        for assertion_match in re.finditer(r"\bassert!\s*\(", function_text):
+            open_index = assertion_match.end() - 1
+            assertion_end = _find_rust_delimiter_end(
+                function_text, open_index, "(", ")"
+            )
+            if assertion_end is None:
+                continue
+            assertion_text = function_text[assertion_match.start() : assertion_end]
+            if not re.search(
+                rf"\b{re.escape(stderr_variable)}\s*\.\s*contains\s*\(",
+                assertion_text,
+            ):
+                continue
+            literals = set(_rust_string_literals(assertion_text))
+            if any(literal in literals for literal in expected_literals):
+                start_line = source_text.count("\n", 0, function_start + assertion_match.start()) + 1
+                end_line = source_text.count("\n", 0, function_start + assertion_end) + 1
+                diagnostic_assertions.append((start_line, end_line, assertion_text, literals))
+
+        asserted_literals = {
+            literal
+            for _start, _end, _assertion, literals in diagnostic_assertions
+            for literal in literals
+        }
+        if not set(expected_literals).issubset(asserted_literals):
+            continue
+        if not any(start <= assertion_line <= end for start, end, _assertion, _literals in diagnostic_assertions):
+            continue
+        return True
+    return False
+
+
+def _repository_relative_path(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty repository-relative path")
+    candidate = Path(value)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError(f"{label} must be repository-relative: {value!r}")
+    return candidate.as_posix()
+
+
 def load_expectations(path: Path | None, root: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
     if path is None:
         return {}, None
     raw = path.read_bytes()
-    document = json.loads(raw.decode("utf-8"))
-    if not isinstance(document, dict) or document.get("schema_version") != 1:
-        raise ValueError("expectations file must be a JSON object with schema_version: 1")
+    document = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys)
+    schema_version = document.get("schema_version") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != EXPECTATION_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"expectations file must be a JSON object with schema_version: {EXPECTATION_SCHEMA_VERSION}"
+        )
     inputs = document.get("inputs")
     if not isinstance(inputs, dict):
         raise ValueError("expectations file must contain an inputs object")
@@ -677,24 +1508,367 @@ def load_expectations(path: Path | None, root: Path) -> tuple[dict[str, Any], di
     for key, value in inputs.items():
         if not isinstance(key, str) or not isinstance(value, dict):
             raise ValueError("each expectations entry must map a source path to an object")
-        route = value.get("route")
-        exit_code = value.get("exit_code")
+        normalized = _repository_relative_path(key, label="expectation path")
+        expectation_class = value.get("class")
+        if not isinstance(expectation_class, str) or expectation_class not in EXPECTATION_CLASSES:
+            raise ValueError(
+                f"expectation {key!r} must have class in {sorted(EXPECTATION_CLASSES)}"
+            )
+        if normalized in expectations:
+            raise ValueError(f"duplicate normalized expectation path: {normalized!r}")
         reason = value.get("reason")
-        if not isinstance(exit_code, int) or isinstance(exit_code, bool):
-            raise ValueError(f"expectation {key!r} must have integer exit_code")
-        if route not in {"canonical", "compatibility", "rejected"}:
-            raise ValueError(f"expectation {key!r} must have route canonical/compatibility/rejected")
-        if not isinstance(reason, str) or not reason.strip():
+        if expectation_class != "unmapped" and (
+            not isinstance(reason, str) or not reason.strip()
+        ):
             raise ValueError(f"expectation {key!r} must have a non-empty reason")
-        normalized = Path(key).as_posix()
-        if Path(key).is_absolute() or ".." in Path(key).parts:
-            raise ValueError(f"expectation path must be repository-relative: {key!r}")
-        expectations[normalized] = {
-            "exit_code": exit_code,
-            "route": route,
-            "reason": reason,
+        if expectation_class == "unmapped" and reason is not None and not isinstance(reason, str):
+            raise ValueError(f"expectation {key!r} reason must be a string when provided")
+
+        input_sha256 = value.get("source_sha256")
+        authority = value.get("authority")
+        if expectation_class == "unmapped":
+            if input_sha256 is not None and not _is_sha256(input_sha256):
+                raise ValueError(f"expectation {key!r} source_sha256 must be a lowercase SHA-256")
+            if authority is not None:
+                raise ValueError(f"unmapped expectation {key!r} cannot claim test authority")
+        else:
+            if not _is_sha256(input_sha256):
+                raise ValueError(
+                    f"mapped expectation {key!r} must include source_sha256 for its Mimi input"
+                )
+            if not isinstance(authority, dict):
+                raise ValueError(f"mapped expectation {key!r} must include an authority object")
+            test_id = authority.get("test_id")
+            assertion = authority.get("assertion")
+            if not isinstance(test_id, str) or not test_id.strip():
+                raise ValueError(f"mapped expectation {key!r} must include authority.test_id")
+            if not isinstance(assertion, dict):
+                raise ValueError(
+                    f"mapped expectation {key!r} must include authority.assertion location and hash"
+                )
+            assertion_path = _repository_relative_path(
+                assertion.get("path"), label=f"expectation {key!r} authority.assertion.path"
+            )
+            assertion_line = assertion.get("line")
+            if not isinstance(assertion_line, int) or isinstance(assertion_line, bool) or assertion_line < 1:
+                raise ValueError(f"expectation {key!r} authority.assertion.line must be a positive integer")
+            assertion_sha256 = assertion.get("sha256")
+            if not _is_sha256(assertion_sha256):
+                raise ValueError(
+                    f"expectation {key!r} authority.assertion.sha256 must be a lowercase SHA-256"
+                )
+            authority = {
+                "test_id": test_id,
+                "assertion": {
+                    "path": assertion_path,
+                    "line": assertion_line,
+                    "sha256": assertion_sha256,
+                },
+            }
+
+        expectation: dict[str, Any] = {
+            "class": expectation_class,
+            "reason": reason or ("expectation is not yet mapped" if expectation_class == "unmapped" else ""),
+            "source_sha256": input_sha256,
+            "authority": authority,
+            "explicit": True,
         }
+        if expectation_class in {"expected_build_rejection", "environment_failure"}:
+            expected_exit_code = value.get("expected_exit_code")
+            if (
+                not isinstance(expected_exit_code, int)
+                or isinstance(expected_exit_code, bool)
+                or (
+                    expectation_class == "expected_build_rejection"
+                    and expected_exit_code <= 0
+                )
+                or (
+                    expectation_class == "environment_failure"
+                    and expected_exit_code == 0
+                )
+            ):
+                raise ValueError(
+                    f"expectation {key!r} must include a positive build-rejection exit code "
+                    "or a nonzero environment-failure exit code"
+                )
+            expectation["expected_exit_code"] = expected_exit_code
+        if expectation_class == "expected_build_rejection":
+            diagnostic_codes = value.get("expected_diagnostic_codes")
+            if (
+                not isinstance(diagnostic_codes, list)
+                or not diagnostic_codes
+                or any(
+                    not isinstance(code, str)
+                    or not DIAGNOSTIC_CODE_FULL_RE.fullmatch(code)
+                    for code in diagnostic_codes
+                )
+            ):
+                raise ValueError(
+                    f"expectation {key!r} must include non-empty expected_diagnostic_codes"
+                )
+            normalized_codes = [code.upper() for code in diagnostic_codes]
+            if len(set(normalized_codes)) != len(normalized_codes):
+                raise ValueError(f"expectation {key!r} has duplicate diagnostic codes")
+            required_substrings = value.get("required_output_substrings")
+            if (
+                not isinstance(required_substrings, list)
+                or not required_substrings
+                or any(not isinstance(item, str) or not item for item in required_substrings)
+            ):
+                raise ValueError(
+                    f"expectation {key!r} must include non-empty required_output_substrings"
+                )
+            expectation["expected_diagnostic_codes"] = sorted(normalized_codes)
+            expectation["required_output_substrings"] = required_substrings
+        expectations[normalized] = expectation
     return expectations, {"path": str(path.resolve()), "sha256": sha256_bytes(raw), "bytes": len(raw)}
+
+
+def bind_expectations_to_inventory(
+    expectations: Mapping[str, Mapping[str, Any]],
+    sources: Sequence[Mapping[str, Any]],
+    root: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind expectation claims to exact inputs and test-source assertions.
+
+    This is a sidecar contract: it never changes the source inventory or build
+    commands. Missing expectations become explicit ``unmapped`` rows and extra
+    entries remain visible in the returned coverage summary.
+    """
+    inventory_paths = [str(item.get("path")) for item in sources]
+    inventory_set = set(inventory_paths)
+    duplicate_inventory_paths = sorted(
+        name for name, count in Counter(inventory_paths).items() if count > 1
+    )
+    missing_paths = sorted(inventory_set - set(expectations))
+    extra_paths = sorted(set(expectations) - inventory_set)
+    bound: dict[str, Any] = {}
+
+    for source in sources:
+        name = str(source["path"])
+        declared = expectations.get(name)
+        if declared is None:
+            bound[name] = {
+                "class": "unmapped",
+                "reason": "no expectation supplied",
+                "source_sha256": source.get("sha256"),
+                "authority": None,
+                "explicit": False,
+                "source_hash_status": "matched" if source.get("sha256") is None else "inventory_only",
+                "authority_status": "not_applicable",
+                "authority_valid": False,
+            }
+            continue
+
+        item = dict(declared)
+        item["authority_status"] = "not_applicable"
+        item["authority_valid"] = False
+        item["test_execution_valid"] = None
+        if item.get("class") == "unmapped":
+            input_hash_matches = None
+            item["source_hash_status"] = "not_applicable"
+        else:
+            input_hash_matches = item.get("source_sha256") == source.get("sha256")
+            item["source_hash_status"] = "matched" if input_hash_matches else "mismatch"
+        authority = item.get("authority")
+        if isinstance(authority, Mapping):
+            assertion = authority.get("assertion")
+            if isinstance(assertion, Mapping):
+                assertion_path = str(assertion.get("path", ""))
+                assertion_file = root / assertion_path
+                try:
+                    resolved = assertion_file.resolve(strict=True)
+                    resolved.relative_to(root.resolve())
+                    assertion_bytes = assertion_file.read_bytes()
+                    assertion_text = assertion_bytes.decode("utf-8")
+                    lines = assertion_text.splitlines()
+                    assertion_hash_matches = sha256_bytes(assertion_bytes) == assertion.get("sha256")
+                    test_id_present, assertion_line_valid = _test_authority_is_structurally_valid(
+                        authority.get("test_id"),
+                        assertion_text,
+                        lines,
+                        assertion.get("line"),
+                    )
+                    base_authority_valid = (
+                        assertion_file.is_file()
+                        and not assertion_file.is_symlink()
+                        and assertion_hash_matches
+                        and test_id_present
+                        and assertion_line_valid
+                    )
+                    if item.get("class") == "expected_build_rejection":
+                        item["test_execution_valid"] = (
+                            base_authority_valid
+                            and _expected_rejection_test_authority_is_valid(
+                                test_id=authority.get("test_id"),
+                                source_path=name,
+                                target_kind=str(source.get("target_kind", "unknown")),
+                                source_text=assertion_text,
+                                assertion_line=assertion.get("line"),
+                                expected_diagnostic_codes=item.get(
+                                    "expected_diagnostic_codes"
+                                ),
+                                required_output_substrings=item.get(
+                                    "required_output_substrings"
+                                ),
+                            )
+                        )
+                    regular_source_file = assertion_file.is_file() and not assertion_file.is_symlink()
+                except (OSError, UnicodeDecodeError, ValueError, TypeError):
+                    assertion_hash_matches = False
+                    test_id_present = False
+                    assertion_line_valid = False
+                    regular_source_file = False
+                    if item.get("class") == "expected_build_rejection":
+                        item["test_execution_valid"] = False
+                authority_valid = (
+                    regular_source_file
+                    and assertion_hash_matches
+                    and test_id_present
+                    and assertion_line_valid
+                    and (
+                        item.get("class") != "expected_build_rejection"
+                        or item.get("test_execution_valid") is True
+                    )
+                )
+                item["authority_status"] = (
+                    "valid"
+                    if authority_valid
+                    else (
+                        "rejection_test_contract_mismatch"
+                        if (
+                            item.get("class") == "expected_build_rejection"
+                            and regular_source_file
+                            and assertion_hash_matches
+                            and test_id_present
+                            and assertion_line_valid
+                        )
+                        else "source_location_or_hash_mismatch"
+                    )
+                )
+                item["authority_valid"] = authority_valid
+        item["source_hash_matches"] = input_hash_matches
+        bound[name] = item
+
+    return bound, {
+        "schema_version": EXPECTATION_SCHEMA_VERSION,
+        "explicit_count": len(expectations),
+        "mapped_count": sum(item.get("class") != "unmapped" for item in bound.values()),
+        "missing_paths": missing_paths,
+        "extra_paths": extra_paths,
+        "duplicate_inventory_paths": duplicate_inventory_paths,
+        "exact_bijection": not missing_paths and not extra_paths and not duplicate_inventory_paths,
+        "invalid_source_hash_paths": sorted(
+            name for name, item in bound.items() if item.get("source_hash_status") == "mismatch"
+        ),
+        "invalid_authority_paths": sorted(
+            name
+            for name, item in bound.items()
+            if item.get("class") != "unmapped" and item.get("authority_valid") is not True
+        ),
+    }
+
+
+def add_actor_default_expectations(
+    expectations: Mapping[str, Mapping[str, Any]],
+    sources: Sequence[Mapping[str, Any]],
+    root: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Bind the two required Actor inputs to their active default-route CLI tests.
+
+    The defaults are generated from the checked-in fixture and test-source
+    bytes at collection time, so the report pins both hashes and the assertion
+    location. An explicitly supplied mapping always takes precedence.
+    """
+    result = {name: dict(value) for name, value in expectations.items()}
+    by_path = {str(item.get("path")): item for item in sources}
+    contracts = actor_fixture_test_contracts(root)
+    defaults: list[dict[str, Any]] = []
+    for source_path in ACTOR_FALLBACK_INPUTS:
+        if source_path in result:
+            continue
+        source = by_path.get(source_path)
+        contract = contracts.get(source_path, {})
+        if (
+            source is None
+            or source.get("present") is not True
+            or source.get("presence_kind") != "regular_file"
+            or not _is_sha256(source.get("sha256"))
+            or contract.get("authority_valid") is not True
+        ):
+            continue
+        authority = contract["authority"]
+        entry = {
+            "class": "required_compile",
+            "reason": (
+                "required original Actor fixture must retain its source/output and use the "
+                "default Canonical route without function fallback, then run its native output"
+            ),
+            "source_sha256": source["sha256"],
+            "authority": authority,
+            "expected_executable_stdout": contract["expected_stdout"],
+            "explicit": True,
+            "origin": "built_in_required_actor_fixture_contract",
+        }
+        result[source_path] = entry
+        defaults.append({
+            "path": source_path,
+            "class": entry["class"],
+            "origin": entry["origin"],
+            "source_sha256": entry["source_sha256"],
+            "authority": entry["authority"],
+            "expected_executable_stdout": entry["expected_executable_stdout"],
+        })
+    return result, defaults
+
+
+def _route_candidate_classification(
+    route: Mapping[str, Any], expectation: Mapping[str, Any] | None
+) -> str:
+    """Assign one route class, requiring an exact contract for intentional rejection."""
+    disposition = route.get("disposition")
+    if disposition == "compatibility":
+        return "compatibility"
+    if disposition == "canonical":
+        return "canonical"
+    expectation_class = (
+        expectation.get("class") if isinstance(expectation, Mapping) else None
+    )
+    if (
+        disposition == "rejected"
+        and expectation_class == "expected_build_rejection"
+        and expectation is not None
+        and expectation.get("matched") is True
+    ):
+        return "intentional_reject"
+    if disposition in {None, "unobserved"}:
+        if expectation_class in {None, "unmapped"}:
+            return "unmapped"
+    return "unknown"
+
+
+def _inventory_only_record(
+    source: Mapping[str, Any], index: int, expectations: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any]:
+    route = {"disposition": "unobserved", "classification_status": "not_run"}
+    expectation = _expectation_result(
+        str(source["path"]),
+        None,
+        route,
+        expectations,
+        run_status="not_run",
+        captured_output=b"",
+        output_artifact=None,
+    )
+    return {
+        **dict(source),
+        "input_index": index,
+        "run_status": "not_run",
+        "route": route,
+        "expectation": expectation,
+        "candidate_classification": _route_candidate_classification(route, expectation),
+        "per_function": {"status": "unavailable", "named_roster_complete": False},
+    }
 
 
 def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_status: str) -> dict[str, Any]:
@@ -767,6 +1941,18 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
         "reason": "no whole-program route disposition was emitted",
         "mir_digest": None,
     }
+
+
+def _diagnostic_codes(text: str) -> list[str]:
+    """Return codes attached to recognized error-diagnostic lines only."""
+    codes: set[str] = set()
+    for raw_line in text.splitlines():
+        match = DIAGNOSTIC_ERROR_CODE_RE.match(_strip_ansi(raw_line))
+        if match:
+            code = match.group("bracketed") or match.group("error_code") or match.group("bare")
+            if code:
+                codes.add(code.upper())
+    return sorted(codes)
 
 
 def _canonical_mir_function_observations(
@@ -1225,29 +2411,214 @@ def _expectation_result(
     exit_code: int | None,
     route: Mapping[str, Any],
     expectations: Mapping[str, Mapping[str, Any]],
+    *,
+    run_status: str = "completed",
+    failure_classification: Mapping[str, Any] | None = None,
+    captured_output: bytes | str = b"",
+    output_artifact: Mapping[str, Any] | None = None,
+    executable_run: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    explicit = expectations.get(source_path)
-    if explicit is None:
-        expected = {"exit_code": 0, "route": ["canonical", "compatibility"], "reason": "default census expectation"}
-        explicit_match = False
+    expectation = expectations.get(source_path)
+    if expectation is None:
+        expectation = {
+            "class": "unmapped",
+            "reason": "no expectation supplied",
+            "source_sha256": None,
+            "authority": None,
+            "explicit": False,
+            "source_hash_status": "missing",
+            "authority_status": "not_applicable",
+            "authority_valid": False,
+        }
+    expectation_class = str(expectation.get("class", "unmapped"))
+    failure = failure_classification if isinstance(failure_classification, Mapping) else {}
+    valid_evidence = (
+        expectation_class == "unmapped"
+        or (
+            expectation.get("source_hash_status") == "matched"
+            and expectation.get("authority_valid") is True
+            and (
+                expectation_class != "expected_build_rejection"
+                or expectation.get("test_execution_valid") is True
+            )
+        )
+    )
+    decoded_output = _decode(captured_output)
+    diagnostic_output = _strip_ansi(decoded_output)
+    actual_diagnostic_codes = _diagnostic_codes(decoded_output)
+    outcome_match = False
+    expected_outcome: dict[str, Any]
+    diagnostic_contract: dict[str, Any] | None = None
+    executable_contract: dict[str, Any] | None = None
+    if expectation_class == "required_compile":
+        expected_outcome = {"build": "completed", "exit_code": 0, "route": "canonical"}
+        outcome_match = (
+            run_status == "completed"
+            and exit_code == 0
+            and route.get("disposition") == "canonical"
+        )
+        expected_executable_stdout = expectation.get("expected_executable_stdout")
+        if expected_executable_stdout is not None:
+            expected_native_bytes = _captured_bytes(expected_executable_stdout)
+            native_run = executable_run if isinstance(executable_run, Mapping) else {}
+            actual_native_bytes = _captured_bytes(native_run.get("stdout_raw"))
+            native_stdout_matches = (
+                expected_native_bytes is not None
+                and actual_native_bytes is not None
+                and actual_native_bytes == expected_native_bytes
+            )
+            native_exit_code_matches = (
+                native_run.get("run_status") == "completed"
+                and native_run.get("exit_code") == 0
+            )
+            executable_contract = {
+                "valid": expected_native_bytes is not None,
+                "expected_stdout": expected_executable_stdout,
+                "actual_stdout": native_run.get("stdout_raw"),
+                "stdout_matches_exactly": native_stdout_matches,
+                "run_status": native_run.get("run_status"),
+                "actual_exit_code": native_run.get("exit_code"),
+                "exit_code_matches": native_exit_code_matches,
+                "matches": native_stdout_matches and native_exit_code_matches,
+            }
+            expected_outcome["native_executable"] = {
+                "exit_code": 0,
+                "stdout": expected_executable_stdout,
+            }
+            outcome_match = outcome_match and executable_contract["matches"]
+    elif expectation_class == "expected_build_rejection":
+        expected_code = expectation.get("expected_exit_code")
+        expected_exit_code_valid = (
+            isinstance(expected_code, int)
+            and not isinstance(expected_code, bool)
+            and expected_code > 0
+        )
+        raw_expected_codes = expectation.get("expected_diagnostic_codes")
+        expected_codes_valid = (
+            isinstance(raw_expected_codes, list)
+            and bool(raw_expected_codes)
+            and all(
+                isinstance(code, str) and DIAGNOSTIC_CODE_FULL_RE.fullmatch(code)
+                for code in raw_expected_codes
+            )
+        )
+        expected_diagnostic_codes = (
+            sorted({code.upper() for code in raw_expected_codes})
+            if expected_codes_valid
+            else []
+        )
+        raw_substrings = expectation.get("required_output_substrings")
+        substrings_valid = (
+            isinstance(raw_substrings, list)
+            and bool(raw_substrings)
+            and all(isinstance(item, str) and item for item in raw_substrings)
+        )
+        required_substrings = raw_substrings if substrings_valid else []
+        missing_substrings = [
+            item for item in required_substrings if item not in diagnostic_output
+        ]
+        diagnostic_codes_match = (
+            expected_codes_valid and actual_diagnostic_codes == expected_diagnostic_codes
+        )
+        required_substrings_match = substrings_valid and not missing_substrings
+        no_output_artifact = output_artifact is None
+        diagnostic_contract = {
+            "valid": expected_exit_code_valid and expected_codes_valid and substrings_valid,
+            "expected_exit_code_valid": expected_exit_code_valid,
+            "expected_diagnostic_codes": expected_diagnostic_codes,
+            "actual_diagnostic_codes": actual_diagnostic_codes,
+            "diagnostic_codes_match_exactly": diagnostic_codes_match,
+            "required_output_substrings": required_substrings,
+            "missing_output_substrings": missing_substrings,
+            "required_output_substrings_match": required_substrings_match,
+            "output_artifact_absent": no_output_artifact,
+        }
+        expected_outcome = {
+            "build": "completed",
+            "exit_code": expected_code,
+            "route": "rejected",
+            "diagnostic_contract": diagnostic_contract,
+            "output_artifact": "absent",
+        }
+        outcome_match = (
+            run_status == "completed"
+            and expected_exit_code_valid
+            and exit_code == expected_code
+            and route.get("disposition") == "rejected"
+            and diagnostic_codes_match
+            and required_substrings_match
+            and no_output_artifact
+        )
+    elif expectation_class == "environment_failure":
+        expected_code = expectation.get("expected_exit_code")
+        expected_outcome = {
+            "build": "completed",
+            "exit_code": expected_code,
+            "failure_class": "environment",
+        }
+        outcome_match = (
+            run_status == "completed"
+            and exit_code == expected_code
+            and failure.get("class") == "environment"
+        )
+    elif expectation_class == "interpreter_only":
+        expected_outcome = {
+            "build": "not_run",
+            "reason": "interpreter-only input",
+            "output_artifact": "absent",
+        }
+        outcome_match = (
+            run_status == "not_run"
+            and exit_code is None
+            and output_artifact is None
+        )
+    elif expectation_class == "known_gap":
+        expected_outcome = {"build": "known_gap_unresolved"}
     else:
-        expected = {"exit_code": explicit["exit_code"], "route": [explicit["route"]], "reason": explicit["reason"]}
-        explicit_match = True
-    route_match = route.get("disposition") in expected["route"]
-    exit_match = exit_code == expected["exit_code"]
-    matched = exit_match and route_match
+        expected_outcome = {"build": "unmapped"}
+
+    matched = valid_evidence and outcome_match
+    if expectation_class == "unmapped":
+        status = "unmapped"
+    elif expectation_class == "known_gap":
+        status = "known_gap_unresolved"
+    elif expectation_class == "interpreter_only" and run_status != "not_run":
+        status = "build_was_run"
+    elif not valid_evidence:
+        status = "invalid_evidence"
+    else:
+        status = "matched" if matched else "mismatch"
     return {
-        "status": "matched" if matched else "mismatch",
-        "explicit_expectation": explicit_match,
-        "expected": expected,
+        "class": expectation_class,
+        "status": status,
+        "explicit_expectation": bool(expectation.get("explicit")),
+        "reason": expectation.get("reason"),
+        "expected": expected_outcome,
+        "source_sha256": expectation.get("source_sha256"),
+        "source_hash_status": expectation.get("source_hash_status"),
+        "source_hash_matches": expectation.get("source_hash_matches"),
+        "authority": expectation.get("authority"),
+        "authority_status": expectation.get("authority_status"),
+        "authority_valid": expectation.get("authority_valid"),
+        "test_execution_valid": expectation.get("test_execution_valid"),
+        "run_status": run_status,
         "actual_exit_code": exit_code,
         "actual_route": route.get("disposition"),
+        "actual_failure_class": failure.get("class"),
+        "actual_diagnostic_codes": actual_diagnostic_codes,
+        "diagnostic_contract": diagnostic_contract,
+        "executable_contract": executable_contract,
+        "actual_output_artifact_present": output_artifact is not None,
+        "outcome_matches": outcome_match,
+        "evidence_valid": valid_evidence,
         "matched": matched,
     }
 
 
 def _actor_fallback_evidence(
-    manifest: Sequence[Mapping[str, Any]], records: Sequence[Mapping[str, Any]]
+    manifest: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    actor_contracts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     by_path = {str(record.get("path")): record for record in records}
     manifest_by_path = {str(record.get("path")): record for record in manifest}
@@ -1256,6 +2627,27 @@ def _actor_fallback_evidence(
     for path in ACTOR_FALLBACK_INPUTS:
         record = by_path.get(path)
         source = manifest_by_path.get(path)
+        contract = (actor_contracts or {}).get(path, {})
+        executable_run = record.get("native_executable_run") if record else None
+        expected_stdout = contract.get("expected_stdout") or _raw_capture(
+            ACTOR_EXPECTED_STDOUT[path]
+        )
+        executable_stdout = (
+            _captured_bytes(executable_run.get("stdout_raw"))
+            if isinstance(executable_run, Mapping)
+            else None
+        )
+        expected_stdout_bytes = _captured_bytes(expected_stdout)
+        native_stdout_matches = (
+            executable_stdout is not None
+            and expected_stdout_bytes is not None
+            and executable_stdout == expected_stdout_bytes
+        )
+        native_exit_matches = (
+            isinstance(executable_run, Mapping)
+            and executable_run.get("run_status") == "completed"
+            and executable_run.get("exit_code") == 0
+        )
         cases.append({
             "path": path,
             "in_denominator": path in manifest_paths,
@@ -1266,6 +2658,15 @@ def _actor_fallback_evidence(
             "whole_program_disposition": record.get("route", {}).get("disposition") if record else "not_run",
             "whole_program_route_reason": record.get("route", {}).get("reason") if record else None,
             "per_function": record.get("per_function") if record else None,
+            "native_executable_run": executable_run,
+            "native_test_authority": contract.get("authority"),
+            "native_test_authority_valid": contract.get("authority_valid") is True,
+            "expected_native_stdout": expected_stdout,
+            "native_stdout_matches_exactly": native_stdout_matches,
+            "native_exit_code_matches": native_exit_matches,
+            "native_executable_contract_matches": (
+                native_stdout_matches and native_exit_matches
+            ),
             "failure_classification": record.get("failure_classification") if record else None,
             "evidence_complete": bool(
                 record
@@ -1273,6 +2674,9 @@ def _actor_fallback_evidence(
                 and isinstance(record.get("per_function"), Mapping)
                 and isinstance(record.get("stdout_raw"), Mapping)
                 and isinstance(record.get("stderr_raw"), Mapping)
+                and isinstance(executable_run, Mapping)
+                and isinstance(executable_run.get("stdout_raw"), Mapping)
+                and isinstance(executable_run.get("stderr_raw"), Mapping)
             ),
             "raw_build_logs": {
                 "stdout": record.get("stdout_raw") if record else None,
@@ -1448,6 +2852,79 @@ def _write_raw_artifact(path: Path, data: bytes) -> dict[str, Any]:
     return {"path": path.name, "sha256": sha256_bytes(data), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
 
 
+def _output_artifact_observation(path: Path) -> dict[str, Any] | None:
+    """Report every filesystem object at the output path; only regular files are hashed."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return {"status": "unreadable", "error": str(error)}
+    if not stat.S_ISREG(metadata.st_mode):
+        if stat.S_ISDIR(metadata.st_mode):
+            kind = "directory"
+        elif stat.S_ISLNK(metadata.st_mode):
+            kind = "symlink"
+        elif stat.S_ISFIFO(metadata.st_mode):
+            kind = "fifo"
+        elif stat.S_ISSOCK(metadata.st_mode):
+            kind = "socket"
+        elif stat.S_ISCHR(metadata.st_mode):
+            kind = "character_device"
+        elif stat.S_ISBLK(metadata.st_mode):
+            kind = "block_device"
+        else:
+            kind = "other"
+        return {
+            "status": "non_regular_path",
+            "kind": kind,
+            "mode": stat.S_IFMT(metadata.st_mode),
+            "bytes": metadata.st_size,
+        }
+
+    try:
+        return {"sha256": sha256_file(path), "bytes": metadata.st_size}
+    except OSError as error:
+        return {"status": "unreadable", "error": str(error)}
+
+
+def _raw_sidecar_matches(logs_root: Path | None, capture: Any) -> bool:
+    """Require a regular non-symlink sidecar whose bytes equal its inline capture."""
+    if logs_root is None or not isinstance(capture, Mapping):
+        return False
+    name = capture.get("path")
+    expected = _captured_bytes(capture)
+    if (
+        not isinstance(name, str)
+        or not name
+        or Path(name).is_absolute()
+        or Path(name).name != name
+        or expected is None
+    ):
+        return False
+    path = logs_root / name
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                return False
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                actual = stream.read()
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return False
+    return actual == expected
+
+
 def _write_json_exclusive(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -1526,6 +3003,7 @@ def _worker_exception_record(
     index: int,
     logs_root: Path,
     error: Exception,
+    expected: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Materialize an unexpected worker exception as an explicitly failed row."""
     exception_text = f"{type(error).__name__}: {error}"
@@ -1547,7 +3025,17 @@ def _worker_exception_record(
         target_kind=str(source.get("target_kind", "unknown")),
         route=route,
     )
-    expectation = _expectation_result(str(source["path"]), None, route, {})
+    expectation = _expectation_result(
+        str(source["path"]),
+        None,
+        route,
+        expected,
+        run_status="worker_error",
+        failure_classification=failure,
+        captured_output=stderr_bytes,
+        output_artifact=None,
+    )
+    candidate_classification = _route_candidate_classification(route, expectation)
     record: dict[str, Any] = {
         **dict(source),
         "input_index": index,
@@ -1563,6 +3051,7 @@ def _worker_exception_record(
         "route": route,
         "failure_classification": failure,
         "expectation": expectation,
+        "candidate_classification": candidate_classification,
         "dispatch_stats": {"status": "not_emitted", "files": [], "parsed": None},
         "per_function": {
             "status": "unavailable",
@@ -1596,22 +3085,39 @@ def _run_one(
     scratch_root: Path,
     logs_root: Path,
     expected: Mapping[str, Any],
+    actor_contracts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started = time.time()
     source_path = root / source["path"]
     observed_hash_before: str | None = None
     source_is_symlink = source.get("presence_kind") == "symlink"
-    if source.get("buildable", True) and not source_is_symlink:
+    source_is_parent_blocked = (
+        source.get("presence_kind") == "blocked_by_symlinked_parent"
+    )
+    if source.get("buildable", True) and not source_is_symlink and not source_is_parent_blocked:
         try:
             observed_hash_before = sha256_file(source_path)
         except OSError:
             pass
-    input_missing = not source.get("present", True)
+    input_missing = not source_is_parent_blocked and not source.get("present", True)
     input_changed_before = (
         not input_missing
         and not source_is_symlink
+        and not source_is_parent_blocked
         and source.get("buildable", True)
         and observed_hash_before != source.get("sha256")
+    )
+    input_expectation = expected.get(str(source["path"]), {})
+    interpreter_only_skip = (
+        input_expectation.get("class") == "interpreter_only"
+        and input_expectation.get("explicit") is True
+        and input_expectation.get("source_hash_status") == "matched"
+        and input_expectation.get("authority_valid") is True
+    )
+    build_not_run_reason = (
+        str(input_expectation.get("reason") or "interpreter-only input")
+        if interpreter_only_skip
+        else None
     )
     scratch = scratch_root / f"input-{index:06d}"
     scratch.mkdir()
@@ -1620,17 +3126,7 @@ def _run_one(
     temp_dir = scratch / "tmp"
     temp_dir.mkdir()
     output_path = scratch / ("out.so" if source["target_kind"] == "shared_library_probe" else "out")
-    command = [str(mimi.resolve()), "build", str(source_path), "-o", str(output_path)]
-    if source["target_kind"] == "shared_library_probe":
-        command.insert(2, "--shared")
-    env = os.environ.copy()
-    env["MIMI_STAT"] = "1"
-    env["MIMI_VERBOSE"] = "1"
-    env["MIMI_ROUTE_CENSUS"] = "1"
-    env.pop("MIMI_REACHABLE_DISPATCH", None)
-    env.pop("MIMI_RESOLVED_MODULE_BODIES", None)
-    env["MIMI_STAT_OUT"] = str(stat_dir)
-    env["TMPDIR"] = str(temp_dir)
+    command: list[str] | None = None
     run_status = "completed"
     stdout_bytes = b""
     stderr_bytes = b""
@@ -1639,6 +3135,13 @@ def _run_one(
         run_status = "source_symlink_not_followed"
         exit_code = None
         stderr_bytes = b"Mimi source symlink was recorded but not followed\n"
+    elif source_is_parent_blocked:
+        run_status = "input_blocked_by_symlinked_parent"
+        exit_code = None
+        stderr_bytes = (
+            "tracked Mimi source is unavailable behind symlinked parent "
+            f"{source.get('symlink_parent_path')}\n"
+        ).encode("utf-8")
     elif input_missing:
         run_status = "input_missing_from_worktree"
         exit_code = None
@@ -1649,7 +3152,21 @@ def _run_one(
         stderr_bytes = (
             f"source hash changed after initial snapshot: expected {source.get('sha256')}, got {observed_hash_before}\n"
         ).encode("utf-8")
+    elif interpreter_only_skip:
+        run_status = "not_run"
+        exit_code = None
     else:
+        command = [str(mimi.resolve()), "build", str(source_path), "-o", str(output_path)]
+        if source["target_kind"] == "shared_library_probe":
+            command.insert(2, "--shared")
+        env = os.environ.copy()
+        env["MIMI_STAT"] = "1"
+        env["MIMI_VERBOSE"] = "1"
+        env["MIMI_ROUTE_CENSUS"] = "1"
+        env.pop("MIMI_REACHABLE_DISPATCH", None)
+        env.pop("MIMI_RESOLVED_MODULE_BODIES", None)
+        env["MIMI_STAT_OUT"] = str(stat_dir)
+        env["TMPDIR"] = str(temp_dir)
         try:
             proc = subprocess.run(
                 command,
@@ -1695,28 +3212,102 @@ def _run_one(
         stats_result,
         route,
     )
-    failure = _failure_classification(
-        run_status=run_status,
-        exit_code=exit_code,
-        text=stderr_text + "\n" + stdout_text,
-        target_kind=source["target_kind"],
-        route=route,
-    )
-    expectation = _expectation_result(source["path"], exit_code, route, expected)
-    try:
-        output_artifact = (
-            {"sha256": sha256_file(output_path), "bytes": output_path.stat().st_size}
-            if output_path.is_file()
-            else None
+    if run_status == "not_run":
+        failure = {
+            "class": "none",
+            "status": "not_applicable",
+            "reason": "build not run for a validated interpreter-only expectation",
+            "evidence": None,
+        }
+    else:
+        failure = _failure_classification(
+            run_status=run_status,
+            exit_code=exit_code,
+            text=stderr_text + "\n" + stdout_text,
+            target_kind=source["target_kind"],
+            route=route,
         )
-    except OSError as error:
-        output_artifact = {"status": "unreadable", "error": str(error)}
+    output_artifact = _output_artifact_observation(output_path)
+    executable_run: dict[str, Any] | None = None
+    source_name = str(source.get("path", ""))
+    if source_name in ACTOR_FALLBACK_INPUTS:
+        contracts = actor_contracts or actor_fixture_test_contracts(root)
+        actor_contract = contracts.get(source_name, {})
+        expected_native_stdout = actor_contract.get(
+            "expected_stdout", _raw_capture(ACTOR_EXPECTED_STDOUT[source_name])
+        )
+        native_run_status = "not_run_build_unsuccessful"
+        native_exit_code: int | None = None
+        native_stdout_bytes = b""
+        native_stderr_bytes = b""
+        if run_status == "completed" and exit_code == 0:
+            if isinstance(output_artifact, Mapping) and _is_sha256(output_artifact.get("sha256")):
+                try:
+                    native_proc = subprocess.run(
+                        [str(output_path)],
+                        cwd=root,
+                        capture_output=True,
+                        timeout=timeout,
+                        check=False,
+                    )
+                    native_run_status = "completed"
+                    native_exit_code = native_proc.returncode
+                    native_stdout_bytes = native_proc.stdout or b""
+                    native_stderr_bytes = native_proc.stderr or b""
+                except subprocess.TimeoutExpired as error:
+                    native_run_status = "timeout"
+                    native_stdout_bytes = error.output or b""
+                    native_stderr_bytes = error.stderr or b""
+                except OSError as error:
+                    native_run_status = "spawn_error"
+                    native_stderr_bytes = str(error).encode("utf-8", errors="replace")
+            else:
+                native_run_status = "not_run_output_not_regular_executable"
+        native_stem = f"{index:06d}.native"
+        native_stdout_artifact = _write_raw_artifact(
+            logs_root / f"{native_stem}.stdout.bin", native_stdout_bytes
+        )
+        native_stderr_artifact = _write_raw_artifact(
+            logs_root / f"{native_stem}.stderr.bin", native_stderr_bytes
+        )
+        expected_native_bytes = _captured_bytes(expected_native_stdout)
+        actual_native_bytes = _captured_bytes(native_stdout_artifact)
+        executable_run = {
+            "run_status": native_run_status,
+            "exit_code": native_exit_code,
+            "stdout": _decode(native_stdout_bytes),
+            "stderr": _decode(native_stderr_bytes),
+            "stdout_raw": native_stdout_artifact,
+            "stderr_raw": native_stderr_artifact,
+            "test_authority_valid": actor_contract.get("authority_valid") is True,
+            "test_authority": actor_contract.get("authority"),
+            "expected_stdout": expected_native_stdout,
+            "stdout_matches_exactly": (
+                expected_native_bytes is not None
+                and actual_native_bytes is not None
+                and actual_native_bytes == expected_native_bytes
+            ),
+            "exit_code_matches": native_run_status == "completed" and native_exit_code == 0,
+        }
+    expectation = _expectation_result(
+        source["path"],
+        exit_code,
+        route,
+        expected,
+        run_status=run_status,
+        failure_classification=failure,
+        captured_output=stdout_bytes + b"\n" + stderr_bytes,
+        output_artifact=output_artifact,
+        executable_run=executable_run,
+    )
+    candidate_classification = _route_candidate_classification(route, expectation)
     record: dict[str, Any] = {
         **dict(source),
         "input_index": index,
         "run_status": run_status,
         "command": command if not input_changed_before else None,
         "exit_code": exit_code,
+        "build_not_run_reason": build_not_run_reason if run_status == "not_run" else None,
         "started_unix_seconds": started,
         "elapsed_seconds": round(time.time() - started, 6),
         "stdout": stdout_text,
@@ -1726,9 +3317,11 @@ def _run_one(
         "route": route,
         "failure_classification": failure,
         "expectation": expectation,
+        "candidate_classification": candidate_classification,
         "dispatch_stats": stats_result,
         "per_function": function_details,
         "output_artifact": output_artifact,
+        "native_executable_run": executable_run,
         "source_hash_before_execution": observed_hash_before,
         "source_hash_after_execution": observed_hash_after,
         "source_stable_for_input": source_stable_for_input,
@@ -1755,6 +3348,10 @@ def _gate_report(
     tracked_inventory: Mapping[str, Any],
     actor_fallbacks: Mapping[str, Any],
     legacy_owner_audit: Mapping[str, Any],
+    expectation_contract: Mapping[str, Any] | None = None,
+    scope_exclusions: Sequence[Mapping[str, Any]] = (),
+    source_scope: Mapping[str, Any] | None = None,
+    logs_root: Path | None = None,
 ) -> dict[str, Any]:
     def nested(record: Mapping[str, Any], key: str) -> Mapping[str, Any]:
         value = record.get(key)
@@ -1785,9 +3382,41 @@ def _gate_report(
     record_paths = [str(record.get("path")) for record in records]
     expected_paths = set(manifest_paths)
     actual_paths = set(record_paths)
-    duplicate_record_paths = sorted({path for path in record_paths if record_paths.count(path) > 1})
+    duplicate_record_paths = sorted(
+        path for path, count in Counter(record_paths).items() if count > 1
+    )
     missing_records = sorted(expected_paths - actual_paths)
     unexpected_records = sorted(actual_paths - expected_paths)
+    classified_records = [
+        (
+            record,
+            str(
+                record.get("candidate_classification")
+                or _route_candidate_classification(
+                    nested(record, "route"), nested(record, "expectation")
+                )
+            ),
+        )
+        for record in records
+    ]
+    candidate_classification_counts = Counter(
+        classification for _record, classification in classified_records
+    )
+    unclassified_candidates = [
+        str(record.get("path"))
+        for record, classification in classified_records
+        if classification not in ROUTE_CANDIDATE_CLASSIFICATIONS
+    ]
+    unmapped_candidates = [
+        str(record.get("path"))
+        for record, classification in classified_records
+        if classification in {"unmapped", "unknown"}
+    ]
+    intentional_rejections = {
+        str(record.get("path"))
+        for record, classification in classified_records
+        if classification == "intentional_reject"
+    }
     noncanonical_routes = [
         str(record.get("path"))
         for record in records
@@ -1847,7 +3476,85 @@ def _gate_report(
         for record in records
         if not all(raw_capture_is_complete(record.get(key)) for key in ("stdout_raw", "stderr_raw"))
     ]
+    missing_raw_log_sidecars: list[str] = []
+    for record in records:
+        captures: list[Any] = [record.get("stdout_raw"), record.get("stderr_raw")]
+        native_run = record.get("native_executable_run")
+        if isinstance(native_run, Mapping):
+            captures.extend([native_run.get("stdout_raw"), native_run.get("stderr_raw")])
+        if not all(_raw_sidecar_matches(logs_root, capture) for capture in captures):
+            missing_raw_log_sidecars.append(str(record.get("path")))
+    owner_captures = [
+        legacy_owner_audit.get("stdout_raw"),
+        legacy_owner_audit.get("stderr_raw"),
+    ]
+    if not all(_raw_sidecar_matches(logs_root, capture) for capture in owner_captures):
+        missing_raw_log_sidecars.append("legacy-owner-audit")
     mismatches = [str(record.get("path")) for record in records if not record.get("expectation", {}).get("matched")]
+    expectation_paths = [
+        str(record.get("path"))
+        for record in records
+        if isinstance(record.get("expectation"), Mapping)
+    ]
+    expectation_path_duplicates = sorted(
+        name for name, count in Counter(expectation_paths).items() if count > 1
+    )
+    if expectation_contract is None:
+        expectation_contract = {
+            "exact_bijection": (
+                set(expectation_paths) == expected_paths
+                and not expectation_path_duplicates
+                and len(expectation_paths) == len(expected_paths)
+            ),
+            "missing_paths": sorted(expected_paths - set(expectation_paths)),
+            "extra_paths": sorted(set(expectation_paths) - expected_paths),
+            "duplicate_inventory_paths": [],
+            "invalid_source_hash_paths": [],
+            "invalid_authority_paths": [],
+        }
+    all_mapped_expectations_have_authority = all(
+        nested(record, "expectation").get("class") == "unmapped"
+        or nested(record, "expectation").get("authority_valid") is True
+        for record in records
+    ) and not expectation_contract.get("invalid_authority_paths")
+    all_expectation_source_hashes_match = all(
+        nested(record, "expectation").get("class") == "unmapped"
+        or nested(record, "expectation").get("source_hash_status") == "matched"
+        for record in records
+    ) and not expectation_contract.get("invalid_source_hash_paths")
+    expected_negative_matches = sorted(
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class")
+        in {"expected_build_rejection", "environment_failure"}
+        and nested(record, "expectation").get("matched") is True
+    )
+    canonical_success_inputs = sorted(
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class") == "required_compile"
+        and nested(record, "expectation").get("matched") is True
+        and nested(record, "expectation").get("source_hash_status") == "matched"
+        and nested(record, "expectation").get("authority_valid") is True
+        and record.get("run_status") == "completed"
+        and record.get("exit_code") == 0
+        and nested(record, "route").get("disposition") == "canonical"
+        and nested(record, "failure_classification").get("class") == "none"
+        and nested(record, "failure_classification").get("status") == "not_applicable"
+        and nested(record, "per_function").get("named_roster_complete") is True
+        and not nested(record, "per_function").get("has_fallback", False)
+        and record.get("source_stable_for_input") is True
+        and isinstance(nested(record, "output_artifact").get("sha256"), str)
+        and bool(
+            re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(nested(record, "output_artifact").get("sha256", "")),
+            )
+        )
+        and isinstance(nested(record, "output_artifact").get("bytes"), int)
+        and not isinstance(nested(record, "output_artifact").get("bytes"), bool)
+        and nested(record, "output_artifact").get("bytes", 0) > 0
+    )
     not_successful = [
         str(record.get("path"))
         for record in records
@@ -1855,7 +3562,9 @@ def _gate_report(
     ]
     missing_manifest_inputs = [str(record.get("path")) for record in manifest if not record.get("present", False)]
     tracked_manifest_paths = sorted(
-        str(record.get("path")) for record in manifest if record.get("tracked_by_git")
+        str(record.get("path"))
+        for record in [*manifest, *scope_exclusions]
+        if record.get("tracked_by_git")
     )
     tracked_path_count_matches = (
         tracked_inventory.get("path_count") == len(tracked_manifest_paths)
@@ -1881,8 +3590,22 @@ def _gate_report(
         and actor_by_path[path].get("exit_code") == 0
         and actor_by_path[path].get("per_function", {}).get("named_roster_complete")
         and not actor_by_path[path].get("per_function", {}).get("has_fallback")
+        and actor_by_path[path].get("native_test_authority_valid") is True
+        and actor_by_path[path].get("native_executable_contract_matches") is True
         for path in ACTOR_FALLBACK_INPUTS
     )
+    actor_invalid_test_authority = [
+        path for path in ACTOR_FALLBACK_INPUTS
+        if actor_by_path.get(path, {}).get("native_test_authority_valid") is not True
+    ]
+    actor_native_output_mismatches = [
+        path for path in ACTOR_FALLBACK_INPUTS
+        if actor_by_path.get(path, {}).get("native_executable_contract_matches") is not True
+    ]
+    tracked_symlink_parent_blockers = [
+        item for item in excluded_symlinks
+        if item.get("kind") == "tracked_mimi_path_parent_symlink_not_followed"
+    ]
     owner_rows = legacy_owner_audit.get("owners", [])
     owner_names = {
         str(owner.get("name")) for owner in owner_rows if isinstance(owner, Mapping)
@@ -1917,8 +3640,27 @@ def _gate_report(
         and not unexpected_records
         and not duplicate_record_paths
     )
+    scope_paths = [
+        str(record.get("path")) for record in [*manifest, *scope_exclusions]
+    ]
+    scope_duplicate_paths = sorted(
+        name for name, count in Counter(scope_paths).items() if count > 1
+    )
+    scope_is_exact = (
+        source_scope.get("exactly_once") is True
+        if isinstance(source_scope, Mapping)
+        else True
+    ) and not scope_duplicate_paths
+    classification_exact = (
+        sum(candidate_classification_counts.values()) == len(records)
+        and not unclassified_candidates
+        and len(record_paths) == len(set(record_paths))
+    )
     checks = {
         "nonempty_exact_input_denominator": complete,
+        "source_scope_is_accounted_exactly_once": scope_is_exact,
+        "all_candidates_have_one_route_classification": classification_exact,
+        "no_unknown_or_unmapped_route_candidates": not unmapped_candidates,
         "tracked_git_manifest_available": (
             tracked_inventory.get("status") == "available"
             and tracked_path_count_matches
@@ -1933,14 +3675,24 @@ def _gate_report(
         ),
         "no_missing_tracked_inputs": not missing_manifest_inputs,
         "no_unfollowed_mimi_symlinks": not excluded_symlinks,
+        "no_tracked_mimi_paths_through_symlinked_parents": not tracked_symlink_parent_blockers,
         "all_whole_program_routes_are_canonical": not noncanonical_routes,
         "no_legacy_or_emission_fallback": not fallback_inputs,
         "all_per_function_eligibility_is_named_and_reconciled": not per_function_incomplete,
         "all_builds_succeeded": not not_successful,
         "no_unclassified_failure_causes": not unclassified_failures,
         "all_outcomes_match_expectations": not mismatches,
+        "expectation_paths_exactly_biject_inventory": (
+            expectation_contract.get("exact_bijection") is True
+            and not expectation_path_duplicates
+            and not expectation_contract.get("duplicate_inventory_paths")
+        ),
+        "all_mapped_expectations_have_test_authority": all_mapped_expectations_have_authority,
+        "all_mapped_expectation_source_hashes_match": all_expectation_source_hashes_match,
         "all_successes_have_hashed_output_artifacts": not missing_output_artifacts,
-        "all_stdout_stderr_logs_are_retained": not missing_raw_logs,
+        "all_stdout_stderr_logs_are_retained": (
+            not missing_raw_logs and not missing_raw_log_sidecars
+        ),
         "all_inputs_are_stable_during_their_build": all(
             record.get("source_stable_for_input") is True for record in records
         ),
@@ -1956,6 +3708,12 @@ def _gate_report(
         "missing_manifest_records": missing_records,
         "unexpected_records": unexpected_records,
         "duplicate_record_paths": duplicate_record_paths,
+        "scope_duplicate_paths": scope_duplicate_paths,
+        "scope_exclusion_paths": [str(record.get("path")) for record in scope_exclusions],
+        "candidate_classification_counts": dict(sorted(candidate_classification_counts.items())),
+        "unclassified_candidates": unclassified_candidates,
+        "unknown_or_unmapped_candidates": unmapped_candidates,
+        "intentional_reject_candidates": sorted(intentional_rejections),
         "missing_tracked_inputs": missing_manifest_inputs,
         "missing_actor_fallback_cases": list(actor_fallbacks.get("missing_cases", [])),
         "legacy_owner_audit_complete": bool(legacy_owner_audit.get("accepted_as_complete_inventory")),
@@ -1963,16 +3721,38 @@ def _gate_report(
         "tracked_manifest_paths_sha256_matches": tracked_path_digest_matches,
         "actor_fallback_evidence_complete": actor_evidence_complete,
         "actor_fallback_cases_are_canonical_without_fallback": actor_no_fallback,
+        "actor_fallback_invalid_test_authority": actor_invalid_test_authority,
+        "actor_fallback_native_output_mismatches": actor_native_output_mismatches,
         "legacy_owner_rows_complete": owner_rows_complete,
         "unfollowed_mimi_symlinks": [item["path"] for item in excluded_symlinks],
+        "tracked_symlink_parent_blockers": tracked_symlink_parent_blockers,
         "noncanonical_route_inputs": noncanonical_routes,
         "fallback_inputs": fallback_inputs,
         "per_function_incomplete_inputs": per_function_incomplete,
         "unclassified_failure_inputs": unclassified_failures,
         "unexpected_or_mismatched_inputs": mismatches,
+        "expectation_path_coverage": {
+            "exact_bijection": expectation_contract.get("exact_bijection") is True,
+            "missing_paths": list(expectation_contract.get("missing_paths", [])),
+            "extra_paths": list(expectation_contract.get("extra_paths", [])),
+            "duplicate_record_paths": expectation_path_duplicates,
+            "duplicate_inventory_paths": list(
+                expectation_contract.get("duplicate_inventory_paths", [])
+            ),
+        },
+        "invalid_expectation_source_hash_inputs": list(
+            expectation_contract.get("invalid_source_hash_paths", [])
+        ),
+        "invalid_expectation_authority_inputs": list(
+            expectation_contract.get("invalid_authority_paths", [])
+        ),
+        "expected_negative_matches": expected_negative_matches,
+        "canonical_success_inputs": canonical_success_inputs,
+        "canonical_success_count": len(canonical_success_inputs),
         "not_successful_inputs": not_successful,
         "missing_output_artifact_inputs": missing_output_artifacts,
         "missing_raw_log_inputs": missing_raw_logs,
+        "missing_raw_log_sidecars": missing_raw_log_sidecars,
     }
 
 
@@ -1983,6 +3763,8 @@ def _write_inventory_artifacts(
     excluded_symlinks: Sequence[Mapping[str, Any]],
     snapshot_id: str,
     tracked_inventory: Mapping[str, Any],
+    scope_exclusions: Sequence[Mapping[str, Any]],
+    source_scope: Mapping[str, Any],
 ) -> None:
     artifact_root.mkdir(parents=True, exist_ok=False)
     (artifact_root / "logs").mkdir()
@@ -1994,13 +3776,16 @@ def _write_inventory_artifacts(
         "manifest_sha256": manifest_sha256,
         "input_count": len(sources),
         "inputs": list(sources),
+        "scope_exclusions": list(scope_exclusions),
+        "source_scope": dict(source_scope),
         "required_actor_fallback_inputs": list(ACTOR_FALLBACK_INPUTS),
         "legacy_owner_names_requiring_individual_status": list(LEGACY_OWNER_NAMES),
         "tracked_git_inventory": dict(tracked_inventory),
         "unfollowed_mimi_symlinks": list(excluded_symlinks),
         "inventory_rule": {
             "root": str(root),
-            "included": "all Git-indexed *.mimi paths (including tracked paths missing from disk) plus every present regular *.mimi file recursively below --root outside excluded directory names",
+            "included": "all active Git-indexed *.mimi paths (including tracked paths missing from disk) plus every present regular or symlink *.mimi outside root-level archival roots devdocs/ and evidence/ and named generated/vendor exclusions",
+            "archival_exclusions": "all tracked or present Mimi paths below root-level devdocs/ and evidence/ are retained in scope_exclusions with hashes and reasons, but are not route candidates",
             "excluded_directory_names": sorted(EXCLUDED_DIRS),
             "symlinks": "directory and file symlinks are not followed; every observed source symlink is listed and blocks --check",
         },
@@ -2018,7 +3803,35 @@ def collect(args: argparse.Namespace) -> int:
     mimi = Path(args.mimi).expanduser()
     if not mimi.is_absolute():
         mimi = root / mimi
-    output = Path(args.output).expanduser().resolve()
+    requested_output = Path(args.output).expanduser()
+    requested_output_lexical = Path(os.path.abspath(requested_output))
+    try:
+        # Resolve the last path component as well as parent symlinks. This
+        # catches external aliases whose target does not exist yet, including
+        # an output symlink or a symlinked parent directory.
+        output = requested_output.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(
+            f"refusing to use an unresolvable output path: {requested_output}"
+        ) from error
+    try:
+        requested_output_lexical.relative_to(root)
+    except ValueError:
+        lexical_output_inside_root = False
+    else:
+        lexical_output_inside_root = True
+    try:
+        output.relative_to(root)
+    except ValueError:
+        resolved_output_inside_root = False
+    else:
+        resolved_output_inside_root = True
+    if (
+        lexical_output_inside_root and requested_output_lexical.suffix == ".mimi"
+    ) or (resolved_output_inside_root and output.suffix == ".mimi"):
+        raise ValueError(
+            f"refusing to place the route census report over an in-scope Mimi path: {output}"
+        )
     if output.exists():
         raise FileExistsError(f"refusing to overwrite output file: {output}")
     requested_artifacts = (
@@ -2029,12 +3842,14 @@ def collect(args: argparse.Namespace) -> int:
     if not args.inventory_only and requested_artifacts.exists():
         raise FileExistsError(f"refusing to overwrite artifact directory: {requested_artifacts}")
     tracked_paths, tracked_inventory = tracked_mimi_paths(root)
-    sources = enumerate_sources(root, tracked_paths)
+    sources, scope_exclusions, source_scope = enumerate_source_scope(root, tracked_paths)
     excluded_symlinks = source_symlink_exclusions(root)
     for name in tracked_paths:
         path = root / name
         if path.is_symlink():
             excluded_symlinks.append({"path": name, "kind": "tracked_mimi_file_symlink_not_followed"})
+    tracked_parent_blockers = tracked_symlink_parent_blockers(root, tracked_paths)
+    excluded_symlinks.extend(tracked_parent_blockers)
     excluded_symlinks = sorted(
         { (entry["path"], entry["kind"]): entry for entry in excluded_symlinks }.values(),
         key=lambda item: (item["path"], item["kind"]),
@@ -2045,14 +3860,21 @@ def collect(args: argparse.Namespace) -> int:
     actual_worker_count = (
         0 if args.inventory_only else min(requested_worker_count, len(sources))
     )
-    expectations, expectations_identity = load_expectations(
+    declared_expectations, expectations_identity = load_expectations(
         Path(args.expectations).expanduser().resolve() if args.expectations else None,
         root,
     )
-    source_paths = {record["path"] for record in sources}
-    stale_expectations = sorted(set(expectations) - source_paths)
-    if stale_expectations:
-        raise ValueError("expectations name inputs outside the census denominator: " + ", ".join(stale_expectations))
+    actor_contracts = actor_fixture_test_contracts(root)
+    declared_expectations, actor_default_expectations = add_actor_default_expectations(
+        declared_expectations,
+        sources,
+        root,
+    )
+    expectations, expectation_contract = bind_expectations_to_inventory(
+        declared_expectations,
+        sources,
+        root,
+    )
     base: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "evidence_kind": "route-census",
@@ -2070,22 +3892,37 @@ def collect(args: argparse.Namespace) -> int:
             "category_counts": _count_by(sources, "category"),
             "target_kind_counts": _count_by(sources, "target_kind"),
             "inputs": sources,
+            "scope_exclusions": scope_exclusions,
+            "source_scope": source_scope,
             "unfollowed_mimi_symlinks": excluded_symlinks,
-            "rule": "all Git-indexed *.mimi paths, including missing tracked files, plus present regular *.mimi files recursively below root outside named exclusions",
+            "rule": "active tracked *.mimi paths plus present regular Mimi files; devdocs/ and evidence/ are retained in scope_exclusions and are never route candidates",
             "excluded_directory_names": sorted(EXCLUDED_DIRS),
+            "archival_prefixes": dict(sorted(ARCHIVAL_SOURCE_PREFIXES.items())),
             "symlinks_excluded": True,
         },
+        "source_scope": source_scope,
         "manifest": {
             "sha256": manifest_sha256,
             "denominator": len(sources),
             "entries_field": "input_inventory.inputs",
             "scope_rule_field": "input_inventory.rule",
+            "source_scope_exactly_once": source_scope["exactly_once"],
         },
         "expectations": {
-            "identity": expectations_identity,
-            "explicit_count": len(expectations),
-            "default": {"exit_code": 0, "route": ["canonical", "compatibility"]},
+            "identity": {
+                "provided_manifest": expectations_identity,
+                "built_in_actor_defaults": actor_default_expectations,
+            },
+            **expectation_contract,
+            "classes": sorted(EXPECTATION_CLASSES),
+            "route_candidate_classifications": sorted(ROUTE_CANDIDATE_CLASSIFICATIONS),
+            "missing_expectations_are": "explicit unmapped rows; never implicit success",
+            "raw_output_policy": (
+                "invoked builds retain exact stdout/stderr; only a validated interpreter_only mapping "
+                "selects run_status=not_run with no command or output artifact"
+            ),
         },
+        "actor_fixture_contracts": actor_contracts,
         "source_snapshot": snapshot_start,
         "repository": repository_identity(root),
         "toolchain": toolchain_manifest(mimi, probe_cli=not args.inventory_only),
@@ -2102,7 +3939,8 @@ def collect(args: argparse.Namespace) -> int:
             "route_classes": ["canonical", "compatibility", "rejected", "unobserved"],
             "per_function_requirement": "route-specific named emitter disposition for every canonical executable owner; canonical MIR events reconcile with the MIR function count and route digest after module verification, while resolved-native events reconcile with MIMI_STAT and their emitter summary",
             "failure_classes": ["capability", "library_target", "environment", "unknown", "none"],
-            "strict_check": "requires exact denominator, zero missing inputs, all canonical routes, no function fallback, complete named per-function roster, successful builds, classified failures, and stable source fingerprint",
+            "build_skip_rule": "a validated explicit interpreter_only expectation skips invocation and records a reason; this row is never canonical",
+            "strict_check": "requires exact active candidate inventory, exact-once source-scope accounting, one route classification per candidate, valid expectation evidence, a canonical route for every candidate, no compatibility/function fallback, complete named per-function rosters for canonical builds, classified failures, and stable source fingerprint; matched intentional rejections are counted separately and remain noncanonical blockers",
             "no_production_route_changes": True,
         },
     }
@@ -2110,20 +3948,20 @@ def collect(args: argparse.Namespace) -> int:
         if args.check:
             raise ValueError("--check cannot be combined with --inventory-only")
         base["records"] = [
-            {
-                **record,
-                "input_index": index,
-                "run_status": "not_run",
-                "route": {"disposition": "unobserved", "classification_status": "not_run"},
-                "per_function": {"status": "unavailable", "named_roster_complete": False},
-            }
+            _inventory_only_record(record, index, expectations)
             for index, record in enumerate(sources, 1)
         ]
-        base["actor_fallback_cases"] = _actor_fallback_evidence(sources, [])
+        base["actor_fallback_cases"] = _actor_fallback_evidence(
+            sources, [], actor_contracts
+        )
         base["legacy_owner_audit"] = {
             "status": "not_run_inventory_only",
             "owners": [{"name": name, "status": "not_assessed"} for name in LEGACY_OWNER_NAMES],
         }
+        base["candidate_classification_counts"] = _count_by(
+            [{"classification": row["candidate_classification"]} for row in base["records"]],
+            "classification",
+        )
         base["gate"] = {"passed": None, "status": "not_evaluated_inventory_only", "strict_gate_available": False}
         _write_json_exclusive(output, base)
         print(f"[full-route-census] inventory only: {len(sources)} inputs -> {output}")
@@ -2137,6 +3975,8 @@ def collect(args: argparse.Namespace) -> int:
         excluded_symlinks,
         snapshot_start["snapshot_id"],
         tracked_inventory,
+        scope_exclusions,
+        source_scope,
     )
     logs_root = artifact_root / "logs"
     legacy_owner_audit = _collect_legacy_owner_audit(root, logs_root)
@@ -2157,6 +3997,7 @@ def collect(args: argparse.Namespace) -> int:
                 scratch_root=scratch_root,
                 logs_root=logs_root,
                 expected=expectations,
+                actor_contracts=actor_contracts,
             )
 
         def record_worker_error(
@@ -2167,6 +4008,7 @@ def collect(args: argparse.Namespace) -> int:
                 index=index,
                 logs_root=logs_root,
                 error=error,
+                expected=expectations,
             )
 
         def commit_record(
@@ -2200,6 +4042,8 @@ def collect(args: argparse.Namespace) -> int:
         path = root / name
         if path.is_symlink():
             excluded_symlinks_end.append({"path": name, "kind": "tracked_mimi_file_symlink_not_followed"})
+    tracked_parent_blockers_end = tracked_symlink_parent_blockers(root, tracked_paths_end)
+    excluded_symlinks_end.extend(tracked_parent_blockers_end)
     excluded_symlinks_end = sorted(
         { (entry["path"], entry["kind"]): entry for entry in excluded_symlinks_end }.values(),
         key=lambda item: (item["path"], item["kind"]),
@@ -2222,7 +4066,9 @@ def collect(args: argparse.Namespace) -> int:
         "retention": "collector does not delete raw logs or partial journal",
     }
     base["records"] = records
-    base["actor_fallback_cases"] = _actor_fallback_evidence(sources, records)
+    base["actor_fallback_cases"] = _actor_fallback_evidence(
+        sources, records, actor_contracts
+    )
     base["legacy_owner_audit"] = legacy_owner_audit
     base["route_counts"] = _count_by(
         [{"route": record["route"]["disposition"]} for record in records], "route"
@@ -2246,14 +4092,34 @@ def collect(args: argparse.Namespace) -> int:
         ],
         "roster",
     )
+    base["candidate_classification_counts"] = _count_by(
+        [
+            {
+                "classification": record.get("candidate_classification")
+                or _route_candidate_classification(
+                    record.get("route", {}), record.get("expectation")
+                )
+            }
+            for record in records
+        ],
+        "classification",
+    )
+    blocking_symlinks = [
+        item for item in excluded_symlinks
+        if not _is_archival_source_path(str(item.get("path", "")))
+    ]
     base["gate"] = _gate_report(
         records,
         sources,
         snapshot_stable,
-        excluded_symlinks,
+        blocking_symlinks,
         tracked_inventory,
         base["actor_fallback_cases"],
         legacy_owner_audit,
+        expectation_contract,
+        scope_exclusions,
+        source_scope,
+        logs_root,
     )
     base["gate"]["requested"] = bool(args.check)
     base["gate"]["mode"] = "strict_check" if args.check else "evidence_collection_only"
@@ -2292,7 +4158,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mimi", default=os.environ.get("MIMI", str(ROOT / "target/debug/mimi")), help="Mimi CLI binary")
     parser.add_argument("--output", required=True, help="new JSON report path; existing files are never overwritten")
     parser.add_argument("--artifacts", help="new artifact directory (default: <output>.artifacts)")
-    parser.add_argument("--expectations", help="optional JSON manifest of explicit expected failures/routes")
+    parser.add_argument(
+        "--expectations",
+        help="optional schema-v2 typed expectation manifest with test authority and source hashes",
+    )
     parser.add_argument("--timeout", type=float, default=120.0, help="per-input timeout in seconds (default: 120)")
     parser.add_argument(
         "--jobs",
