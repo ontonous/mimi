@@ -99,3 +99,8 @@ mm_probe_*.txt
 # Reproducible native binaries captured by strict Map/Any L3 evidence
 evidence/**/native/case-*/default-build/program
 evidence/**/native/case-*/explicit-build/program
+
+# Local Rust/LLVM probe artifacts created at the repository root
+/a.out
+/mimi-values
+/mimi-values-scopedrop
