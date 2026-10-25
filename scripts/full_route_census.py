@@ -13,12 +13,16 @@ Typical evidence collection (does not enforce a zero-fallback result):
       --output evidence/route-census-0.1.11-dev.json
 
 Use ``--inventory-only`` to write the denominator and source/toolchain identity
-without invoking Mimi. A full run uses a bounded worker pool and commits its
-journal and progress in manifest order. Add
+without invoking Mimi or Cargo. A full run executes the two exact Actor Rust
+authority tests, then uses a bounded worker pool and commits its journal and
+progress in manifest order. Add
 ``--check`` to make the command a fail-closed gate: every denominator entry
-must build through the default Canonical route, have a complete named
-per-function eligibility/emission roster, and have no legacy fallback. The
-census parses the route-specific native emitter roster: canonical MIR builds
+must have an explicit current-source expectation whose result is proven. A
+canonical compile expectation must build through the default Canonical route,
+have a complete named per-function eligibility/emission roster, and have no
+legacy fallback. An expected rejection must match its declared observed route
+disposition, route reason, failure class, diagnostics, and absence of output.
+The census parses the route-specific native emitter roster: canonical MIR builds
 report every verified MIR owner and reconcile those names, counts, and graph
 digest; resolved-native builds reconcile their named events against dispatch
 and emitter totals.
@@ -28,7 +32,7 @@ Mimi source digest to a named test assertion and the digest/location of that
 assertion's source file. Missing entries are reported as ``unmapped``; there is
 no implicit success expectation. For example:
 
-    {"schema_version": 2, "inputs": {
+    {"schema_version": 4, "inputs": {
       "tests/fixtures/required.mimi": {
         "class": "required_compile",
         "reason": "fixture must compile through the canonical route",
@@ -40,16 +44,24 @@ no implicit success expectation. For example:
     }}
 
 ``expected_build_rejection`` entries also require a nonzero
-``expected_exit_code``, a non-empty ``expected_diagnostic_codes`` list, and a
-non-empty ``required_output_substrings`` list. Those diagnostics must match the
-captured output exactly, and the build must leave no output artifact. A valid
+``expected_exit_code``, a non-empty ``expected_diagnostic_codes`` list, a
+non-empty ``required_output_substrings`` list, and explicit expected route
+disposition, route-classification status, route reason, and failure class.
+Those diagnostics must match the captured output exactly, and the build must
+leave no output artifact. A valid
 ``interpreter_only`` entry skips the build and records ``run_status=not_run``.
 
 An expected build rejection's named authority must be an active Rust ``#[test]``
-that builds the same repository-relative Mimi path with the default ``build``
-command and asserts that command's failure plus every expected diagnostic code
-and output substring. The census independently checks the observed command
-exit, exact diagnostic-code set, required substrings, and artifact absence.
+that uses fully-qualified ``::std`` APIs to run the exact Cargo-provided Mimi
+binary against the same repository-relative source with the default ``build``
+command and asserts that command's failure, every expected diagnostic code and
+output substring, and the complete route-rejection line containing the exact
+route reason. Cargo authority records bind the absolute Cargo and rustc dispatch
+paths, resolved executable hashes before and after each invocation, the frozen
+toolchain/environment identity, and reject compiler, cfg, target, linker, runner,
+Rust flag, or relevant Cargo config overrides. The census independently checks the observed route fields,
+failure class, command exit, exact diagnostic-code set, required substrings,
+and artifact absence.
 
 Expectations never remove an input from the denominator. A valid
 ``interpreter_only`` mapping records an intentional no-build row with an
@@ -100,9 +112,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - older Python fails closed on Cargo config
+    tomllib = None
+
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = "0.1.11-full-route-census-v3"
-EXPECTATION_SCHEMA_VERSION = 2
+SCHEMA_VERSION = "0.1.11-full-route-census-v4"
+EXPECTATION_SCHEMA_VERSION = 4
 EXPECTATION_CLASSES = {
     "required_compile",
     "expected_build_rejection",
@@ -126,10 +143,20 @@ ACTOR_FALLBACK_INPUTS = (
     "tests/real_world/actor_nested_func_capture.mimi",
     "tests/real_world/actor_nested_func_shadow.mimi",
 )
+ACTOR_AUTHORITY_TEST_IDS = {
+    ACTOR_FALLBACK_INPUTS[0]: "canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback",
+    ACTOR_FALLBACK_INPUTS[1]: "canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback",
+}
 ACTOR_EXPECTED_STDOUT = {
     ACTOR_FALLBACK_INPUTS[0]: b"15\n",
     ACTOR_FALLBACK_INPUTS[1]: b"42\n101\n",
 }
+ACTOR_HELPER_TEST_PATH = "tests/real_world_cli.rs"
+ACTOR_HELPER_NAME = "assert_original_actor_cli_routes"
+# The Actor callsite tests exercise a substantial helper rather than issuing
+# CLI assertions themselves. Pin its active implementation so changing it to
+# a no-op cannot preserve authority merely by retaining the two callsites.
+ACTOR_HELPER_SHA256 = "ff9ac0114e27da92f68d3b02a35c823e00a2a4ba91f4613d9dce0c01c90b24cc"
 LEGACY_OWNER_NAMES = (
     "CodegenLegacyRemainder",
     "FlowVerifierCompatibility",
@@ -612,8 +639,6 @@ def source_symlink_exclusions(root: Path) -> list[dict[str, str]]:
         retained: list[str] = []
         for name in sorted(dirnames):
             path = current / name
-            if name in EXCLUDED_DIRS:
-                continue
             if path.is_symlink():
                 target_bytes = os.fsencode(os.readlink(path))
                 excluded.append({
@@ -622,8 +647,10 @@ def source_symlink_exclusions(root: Path) -> list[dict[str, str]]:
                     "symlink_target": os.fsdecode(target_bytes),
                     "symlink_target_sha256": sha256_bytes(target_bytes),
                 })
-            else:
-                retained.append(name)
+                continue
+            if name in EXCLUDED_DIRS:
+                continue
+            retained.append(name)
         dirnames[:] = retained
         for name in sorted(filenames):
             path = current / name
@@ -681,6 +708,8 @@ def _compiler_snapshot_files(root: Path) -> list[Path]:
         root / "scripts" / "full_route_census.py",
         root / "tests" / "scripts" / "test_full_route_census.py",
         root / "scripts" / "audit-mir-legacy-owners.sh",
+        root / "rust-toolchain",
+        root / "rust-toolchain.toml",
     ]
     explicit.extend(sorted((root / ".cargo").glob("**/*")) if (root / ".cargo").is_dir() else [])
     for path in explicit:
@@ -737,33 +766,48 @@ def source_snapshot(root: Path, sources: Sequence[Mapping[str, Any]]) -> dict[st
     }
 
 
-def _command_result(command: Sequence[str], *, timeout: float = 8.0) -> dict[str, Any]:
+def _command_result(
+    command: Sequence[str], *, timeout: float = 8.0, cwd: Path | None = None
+) -> dict[str, Any]:
     try:
         proc = subprocess.run(
-            list(command), capture_output=True, timeout=timeout, check=False
+            list(command),
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            cwd=cwd,
         )
-        return {
+        result = {
             "command": list(command),
             "exit_code": proc.returncode,
             "stdout": _decode(proc.stdout),
             "stderr": _decode(proc.stderr),
         }
+        if cwd is not None:
+            result["cwd"] = str(cwd.resolve())
+        return result
     except subprocess.TimeoutExpired as error:
-        return {
+        result = {
             "command": list(command),
             "exit_code": None,
             "stdout": _decode(error.output),
             "stderr": _decode(error.stderr),
             "status": "timeout",
         }
+        if cwd is not None:
+            result["cwd"] = str(cwd.resolve())
+        return result
     except OSError as error:
-        return {
+        result = {
             "command": list(command),
             "exit_code": None,
             "stdout": "",
             "stderr": str(error),
             "status": "spawn_error",
         }
+        if cwd is not None:
+            result["cwd"] = str(cwd.resolve())
+        return result
 
 
 def _decode(data: bytes | str | None) -> str:
@@ -787,6 +831,575 @@ def _tool_identity(command_name: str) -> dict[str, Any]:
     return result
 
 
+def _native_executable_magic(path: Path) -> bool:
+    """Reject script shims as Cargo/rustc identities when the host format is known."""
+    try:
+        with path.open("rb") as stream:
+            prefix = stream.read(4)
+    except OSError:
+        return False
+    system = platform.system()
+    if system == "Linux":
+        return prefix.startswith(b"\x7fELF")
+    if system == "Darwin":
+        return prefix in {
+            b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+            b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+        }
+    if system == "Windows":
+        return prefix[:2] == b"MZ"
+    return False
+
+
+def _executable_identity_at_path(
+    command_name: str, path_value: str | Path | None
+) -> dict[str, Any]:
+    """Resolve a named executable path once to its canonical byte identity."""
+    if path_value is None:
+        return {
+            "requested": command_name,
+            "path": None,
+            "sha256": None,
+            "bytes": None,
+            "native_executable": False,
+        }
+    try:
+        invocation_path = Path(os.path.abspath(path_value))
+        path = invocation_path.resolve(strict=True)
+        metadata = path.stat()
+        is_file = stat.S_ISREG(metadata.st_mode)
+        executable = os.access(path, os.X_OK)
+        native = is_file and executable and _native_executable_magic(path)
+        digest = sha256_file(path) if is_file else None
+        size = metadata.st_size if is_file else None
+    except OSError as error:
+        return {
+            "requested": command_name,
+            "path": str(Path(path_value).absolute()),
+            "sha256": None,
+            "bytes": None,
+            "native_executable": False,
+            "identity_error": str(error),
+        }
+    return {
+        "requested": command_name,
+        "path": str(invocation_path),
+        "resolved_path": str(path),
+        "sha256": digest,
+        "bytes": size,
+        "native_executable": native,
+    }
+
+
+def _resolved_executable_identity(command_name: str) -> dict[str, Any]:
+    """Resolve an executable once to a canonical path and byte identity."""
+    return _executable_identity_at_path(command_name, shutil.which(command_name))
+
+
+def _rustup_input_files(root: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Snapshot every directory override and Rustup's default-toolchain settings."""
+    root = root.resolve()
+    candidates: list[Path] = []
+    current = root
+    while True:
+        candidates.extend((current / "rust-toolchain", current / "rust-toolchain.toml"))
+        if current.parent == current:
+            break
+        current = current.parent
+    rustup_home = Path(os.environ.get("RUSTUP_HOME") or Path.home() / ".rustup")
+    candidates.append(rustup_home / "settings.toml")
+
+    records: list[dict[str, Any]] = []
+    issues: list[str] = []
+    for candidate in candidates:
+        path = Path(os.path.abspath(candidate))
+        record: dict[str, Any] = {"path": str(path)}
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            record["status"] = "missing"
+        except OSError as error:
+            record.update(status="unreadable", error=type(error).__name__)
+            issues.append(f"rustup_input_unreadable:{path}")
+        else:
+            if stat.S_ISLNK(metadata.st_mode):
+                try:
+                    target = os.fsencode(os.readlink(path))
+                    record["symlink_target_sha256"] = sha256_bytes(target)
+                    record["symlink_target"] = os.fsdecode(target)
+                except OSError:
+                    record["symlink_target_sha256"] = None
+                record["status"] = "symlink"
+                issues.append(f"rustup_input_is_symlink:{path}")
+            elif not stat.S_ISREG(metadata.st_mode):
+                record["status"] = "not_regular_file"
+                issues.append(f"rustup_input_not_regular:{path}")
+            else:
+                try:
+                    raw = path.read_bytes()
+                except OSError as error:
+                    record.update(status="unreadable", error=type(error).__name__)
+                    issues.append(f"rustup_input_unreadable:{path}")
+                else:
+                    record.update(
+                        status="regular_file",
+                        sha256=sha256_bytes(raw),
+                        bytes=len(raw),
+                    )
+        records.append(record)
+    return records, issues
+
+
+def _rustup_toolchain_snapshot(
+    root: Path,
+    rustup_identity: Mapping[str, Any],
+    *,
+    probe: bool,
+    expected: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Capture Rustup's cwd-specific selection and the actual selected binaries."""
+    root = root.resolve()
+    input_files, issues = _rustup_input_files(root)
+    if not probe and expected is None:
+        return {
+            "cwd": str(root),
+            "active_toolchain": None,
+            "override_and_settings_files": input_files,
+            "selected_cargo": _executable_identity_at_path("selected cargo", None),
+            "selected_rustc": _executable_identity_at_path("selected rustc", None),
+            "sysroot_path": None,
+            "policy": {
+                "valid": False,
+                "issues": ["rustup_toolchain_not_probed_inventory_only"],
+            },
+        }
+    active_toolchain: str | None = None
+    selected_cargo_path: str | None = None
+    selected_rustc_path: str | None = None
+
+    if probe:
+        rustup_path = rustup_identity.get("path")
+        if not isinstance(rustup_path, str):
+            issues.append("rustup_toolchain_probe_missing_rustup")
+        else:
+            active = _command_result(
+                [rustup_path, "show", "active-toolchain"], cwd=root
+            )
+            cargo = _command_result([rustup_path, "which", "cargo"], cwd=root)
+            rustc = _command_result([rustup_path, "which", "rustc"], cwd=root)
+
+            active_lines = [line.strip() for line in active.get("stdout", "").splitlines() if line.strip()]
+            if active.get("exit_code") == 0 and len(active_lines) == 1:
+                active_toolchain = active_lines[0]
+            else:
+                issues.append("rustup_active_toolchain_probe_failed")
+
+            def selected_path(result: Mapping[str, Any], label: str) -> str | None:
+                lines = [line.strip() for line in str(result.get("stdout", "")).splitlines() if line.strip()]
+                if result.get("exit_code") != 0 or len(lines) != 1 or not Path(lines[0]).is_absolute():
+                    issues.append(f"rustup_selected_{label}_probe_failed")
+                    return None
+                return str(Path(lines[0]).absolute())
+
+            selected_cargo_path = selected_path(cargo, "cargo")
+            selected_rustc_path = selected_path(rustc, "rustc")
+    elif isinstance(expected, Mapping):
+        active_toolchain = expected.get("active_toolchain")
+        expected_cargo = expected.get("selected_cargo")
+        expected_rustc = expected.get("selected_rustc")
+        selected_cargo_path = (
+            expected_cargo.get("path") if isinstance(expected_cargo, Mapping) else None
+        )
+        selected_rustc_path = (
+            expected_rustc.get("path") if isinstance(expected_rustc, Mapping) else None
+        )
+        if not isinstance(active_toolchain, str) or not active_toolchain:
+            issues.append("rustup_active_toolchain_record_missing")
+    else:
+        issues.append("rustup_toolchain_not_probed_inventory_only")
+
+    selected_cargo = _executable_identity_at_path("selected cargo", selected_cargo_path)
+    selected_rustc = _executable_identity_at_path("selected rustc", selected_rustc_path)
+    for label, identity in (("cargo", selected_cargo), ("rustc", selected_rustc)):
+        if not identity.get("path") or not _is_sha256(identity.get("sha256")):
+            issues.append(f"rustup_selected_{label}_identity_missing")
+        if identity.get("native_executable") is not True:
+            issues.append(f"rustup_selected_{label}_not_native_executable")
+
+    cargo_resolved = selected_cargo.get("resolved_path")
+    rustc_resolved = selected_rustc.get("resolved_path")
+    cargo_sysroot = (
+        str(Path(cargo_resolved).parent.parent)
+        if isinstance(cargo_resolved, str)
+        else None
+    )
+    rustc_sysroot = (
+        str(Path(rustc_resolved).parent.parent)
+        if isinstance(rustc_resolved, str)
+        else None
+    )
+    if not cargo_sysroot or cargo_sysroot != rustc_sysroot:
+        issues.append("rustup_selected_cargo_rustc_sysroots_mismatch")
+    if not isinstance(active_toolchain, str) or not active_toolchain:
+        issues.append("rustup_active_toolchain_missing")
+    elif rustc_sysroot and Path(rustc_sysroot).name != active_toolchain.split(" (", 1)[0]:
+        issues.append("rustup_active_toolchain_sysroot_name_mismatch")
+
+    snapshot = {
+        "cwd": str(root),
+        "active_toolchain": active_toolchain,
+        "override_and_settings_files": input_files,
+        "selected_cargo": selected_cargo,
+        "selected_rustc": selected_rustc,
+        "sysroot_path": rustc_sysroot,
+        "policy": {"valid": not issues, "issues": sorted(set(issues))},
+    }
+    if isinstance(expected, Mapping) and not probe:
+        prior_policy = expected.get("policy")
+        if not isinstance(prior_policy, Mapping) or prior_policy.get("valid") is not True:
+            snapshot["policy"]["issues"] = sorted(
+                set(snapshot["policy"]["issues"])
+                | {"previous_rustup_toolchain_snapshot_invalid"}
+            )
+            snapshot["policy"]["valid"] = False
+    return snapshot
+
+
+def _executable_observation(path_value: Any) -> dict[str, Any]:
+    """Read an executable's current canonical path and content hash."""
+    if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+        return {"path": None, "sha256": None}
+    try:
+        invocation_path = Path(os.path.abspath(path_value))
+        path = invocation_path.resolve(strict=True)
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode) or not os.access(path, os.X_OK):
+            return {
+                "path": str(invocation_path),
+                "resolved_path": str(path),
+                "sha256": None,
+            }
+        return {
+            "path": str(invocation_path),
+            "resolved_path": str(path),
+            "sha256": sha256_file(path),
+        }
+    except OSError:
+        return {"path": None, "resolved_path": None, "sha256": None}
+
+
+_BLOCKED_CARGO_AUTHORITY_ENV = {
+    "CARGO_HOME",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTC_BOOTSTRAP",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTFLAGS",
+    "CARGO_BUILD_TARGET",
+    "CC",
+    "CXX",
+    "AR",
+    "LD",
+}
+
+
+def _cargo_config_paths(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    current = root.resolve()
+    while True:
+        candidates.extend((current / ".cargo" / "config.toml", current / ".cargo" / "config"))
+        if current.parent == current:
+            break
+        current = current.parent
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    candidates.extend((cargo_home / "config.toml", cargo_home / "config"))
+    existing: dict[str, Path] = {}
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                resolved = candidate.resolve(strict=True)
+                existing[str(resolved)] = resolved
+        except OSError:
+            continue
+    return [existing[key] for key in sorted(existing)]
+
+
+def _cargo_config_authority(root: Path) -> dict[str, Any]:
+    """Hash Cargo config inputs and reject compiler, cfg, linker or runner overrides."""
+    files: list[dict[str, Any]] = []
+    issues: list[str] = []
+    for path in _cargo_config_paths(root):
+        try:
+            raw = path.read_bytes()
+            text = raw.decode("utf-8")
+            files.append({"path": str(path), "sha256": sha256_bytes(raw)})
+            if tomllib is None:
+                issues.append(f"cannot_parse_cargo_config:{path}")
+                continue
+            document = tomllib.loads(text)
+        except (OSError, UnicodeDecodeError, ValueError) as error:
+            issues.append(f"invalid_cargo_config:{path}:{type(error).__name__}")
+            continue
+        build = document.get("build", {})
+        if isinstance(build, Mapping):
+            for key in (
+                "rustc", "rustc-wrapper", "rustc-workspace-wrapper", "target",
+                "rustflags", "rustdocflags",
+            ):
+                if key in build:
+                    issues.append(f"cargo_config_build_override:{path}:build.{key}")
+        target = document.get("target")
+        if isinstance(target, Mapping) and target:
+            issues.append(f"cargo_config_target_override:{path}:target")
+        configured_env = document.get("env", {})
+        if isinstance(configured_env, Mapping):
+            for name in configured_env:
+                if not isinstance(name, str):
+                    issues.append(f"invalid_cargo_config_env_key:{path}")
+                elif (
+                    name in _BLOCKED_CARGO_AUTHORITY_ENV
+                    or name.startswith("CARGO_BUILD_")
+                    or re.fullmatch(r"CARGO_TARGET_.+_(?:RUNNER|LINKER|RUSTFLAGS)", name)
+                ):
+                    issues.append(f"cargo_config_env_override:{path}:env.{name}")
+    return {"files": files, "issues": sorted(set(issues)), "valid": not issues}
+
+
+def cargo_test_toolchain_authority(
+    root: Path,
+    *,
+    probe_active_toolchain: bool = True,
+    expected_active_toolchain: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Freeze the Cargo/rustc identity and reject inherited build/runner overrides."""
+    root = root.resolve()
+    cargo = _resolved_executable_identity("cargo")
+    rustc = _resolved_executable_identity("rustc")
+    rustup = _resolved_executable_identity("rustup")
+    environment = _environment_fingerprint()
+    config = _cargo_config_authority(root)
+    rustup_toolchain = _rustup_toolchain_snapshot(
+        root,
+        rustup,
+        probe=probe_active_toolchain,
+        expected=expected_active_toolchain,
+    )
+    issues: list[str] = list(config["issues"])
+    issues.extend(rustup_toolchain["policy"]["issues"])
+    for name in sorted(os.environ):
+        value = os.environ[name]
+        if not value:
+            continue
+        if (
+            name in _BLOCKED_CARGO_AUTHORITY_ENV
+            or name.startswith("CARGO_BUILD_")
+            or name.startswith("CARGO_ALIAS_")
+            or re.fullmatch(r"CARGO_TARGET_.+_(?:RUNNER|LINKER|RUSTFLAGS)", name)
+        ):
+            issues.append(f"inherited_toolchain_override:{name}")
+    for label, identity in (("cargo", cargo), ("rustc", rustc), ("rustup", rustup)):
+        if not identity.get("path") or not _is_sha256(identity.get("sha256")):
+            issues.append(f"{label}_identity_missing")
+        if identity.get("native_executable") is not True:
+            issues.append(f"{label}_is_not_native_executable")
+    # In this rustup-managed toolchain, cargo and rustc are argv[0] dispatch
+    # symlinks to the same rustup ELF.  Pin that relation as well as each
+    # invocation name: a native ELF named `cargo` earlier on PATH must not be
+    # accepted just because its bytes are stable and executable.
+    rustup_path = rustup.get("path")
+    rustup_target = rustup.get("resolved_path")
+    for label, identity in (("cargo", cargo), ("rustc", rustc)):
+        if (
+            not isinstance(rustup_path, str)
+            or not isinstance(rustup_target, str)
+            or identity.get("resolved_path") != rustup_target
+            or not isinstance(identity.get("path"), str)
+            or Path(identity["path"]).parent != Path(rustup_path).parent
+        ):
+            issues.append(f"{label}_is_not_the_selected_rustup_proxy")
+    payload: dict[str, Any] = {
+        "cargo": cargo,
+        "rustc": rustc,
+        "rustup": rustup,
+        "rustup_toolchain": rustup_toolchain,
+        "environment_sha256": environment["sha256"],
+        "environment_variable_names": environment["variable_names"],
+        "cargo_config": config,
+        "policy": {"valid": not issues, "issues": sorted(set(issues))},
+    }
+    payload["identity_sha256"] = sha256_bytes(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    return payload
+
+
+def _cargo_toolchain_identity_valid(
+    authority: Any,
+    *,
+    root: Path,
+    require_current_environment: bool = True,
+    current_authority: Mapping[str, Any] | None = None,
+) -> bool:
+    if not isinstance(authority, Mapping):
+        return False
+    identity = authority.get("identity_sha256")
+    payload = {key: value for key, value in authority.items() if key != "identity_sha256"}
+    policy = authority.get("policy")
+    if (
+        not isinstance(policy, Mapping)
+        or policy.get("valid") is not True
+        or not _is_sha256(identity)
+        or sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")) != identity
+    ):
+        return False
+    if not all(
+        isinstance(authority.get(key), Mapping)
+        and authority[key].get("native_executable") is True
+        for key in ("cargo", "rustc", "rustup")
+    ):
+        return False
+    for key in ("cargo", "rustc", "rustup"):
+        expected = authority[key]
+        observed = _executable_observation(expected.get("path"))
+        if observed != {
+            "path": expected.get("path"),
+            "resolved_path": expected.get("resolved_path"),
+            "sha256": expected.get("sha256"),
+        }:
+            return False
+    if not all(
+        authority[command].get("resolved_path") == authority["rustup"].get("resolved_path")
+        and Path(str(authority[command].get("path"))).parent
+        == Path(str(authority["rustup"].get("path"))).parent
+        for command in ("cargo", "rustc")
+    ):
+        return False
+    rustup_toolchain = authority.get("rustup_toolchain")
+    if (
+        not isinstance(rustup_toolchain, Mapping)
+        or not isinstance(rustup_toolchain.get("policy"), Mapping)
+        or rustup_toolchain["policy"].get("valid") is not True
+    ):
+        return False
+    if require_current_environment:
+        current = current_authority or cargo_test_toolchain_authority(
+            root,
+            probe_active_toolchain=False,
+            expected_active_toolchain=rustup_toolchain,
+        )
+        if current.get("identity_sha256") != identity:
+            return False
+    return True
+
+
+def _cargo_execution_evidence(
+    authority: Mapping[str, Any], cargo_before: Mapping[str, Any],
+    rustc_before: Mapping[str, Any], cargo_after: Mapping[str, Any],
+    rustc_after: Mapping[str, Any], *, stable: bool,
+    rustup_before: Mapping[str, Any] | None = None,
+    rustup_after: Mapping[str, Any] | None = None,
+    rustup_toolchain_before: Mapping[str, Any] | None = None,
+    rustup_toolchain_after: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if rustup_before is None:
+        rustup_before = _executable_observation(authority.get("rustup", {}).get("path"))
+    if rustup_after is None:
+        rustup_after = rustup_before
+    if rustup_toolchain_before is None:
+        rustup_toolchain_before = authority.get("rustup_toolchain", {})
+    if rustup_toolchain_after is None:
+        rustup_toolchain_after = rustup_toolchain_before
+    return {
+        "toolchain_identity_sha256": authority.get("identity_sha256"),
+        "cargo": {
+            "expected_path": authority.get("cargo", {}).get("path"),
+            "expected_sha256": authority.get("cargo", {}).get("sha256"),
+            "before": dict(cargo_before),
+            "after": dict(cargo_after),
+        },
+        "rustc": {
+            "expected_path": authority.get("rustc", {}).get("path"),
+            "expected_sha256": authority.get("rustc", {}).get("sha256"),
+            "before": dict(rustc_before),
+            "after": dict(rustc_after),
+        },
+        "rustup": {
+            "expected_path": authority.get("rustup", {}).get("path"),
+            "expected_sha256": authority.get("rustup", {}).get("sha256"),
+            "before": dict(rustup_before),
+            "after": dict(rustup_after),
+        },
+        "rustup_toolchain": {
+            "expected": dict(authority.get("rustup_toolchain", {})),
+            "before": dict(rustup_toolchain_before),
+            "after": dict(rustup_toolchain_after),
+        },
+        "child_environment": {
+            "RUSTC": authority.get("rustc", {}).get("path"),
+            "RUSTC_WRAPPER": "unset",
+            "RUSTC_WORKSPACE_WRAPPER": "unset",
+            "target_runner": "unset",
+            "rustflags": "unset",
+        },
+        "stable": stable,
+    }
+
+
+def _cargo_execution_evidence_valid(
+    evidence: Any, authority: Any, *, root: Path
+) -> bool:
+    if not isinstance(evidence, Mapping) or not _cargo_toolchain_identity_valid(
+        authority, root=root
+    ):
+        return False
+    if evidence.get("toolchain_identity_sha256") != authority.get("identity_sha256"):
+        return False
+    for key in ("cargo", "rustc", "rustup"):
+        row = evidence.get(key)
+        identity = authority.get(key) if isinstance(authority, Mapping) else None
+        if not isinstance(row, Mapping) or not isinstance(identity, Mapping):
+            return False
+        expected = {
+            "path": identity.get("path"),
+            "resolved_path": identity.get("resolved_path"),
+            "sha256": identity.get("sha256"),
+        }
+        if (
+            row.get("expected_path") != identity.get("path")
+            or row.get("expected_sha256") != identity.get("sha256")
+            or row.get("before") != expected
+            or row.get("after") != expected
+        ):
+            return False
+    rustup_toolchain_evidence = evidence.get("rustup_toolchain")
+    expected_rustup_toolchain = authority.get("rustup_toolchain")
+    if (
+        not isinstance(rustup_toolchain_evidence, Mapping)
+        or not isinstance(expected_rustup_toolchain, Mapping)
+        or rustup_toolchain_evidence.get("expected") != expected_rustup_toolchain
+        or rustup_toolchain_evidence.get("before") != expected_rustup_toolchain
+        or rustup_toolchain_evidence.get("after") != expected_rustup_toolchain
+    ):
+        return False
+    child_environment = evidence.get("child_environment")
+    return bool(
+        evidence.get("stable") is True
+        and isinstance(child_environment, Mapping)
+        and child_environment.get("RUSTC") == authority["rustc"]["path"]
+        and child_environment.get("RUSTC_WRAPPER") == "unset"
+        and child_environment.get("RUSTC_WORKSPACE_WRAPPER") == "unset"
+        and child_environment.get("target_runner") == "unset"
+        and child_environment.get("rustflags") == "unset"
+    )
+
+
 def _environment_fingerprint() -> dict[str, Any]:
     """Fingerprint the inherited environment without copying secret values."""
     digest = hashlib.sha256()
@@ -806,16 +1419,27 @@ def _environment_fingerprint() -> dict[str, Any]:
     }
 
 
-def toolchain_manifest(mimi: Path, *, probe_cli: bool = True) -> dict[str, Any]:
+def toolchain_manifest(
+    mimi: Path,
+    *,
+    probe_cli: bool = True,
+    probe_toolchain_versions: bool = True,
+    root: Path = ROOT,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if cargo_authority is None:
+        cargo_authority = cargo_test_toolchain_authority(
+            root, probe_active_toolchain=probe_toolchain_versions
+        )
     mimi_path = mimi.expanduser().resolve()
     binary: dict[str, Any] = {"path": str(mimi_path), "exists": mimi_path.is_file()}
     if mimi_path.is_file():
         binary["sha256"] = sha256_file(mimi_path)
         binary["bytes"] = mimi_path.stat().st_size
     if probe_cli and mimi_path.is_file():
-        binary["version"] = _command_result([str(mimi_path), "--version"])
-        build_help = _command_result([str(mimi_path), "build", "--help"])
-        stats_help = _command_result([str(mimi_path), "stats", "--help"])
+        binary["version"] = _command_result([str(mimi_path), "--version"], cwd=root)
+        build_help = _command_result([str(mimi_path), "build", "--help"], cwd=root)
+        stats_help = _command_result([str(mimi_path), "stats", "--help"], cwd=root)
     else:
         binary["version_probe"] = "not_run_inventory_only" if not probe_cli else "binary_missing"
         build_help = {"status": "not_run_inventory_only" if not probe_cli else "binary_missing"}
@@ -833,14 +1457,14 @@ def toolchain_manifest(mimi: Path, *, probe_cli: bool = True) -> dict[str, Any]:
     llvm = (
         {
             **_tool_identity(str(llvm_config)),
-            "version": _command_result([str(llvm_config), "--version"]),
+            "version": _command_result([str(llvm_config), "--version"], cwd=root),
         }
         if llvm_config
         else {"status": "not_found", "candidates_checked": [str(p) for p in llvm_candidates]}
     )
     z3_identity = _tool_identity(os.environ.get("Z3", "z3"))
     z3_identity["version"] = (
-        _command_result([z3_identity["path"], "--version"])
+        _command_result([z3_identity["path"], "--version"], cwd=root)
         if z3_identity.get("path")
         else {"status": "not_found"}
     )
@@ -885,6 +1509,53 @@ def toolchain_manifest(mimi: Path, *, probe_cli: bool = True) -> dict[str, Any]:
         "MIMI_STAT_OUT": "unique per-input scratch directory",
         "TMPDIR": "unique per-input scratch directory",
     }
+    cargo_identity = cargo_authority.get("cargo", {})
+    rustc_identity = cargo_authority.get("rustc", {})
+    rustup_toolchain = cargo_authority.get("rustup_toolchain", {})
+    selected_cargo = (
+        rustup_toolchain.get("selected_cargo", {})
+        if isinstance(rustup_toolchain, Mapping)
+        else {}
+    )
+    selected_rustc = (
+        rustup_toolchain.get("selected_rustc", {})
+        if isinstance(rustup_toolchain, Mapping)
+        else {}
+    )
+    cargo_authority_current = bool(
+        probe_toolchain_versions
+        and _cargo_toolchain_identity_valid(cargo_authority, root=root)
+    )
+    cargo_tool = {
+        **dict(cargo_identity),
+        "selected_toolchain_binary": dict(selected_cargo),
+        "version": (
+            _command_result([str(selected_cargo["path"]), "--version"], cwd=root)
+            if cargo_authority_current and selected_cargo.get("path")
+            else {
+                "status": "not_run_inventory_only"
+                if not probe_toolchain_versions
+                else "not_run_invalid_cargo_test_authority"
+            }
+        ),
+        "authority_identity_sha256": cargo_authority.get("identity_sha256"),
+    }
+    rustc_tool = {
+        **dict(rustc_identity),
+        "selected_toolchain_binary": dict(selected_rustc),
+        "version": (
+            _command_result(
+                [str(selected_rustc["path"]), "--version", "--verbose"], cwd=root
+            )
+            if cargo_authority_current and selected_rustc.get("path")
+            else {
+                "status": "not_run_inventory_only"
+                if not probe_toolchain_versions
+                else "not_run_invalid_cargo_test_authority"
+            }
+        ),
+        "authority_identity_sha256": cargo_authority.get("identity_sha256"),
+    }
     return {
         "platform": platform.platform(),
         "host": {
@@ -901,9 +1572,13 @@ def toolchain_manifest(mimi: Path, *, probe_cli: bool = True) -> dict[str, Any]:
             else None,
         },
         "mimi": binary,
-        "rustc": {**_tool_identity("rustc"), "version": _command_result(["rustc", "--version", "--verbose"])},
-        "cargo": {**_tool_identity("cargo"), "version": _command_result(["cargo", "--version"])},
-        "cc": {**_tool_identity(os.environ.get("CC", "cc")), "version": _command_result([os.environ.get("CC", "cc"), "--version"])},
+        "rustc": rustc_tool,
+        "cargo": cargo_tool,
+        "cargo_test_authority": dict(cargo_authority),
+        "cc": {
+            **_tool_identity(os.environ.get("CC", "cc")),
+            "version": _command_result([os.environ.get("CC", "cc"), "--version"], cwd=root),
+        },
         "llvm_config": llvm,
         "z3": z3_identity,
         "binary_build_features": {
@@ -1237,20 +1912,22 @@ def _rust_test_function_span(source_text: str, test_id: str) -> tuple[int, int] 
     # matching declarations written as tokens inside a macro or nested item.
     if _rust_delimiter_depth_at(code_text, 0, match.start()) != (0, 0, 0):
         return None
+    if re.search(
+        r"(?m)^\s*#!\s*\[\s*(?:cfg|cfg_attr)\s*\(",
+        code_text[:match.start()],
+    ):
+        # A crate-level conditional attribute can deactivate an otherwise
+        # ordinary-looking test declaration. Do not infer the active cfg set.
+        return None
 
     attributes = _rust_outer_attributes_before(code_text, match.start())
     if attributes is None:
         return None
     normalized = [re.sub(r"\s+", "", attribute) for attribute in attributes]
-    if normalized.count("#[test]") != 1:
-        return None
-    if any(
-        re.match(r"#\[(?:ignore)(?:=|\(|\])", attribute)
-        or re.match(r"#\[(?:cfg|cfg_attr)\(", attribute)
-        for attribute in normalized
-    ):
-        # Any conditional attribute makes activity dependent on the build
-        # environment. Fail closed instead of guessing at the active cfg set.
+    if normalized != ["#[test]"]:
+        # Only the ordinary test harness semantics are accepted. Attributes
+        # such as should_panic, ignore, cfg, or custom harness modifiers can
+        # change whether a failing test counts as passing or runs at all.
         return None
 
     opening_index = match.end() - 1
@@ -1260,9 +1937,176 @@ def _rust_test_function_span(source_text: str, test_id: str) -> tuple[int, int] 
     return match.start(), end
 
 
+def _rust_named_function_span(
+    source_text: str, function_name: str, *, require_test: bool = False
+) -> tuple[int, int] | None:
+    """Find one top-level Rust function, optionally requiring an active test."""
+    declaration = re.compile(
+        r"(?m)^[ \t]*(?:(?:pub(?:\([^)]*\))?|async|unsafe)[ \t]+)*"
+        rf"fn[ \t]+{re.escape(function_name)}[ \t]*\([^)]*\)[^{{;]*\{{"
+    )
+    code_text = _mask_rust_comments_and_strings(source_text)
+    matches = list(declaration.finditer(code_text))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    if _rust_delimiter_depth_at(code_text, 0, match.start()) != (0, 0, 0):
+        return None
+    attributes = _rust_outer_attributes_before(code_text, match.start())
+    if attributes is None:
+        return None
+    normalized = [re.sub(r"\s+", "", attribute) for attribute in attributes]
+    if require_test:
+        if normalized.count("#[test]") != 1:
+            return None
+    elif attributes:
+        # The helper is compiled as an ordinary top-level item. Any attribute
+        # could conditionally replace or disable the implementation.
+        return None
+    if any(
+        re.match(r"#\[(?:ignore)(?:=|\(|\])", attribute)
+        or re.match(r"#\[(?:cfg|cfg_attr)\(", attribute)
+        for attribute in normalized
+    ):
+        return None
+    end = _find_rust_delimiter_end(code_text, match.end() - 1, "{", "}")
+    return (match.start(), end) if end is not None else None
+
+
+def _actor_helper_has_required_contract(source_text: str, span: tuple[int, int]) -> bool:
+    """Require the helper's active CLI invocations and result assertions."""
+    tokens = _rust_tokens(source_text, span[0], span[1])
+
+    def has(pattern: Sequence[tuple[str, str | None]]) -> bool:
+        width = len(pattern)
+        return any(
+            _token_pattern_matches(tokens[index : index + width], pattern)
+            for index in range(len(tokens) - width + 1)
+        )
+
+    required_patterns: tuple[tuple[tuple[str, str | None], ...], ...] = (
+        (
+            ("ident", "let"), ("ident", "source"), ("punct", "="),
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "path"), ("punct", "::"), ("ident", "Path"),
+            ("punct", "::"), ("ident", "new"), ("punct", "("),
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "env"), ("punct", "!"), ("punct", "("),
+            ("string", "CARGO_MANIFEST_DIR"), ("punct", ")"),
+            ("punct", ")"), ("punct", "."), ("ident", "join"), ("punct", "("),
+            ("string", "tests/real_world"), ("punct", ")"),
+            ("punct", "."), ("ident", "join"), ("punct", "("),
+            ("ident", "fixture"), ("punct", ")"),
+        ),
+        (
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "process"), ("punct", "::"), ("ident", "Command"),
+            ("punct", "::"), ("ident", "new"), ("punct", "("),
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "env"), ("punct", "!"), ("punct", "("),
+            ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+            ("punct", "."),
+            ("ident", "arg"), ("punct", "("), ("string", "mir"),
+            ("punct", ")"), ("punct", "."), ("ident", "arg"),
+            ("punct", "("), ("punct", "&"), ("ident", "source"),
+            ("punct", ")"), ("punct", "."), ("ident", "arg"),
+            ("punct", "("), ("string", "--receipt"), ("punct", ")"),
+            ("punct", "."), ("ident", "output"), ("punct", "("),
+            ("punct", ")"),
+        ),
+        (
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "assert"), ("punct", "!"), ("punct", "("),
+            ("ident", "receipt"), ("punct", "."), ("ident", "status"),
+            ("punct", "."), ("ident", "success"), ("punct", "("),
+            ("punct", ")"),
+        ),
+        (
+            ("ident", "for"), ("ident", "explicit"), ("ident", "in"),
+            ("punct", "["), ("ident", "false"), ("punct", ","),
+            ("ident", "true"), ("punct", "]"),
+        ),
+        (
+            ("ident", "for"), ("punct", "("),
+            ("ident", "command_index"), ("punct", ","),
+            ("ident", "command"), ("punct", ")"), ("ident", "in"),
+            ("punct", "["), ("string", "run"), ("punct", ","),
+            ("string", "build"), ("punct", ","), ("string", "verify"),
+            ("punct", "]"), ("punct", "."), ("ident", "into_iter"),
+            ("punct", "("), ("punct", ")"), ("punct", "."),
+            ("ident", "enumerate"), ("punct", "("), ("punct", ")"),
+        ),
+        (
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "assert"), ("punct", "!"), ("punct", "("),
+            ("ident", "observed"), ("punct", "."), ("ident", "status"),
+            ("punct", "."), ("ident", "success"), ("punct", "("),
+            ("punct", ")"),
+        ),
+        (
+            ("ident", "stderr"), ("punct", "."), ("ident", "contains"),
+            ("punct", "("), ("string", "canonical route disposition: legacy"),
+            ("punct", ")"),
+        ),
+        (
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "assert_eq"), ("punct", "!"), ("punct", "("),
+            ("ident", "observed"), ("punct", "."), ("ident", "stdout"),
+            ("punct", ","), ("ident", "expected"),
+        ),
+        (
+            ("ident", "stdout"), ("punct", "."), ("ident", "contains"),
+            ("punct", "("), ("string", "No contracts to verify"), ("punct", ")"),
+        ),
+        (
+            ("ident", "stdout"), ("punct", "."), ("ident", "contains"),
+            ("punct", "("), ("string", "Proven"), ("punct", ")"),
+        ),
+        (
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "process"), ("punct", "::"), ("ident", "Command"),
+            ("punct", "::"), ("ident", "new"),
+            ("punct", "("), ("punct", "&"), ("ident", "binary"),
+            ("punct", ")"), ("punct", "."), ("ident", "output"),
+            ("punct", "("), ("punct", ")"),
+        ),
+        (
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "assert_eq"), ("punct", "!"), ("punct", "("),
+            ("ident", "native"), ("punct", "."), ("ident", "stdout"),
+            ("punct", ","), ("ident", "expected"),
+        ),
+        (
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "process"), ("punct", "::"), ("ident", "Command"),
+            ("punct", "::"), ("ident", "new"), ("punct", "("),
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "env"), ("punct", "!"), ("punct", "("),
+            ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+            ("punct", "."),
+            ("ident", "env"), ("punct", "("),
+            ("string", "MIMI_ROUTE_CENSUS"), ("punct", ","),
+            ("string", "1"), ("punct", ")"), ("punct", "."),
+            ("ident", "arg"), ("punct", "("), ("string", "disasm"),
+            ("punct", ")"), ("punct", "."), ("ident", "arg"),
+            ("punct", "("), ("punct", "&"), ("ident", "source"),
+            ("punct", ")"), ("punct", "."), ("ident", "output"),
+            ("punct", "("), ("punct", ")"),
+        ),
+        *tuple(
+            (
+                ("ident", "opcodes"), ("punct", "."), ("ident", "contains"),
+                ("punct", "("), ("string", opcode), ("punct", ")"),
+            )
+            for opcode in ("MIR_ACTOR_SPAWN", "MIR_ACTOR_CALL", "MIR_ACTOR_FIELD_STORE")
+        ),
+    )
+    return all(has(pattern) for pattern in required_patterns)
+
+
 def actor_fixture_test_contracts(root: Path) -> dict[str, dict[str, Any]]:
     """Bind each required Actor fixture to an active test's exact helper call."""
-    authority_path = "tests/real_world_cli.rs"
+    authority_path = ACTOR_HELPER_TEST_PATH
     authority_file = root / authority_path
     try:
         authority_bytes = authority_file.read_bytes()
@@ -1271,22 +2115,27 @@ def actor_fixture_test_contracts(root: Path) -> dict[str, dict[str, Any]]:
     except (OSError, UnicodeDecodeError):
         authority_text = ""
         authority_digest = None
-    bindings = (
-        (
-            ACTOR_FALLBACK_INPUTS[0],
-            "canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback",
-        ),
-        (
-            ACTOR_FALLBACK_INPUTS[1],
-            "canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback",
-        ),
+        authority_bytes = b""
+    helper_span = _rust_named_function_span(
+        authority_text, ACTOR_HELPER_NAME
+    )
+    helper_digest = (
+        sha256_bytes(authority_text[helper_span[0] : helper_span[1]].encode("utf-8"))
+        if helper_span is not None
+        else None
+    )
+    helper_valid = bool(
+        helper_span is not None
+        and helper_digest == ACTOR_HELPER_SHA256
+        and _actor_helper_has_required_contract(authority_text, helper_span)
     )
     contracts: dict[str, dict[str, Any]] = {}
-    for source_path, test_id in bindings:
+    for source_path in ACTOR_FALLBACK_INPUTS:
+        test_id = ACTOR_AUTHORITY_TEST_IDS[source_path]
         expected_stdout = ACTOR_EXPECTED_STDOUT[source_path]
         span = _rust_test_function_span(authority_text, test_id)
         assertion: dict[str, Any] | None = None
-        if span is not None and authority_digest is not None:
+        if span is not None and authority_digest is not None and helper_valid:
             function_start, function_end = span
             code_text = _mask_rust_comments_and_strings(authority_text)
             body_open = code_text.find("{", function_start, function_end)
@@ -1329,15 +2178,42 @@ def actor_fixture_test_contracts(root: Path) -> dict[str, dict[str, Any]]:
             ]
             if len(calls) == 1 and len(matching_calls) == 1:
                 matching_call = matching_calls[0]
-                line = authority_text.count("\n", 0, matching_call) + 1
-                assertion = {
-                    "path": authority_path,
-                    "line": line,
-                    "sha256": authority_digest,
-                }
+                opening = code_text.find("(", matching_call)
+                closing_end = (
+                    _find_rust_delimiter_end(code_text, opening, "(", ")")
+                    if opening >= 0
+                    else None
+                )
+                statement_end = closing_end
+                if statement_end is not None:
+                    while statement_end < body_end and code_text[statement_end].isspace():
+                        statement_end += 1
+                    if statement_end < body_end and code_text[statement_end] == ";":
+                        statement_end += 1
+                    else:
+                        statement_end = None
+                # Require the cited call to be the test's only direct body
+                # statement. This excludes unreachable calls after `return`,
+                # setup that could divert control, and calls merely nested in
+                # another item or expression.
+                if (
+                    statement_end is not None
+                    and not code_text[body_start:matching_call].strip()
+                    and not code_text[statement_end:body_end].strip()
+                ):
+                    line = authority_text.count("\n", 0, matching_call) + 1
+                    assertion = {
+                        "path": authority_path,
+                        "line": line,
+                        "sha256": authority_digest,
+                    }
         contracts[source_path] = {
             "test_id": test_id,
             "authority_valid": assertion is not None,
+            "helper_name": ACTOR_HELPER_NAME,
+            "helper_sha256": helper_digest,
+            "helper_sha256_expected": ACTOR_HELPER_SHA256,
+            "helper_valid": helper_valid,
             "authority": {
                 "test_id": test_id,
                 "assertion": assertion,
@@ -1347,8 +2223,359 @@ def actor_fixture_test_contracts(root: Path) -> dict[str, dict[str, Any]]:
     return contracts
 
 
-def _rust_string_literals(text: str) -> list[str]:
-    return [match.group(1) for match in re.finditer(r'"((?:\\.|[^"\\])*)"', text)]
+def _regular_file_sha256(path: Path) -> str | None:
+    try:
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        return sha256_file(path)
+    except OSError:
+        return None
+
+
+def _actor_test_pass_output(stdout: bytes, test_id: str) -> bool:
+    observed = re.findall(
+        rb"(?m)^test ([A-Za-z_][A-Za-z0-9_]*) \.\.\. (ok|FAILED|ignored)$",
+        stdout,
+    )
+    running = re.findall(rb"(?m)^running ([0-9]+) tests?$", stdout)
+    summaries = re.findall(
+        rb"(?m)^test result: ok\. 1 passed; 0 failed;[^\r\n]*$", stdout
+    )
+    return (
+        observed == [(test_id.encode("ascii"), b"ok")]
+        and running == [b"1"]
+        and len(summaries) == 1
+    )
+
+
+def _actor_test_execution_valid(
+    result: Any,
+    source_path: str,
+    source: Mapping[str, Any] | None,
+    contract: Mapping[str, Any] | None,
+    *,
+    root: Path,
+    logs_root: Path | None = None,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> bool:
+    """Validate one exact Cargo test result against its fixture and authority hashes."""
+    if source_path not in ACTOR_AUTHORITY_TEST_IDS or not isinstance(result, Mapping):
+        return False
+    test_id = ACTOR_AUTHORITY_TEST_IDS[source_path]
+    authority = contract.get("authority") if isinstance(contract, Mapping) else None
+    assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+    expected_fixture_hash = source.get("sha256") if isinstance(source, Mapping) else None
+    expected_test_hash = assertion.get("sha256") if isinstance(assertion, Mapping) else None
+    cargo_path = cargo_authority.get("cargo", {}).get("path") if isinstance(cargo_authority, Mapping) else None
+    expected_command = [
+        cargo_path, "test", "--test", "real_world_cli", test_id, "--", "--exact"
+    ]
+    stdout = _captured_bytes(result.get("stdout_raw"))
+    stderr = _captured_bytes(result.get("stderr_raw"))
+    if logs_root is not None and not all(
+        _raw_sidecar_matches(logs_root, result.get(key))
+        for key in ("stdout_raw", "stderr_raw")
+    ):
+        return False
+    return bool(
+        isinstance(source, Mapping)
+        and source.get("path") == source_path
+        and source.get("present") is True
+        and source.get("presence_kind") == "regular_file"
+        and _is_sha256(expected_fixture_hash)
+        and isinstance(contract, Mapping)
+        and contract.get("authority_valid") is True
+        and contract.get("helper_valid") is True
+        and contract.get("helper_sha256") == ACTOR_HELPER_SHA256
+        and result.get("helper_sha256_expected") == ACTOR_HELPER_SHA256
+        and result.get("helper_sha256_observed") == ACTOR_HELPER_SHA256
+        and contract.get("helper_name") == ACTOR_HELPER_NAME
+        and contract.get("helper_sha256") == ACTOR_HELPER_SHA256
+        and contract.get("helper_valid") is True
+        and isinstance(authority, Mapping)
+        and isinstance(assertion, Mapping)
+        and authority.get("test_id") == test_id
+        and assertion.get("path") == "tests/real_world_cli.rs"
+        and _is_sha256(expected_test_hash)
+        and result.get("path") == source_path
+        and result.get("test_id") == test_id
+        and result.get("authority_path") == "tests/real_world_cli.rs"
+        and result.get("command") == expected_command
+        and _cargo_execution_evidence_valid(
+            result.get("cargo_execution"), cargo_authority, root=root
+        )
+        and result.get("cwd") == str(root)
+        and result.get("run_status") == "completed"
+        and result.get("exit_code") == 0
+        and result.get("fixture_sha256_expected") == expected_fixture_hash
+        and result.get("fixture_sha256_before") == expected_fixture_hash
+        and result.get("fixture_sha256_after") == expected_fixture_hash
+        and result.get("test_source_sha256_expected") == expected_test_hash
+        and result.get("test_source_sha256_before") == expected_test_hash
+        and result.get("test_source_sha256_after") == expected_test_hash
+        and stdout is not None
+        and stderr is not None
+        and _actor_test_pass_output(stdout, test_id)
+    )
+
+
+def _run_actor_authority_tests(
+    root: Path,
+    logs_root: Path,
+    sources: Sequence[Mapping[str, Any]],
+    actor_contracts: Mapping[str, Mapping[str, Any]],
+    timeout: float,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run only the two named Actor tests and retain hash-bound raw logs."""
+    source_by_path = {str(source.get("path")): source for source in sources}
+    if cargo_authority is None:
+        cargo_authority = cargo_test_toolchain_authority(root)
+    authority_path = ACTOR_HELPER_TEST_PATH
+    authority_file = root / authority_path
+    results: list[dict[str, Any]] = []
+    for index, source_path in enumerate(ACTOR_FALLBACK_INPUTS, 1):
+        test_id = ACTOR_AUTHORITY_TEST_IDS[source_path]
+        source = source_by_path.get(source_path)
+        contract = actor_contracts.get(source_path, {})
+        fixture_file = root / source_path
+        fixture_before = _regular_file_sha256(fixture_file)
+        test_before = _regular_file_sha256(authority_file)
+        cargo_path = cargo_authority.get("cargo", {}).get("path")
+        command = [
+            cargo_path, "test", "--test", "real_world_cli", test_id, "--", "--exact"
+        ]
+        run_status = "completed"
+        exit_code: int | None
+        stdout = b""
+        stderr = b""
+        execution: dict[str, Any] | None = None
+        if not (root / "Cargo.toml").is_file():
+            run_status = "cargo_project_missing"
+            exit_code = None
+            stderr = b"Cargo.toml is absent; exact Actor integration tests were not run\n"
+        else:
+            execution = _run_cargo_authority_command(
+                command, root, timeout, cargo_authority
+            )
+            run_status = str(execution["run_status"])
+            exit_code = execution["exit_code"]
+            stdout = execution["stdout_bytes"]
+            stderr = execution["stderr_bytes"]
+        fixture_after = _regular_file_sha256(fixture_file)
+        test_after = _regular_file_sha256(authority_file)
+        stem = f"actor-test-{index:02d}"
+        stdout_raw = _write_raw_artifact(logs_root / f"{stem}.stdout.bin", stdout)
+        stderr_raw = _write_raw_artifact(logs_root / f"{stem}.stderr.bin", stderr)
+        authority = contract.get("authority") if isinstance(contract, Mapping) else None
+        assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+        result = {
+            "path": source_path,
+            "test_id": test_id,
+            "authority_path": authority_path,
+            "command": command,
+            "cargo_toolchain_identity_sha256": cargo_authority.get("identity_sha256"),
+            "cargo_execution": execution.get("cargo_execution") if execution is not None else None,
+            "cwd": str(root),
+            "environment_policy": "inherits only after rejecting compiler/cfg/target/runner overrides; collector pins RUSTC to its resolved absolute path",
+            "run_status": run_status,
+            "exit_code": exit_code,
+            "fixture_sha256_expected": source.get("sha256") if isinstance(source, Mapping) else None,
+            "fixture_sha256_before": fixture_before,
+            "fixture_sha256_after": fixture_after,
+            "test_source_sha256_expected": assertion.get("sha256") if isinstance(assertion, Mapping) else None,
+            "test_source_sha256_before": test_before,
+            "test_source_sha256_after": test_after,
+            "helper_sha256_expected": contract.get("helper_sha256_expected")
+            if isinstance(contract, Mapping)
+            else None,
+            "helper_sha256_observed": contract.get("helper_sha256")
+            if isinstance(contract, Mapping)
+            else None,
+            "stdout": _decode(stdout),
+            "stderr": _decode(stderr),
+            "stdout_raw": stdout_raw,
+            "stderr_raw": stderr_raw,
+        }
+        result["execution_valid"] = _actor_test_execution_valid(
+            result,
+            source_path,
+            source,
+            contract,
+            root=root,
+            logs_root=logs_root,
+            cargo_authority=cargo_authority,
+        )
+        results.append(result)
+    expected_pairs = {
+        (path, ACTOR_AUTHORITY_TEST_IDS[path]) for path in ACTOR_FALLBACK_INPUTS
+    }
+    observed_pairs = {
+        (str(result.get("path")), str(result.get("test_id"))) for result in results
+    }
+    passed = (
+        len(results) == len(ACTOR_FALLBACK_INPUTS)
+        and observed_pairs == expected_pairs
+        and all(result.get("execution_valid") is True for result in results)
+    )
+    return {
+        "status": "passed" if passed else "failed",
+        "required_tests": [
+            {"path": path, "test_id": ACTOR_AUTHORITY_TEST_IDS[path]}
+            for path in ACTOR_FALLBACK_INPUTS
+        ],
+        "command_template": [
+            "<cargo-absolute-path>", "test", "--test", "real_world_cli", "<exact-test-id>", "--", "--exact"
+        ],
+        "cases": results,
+    }
+
+
+def _rust_tokens(text: str, start: int = 0, end: int | None = None) -> list[tuple[str, str, int, int]]:
+    """Tokenize the small Rust surface used by authority contracts.
+
+    Comments disappear and string literals become indivisible tokens. This is
+    intentionally not a Rust parser: callers accept a narrow statement shape
+    and fail closed on syntax outside that shape.
+    """
+    stop = len(text) if end is None else end
+    tokens: list[tuple[str, str, int, int]] = []
+    index = start
+    paired_punctuation = {"::", "&&", "||", "->", "=>", "==", "!=", "<=", ">="}
+    while index < stop:
+        if text[index].isspace():
+            index += 1
+            continue
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2, stop)
+            index = stop if newline < 0 else newline + 1
+            continue
+        if text.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < stop and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            if depth:
+                return []
+            continue
+
+        raw_prefix = re.match(r'(?:br|cr|r)(#{0,})"', text[index:stop])
+        if raw_prefix:
+            terminator = '"' + raw_prefix.group(1)
+            content_start = index + len(raw_prefix.group(0))
+            closing = text.find(terminator, content_start, stop)
+            if closing < 0:
+                return []
+            token_end = closing + len(terminator)
+            tokens.append(("string", text[content_start:closing], index, token_end))
+            index = token_end
+            continue
+
+        if text[index] == '"':
+            literal_start = index
+            index += 1
+            value: list[str] = []
+            while index < stop:
+                if text[index] == "\\":
+                    if index + 1 >= stop:
+                        return []
+                    value.extend(text[index : index + 2])
+                    index += 2
+                elif text[index] == '"':
+                    index += 1
+                    break
+                else:
+                    value.append(text[index])
+                    index += 1
+            else:
+                return []
+            tokens.append(("string", "".join(value), literal_start, index))
+            continue
+
+        if text[index] == "'":
+            # Keep lifetimes as punctuation plus an identifier. Bounded char
+            # literals are one token so apostrophes cannot alter nesting.
+            cursor = index + 1
+            if cursor < stop and text[cursor] == "\\":
+                cursor += 2
+            elif cursor < stop and text[cursor] not in "\r\n'":
+                cursor += 1
+            if cursor < stop and text[cursor] == "'":
+                tokens.append(("char", text[index + 1 : cursor], index, cursor + 1))
+                index = cursor + 1
+                continue
+
+        if text[index].isalpha() or text[index] == "_":
+            token_start = index
+            index += 1
+            while index < stop and (text[index].isalnum() or text[index] == "_"):
+                index += 1
+            tokens.append(("ident", text[token_start:index], token_start, index))
+            continue
+
+        pair = text[index : index + 2]
+        if pair in paired_punctuation:
+            tokens.append(("punct", pair, index, index + 2))
+            index += 2
+        else:
+            tokens.append(("punct", text[index], index, index + 1))
+            index += 1
+    return tokens
+
+
+def _rust_top_level_statements(
+    text: str, start: int, end: int
+) -> list[list[tuple[str, str, int, int]]] | None:
+    tokens = _rust_tokens(text, start, end)
+    statements: list[list[tuple[str, str, int, int]]] = []
+    current: list[tuple[str, str, int, int]] = []
+    paren_depth = bracket_depth = 0
+    for token in tokens:
+        value = token[1]
+        if value in "{}":
+            # Nested blocks, closures and brace-form macros are outside the
+            # accepted authority shape, including an unreachable block.
+            return None
+        if value == "(":
+            paren_depth += 1
+        elif value == ")":
+            paren_depth -= 1
+            if paren_depth < 0:
+                return None
+        elif value == "[":
+            bracket_depth += 1
+        elif value == "]":
+            bracket_depth -= 1
+            if bracket_depth < 0:
+                return None
+        if value == ";" and paren_depth == 0 and bracket_depth == 0:
+            if not current:
+                return None
+            statements.append(current)
+            current = []
+        else:
+            current.append(token)
+    if current or paren_depth or bracket_depth:
+        return None
+    return statements
+
+
+def _token_pattern_matches(
+    tokens: Sequence[tuple[str, str, int, int]],
+    pattern: Sequence[tuple[str, str | None]],
+) -> bool:
+    return len(tokens) == len(pattern) and all(
+        token[0] == kind and (value is None or token[1] == value)
+        for token, (kind, value) in zip(tokens, pattern)
+    )
 
 
 def _expected_rejection_test_authority_is_valid(
@@ -1360,8 +2587,9 @@ def _expected_rejection_test_authority_is_valid(
     assertion_line: Any,
     expected_diagnostic_codes: Any,
     required_output_substrings: Any,
+    expected_route_reason: Any,
 ) -> bool:
-    """Require an active test to invoke the exact input's default build and assert its refusal."""
+    """Require a direct, unconditional test body for this exact default build."""
     if (
         not isinstance(test_id, str)
         or Path(source_path).suffix != ".mimi"
@@ -1372,110 +2600,289 @@ def _expected_rejection_test_authority_is_valid(
         or not expected_diagnostic_codes
         or not isinstance(required_output_substrings, list)
         or not required_output_substrings
+        or not isinstance(expected_route_reason, str)
+        or not expected_route_reason.strip()
     ):
         return False
     span = _rust_test_function_span(source_text, test_id)
     if span is None:
         return False
     function_start, function_end = span
-    function_text = source_text[function_start:function_end]
+    code_text = _mask_rust_comments_and_strings(source_text)
+    body_open = code_text.find("{", function_start, function_end)
+    if body_open < 0:
+        return False
+    body_start = body_open + 1
+    body_end = function_end - 1
+    statements = _rust_top_level_statements(source_text, body_start, body_end)
+    if statements is None or len(statements) < 5:
+        return False
 
-    source_parts = Path(source_path).parts
-    matching_fixture_variables: set[str] = set()
-    for variable_match in re.finditer(
-        r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);", function_text, re.S
-    ):
-        initializer = variable_match.group(2)
-        joined_parts = re.findall(
-            r"\.join\(\s*\"((?:\\.|[^\"\\])*)\"\s*\)", initializer
-        )
-        if any(
-            tuple(joined_parts[index : index + len(source_parts)]) == tuple(source_parts)
-            for index in range(max(0, len(joined_parts) - len(source_parts) + 1))
+    values = [[token[1] for token in statement] for statement in statements]
+    first = statements[0]
+    if len(values[0]) < 3 or values[0][0] != "let" or values[0][2] != "=":
+        return False
+    fixture_variable = values[0][1]
+    fixture_prefix = [
+        ("ident", "let"), ("ident", fixture_variable), ("punct", "="),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "path"), ("punct", "::"), ("ident", "Path"),
+        ("punct", "::"), ("ident", "new"), ("punct", "("),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "env"), ("punct", "!"), ("punct", "("),
+        ("string", "CARGO_MANIFEST_DIR"), ("punct", ")"), ("punct", ")"),
+    ]
+    if not _token_pattern_matches(first[:len(fixture_prefix)], fixture_prefix):
+        return False
+    joined_parts: list[str] = []
+    cursor = len(fixture_prefix)
+    while cursor < len(first):
+        if values[0][cursor : cursor + 3] != [".", "join", "("]:
+            return False
+        literal_index = cursor + 3
+        if (
+            literal_index + 1 >= len(first)
+            or first[literal_index][0] != "string"
+            or values[0][literal_index + 1] != ")"
         ):
-            matching_fixture_variables.add(variable_match.group(1))
-    if not matching_fixture_variables:
+            return False
+        joined_parts.append(values[0][literal_index])
+        cursor = literal_index + 2
+    if tuple(joined_parts) != tuple(Path(source_path).parts):
         return False
 
-    command_bindings: list[str] = []
-    for variable_match in re.finditer(
-        r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);", function_text, re.S
+    command_statement = statements[1]
+    if (
+        values[1][0:1] != ["let"]
+        or len(values[1]) < 3
+        or command_statement[1][0] != "ident"
+        or values[1][2] != "="
     ):
-        initializer = variable_match.group(2)
-        command_match = re.search(
-            r"Command::new\s*\(\s*mimi_bin\s*\(\s*\)\s*\)"
-            r"(?P<chain>[\s\S]*?)\.output\s*\(\s*\)",
-            initializer,
-        )
-        if command_match is None:
-            continue
-        chain = command_match.group("chain")
-        arguments = re.findall(
-            r"\.arg\(\s*(&?[A-Za-z_][A-Za-z0-9_]*|\"(?:\\.|[^\"\\])*\")\s*\)",
-            chain,
-        )
-        shared_argument = ['"--shared"'] if target_kind == "shared_library_probe" else []
-        for fixture_variable in matching_fixture_variables:
-            expected_prefix = ['"build"', *shared_argument, f"&{fixture_variable}", '"-o"']
-            if (
-                len(arguments) == len(expected_prefix) + 1
-                and arguments[:-1] == expected_prefix
-                and not arguments[-1].startswith("&")
-            ):
-                command_bindings.append(variable_match.group(1))
-    if not command_bindings:
+        return False
+    command_variable = values[1][1]
+    command_prefix = [
+        ("ident", "let"), ("ident", command_variable), ("punct", "="),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "process"), ("punct", "::"), ("ident", "Command"),
+        ("punct", "::"), ("ident", "new"), ("punct", "("),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "env"), ("punct", "!"), ("punct", "("),
+        ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+        ("punct", "."), ("ident", "current_dir"), ("punct", "("),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "env"), ("punct", "!"), ("punct", "("),
+        ("string", "CARGO_MANIFEST_DIR"), ("punct", ")"),
+        ("punct", ")"), ("punct", "."), ("ident", "arg"),
+        ("punct", "("), ("string", "build"), ("punct", ")"),
+    ]
+    if not _token_pattern_matches(command_statement[: len(command_prefix)], command_prefix):
+        return False
+    cursor = len(command_prefix)
+    if target_kind == "shared_library_probe":
+        shared_pattern = [
+            ("punct", "."), ("ident", "arg"), ("punct", "("),
+            ("string", "--shared"), ("punct", ")"),
+        ]
+        if not _token_pattern_matches(
+            command_statement[cursor : cursor + len(shared_pattern)], shared_pattern
+        ):
+            return False
+        cursor += len(shared_pattern)
+    command_suffix = [
+        ("punct", "."), ("ident", "arg"), ("punct", "("),
+        ("punct", "&"), ("ident", fixture_variable), ("punct", ")"),
+        ("punct", "."), ("ident", "arg"), ("punct", "("),
+        ("string", "-o"), ("punct", ")"),
+        ("punct", "."), ("ident", "arg"), ("punct", "("),
+        ("string", None), ("punct", ")"),
+        ("punct", "."), ("ident", "output"), ("punct", "("),
+        ("punct", ")"), ("punct", "."), ("ident", "expect"),
+        ("punct", "("), ("string", None), ("punct", ")"),
+    ]
+    if not _token_pattern_matches(command_statement[cursor:], command_suffix):
+        return False
+    if not command_statement[cursor + 14][1] or not command_statement[cursor + 23][1]:
         return False
 
-    expected_literals = [
+    status_pattern = [
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "assert"), ("punct", "!"), ("punct", "("),
+        ("punct", "!"), ("ident", command_variable), ("punct", "."),
+        ("ident", "status"), ("punct", "."), ("ident", "success"),
+        ("punct", "("), ("punct", ")"), ("punct", ")"),
+    ]
+    if not _token_pattern_matches(statements[2], status_pattern):
+        return False
+
+    if not _token_pattern_matches(
+        statements[3],
+        [
+            ("ident", "let"), ("ident", None), ("punct", "="),
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "string"), ("punct", "::"), ("ident", "String"),
+            ("punct", "::"), ("ident", "from_utf8_lossy"), ("punct", "("),
+            ("punct", "&"), ("ident", command_variable), ("punct", "."),
+            ("ident", "stderr"), ("punct", ")"),
+        ],
+    ):
+        return False
+    stderr_variable = values[3][1]
+
+    required_literals = {
         *[str(code).upper() for code in expected_diagnostic_codes],
         *[str(item) for item in required_output_substrings],
-    ]
-    for command_variable in command_bindings:
-        if not re.search(
-            rf"assert!\s*\(\s*!\s*{re.escape(command_variable)}\.status\.success\s*\(\s*\)",
-            function_text,
+    }
+    route_lines = {
+        f"default Canonical MIR route rejected: {expected_route_reason}",
+        f"canonical MIR build rejected: {expected_route_reason}",
+    }
+    asserted_literals: set[str] = set()
+    cited_line_is_diagnostic_assertion = False
+    for statement in statements[4:]:
+        tokens = statement
+        assert_prefix = [
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "assert"), ("punct", "!"), ("punct", "("),
+        ]
+        if len(tokens) < 11 or not _token_pattern_matches(
+            tokens[:len(assert_prefix)], assert_prefix
         ):
+            return False
+        if tokens[-1][1] != ")":
+            return False
+        cursor = len(assert_prefix)
+        statement_literals: set[str] = set()
+        while cursor < len(tokens) - 1:
+            contains_pattern = [
+                ("ident", stderr_variable), ("punct", "."),
+                ("ident", "contains"), ("punct", "("), ("string", None),
+            ]
+            if not _token_pattern_matches(tokens[cursor : cursor + 5], contains_pattern):
+                return False
+            if cursor + 5 >= len(tokens) - 1 or tokens[cursor + 5][1] != ")":
+                return False
+            literal = tokens[cursor + 4][1]
+            statement_literals.add(literal)
+            asserted_literals.add(literal)
+            cursor += 6
+            if cursor < len(tokens) - 1:
+                if tokens[cursor][1] != "&&":
+                    return False
+                cursor += 1
+        if not statement_literals:
+            return False
+        line_start = source_text.count("\n", 0, statement[0][2]) + 1
+        line_end = source_text.count("\n", 0, statement[-1][3]) + 1
+        if line_start <= assertion_line <= line_end:
+            cited_line_is_diagnostic_assertion = True
+
+    return bool(
+        required_literals.issubset(asserted_literals)
+        and route_lines.intersection(asserted_literals)
+        and cited_line_is_diagnostic_assertion
+    )
+
+
+def _cargo_metadata(
+    root: Path,
+    timeout: float = 120.0,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], Any]:
+    """Read Cargo's declared target graph without compiling project code."""
+    if cargo_authority is None:
+        cargo_authority = cargo_test_toolchain_authority(root)
+    cargo_path = cargo_authority.get("cargo", {}).get("path")
+    command = [cargo_path, "metadata", "--format-version", "1", "--no-deps"]
+    execution = _run_cargo_authority_command(
+        command, root, timeout, cargo_authority
+    )
+    run_status = execution["run_status"]
+    exit_code = execution["exit_code"]
+    stdout = execution["stdout_bytes"]
+    stderr = execution["stderr_bytes"]
+    result = {
+        "command": command,
+        "cwd": str(root),
+        "run_status": run_status,
+        "exit_code": exit_code,
+        "cargo_toolchain_identity_sha256": cargo_authority.get("identity_sha256"),
+        "cargo_execution": execution["cargo_execution"],
+        "stdout_raw": _raw_capture(stdout),
+        "stderr_raw": _raw_capture(stderr),
+    }
+    metadata: Any = None
+    if run_status == "completed" and exit_code == 0:
+        try:
+            metadata = json.loads(stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            metadata = None
+    return result, metadata
+
+
+def _cargo_test_target_for_source(
+    metadata: Any, root: Path, source_path: str
+) -> dict[str, Any] | None:
+    """Resolve a source only when Cargo declares it as an active test target."""
+    if not isinstance(metadata, Mapping):
+        return None
+    members = metadata.get("workspace_members")
+    packages = metadata.get("packages")
+    if not isinstance(members, list) or not isinstance(packages, list):
+        return None
+    try:
+        expected_source = (root / source_path).resolve(strict=True)
+        root_resolved = root.resolve(strict=True)
+        expected_source.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return None
+    matches: list[dict[str, Any]] = []
+    for package in packages:
+        if not isinstance(package, Mapping) or package.get("id") not in members:
             continue
-        stderr_binding = re.search(
-            rf"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*String::from_utf8_lossy\s*"
-            rf"\(\s*&{re.escape(command_variable)}\.stderr\s*\)",
-            function_text,
-        )
-        if stderr_binding is None:
+        manifest = package.get("manifest_path")
+        package_name = package.get("name")
+        package_id = package.get("id")
+        if not isinstance(manifest, str) or not isinstance(package_name, str) or not isinstance(package_id, str):
             continue
-        stderr_variable = stderr_binding.group(1)
-        diagnostic_assertions: list[tuple[int, int, str, set[str]]] = []
-        for assertion_match in re.finditer(r"\bassert!\s*\(", function_text):
-            open_index = assertion_match.end() - 1
-            assertion_end = _find_rust_delimiter_end(
-                function_text, open_index, "(", ")"
-            )
-            if assertion_end is None:
+        try:
+            manifest_path = Path(manifest).resolve(strict=True)
+            manifest_path.relative_to(root_resolved)
+        except (OSError, ValueError):
+            continue
+        targets = package.get("targets")
+        if not isinstance(targets, list):
+            continue
+        for target in targets:
+            if not isinstance(target, Mapping):
                 continue
-            assertion_text = function_text[assertion_match.start() : assertion_end]
-            if not re.search(
-                rf"\b{re.escape(stderr_variable)}\s*\.\s*contains\s*\(",
-                assertion_text,
+            kinds = target.get("kind")
+            target_name = target.get("name")
+            target_source = target.get("src_path")
+            if (
+                not isinstance(kinds, list)
+                or "test" not in kinds
+                or target.get("test") is not True
+                or not isinstance(target_name, str)
+                or not isinstance(target_source, str)
             ):
                 continue
-            literals = set(_rust_string_literals(assertion_text))
-            if any(literal in literals for literal in expected_literals):
-                start_line = source_text.count("\n", 0, function_start + assertion_match.start()) + 1
-                end_line = source_text.count("\n", 0, function_start + assertion_end) + 1
-                diagnostic_assertions.append((start_line, end_line, assertion_text, literals))
-
-        asserted_literals = {
-            literal
-            for _start, _end, _assertion, literals in diagnostic_assertions
-            for literal in literals
-        }
-        if not set(expected_literals).issubset(asserted_literals):
-            continue
-        if not any(start <= assertion_line <= end for start, end, _assertion, _literals in diagnostic_assertions):
-            continue
-        return True
-    return False
-
+            try:
+                actual_source = Path(target_source).resolve(strict=True)
+            except OSError:
+                continue
+            if actual_source == expected_source:
+                matches.append(
+                    {
+                        "package_id": package_id,
+                        "package_name": package_name,
+                        "manifest_path": str(manifest_path),
+                        "target_name": target_name,
+                        "target_kind": list(kinds),
+                        "src_path": str(actual_source),
+                        "test": True,
+                    }
+                )
+    return matches[0] if len(matches) == 1 else None
 
 def _repository_relative_path(value: Any, *, label: str) -> str:
     if not isinstance(value, str) or not value:
@@ -1593,6 +3000,32 @@ def load_expectations(path: Path | None, root: Path) -> tuple[dict[str, Any], di
                 )
             expectation["expected_exit_code"] = expected_exit_code
         if expectation_class == "expected_build_rejection":
+            expected_route_disposition = value.get("expected_route_disposition")
+            if expected_route_disposition != "rejected":
+                raise ValueError(
+                    f"expectation {key!r} must declare expected_route_disposition: 'rejected'"
+                )
+            expected_route_status = value.get("expected_route_classification_status")
+            if expected_route_status != "observed":
+                raise ValueError(
+                    f"expectation {key!r} must declare observed expected_route_classification_status"
+                )
+            expected_route_reason = value.get("expected_route_reason")
+            if (
+                not isinstance(expected_route_reason, str)
+                or not expected_route_reason.strip()
+                or expected_route_reason != expected_route_reason.strip()
+                or "\n" in expected_route_reason
+                or "\r" in expected_route_reason
+            ):
+                raise ValueError(
+                    f"expectation {key!r} must include a trimmed single-line expected_route_reason"
+                )
+            expected_failure_class = value.get("expected_failure_class")
+            if expected_failure_class not in {"capability", "library_target"}:
+                raise ValueError(
+                    f"expectation {key!r} must declare a recognized expected_failure_class"
+                )
             diagnostic_codes = value.get("expected_diagnostic_codes")
             if (
                 not isinstance(diagnostic_codes, list)
@@ -1620,6 +3053,10 @@ def load_expectations(path: Path | None, root: Path) -> tuple[dict[str, Any], di
                 )
             expectation["expected_diagnostic_codes"] = sorted(normalized_codes)
             expectation["required_output_substrings"] = required_substrings
+            expectation["expected_route_disposition"] = expected_route_disposition
+            expectation["expected_route_classification_status"] = expected_route_status
+            expectation["expected_route_reason"] = expected_route_reason
+            expectation["expected_failure_class"] = expected_failure_class
         expectations[normalized] = expectation
     return expectations, {"path": str(path.resolve()), "sha256": sha256_bytes(raw), "bytes": len(raw)}
 
@@ -1661,9 +3098,17 @@ def bind_expectations_to_inventory(
             continue
 
         item = dict(declared)
+        item["path"] = name
         item["authority_status"] = "not_applicable"
         item["authority_valid"] = False
         item["test_execution_valid"] = None
+        if item.get("class") == "expected_build_rejection":
+            item["test_contract_valid"] = False
+            item["source_authority_valid"] = False
+            item["cargo_target_valid"] = False
+            item["cargo_test_target"] = None
+            item["test_execution_valid"] = False
+            item["test_execution_proof"] = None
         if item.get("class") == "unmapped":
             input_hash_matches = None
             item["source_hash_status"] = "not_applicable"
@@ -1697,7 +3142,7 @@ def bind_expectations_to_inventory(
                         and assertion_line_valid
                     )
                     if item.get("class") == "expected_build_rejection":
-                        item["test_execution_valid"] = (
+                        item["test_contract_valid"] = (
                             base_authority_valid
                             and _expected_rejection_test_authority_is_valid(
                                 test_id=authority.get("test_id"),
@@ -1711,7 +3156,14 @@ def bind_expectations_to_inventory(
                                 required_output_substrings=item.get(
                                     "required_output_substrings"
                                 ),
+                                expected_route_reason=item.get(
+                                    "expected_route_reason"
+                                ),
                             )
+                        )
+                        item["test_execution_valid"] = False
+                        item["source_authority_valid"] = bool(
+                            base_authority_valid and item["test_contract_valid"]
                         )
                     regular_source_file = assertion_file.is_file() and not assertion_file.is_symlink()
                 except (OSError, UnicodeDecodeError, ValueError, TypeError):
@@ -1720,30 +3172,27 @@ def bind_expectations_to_inventory(
                     assertion_line_valid = False
                     regular_source_file = False
                     if item.get("class") == "expected_build_rejection":
+                        item["test_contract_valid"] = False
                         item["test_execution_valid"] = False
+                        item["source_authority_valid"] = False
                 authority_valid = (
-                    regular_source_file
-                    and assertion_hash_matches
-                    and test_id_present
-                    and assertion_line_valid
-                    and (
-                        item.get("class") != "expected_build_rejection"
-                        or item.get("test_execution_valid") is True
+                    False
+                    if item.get("class") == "expected_build_rejection"
+                    else (
+                        regular_source_file
+                        and assertion_hash_matches
+                        and test_id_present
+                        and assertion_line_valid
                     )
                 )
                 item["authority_status"] = (
-                    "valid"
-                    if authority_valid
+                    "requires_cargo_target_and_execution"
+                    if item.get("class") == "expected_build_rejection"
+                    and item.get("source_authority_valid") is True
                     else (
                         "rejection_test_contract_mismatch"
-                        if (
-                            item.get("class") == "expected_build_rejection"
-                            and regular_source_file
-                            and assertion_hash_matches
-                            and test_id_present
-                            and assertion_line_valid
-                        )
-                        else "source_location_or_hash_mismatch"
+                        if item.get("class") == "expected_build_rejection"
+                        else ("valid" if authority_valid else "source_location_or_hash_mismatch")
                     )
                 )
                 item["authority_valid"] = authority_valid
@@ -2435,11 +3884,16 @@ def _expectation_result(
     valid_evidence = (
         expectation_class == "unmapped"
         or (
-            expectation.get("source_hash_status") == "matched"
+            expectation.get("explicit") is True
+            and expectation.get("source_hash_status") == "matched"
             and expectation.get("authority_valid") is True
             and (
                 expectation_class != "expected_build_rejection"
-                or expectation.get("test_execution_valid") is True
+                or (
+                    expectation.get("test_execution_valid") is True
+                    and isinstance(expectation.get("test_execution_proof"), Mapping)
+                    and expectation["test_execution_proof"].get("status") == "passed"
+                )
             )
         )
     )
@@ -2449,13 +3903,22 @@ def _expectation_result(
     outcome_match = False
     expected_outcome: dict[str, Any]
     diagnostic_contract: dict[str, Any] | None = None
+    route_contract: dict[str, Any] | None = None
     executable_contract: dict[str, Any] | None = None
     if expectation_class == "required_compile":
-        expected_outcome = {"build": "completed", "exit_code": 0, "route": "canonical"}
+        expected_outcome = {
+            "build": "completed",
+            "exit_code": 0,
+            "route": {
+                "disposition": "canonical",
+                "classification_status": "observed",
+            },
+        }
         outcome_match = (
             run_status == "completed"
             and exit_code == 0
             and route.get("disposition") == "canonical"
+            and route.get("classification_status") == "observed"
         )
         expected_executable_stdout = expectation.get("expected_executable_stdout")
         if expected_executable_stdout is not None:
@@ -2514,6 +3977,44 @@ def _expectation_result(
             and all(isinstance(item, str) and item for item in raw_substrings)
         )
         required_substrings = raw_substrings if substrings_valid else []
+        expected_route_disposition = expectation.get("expected_route_disposition")
+        expected_route_status = expectation.get("expected_route_classification_status")
+        expected_route_reason = expectation.get("expected_route_reason")
+        expected_failure_class = expectation.get("expected_failure_class")
+        route_contract_valid = (
+            expected_route_disposition == "rejected"
+            and expected_route_status == "observed"
+            and isinstance(expected_route_reason, str)
+            and bool(expected_route_reason.strip())
+            and expected_failure_class in {"capability", "library_target"}
+        )
+        route_contract = {
+            "valid": route_contract_valid,
+            "expected_disposition": expected_route_disposition,
+            "actual_disposition": route.get("disposition"),
+            "disposition_matches": (
+                route_contract_valid
+                and route.get("disposition") == expected_route_disposition
+            ),
+            "expected_classification_status": expected_route_status,
+            "actual_classification_status": route.get("classification_status"),
+            "classification_status_matches": (
+                route_contract_valid
+                and route.get("classification_status") == expected_route_status
+            ),
+            "expected_reason": expected_route_reason,
+            "actual_reason": route.get("reason"),
+            "reason_matches_exactly": (
+                route_contract_valid
+                and route.get("reason") == expected_route_reason
+            ),
+            "expected_failure_class": expected_failure_class,
+            "actual_failure_class": failure.get("class"),
+            "failure_class_matches": (
+                route_contract_valid
+                and failure.get("class") == expected_failure_class
+            ),
+        }
         missing_substrings = [
             item for item in required_substrings if item not in diagnostic_output
         ]
@@ -2536,7 +4037,12 @@ def _expectation_result(
         expected_outcome = {
             "build": "completed",
             "exit_code": expected_code,
-            "route": "rejected",
+            "route": {
+                "disposition": expected_route_disposition,
+                "classification_status": expected_route_status,
+                "reason": expected_route_reason,
+            },
+            "failure_class": expected_failure_class,
             "diagnostic_contract": diagnostic_contract,
             "output_artifact": "absent",
         }
@@ -2544,7 +4050,12 @@ def _expectation_result(
             run_status == "completed"
             and expected_exit_code_valid
             and exit_code == expected_code
-            and route.get("disposition") == "rejected"
+            and route_contract_valid
+            and route.get("disposition") == expected_route_disposition
+            and route.get("classification_status") == expected_route_status
+            and route.get("reason") == expected_route_reason
+            and failure.get("class") == expected_failure_class
+            and failure.get("status") == "classified"
             and diagnostic_codes_match
             and required_substrings_match
             and no_output_artifact
@@ -2600,13 +4111,22 @@ def _expectation_result(
         "authority": expectation.get("authority"),
         "authority_status": expectation.get("authority_status"),
         "authority_valid": expectation.get("authority_valid"),
+        "test_contract_valid": expectation.get("test_contract_valid"),
+        "cargo_target_valid": expectation.get("cargo_target_valid"),
+        "cargo_test_target": expectation.get("cargo_test_target"),
         "test_execution_valid": expectation.get("test_execution_valid"),
+        "test_execution_proof": expectation.get("test_execution_proof"),
+        "path": source_path,
         "run_status": run_status,
         "actual_exit_code": exit_code,
         "actual_route": route.get("disposition"),
+        "actual_route_classification_status": route.get("classification_status"),
+        "actual_route_reason": route.get("reason"),
         "actual_failure_class": failure.get("class"),
+        "actual_failure_reason": failure.get("reason"),
         "actual_diagnostic_codes": actual_diagnostic_codes,
         "diagnostic_contract": diagnostic_contract,
+        "route_contract": route_contract,
         "executable_contract": executable_contract,
         "actual_output_artifact_present": output_artifact is not None,
         "outcome_matches": outcome_match,
@@ -2619,15 +4139,29 @@ def _actor_fallback_evidence(
     manifest: Sequence[Mapping[str, Any]],
     records: Sequence[Mapping[str, Any]],
     actor_contracts: Mapping[str, Mapping[str, Any]] | None = None,
+    actor_test_execution: Mapping[str, Any] | None = None,
+    root: Path = ROOT,
+    cargo_authority: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     by_path = {str(record.get("path")): record for record in records}
     manifest_by_path = {str(record.get("path")): record for record in manifest}
     manifest_paths = set(manifest_by_path)
+    execution_cases = (
+        actor_test_execution.get("cases", [])
+        if isinstance(actor_test_execution, Mapping)
+        else []
+    )
+    execution_by_path = {
+        str(item.get("path")): item
+        for item in execution_cases
+        if isinstance(item, Mapping)
+    }
     cases: list[dict[str, Any]] = []
     for path in ACTOR_FALLBACK_INPUTS:
         record = by_path.get(path)
         source = manifest_by_path.get(path)
         contract = (actor_contracts or {}).get(path, {})
+        rust_test_execution = execution_by_path.get(path)
         executable_run = record.get("native_executable_run") if record else None
         expected_stdout = contract.get("expected_stdout") or _raw_capture(
             ACTOR_EXPECTED_STDOUT[path]
@@ -2661,6 +4195,23 @@ def _actor_fallback_evidence(
             "native_executable_run": executable_run,
             "native_test_authority": contract.get("authority"),
             "native_test_authority_valid": contract.get("authority_valid") is True,
+            "native_test_helper_name": contract.get("helper_name"),
+            "native_test_helper_sha256": contract.get("helper_sha256"),
+            "native_test_helper_sha256_expected": contract.get("helper_sha256_expected"),
+            "native_test_helper_valid": contract.get("helper_valid") is True,
+            "rust_test_execution": rust_test_execution,
+            "rust_test_execution_valid": (
+                _actor_test_execution_valid(
+                    rust_test_execution,
+                    path,
+                    source,
+                    contract,
+                    root=root,
+                    cargo_authority=cargo_authority,
+                )
+                if rust_test_execution is not None
+                else False
+            ),
             "expected_native_stdout": expected_stdout,
             "native_stdout_matches_exactly": native_stdout_matches,
             "native_exit_code_matches": native_exit_matches,
@@ -2691,6 +4242,7 @@ def _actor_fallback_evidence(
     return {
         "required_cases": list(ACTOR_FALLBACK_INPUTS),
         "cases": cases,
+        "rust_test_execution": actor_test_execution,
         "missing_cases": missing,
         "source": "B-01/A-05 explicitly retain both former nested capture/shadow compatibility cases in the route denominator",
     }
@@ -2899,30 +4451,573 @@ def _raw_sidecar_matches(logs_root: Path | None, capture: Any) -> bool:
         or not name
         or Path(name).is_absolute()
         or Path(name).name != name
+        or Path(name).suffix != ".bin"
         or expected is None
     ):
         return False
-    path = logs_root / name
+
+    # The artifact directory is itself part of the trust boundary. Reject a
+    # symlink at any component instead of allowing a caller-provided artifact
+    # root to redirect the evidence check outside its permitted location.
+    root_path = Path(os.path.abspath(logs_root))
+    cursor = Path(root_path.anchor)
     try:
-        before = path.lstat()
-        if not stat.S_ISREG(before.st_mode):
+        for component in root_path.parts[1:]:
+            cursor /= component
+            metadata = cursor.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                return False
+        root_metadata = root_path.lstat()
+        if not stat.S_ISDIR(root_metadata.st_mode):
             return False
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
+
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            return False
+        root_descriptor = os.open(root_path, directory_flags | nofollow)
         try:
-            opened = os.fstat(descriptor)
+            opened_root = os.fstat(root_descriptor)
             if (
-                not stat.S_ISREG(opened.st_mode)
-                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                not stat.S_ISDIR(opened_root.st_mode)
+                or (opened_root.st_dev, opened_root.st_ino)
+                != (root_metadata.st_dev, root_metadata.st_ino)
             ):
                 return False
-            with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                actual = stream.read()
+
+            path = root_path / name
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                return False
+            descriptor = os.open(name, os.O_RDONLY | nofollow, dir_fd=root_descriptor)
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                ):
+                    return False
+                with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                    actual = stream.read()
+            finally:
+                os.close(descriptor)
         finally:
-            os.close(descriptor)
+            os.close(root_descriptor)
     except OSError:
         return False
     return actual == expected
+
+
+def _cargo_exact_test_output(stdout: bytes, test_id: str) -> bool:
+    return _actor_test_pass_output(stdout, test_id)
+
+
+def _run_cargo_authority_command(
+    command: list[str],
+    root: Path,
+    timeout: float,
+    cargo_authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    cargo_identity = cargo_authority.get("cargo", {})
+    rustc_identity = cargo_authority.get("rustc", {})
+    cargo_before = _executable_observation(cargo_identity.get("path"))
+    rustc_before = _executable_observation(rustc_identity.get("path"))
+    rustup_identity = cargo_authority.get("rustup", {})
+    rustup_before = _executable_observation(rustup_identity.get("path"))
+    rustup_toolchain_expected = cargo_authority.get("rustup_toolchain", {})
+    current_authority_before = cargo_test_toolchain_authority(
+        root,
+        probe_active_toolchain=False,
+        expected_active_toolchain=rustup_toolchain_expected,
+    )
+    rustup_toolchain_before = current_authority_before.get("rustup_toolchain", {})
+    run_status = "completed"
+    exit_code: int | None
+    stdout = b""
+    stderr = b""
+    authority_before_valid = (
+        bool(command)
+        and command[0] == cargo_identity.get("path")
+        and _cargo_toolchain_identity_valid(
+            cargo_authority,
+            root=root,
+            require_current_environment=True,
+            current_authority=current_authority_before,
+        )
+        and cargo_before == {
+            "path": cargo_identity.get("path"),
+            "resolved_path": cargo_identity.get("resolved_path"),
+            "sha256": cargo_identity.get("sha256"),
+        }
+        and rustc_before == {
+            "path": rustc_identity.get("path"),
+            "resolved_path": rustc_identity.get("resolved_path"),
+            "sha256": rustc_identity.get("sha256"),
+        }
+        and rustup_before == {
+            "path": rustup_identity.get("path"),
+            "resolved_path": rustup_identity.get("resolved_path"),
+            "sha256": rustup_identity.get("sha256"),
+        }
+    )
+    if not authority_before_valid:
+        run_status = "cargo_toolchain_authority_invalid_before_run"
+        exit_code = None
+        stderr = b"Cargo/rustc identity, environment, or Cargo config failed the frozen authority policy\n"
+    else:
+        child_environment = os.environ.copy()
+        # Cargo always invokes the already-identified compiler. An inherited
+        # RUSTC/RUSTC_WRAPPER/target runner is rejected before reaching here.
+        child_environment["RUSTC"] = str(rustc_identity["path"])
+        child_environment.pop("RUSTC_WRAPPER", None)
+        child_environment.pop("RUSTC_WORKSPACE_WRAPPER", None)
+        child_environment.pop("RUSTFLAGS", None)
+        child_environment.pop("CARGO_ENCODED_RUSTFLAGS", None)
+        for name in list(child_environment):
+            if re.fullmatch(r"CARGO_TARGET_.+_(?:RUNNER|LINKER|RUSTFLAGS)", name):
+                child_environment.pop(name, None)
+        try:
+            process = subprocess.run(
+                command,
+                cwd=root,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                env=child_environment,
+            )
+            exit_code = process.returncode
+            stdout = process.stdout or b""
+            stderr = process.stderr or b""
+        except subprocess.TimeoutExpired as error:
+            run_status = "timeout"
+            exit_code = None
+            stdout = error.output or b""
+            stderr = error.stderr or b""
+        except OSError as error:
+            run_status = "spawn_error"
+            exit_code = None
+            stderr = str(error).encode("utf-8", errors="replace")
+    cargo_after = _executable_observation(cargo_identity.get("path"))
+    rustc_after = _executable_observation(rustc_identity.get("path"))
+    rustup_after = _executable_observation(rustup_identity.get("path"))
+    current_authority_after = cargo_test_toolchain_authority(
+        root,
+        probe_active_toolchain=False,
+        expected_active_toolchain=rustup_toolchain_expected,
+    )
+    rustup_toolchain_after = current_authority_after.get("rustup_toolchain", {})
+    authority_after_valid = _cargo_toolchain_identity_valid(
+        cargo_authority,
+        root=root,
+        require_current_environment=True,
+        current_authority=current_authority_after,
+    )
+    stable = bool(
+        authority_before_valid
+        and authority_after_valid
+        and cargo_after == cargo_before
+        and rustc_after == rustc_before
+        and rustup_after == rustup_before
+        and rustup_toolchain_before == rustup_toolchain_expected
+        and rustup_toolchain_after == rustup_toolchain_expected
+    )
+    cargo_execution = _cargo_execution_evidence(
+        cargo_authority,
+        cargo_before,
+        rustc_before,
+        cargo_after,
+        rustc_after,
+        stable=stable,
+        rustup_before=rustup_before,
+        rustup_after=rustup_after,
+        rustup_toolchain_before=rustup_toolchain_before,
+        rustup_toolchain_after=rustup_toolchain_after,
+    )
+    return {
+        "command": command,
+        "command_sha256": sha256_bytes(
+            json.dumps(command, separators=(",", ":")).encode("utf-8")
+        ),
+        "cwd": str(root),
+        "run_status": run_status,
+        "exit_code": exit_code,
+        "stdout_bytes": stdout,
+        "stderr_bytes": stderr,
+        "cargo_execution": cargo_execution,
+    }
+
+
+def _authority_command_record(
+    result: Mapping[str, Any], logs_root: Path, stem: str
+) -> dict[str, Any]:
+    stdout = result.get("stdout_bytes")
+    stderr = result.get("stderr_bytes")
+    stdout_bytes = stdout if isinstance(stdout, bytes) else b""
+    stderr_bytes = stderr if isinstance(stderr, bytes) else b""
+    return {
+        "command": list(result.get("command", [])),
+        "command_sha256": result.get("command_sha256"),
+        "cargo_execution": result.get("cargo_execution"),
+        "cwd": result.get("cwd"),
+        "run_status": result.get("run_status"),
+        "exit_code": result.get("exit_code"),
+        "stdout_raw": _write_raw_artifact(
+            logs_root / f"{stem}.stdout.bin", stdout_bytes
+        ),
+        "stderr_raw": _write_raw_artifact(
+            logs_root / f"{stem}.stderr.bin", stderr_bytes
+        ),
+    }
+
+
+def _expected_rejection_execution_proof_is_valid(
+    expectation: Mapping[str, Any],
+    *,
+    root: Path,
+    logs_root: Path | None,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> bool:
+    """Recheck captured Cargo target, compile, exact test and source evidence."""
+    proof = expectation.get("test_execution_proof")
+    authority = expectation.get("authority")
+    assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+    target = proof.get("cargo_test_target") if isinstance(proof, Mapping) else None
+    metadata_evidence = proof.get("cargo_metadata") if isinstance(proof, Mapping) else None
+    build = proof.get("target_build") if isinstance(proof, Mapping) else None
+    run = proof.get("exact_test_run") if isinstance(proof, Mapping) else None
+    if not all(
+        isinstance(value, Mapping)
+        for value in (assertion, target, metadata_evidence, build, run)
+    ):
+        return False
+    test_id = authority.get("test_id")
+    authority_path = assertion.get("path")
+    expected_authority_hash = assertion.get("sha256")
+    fixture_path = expectation.get("path")
+    expected_fixture_hash = expectation.get("source_sha256")
+    if (
+        not isinstance(test_id, str)
+        or not isinstance(authority_path, str)
+        or not isinstance(fixture_path, str)
+        or not _is_sha256(expected_authority_hash)
+        or not _is_sha256(expected_fixture_hash)
+        or proof.get("status") not in {"pending", "passed"}
+        or proof.get("test_id") != test_id
+        or proof.get("authority_path") != authority_path
+        or proof.get("fixture_path") != fixture_path
+        or proof.get("cargo_toolchain_identity_sha256")
+        != (cargo_authority.get("identity_sha256") if isinstance(cargo_authority, Mapping) else None)
+    ):
+        return False
+
+    metadata_stdout = _captured_bytes(metadata_evidence.get("stdout_raw"))
+    metadata_stderr = _captured_bytes(metadata_evidence.get("stderr_raw"))
+    cargo_path = (
+        cargo_authority.get("cargo", {}).get("path")
+        if isinstance(cargo_authority, Mapping)
+        else None
+    )
+    metadata_command = [cargo_path, "metadata", "--format-version", "1", "--no-deps"]
+    if (
+        metadata_evidence.get("command") != metadata_command
+        or not _cargo_execution_evidence_valid(
+            metadata_evidence.get("cargo_execution"), cargo_authority, root=root
+        )
+        or metadata_evidence.get("cwd") != str(root)
+        or metadata_evidence.get("run_status") != "completed"
+        or metadata_evidence.get("exit_code") != 0
+        or metadata_stdout is None
+        or metadata_stderr is None
+    ):
+        return False
+    try:
+        metadata = json.loads(metadata_stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    selected_target = _cargo_test_target_for_source(metadata, root, authority_path)
+    if selected_target is None or dict(target) != selected_target:
+        return False
+
+    manifest_path = str(target.get("manifest_path"))
+    target_name = str(target.get("target_name"))
+    expected_build_command = [
+        cargo_path, "test", "--manifest-path", manifest_path,
+        "--test", target_name, "--no-run",
+    ]
+    expected_run_command = [
+        cargo_path, "test", "--manifest-path", manifest_path,
+        "--test", target_name, test_id, "--", "--exact", "--nocapture",
+    ]
+    if (
+        build.get("command") != expected_build_command
+        or run.get("command") != expected_run_command
+        or build.get("cwd") != str(root)
+        or run.get("cwd") != str(root)
+        or build.get("run_status") != "completed"
+        or build.get("exit_code") != 0
+        or run.get("run_status") != "completed"
+        or run.get("exit_code") != 0
+    ):
+        return False
+
+    for command_record in (build, run):
+        command = command_record.get("command")
+        expected_command_hash = (
+            sha256_bytes(json.dumps(command, separators=(",", ":")).encode("utf-8"))
+            if isinstance(command, list)
+            else None
+        )
+        if (
+            command_record.get("command_sha256") != expected_command_hash
+            or not _cargo_execution_evidence_valid(
+                command_record.get("cargo_execution"), cargo_authority, root=root
+            )
+            or _captured_bytes(command_record.get("stdout_raw")) is None
+            or _captured_bytes(command_record.get("stderr_raw")) is None
+            or not _raw_sidecar_matches(logs_root, command_record.get("stdout_raw"))
+            or not _raw_sidecar_matches(logs_root, command_record.get("stderr_raw"))
+        ):
+            return False
+    if not _cargo_exact_test_output(
+        _captured_bytes(run.get("stdout_raw")) or b"", test_id
+    ):
+        return False
+
+    authority_hashes = proof.get("authority_source_hashes")
+    fixture_hashes = proof.get("fixture_source_hashes")
+    return bool(
+        isinstance(authority_hashes, Mapping)
+        and authority_hashes.get("expected") == expected_authority_hash
+        and authority_hashes.get("before_build") == expected_authority_hash
+        and authority_hashes.get("after_build") == expected_authority_hash
+        and authority_hashes.get("before_test") == expected_authority_hash
+        and authority_hashes.get("after_test") == expected_authority_hash
+        and isinstance(fixture_hashes, Mapping)
+        and fixture_hashes.get("path") == fixture_path
+        and fixture_hashes.get("expected") == expected_fixture_hash
+        and fixture_hashes.get("before_build") == expected_fixture_hash
+        and fixture_hashes.get("after_build") == expected_fixture_hash
+        and fixture_hashes.get("before_test") == expected_fixture_hash
+        and fixture_hashes.get("after_test") == expected_fixture_hash
+    )
+
+
+def _run_expected_rejection_authority_tests(
+    root: Path,
+    logs_root: Path,
+    sources: Sequence[Mapping[str, Any]],
+    expectations: Mapping[str, dict[str, Any]],
+    timeout: float,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build each Cargo test target once, then run each exact test ID serially."""
+    source_by_path = {str(source.get("path")): source for source in sources}
+    rejection_items = {
+        path: item
+        for path, item in expectations.items()
+        if isinstance(item, dict) and item.get("class") == "expected_build_rejection"
+    }
+    if not rejection_items:
+        return {"status": "not_required", "cargo_metadata": None, "targets": [], "tests": []}
+
+    if cargo_authority is None:
+        cargo_authority = cargo_test_toolchain_authority(root)
+    metadata_result, metadata_document = _cargo_metadata(root, timeout, cargo_authority)
+    metadata_record = {
+        "command": metadata_result["command"],
+        "cargo_toolchain_identity_sha256": metadata_result["cargo_toolchain_identity_sha256"],
+        "cargo_execution": metadata_result["cargo_execution"],
+        "cwd": metadata_result["cwd"],
+        "run_status": metadata_result["run_status"],
+        "exit_code": metadata_result["exit_code"],
+        "stdout_raw": metadata_result["stdout_raw"],
+        "stderr_raw": metadata_result["stderr_raw"],
+    }
+    groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    rejected: list[str] = []
+    for path, item in sorted(rejection_items.items()):
+        item["cargo_metadata"] = metadata_record
+        item["cargo_target_valid"] = False
+        item["cargo_test_target"] = None
+        item["authority_valid"] = False
+        item["test_execution_valid"] = False
+        source = source_by_path.get(path)
+        authority = item.get("authority")
+        assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+        if (
+            source is None
+            or item.get("source_authority_valid") is not True
+            or not isinstance(authority, Mapping)
+            or not isinstance(assertion, Mapping)
+            or metadata_result.get("run_status") != "completed"
+            or metadata_result.get("exit_code") != 0
+        ):
+            item["authority_status"] = "cargo_target_or_source_contract_unproven"
+            rejected.append(path)
+            continue
+        test_id = authority.get("test_id")
+        authority_path = assertion.get("path")
+        target = _cargo_test_target_for_source(metadata_document, root, str(authority_path))
+        if not isinstance(test_id, str) or target is None:
+            item["authority_status"] = "not_a_cargo_test_target"
+            rejected.append(path)
+            continue
+        item["cargo_test_target"] = target
+        item["cargo_target_valid"] = True
+        item["authority_status"] = "valid_cargo_test_target"
+        key = (str(target["manifest_path"]), str(target["target_name"]), str(target["package_id"]))
+        groups.setdefault(key, []).append((path, item, target))
+
+    target_reports: list[dict[str, Any]] = []
+    test_reports: list[dict[str, Any]] = []
+    for target_index, (key, entries) in enumerate(sorted(groups.items()), 1):
+        manifest_path, target_name, _package_id = key
+        fixture_before = {
+            path: _regular_file_sha256(root / path) for path, _item, _target in entries
+        }
+        assertion_paths = {
+            str(item["authority"]["assertion"]["path"])
+            for _path, item, _target in entries
+        }
+        authority_before = {
+            path: _regular_file_sha256(root / path) for path in assertion_paths
+        }
+        build_command = [
+            str(cargo_authority.get("cargo", {}).get("path")), "test", "--manifest-path", manifest_path,
+            "--test", target_name, "--no-run",
+        ]
+        build_result = _run_cargo_authority_command(
+            build_command, root, timeout, cargo_authority
+        )
+        fixture_after_build = {
+            path: _regular_file_sha256(root / path) for path, _item, _target in entries
+        }
+        authority_after_build = {
+            path: _regular_file_sha256(root / path) for path in assertion_paths
+        }
+        target_stem = sha256_bytes("\0".join(key).encode("utf-8"))[:12]
+        build_record = _authority_command_record(
+            build_result, logs_root,
+            f"expected-rejection-target-{target_index:03d}-{target_stem}.build",
+        )
+        target_reports.append(
+            {
+                "target": entries[0][2],
+                "build": build_record,
+                "fixture_sha256_before": fixture_before,
+                "fixture_sha256_after": fixture_after_build,
+                "authority_sha256_before": authority_before,
+                "authority_sha256_after": authority_after_build,
+            }
+        )
+        for test_index, (path, item, target) in enumerate(entries, 1):
+            authority = item["authority"]
+            assertion = authority["assertion"]
+            test_id = str(authority["test_id"])
+            authority_path = str(assertion["path"])
+            run_command = [
+                str(cargo_authority.get("cargo", {}).get("path")), "test", "--manifest-path", manifest_path,
+                "--test", target_name, test_id, "--", "--exact", "--nocapture",
+            ]
+            run_record: dict[str, Any]
+            source_before_test = _regular_file_sha256(root / authority_path)
+            fixture_before_test = _regular_file_sha256(root / path)
+            if build_record.get("run_status") == "completed" and build_record.get("exit_code") == 0:
+                run_result = _run_cargo_authority_command(
+                    run_command, root, timeout, cargo_authority
+                )
+                run_record = _authority_command_record(
+                    run_result,
+                    logs_root,
+                    f"expected-rejection-target-{target_index:03d}-{target_stem}.test-{test_index:03d}",
+                )
+            else:
+                run_record = {
+                    "command": run_command,
+                    "command_sha256": sha256_bytes(
+                        json.dumps(run_command, separators=(",", ":")).encode("utf-8")
+                    ),
+                    "cwd": str(root),
+                    "run_status": "not_run_target_build_failed",
+                    "exit_code": None,
+                    "stdout_raw": None,
+                    "stderr_raw": None,
+                }
+            source_after_test = _regular_file_sha256(root / authority_path)
+            fixture_after_test = _regular_file_sha256(root / path)
+            proof = {
+                "status": "pending",
+                "cargo_toolchain_identity_sha256": cargo_authority.get("identity_sha256"),
+                "test_id": test_id,
+                "authority_path": authority_path,
+                "fixture_path": path,
+                "cargo_metadata": metadata_record,
+                "cargo_test_target": target,
+                "target_build": build_record,
+                "exact_test_run": run_record,
+                "authority_source_hashes": {
+                    "expected": assertion.get("sha256"),
+                    "before_build": authority_before.get(authority_path),
+                    "after_build": authority_after_build.get(authority_path),
+                    "before_test": source_before_test,
+                    "after_test": source_after_test,
+                },
+                "fixture_source_hashes": {
+                    "path": path,
+                    "expected": item.get("source_sha256"),
+                    "before_build": fixture_before.get(path),
+                    "after_build": fixture_after_build.get(path),
+                    "before_test": fixture_before_test,
+                    "after_test": fixture_after_test,
+                },
+            }
+            proof["status"] = (
+                "passed"
+                if _expected_rejection_execution_proof_is_valid(
+                    {**item, "path": path, "test_execution_proof": proof},
+                    root=root,
+                    logs_root=logs_root,
+                    cargo_authority=cargo_authority,
+                )
+                else "failed"
+            )
+            item["test_execution_proof"] = proof
+            item["test_execution_valid"] = proof["status"] == "passed"
+            item["authority_valid"] = bool(
+                item.get("source_authority_valid") is True
+                and item.get("cargo_target_valid") is True
+                and item.get("test_execution_valid") is True
+            )
+            item["authority_status"] = (
+                "valid" if item["authority_valid"] else "cargo_test_execution_unproven"
+            )
+            test_reports.append({"path": path, **proof})
+
+    for path in rejected:
+        item = rejection_items[path]
+        proof = {
+            "status": "failed",
+            "path": path,
+            "test_id": (item.get("authority") or {}).get("test_id"),
+            "authority_path": ((item.get("authority") or {}).get("assertion") or {}).get("path"),
+            "fixture_path": path,
+            "cargo_metadata": metadata_record,
+            "reason": item.get("authority_status"),
+        }
+        item["test_execution_proof"] = proof
+        item["test_execution_valid"] = False
+        test_reports.append(proof)
+
+    passed = (
+        len(test_reports) == len(rejection_items)
+        and all(item.get("test_execution_valid") is True for item in rejection_items.values())
+    )
+    return {
+        "status": "passed" if passed else "failed",
+        "cargo_metadata": metadata_record,
+        "targets": target_reports,
+        "tests": test_reports,
+    }
 
 
 def _write_json_exclusive(path: Path, value: Any) -> None:
@@ -2932,6 +5027,28 @@ def _write_json_exclusive(path: Path, value: Any) -> None:
         stream.write(data)
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def _ensure_report_output_is_not_mimi_source(
+    root: Path, requested_lexical: Path, resolved_output: Path
+) -> None:
+    """Prevent a census report from becoming an in-scope Mimi source path."""
+    try:
+        requested_lexical.relative_to(root)
+        lexical_inside_root = True
+    except ValueError:
+        lexical_inside_root = False
+    try:
+        resolved_output.relative_to(root)
+        resolved_inside_root = True
+    except ValueError:
+        resolved_inside_root = False
+    if (
+        lexical_inside_root and requested_lexical.suffix == ".mimi"
+    ) or (resolved_inside_root and resolved_output.suffix == ".mimi"):
+        raise ValueError(
+            f"refusing to place the route census report over an in-scope Mimi path: {resolved_output}"
+        )
 
 
 def _write_journal_line(path: Path, value: Mapping[str, Any]) -> None:
@@ -3352,30 +5469,66 @@ def _gate_report(
     scope_exclusions: Sequence[Mapping[str, Any]] = (),
     source_scope: Mapping[str, Any] | None = None,
     logs_root: Path | None = None,
+    root: Path = ROOT,
+    expected_rejection_source_root: Path | None = None,
+    cargo_authority: Mapping[str, Any] | None = None,
+    expected_rejection_cargo_authority: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if expected_rejection_cargo_authority is None:
+        expected_rejection_cargo_authority = cargo_authority
     def nested(record: Mapping[str, Any], key: str) -> Mapping[str, Any]:
         value = record.get(key)
         return value if isinstance(value, Mapping) else {}
 
     def raw_capture_is_complete(value: Any) -> bool:
-        if not isinstance(value, Mapping):
-            return False
-        encoded = value.get("base64")
-        expected_hash = value.get("sha256")
-        expected_bytes = value.get("bytes")
-        if not isinstance(encoded, str) or not isinstance(expected_hash, str):
-            return False
-        if not isinstance(value.get("path"), str):
-            return False
-        try:
-            raw = base64.b64decode(encoded, validate=True)
-        except (ValueError, base64.binascii.Error):
-            return False
-        return (
-            sha256_bytes(raw) == expected_hash
-            and isinstance(expected_bytes, int)
-            and not isinstance(expected_bytes, bool)
-            and len(raw) == expected_bytes
+        return _captured_bytes(value) is not None and _raw_sidecar_matches(logs_root, value)
+
+    def expected_rejection_is_proven(record: Mapping[str, Any]) -> bool:
+        expectation = nested(record, "expectation")
+        route = nested(record, "route")
+        failure = nested(record, "failure_classification")
+        expected = nested(expectation, "expected")
+        expected_route = nested(expected, "route")
+        route_contract = nested(expectation, "route_contract")
+        diagnostic_contract = nested(expectation, "diagnostic_contract")
+        return bool(
+            expectation.get("class") == "expected_build_rejection"
+            and expectation.get("matched") is True
+            and expectation.get("status") == "matched"
+            and expectation.get("explicit_expectation") is True
+            and expectation.get("source_hash_status") == "matched"
+            and expectation.get("authority_valid") is True
+            and expectation.get("test_contract_valid") is True
+            and expectation.get("cargo_target_valid") is True
+            and expectation.get("test_execution_valid") is True
+            and _expected_rejection_execution_proof_is_valid(
+                expectation,
+                root=expected_rejection_source_root or root,
+                logs_root=logs_root,
+                cargo_authority=expected_rejection_cargo_authority,
+            )
+            and record.get("run_status") == "completed"
+            and record.get("exit_code") == expected.get("exit_code")
+            and isinstance(expected.get("exit_code"), int)
+            and not isinstance(expected.get("exit_code"), bool)
+            and expected.get("exit_code", 0) > 0
+            and route_contract.get("valid") is True
+            and route_contract.get("disposition_matches") is True
+            and route_contract.get("classification_status_matches") is True
+            and route_contract.get("reason_matches_exactly") is True
+            and route_contract.get("failure_class_matches") is True
+            and expected_route.get("disposition") == route.get("disposition") == "rejected"
+            and expected_route.get("classification_status") == route.get("classification_status") == "observed"
+            and expected_route.get("reason") == route.get("reason")
+            and expected.get("failure_class") == failure.get("class")
+            and failure.get("status") == "classified"
+            and diagnostic_contract.get("valid") is True
+            and diagnostic_contract.get("diagnostic_codes_match_exactly") is True
+            and diagnostic_contract.get("required_output_substrings_match") is True
+            and diagnostic_contract.get("output_artifact_absent") is True
+            and record.get("output_artifact") is None
+            and not nested(record, "per_function").get("has_fallback", False)
+            and record.get("source_stable_for_input") is True
         )
 
     manifest_paths = [str(record.get("path")) for record in manifest]
@@ -3416,11 +5569,18 @@ def _gate_report(
         str(record.get("path"))
         for record, classification in classified_records
         if classification == "intentional_reject"
+        and expected_rejection_is_proven(record)
     }
     noncanonical_routes = [
         str(record.get("path"))
         for record in records
         if nested(record, "route").get("disposition") != "canonical"
+    ]
+    unauthorized_noncanonical_routes = [
+        str(record.get("path"))
+        for record in records
+        if nested(record, "route").get("disposition") != "canonical"
+        and not expected_rejection_is_proven(record)
     ]
     unclassified_failures = [
         str(record.get("path"))
@@ -3449,7 +5609,8 @@ def _gate_report(
     per_function_incomplete = [
         str(record.get("path"))
         for record in records
-        if not nested(record, "per_function").get("named_roster_complete", False)
+        if not expected_rejection_is_proven(record)
+        and not nested(record, "per_function").get("named_roster_complete", False)
     ]
     fallback_inputs = [
         str(record.get("path"))
@@ -3484,10 +5645,84 @@ def _gate_report(
             captures.extend([native_run.get("stdout_raw"), native_run.get("stderr_raw")])
         if not all(_raw_sidecar_matches(logs_root, capture) for capture in captures):
             missing_raw_log_sidecars.append(str(record.get("path")))
+    actor_test_execution = actor_fallbacks.get("rust_test_execution")
+    actor_test_cases = (
+        actor_test_execution.get("cases", [])
+        if isinstance(actor_test_execution, Mapping)
+        else []
+    )
+    actor_test_pairs = [
+        (str(item.get("path")), str(item.get("test_id")))
+        for item in actor_test_cases
+        if isinstance(item, Mapping)
+    ]
+    required_actor_test_pairs = [
+        (path, ACTOR_AUTHORITY_TEST_IDS[path]) for path in ACTOR_FALLBACK_INPUTS
+    ]
+    actor_test_execution_by_path = {
+        str(item.get("path")): item
+        for item in actor_test_cases
+        if isinstance(item, Mapping)
+    }
+    actor_test_execution_valid_by_path: dict[str, bool] = {}
+    actor_test_result_sources = {
+        str(item.get("path")): item for item in manifest if isinstance(item, Mapping)
+    }
+    for path in ACTOR_FALLBACK_INPUTS:
+        result = actor_test_execution_by_path.get(path)
+        source = actor_test_result_sources.get(path)
+        actor_case = next(
+            (
+                case for case in actor_fallbacks.get("cases", [])
+                if isinstance(case, Mapping) and case.get("path") == path
+            ),
+            {},
+        )
+        contract = {
+            "authority_valid": actor_case.get("native_test_authority_valid") is True,
+            "authority": actor_case.get("native_test_authority"),
+            "helper_name": actor_case.get("native_test_helper_name"),
+            "helper_sha256": actor_case.get("native_test_helper_sha256"),
+            "helper_sha256_expected": actor_case.get("native_test_helper_sha256_expected"),
+            "helper_valid": actor_case.get("native_test_helper_valid") is True,
+        }
+        actor_test_execution_valid_by_path[path] = _actor_test_execution_valid(
+            result,
+            path,
+            source,
+            contract,
+            root=root,
+            logs_root=logs_root,
+            cargo_authority=cargo_authority,
+        )
+    actor_test_execution_exact = (
+        isinstance(actor_test_execution, Mapping)
+        and actor_test_execution.get("status") == "passed"
+        and len(actor_test_pairs) == len(required_actor_test_pairs)
+        and sorted(actor_test_pairs) == sorted(required_actor_test_pairs)
+        and all(actor_test_execution_valid_by_path.get(path) for path in ACTOR_FALLBACK_INPUTS)
+    )
+    if isinstance(actor_test_execution, Mapping):
+        for result in actor_test_cases:
+            if not isinstance(result, Mapping):
+                missing_raw_logs.append("actor-rust-test:invalid-record")
+                missing_raw_log_sidecars.append("actor-rust-test:invalid-record")
+                continue
+            captures = [result.get("stdout_raw"), result.get("stderr_raw")]
+            owner = f"actor-rust-test:{result.get('path')}"
+            if not all(raw_capture_is_complete(capture) for capture in captures):
+                missing_raw_logs.append(owner)
+            if not all(_raw_sidecar_matches(logs_root, capture) for capture in captures):
+                missing_raw_log_sidecars.append(owner)
+    else:
+        missing_raw_logs.append("actor-rust-tests")
+        missing_raw_log_sidecars.append("actor-rust-tests")
     owner_captures = [
         legacy_owner_audit.get("stdout_raw"),
         legacy_owner_audit.get("stderr_raw"),
     ]
+    if not all(raw_capture_is_complete(capture) for capture in owner_captures):
+        missing_raw_logs.append("legacy-owner-audit")
     if not all(_raw_sidecar_matches(logs_root, capture) for capture in owner_captures):
         missing_raw_log_sidecars.append("legacy-owner-audit")
     mismatches = [str(record.get("path")) for record in records if not record.get("expectation", {}).get("matched")]
@@ -3514,7 +5749,10 @@ def _gate_report(
         }
     all_mapped_expectations_have_authority = all(
         nested(record, "expectation").get("class") == "unmapped"
-        or nested(record, "expectation").get("authority_valid") is True
+        or (
+            nested(record, "expectation").get("explicit_expectation") is True
+            and nested(record, "expectation").get("authority_valid") is True
+        )
         for record in records
     ) and not expectation_contract.get("invalid_authority_paths")
     all_expectation_source_hashes_match = all(
@@ -3529,16 +5767,24 @@ def _gate_report(
         in {"expected_build_rejection", "environment_failure"}
         and nested(record, "expectation").get("matched") is True
     )
+    passed_expected_rejections = sorted(
+        str(record.get("path"))
+        for record in records
+        if expected_rejection_is_proven(record)
+    )
+    passed_expected_rejection_set = set(passed_expected_rejections)
     canonical_success_inputs = sorted(
         str(record.get("path"))
         for record in records
         if nested(record, "expectation").get("class") == "required_compile"
         and nested(record, "expectation").get("matched") is True
+        and nested(record, "expectation").get("explicit_expectation") is True
         and nested(record, "expectation").get("source_hash_status") == "matched"
         and nested(record, "expectation").get("authority_valid") is True
         and record.get("run_status") == "completed"
         and record.get("exit_code") == 0
         and nested(record, "route").get("disposition") == "canonical"
+        and nested(record, "route").get("classification_status") == "observed"
         and nested(record, "failure_classification").get("class") == "none"
         and nested(record, "failure_classification").get("status") == "not_applicable"
         and nested(record, "per_function").get("named_roster_complete") is True
@@ -3555,11 +5801,36 @@ def _gate_report(
         and not isinstance(nested(record, "output_artifact").get("bytes"), bool)
         and nested(record, "output_artifact").get("bytes", 0) > 0
     )
+    canonical_expectation_paths = {
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class") == "required_compile"
+    }
+    canonical_success_set = set(canonical_success_inputs)
     not_successful = [
         str(record.get("path"))
         for record in records
-        if record.get("run_status") != "completed" or record.get("exit_code") != 0
+        if (record.get("run_status") != "completed" or record.get("exit_code") != 0)
+        and str(record.get("path")) not in passed_expected_rejection_set
     ]
+    unexpected_failure_inputs = [
+        str(record.get("path"))
+        for record in records
+        if (
+            record.get("run_status") in {"timeout", "spawn_error"}
+            or (
+                record.get("run_status") == "completed"
+                and record.get("exit_code") not in (None, 0)
+            )
+        )
+        and str(record.get("path")) not in passed_expected_rejection_set
+    ]
+    unproven_expected_rejections = sorted(
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class") == "expected_build_rejection"
+        and not expected_rejection_is_proven(record)
+    )
     missing_manifest_inputs = [str(record.get("path")) for record in manifest if not record.get("present", False)]
     tracked_manifest_paths = sorted(
         str(record.get("path"))
@@ -3591,6 +5862,7 @@ def _gate_report(
         and actor_by_path[path].get("per_function", {}).get("named_roster_complete")
         and not actor_by_path[path].get("per_function", {}).get("has_fallback")
         and actor_by_path[path].get("native_test_authority_valid") is True
+        and actor_test_execution_valid_by_path.get(path) is True
         and actor_by_path[path].get("native_executable_contract_matches") is True
         for path in ACTOR_FALLBACK_INPUTS
     )
@@ -3657,6 +5929,20 @@ def _gate_report(
         and len(record_paths) == len(set(record_paths))
     )
     checks = {
+        "cargo_test_toolchain_identity_is_current_and_unmodified": (
+            _cargo_toolchain_identity_valid(cargo_authority, root=root)
+        ),
+        "expected_rejection_cargo_toolchain_identity_is_current_and_unmodified": (
+            _cargo_toolchain_identity_valid(
+                expected_rejection_cargo_authority,
+                root=expected_rejection_source_root or root,
+            )
+            if any(
+                nested(record, "expectation").get("class") == "expected_build_rejection"
+                for record in records
+            )
+            else True
+        ),
         "nonempty_exact_input_denominator": complete,
         "source_scope_is_accounted_exactly_once": scope_is_exact,
         "all_candidates_have_one_route_classification": classification_exact,
@@ -3669,6 +5955,7 @@ def _gate_report(
         "both_actor_fallback_cases_are_in_denominator": (
             not actor_fallbacks.get("missing_cases") and actor_evidence_complete
         ),
+        "both_exact_actor_rust_tests_ran_and_passed": actor_test_execution_exact,
         "actor_fallback_cases_are_canonical_without_fallback": actor_no_fallback,
         "all_four_legacy_owners_are_audited": (
             bool(legacy_owner_audit.get("accepted_as_complete_inventory")) and owner_rows_complete
@@ -3676,10 +5963,17 @@ def _gate_report(
         "no_missing_tracked_inputs": not missing_manifest_inputs,
         "no_unfollowed_mimi_symlinks": not excluded_symlinks,
         "no_tracked_mimi_paths_through_symlinked_parents": not tracked_symlink_parent_blockers,
-        "all_whole_program_routes_are_canonical": not noncanonical_routes,
+        "all_routes_are_canonical_or_authorized_rejections": not unauthorized_noncanonical_routes,
+        "all_canonical_expectations_are_proven": canonical_expectation_paths <= canonical_success_set,
         "no_legacy_or_emission_fallback": not fallback_inputs,
         "all_per_function_eligibility_is_named_and_reconciled": not per_function_incomplete,
-        "all_builds_succeeded": not not_successful,
+        "all_builds_succeeded_or_rejected_as_declared": not not_successful,
+        "no_unexpected_build_failures": not unexpected_failure_inputs,
+        "all_expected_rejections_are_proven": all(
+            nested(record, "expectation").get("class") != "expected_build_rejection"
+            or expected_rejection_is_proven(record)
+            for record in records
+        ),
         "no_unclassified_failure_causes": not unclassified_failures,
         "all_outcomes_match_expectations": not mismatches,
         "expectation_paths_exactly_biject_inventory": (
@@ -3723,10 +6017,15 @@ def _gate_report(
         "actor_fallback_cases_are_canonical_without_fallback": actor_no_fallback,
         "actor_fallback_invalid_test_authority": actor_invalid_test_authority,
         "actor_fallback_native_output_mismatches": actor_native_output_mismatches,
+        "actor_rust_test_execution_failures": [
+            path for path in ACTOR_FALLBACK_INPUTS
+            if actor_test_execution_valid_by_path.get(path) is not True
+        ],
         "legacy_owner_rows_complete": owner_rows_complete,
         "unfollowed_mimi_symlinks": [item["path"] for item in excluded_symlinks],
         "tracked_symlink_parent_blockers": tracked_symlink_parent_blockers,
         "noncanonical_route_inputs": noncanonical_routes,
+        "unauthorized_noncanonical_route_inputs": unauthorized_noncanonical_routes,
         "fallback_inputs": fallback_inputs,
         "per_function_incomplete_inputs": per_function_incomplete,
         "unclassified_failure_inputs": unclassified_failures,
@@ -3747,6 +6046,9 @@ def _gate_report(
             expectation_contract.get("invalid_authority_paths", [])
         ),
         "expected_negative_matches": expected_negative_matches,
+        "passed_expected_rejections": passed_expected_rejections,
+        "unproven_expected_rejection_inputs": unproven_expected_rejections,
+        "unexpected_failure_inputs": unexpected_failure_inputs,
         "canonical_success_inputs": canonical_success_inputs,
         "canonical_success_count": len(canonical_success_inputs),
         "not_successful_inputs": not_successful,
@@ -3814,24 +6116,23 @@ def collect(args: argparse.Namespace) -> int:
         raise ValueError(
             f"refusing to use an unresolvable output path: {requested_output}"
         ) from error
-    try:
-        requested_output_lexical.relative_to(root)
-    except ValueError:
-        lexical_output_inside_root = False
-    else:
-        lexical_output_inside_root = True
-    try:
-        output.relative_to(root)
-    except ValueError:
-        resolved_output_inside_root = False
-    else:
-        resolved_output_inside_root = True
-    if (
-        lexical_output_inside_root and requested_output_lexical.suffix == ".mimi"
-    ) or (resolved_output_inside_root and output.suffix == ".mimi"):
-        raise ValueError(
-            f"refusing to place the route census report over an in-scope Mimi path: {output}"
+
+    def validate_report_destination() -> None:
+        try:
+            current_output = requested_output.resolve(strict=False)
+        except (OSError, RuntimeError) as error:
+            raise ValueError(
+                f"refusing to use an unresolvable output path: {requested_output}"
+            ) from error
+        if current_output != output:
+            raise ValueError(
+                f"refusing to use a report output path that changed during collection: {requested_output}"
+            )
+        _ensure_report_output_is_not_mimi_source(
+            root, requested_output_lexical, current_output
         )
+
+    validate_report_destination()
     if output.exists():
         raise FileExistsError(f"refusing to overwrite output file: {output}")
     requested_artifacts = (
@@ -3874,6 +6175,9 @@ def collect(args: argparse.Namespace) -> int:
         declared_expectations,
         sources,
         root,
+    )
+    cargo_authority = cargo_test_toolchain_authority(
+        root, probe_active_toolchain=not args.inventory_only
     )
     base: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -3925,7 +6229,14 @@ def collect(args: argparse.Namespace) -> int:
         "actor_fixture_contracts": actor_contracts,
         "source_snapshot": snapshot_start,
         "repository": repository_identity(root),
-        "toolchain": toolchain_manifest(mimi, probe_cli=not args.inventory_only),
+        "toolchain": toolchain_manifest(
+            mimi,
+            probe_cli=not args.inventory_only,
+            probe_toolchain_versions=not args.inventory_only,
+            root=root,
+            cargo_authority=cargo_authority,
+        ),
+        "cargo_test_toolchain_authority": cargo_authority,
         "execution_contract": {
             "command_template": ["<mimi>", "build", "[--shared for no-main inputs]", "<source>", "-o", "<unique-output>"],
             "route_mode": "default production route; --mir is not passed",
@@ -3936,11 +6247,15 @@ def collect(args: argparse.Namespace) -> int:
             "submitted_but_uncommitted_window_limit": actual_worker_count,
             "ordered_commit": "journal, final records, and progress are committed in manifest input order",
             "raw_output": "complete UTF-8 text plus exact stdout/stderr bytes in base64 and adjacent .bin files",
+            "actor_test_execution": (
+                "full execution runs the exact two named real_world_cli Actor tests; command, exit, raw logs, "
+                "fixture hashes, and test-source hashes are retained and required by the strict gate"
+            ),
             "route_classes": ["canonical", "compatibility", "rejected", "unobserved"],
             "per_function_requirement": "route-specific named emitter disposition for every canonical executable owner; canonical MIR events reconcile with the MIR function count and route digest after module verification, while resolved-native events reconcile with MIMI_STAT and their emitter summary",
             "failure_classes": ["capability", "library_target", "environment", "unknown", "none"],
             "build_skip_rule": "a validated explicit interpreter_only expectation skips invocation and records a reason; this row is never canonical",
-            "strict_check": "requires exact active candidate inventory, exact-once source-scope accounting, one route classification per candidate, valid expectation evidence, a canonical route for every candidate, no compatibility/function fallback, complete named per-function rosters for canonical builds, classified failures, and stable source fingerprint; matched intentional rejections are counted separately and remain noncanonical blockers",
+        "strict_check": "requires an exact active candidate inventory and source-scope ledger, one route classification per candidate, valid source-bound expectations, a canonical build for required_compile inputs, or a source-bound expected rejection whose active Cargo test target compiled and passed by exact test ID under the recorded absolute Cargo/rustc/rustup dispatch paths and stable before/after executable hashes; Cargo/rustc must resolve through the same native rustup proxy, and inherited compiler, wrapper, bootstrap, toolchain-home, cfg, target, linker, runner, alias, and Rust flag overrides or relevant Cargo config overrides fail closed; no compatibility/function fallback, complete named per-function rosters for canonical builds, classified failures, and a stable source fingerprint",
             "no_production_route_changes": True,
         },
     }
@@ -3952,7 +6267,7 @@ def collect(args: argparse.Namespace) -> int:
             for index, record in enumerate(sources, 1)
         ]
         base["actor_fallback_cases"] = _actor_fallback_evidence(
-            sources, [], actor_contracts
+            sources, [], actor_contracts, root=root, cargo_authority=cargo_authority
         )
         base["legacy_owner_audit"] = {
             "status": "not_run_inventory_only",
@@ -3963,6 +6278,7 @@ def collect(args: argparse.Namespace) -> int:
             "classification",
         )
         base["gate"] = {"passed": None, "status": "not_evaluated_inventory_only", "strict_gate_available": False}
+        validate_report_destination()
         _write_json_exclusive(output, base)
         print(f"[full-route-census] inventory only: {len(sources)} inputs -> {output}")
         return 0
@@ -3980,6 +6296,25 @@ def collect(args: argparse.Namespace) -> int:
     )
     logs_root = artifact_root / "logs"
     legacy_owner_audit = _collect_legacy_owner_audit(root, logs_root)
+    actor_test_execution = _run_actor_authority_tests(
+        root, logs_root, sources, actor_contracts, args.timeout, cargo_authority
+    )
+    base["actor_rust_test_execution"] = actor_test_execution
+    expected_rejection_authority_execution = _run_expected_rejection_authority_tests(
+        root, logs_root, sources, expectations, args.timeout, cargo_authority
+    )
+    base["expected_rejection_authority_execution"] = (
+        expected_rejection_authority_execution
+    )
+    expectation_contract["invalid_authority_paths"] = sorted(
+        name
+        for name, expectation in expectations.items()
+        if expectation.get("class") != "unmapped"
+        and expectation.get("authority_valid") is not True
+    )
+    base["expectations"]["invalid_authority_paths"] = list(
+        expectation_contract["invalid_authority_paths"]
+    )
     scratch_parent = Path(args.scratch_root).expanduser().resolve() if args.scratch_root else root / "target"
     scratch_parent.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
@@ -4067,7 +6402,12 @@ def collect(args: argparse.Namespace) -> int:
     }
     base["records"] = records
     base["actor_fallback_cases"] = _actor_fallback_evidence(
-        sources, records, actor_contracts
+        sources,
+        records,
+        actor_contracts,
+        actor_test_execution,
+        root=root,
+        cargo_authority=cargo_authority,
     )
     base["legacy_owner_audit"] = legacy_owner_audit
     base["route_counts"] = _count_by(
@@ -4120,9 +6460,12 @@ def collect(args: argparse.Namespace) -> int:
         scope_exclusions,
         source_scope,
         logs_root,
+        root,
+        cargo_authority=cargo_authority,
     )
     base["gate"]["requested"] = bool(args.check)
     base["gate"]["mode"] = "strict_check" if args.check else "evidence_collection_only"
+    validate_report_destination()
     _write_json_exclusive(output, base)
     print(
         f"[full-route-census] {'PASS' if base['gate']['passed'] else 'FAIL'}: "
@@ -4160,7 +6503,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--artifacts", help="new artifact directory (default: <output>.artifacts)")
     parser.add_argument(
         "--expectations",
-        help="optional schema-v2 typed expectation manifest with test authority and source hashes",
+        help="optional schema-v4 typed expectation manifest with test authority and source hashes",
     )
     parser.add_argument("--timeout", type=float, default=120.0, help="per-input timeout in seconds (default: 120)")
     parser.add_argument(
