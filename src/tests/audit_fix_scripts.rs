@@ -235,7 +235,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         (
             "CodegenLegacyRemainder",
             "legacy-codegen-remainder",
-            "MIR-COVERAGE-001",
+            "test_legacy_codegen_function_calls().is_empty()",
             "try_compile_exact_migrated_mir_island",
             "src/codegen/compile.rs::pub fn compile_checked(",
         ),
@@ -285,7 +285,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
             stdout.lines().any(|line| line == guard),
             "owner {owner} closed route guard drifted: expected {guard}"
         );
-        let status_prefix = format!("owner={owner} status=closed");
+        let status_prefix = format!("owner={owner} production_access_status=sealed");
         let status = stdout
             .lines()
             .find(|line| line.starts_with(&status_prefix))
@@ -298,6 +298,12 @@ fn legacy_owner_reachability_report_stays_conservative() {
             status.contains("owner_deletion_ready=0"),
             "owner {owner} must remain fail-closed for deletion: {status}"
         );
+        if owner == "FfiVerifierCompatibility" {
+            assert!(
+                status.contains("uncovered declarations and call-site contexts remain"),
+                "FFI owner must retain its active declaration/call-site coverage blocker: {status}"
+            );
+        }
     }
     for expected in [
         "closed_scalar_zero_owner_evidence=",
@@ -307,12 +313,12 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
         "closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call",
         "test_only_legacy_body_adapter_context=core::CheckedProgram::legacy_body_file+codegen::tests",
-        "test_only_ast_verifier_modules=expr,ffi,flow,func,helpers,vir;ctx::verify_file;helpers::mock_verify_file",
+        "test_only_ast_verifier_modules=expr,flow,func,helpers,vir;func::ExternBlock->verify_extern_func;ctx::verify_file;helpers::mock_verify_file",
         "codegen_legacy_consumer_boundary=llvm_compile_file_cfg_test;native_build_no_bytecode_legacy;run-test-disasm_explicit_legacy_route",
         "closed_codegen_route_tripwire=dynamic-trait test=compile_checked_rejects_dynamic_protocol_method_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
         "closed_codegen_route_tripwire=flow-transition test=compile_checked_routes_multi_transition_flow_through_canonical_mir markers=test_legacy_body_access().is_empty(),canonical multi-transition Flow must emit main",
         "closed_codegen_route_tripwire=trait-impl-specialization test=compile_checked_rejects_trait_impl_specialization_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
-        "closed_codegen_route_tripwire=nested-function-body test=compile_checked_rejects_captured_nested_helper_without_legacy_owner markers=MIR-COVERAGE-001,test_legacy_body_access().is_empty(),nested_increment",
+        "closed_codegen_route_tripwire=nested-function-body test=compile_checked_routes_captured_nested_helper_without_legacy_owner markers=nested_callable_scopes().len(),canonical MIR default route,test_legacy_body_access().is_empty(),test_legacy_codegen_function_calls().is_empty()",
         "closed_codegen_route_tripwire=export-wrapper test=compile_checked_routes_scalar_export_wrapper_without_legacy_access markers=test_legacy_body_access().is_empty(),owner_tripwire_export",
         "closed_codegen_route_tripwire=actor-method test=compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access markers=CanonicalMirRouteProfile::ScalarActor,Vec::<crate::core::LegacyBodyConsumer>::new(),OwnerTripwireWorker__read__method",
         "closed_codegen_route_tripwire=actor-method-rejected test=compile_checked_rejects_contract_bearing_actor_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
@@ -321,13 +327,14 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "direct_mir_no_legacy_tripwire=compile_checked_routes_exact_s8_flow_through_canonical_mir",
         "production_direct_legacy_file_accessors=0 source-metadata-reads=0 body_bypasses=0",
         "test_only_legacy_file_accessor=src/core/resolved/mod.rs::legacy_body_file",
+        "checked_program_legacy_file_residency=field+construction+initializer-cfg-test-only",
         "production_legacy_body_file_call_sites=0",
         "production_raw_ast_call_sites=0",
         "production_compile_func_legacy_call_sites=0",
         "test_only_codegen_legacy_body_compiler=src/codegen/func.rs::compile_func_legacy+inner+clean",
         "production_compile_generic_func_call_sites=0",
         "test_only_codegen_func_generic_adapter_refs=2 excluded_from_production=1",
-        "test_only_codegen_legacy_adapter_refs=6 excluded_from_production=1",
+        "test_only_codegen_legacy_adapter_refs=5 excluded_from_production=1",
         "scalar_ffi_direct_expression_legacy_refs=0",
         "receiptless_bytecode_ffi=raw_compiler_reject+vm_whole_program_preflight+old_loader_removed",
         "ast_ffi_compatibility=retired+canonical_mir_runtime_only",
@@ -337,10 +344,14 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
         "native_direct_preflight_receipt_binding=native-direct-v1->bytecode+verifier+native consumer=src/codegen/compile.rs::try_compile_exact_migrated_mir_island(",
         "verifier_route_receipt_handoff=direct-receipt-semantic-run consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
-        "verifier_ffi_route_receipt_handoff=direct-receipt-semantic-run consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
+        "verifier_ffi_route_receipt_handoff=public-api->profile-helper receipt+capability+proof+provenance consumer=src/verifier/mod.rs",
         "verifier_default_receipt_reuse=single-batch-witness consumer=src/verifier/mir.rs::fn verify_program_inner(",
         "verifier_semantic_receipt_required=explicit-reference consumer=src/verifier/mir.rs::verify_program_inner+verify_ffi_program_inner(",
         "verifier_default_entry_receipt_handoff=single-wrapper-witness consumer=src/verifier/mod.rs::verify_mir+verify_ffi_mir_with_source_hash(",
+        "verifier_default_entry_receipt_profile_order=map-empty-root-root-queries-v1->zero-miss-i32->observer-v1->direct-print->computed-key-get->mixed-snapshot-remove->mixed-snapshot->snapshot-replacement->field-move->ordinary-map-owner-v2->default consumer=src/verifier/mod.rs::pub fn verify_mir(",
+        "bytecode_ordinary_map_owned_any_v2_route_binding=11-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(",
+        "bytecode_map_empty_root_root_queries_v1_route_binding=1-dedicated-adapter->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_with_empty_root_root_queries_v1_route(",
+        "observer_v1_exact_route_binding=CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1->ordinary-map-owner-lifecycle-observer-v1->ordered-default-selector+materialization-receipt-equality+checker-MIR-bytecode-native-verifier-preflight+same-bytecode-and-native-receipt-adapters consumer=src/main/canonical_dispatch.rs+src/main/build.rs+src/interp/bytecode/mir.rs+src/codegen/mir/eligibility.rs",
         "verifier_unbound_helper=test-only consumer=src/verifier/mir.rs::pub(crate) fn verify_program(",
         "consumer_receipt_provenance_binding=native-direct-v1 graph=canonical provenance=canonical-mir-graph consumer=src/codegen/compile.rs::pub fn compile_checked(",
         "consumer_receipt_provenance_binding=verify-ffi-v1 graph=canonical provenance=canonical-mir-graph+source-hash consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
@@ -350,13 +361,13 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_verifier_source_provenance_binding=single-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_source_hash(",
         "mir_result_identity_binding=source-hash+mir-hash+route-receipt consumer=src/verifier/mod.rs::fn validate_mir_result_provenance(",
         "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
-        "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
+        "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::fn verify_ffi_mir_with_route_receipt_profile(",
         "mir_route_manifest_replay_binding=manifest-round-trip+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_manifest(",
         "mir_route_manifest_replay_binding=manifest-round-trip+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_manifest(",
         "reference_route_manifest_adapter_binding=manifest-round-trip-to-typed-receipt consumer=src/core/mir/reference.rs",
         "mir_ffi_capability_order_binding=capability-before-execution consumer=src/verifier/mod.rs::fn verify_ffi_mir_results_with_route_receipt(",
         "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
-        "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_receipt(",
+        "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::fn verify_ffi_mir_with_route_receipt_profile(",
         "mir_cli_verifier_route_binding=receipt-bearing-adapter consumer=src/main/verify.rs",
         "mir_cli_error_boundary_binding=shared-format-cli-error consumer=src/main.rs",
         "mir_cli_disasm_route_binding=shared-format-cli-error consumer=src/main/disasm_cmd.rs",
@@ -438,8 +449,8 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         String::from_utf8_lossy(&owner_tripwire_output.stderr)
     );
     let tampered_closed_actor_route_script = source_script.replacen(
-        "    compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access \\\n",
-        "    compile_checked_missing_scalar_actor_route_test \\\n",
+        "    compile_checked_rejects_contract_bearing_actor_without_legacy_owner \\\n",
+        "    compile_checked_missing_contract_bearing_actor_route_test \\\n",
         1,
     );
     assert!(
@@ -459,9 +470,10 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         String::from_utf8_lossy(&closed_actor_route_output.stdout)
     );
     assert!(
-        String::from_utf8_lossy(&closed_actor_route_output.stderr)
-            .contains("owner_audit_error=missing_codegen_closed_route_tripwire class=actor-method"),
-        "missing closed ScalarActor route tripwire omitted fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&closed_actor_route_output.stderr).contains(
+            "owner_audit_error=missing_codegen_closed_route_tripwire class=actor-method-rejected"
+        ),
+        "missing rejected Actor route tripwire omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&closed_actor_route_output.stderr)
     );
     let tampered_map_tripwire_script = source_script.replacen(
@@ -644,8 +656,14 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         String::from_utf8_lossy(&provenance_output.stderr)
     );
     let tampered_profile_script = source_script.replacen(
-        "    ScalarFfi\n\n# The AST-free bytecode adapter must retain the route receipt that admitted",
-        "    ScalarCollection\n\n# The AST-free bytecode adapter must retain the route receipt that admitted",
+        r#"    verify-ffi-v1 \
+    ScalarFfi
+
+# The verifier-only singleton-For exception"#,
+        r#"    verify-ffi-v1 \
+    ScalarCollection
+
+# The verifier-only singleton-For exception"#,
         1,
     );
     assert!(
@@ -833,8 +851,18 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         String::from_utf8_lossy(&manifest_replay_output.stderr)
     );
     let tampered_capability_order_script = source_script.replacen(
-        "    'validate_mir_capabilities(program)' \\\n",
-        "    'missing_mir_capability_gate(program)' \\\n",
+        r#"mir_ffi_capability_order_binding \
+    src/verifier/mod.rs \
+    'fn verify_ffi_mir_results_with_route_receipt(' \
+    'pub fn verify_ffi_mir_with_route_receipt(' \
+    'validate_ffi_verifier_mir_capabilities(program)' \
+    'mir::verify_ffi_program_with_route_receipt(program, source_hash, receipt)'"#,
+        r#"mir_ffi_capability_order_binding \
+    src/verifier/mod.rs \
+    'fn verify_ffi_mir_results_with_route_receipt(' \
+    'pub fn verify_ffi_mir_with_route_receipt(' \
+    'missing_ffi_verifier_mir_capability_gate(program)' \
+    'mir::verify_ffi_program_with_route_receipt(program, source_hash, receipt)'"#,
         1,
     );
     assert!(
@@ -1106,7 +1134,9 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
     let mut first_round_results = Vec::new();
     for round in 1..=2 {
         for test_name in [
-            "compile_checked_rejects_unmigrated_generic_body_without_legacy_owner",
+            "compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access",
+            "compile_checked_rejects_generic_integer_side_binding_without_legacy_owner",
+            "compile_checked_routes_generic_local_alias_projection_without_legacy_access",
             "compile_checked_routes_exact_s8_flow_through_canonical_mir",
             "compile_checked_routes_multi_transition_flow_through_canonical_mir",
             "compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access",
@@ -1114,13 +1144,14 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
             "compile_checked_routes_concrete_protocol_method_without_legacy_access",
             "compile_checked_rejects_dynamic_protocol_method_without_legacy_owner",
             "compile_checked_rejects_trait_impl_specialization_without_legacy_owner",
-            "compile_checked_rejects_captured_nested_helper_without_legacy_owner",
+            "compile_checked_routes_captured_nested_helper_without_legacy_owner",
             "compile_checked_routes_scalar_export_wrapper_without_legacy_access",
             "compile_checked_routes_closed_map_any_owner_v1_without_legacy_access",
             "compile_checked_rejects_map_any_borrowed_access_without_legacy_owner",
-            "unsupported_contract_returns_structured_coverage_without_legacy_access",
+            "typed_ffi_deferred_predicate_preserves_explicit_compatibility_obligation",
+            "nested_requires_in_expression_block_is_rejected_before_verifier_routing",
             "typed_ffi_deferred_actual_argument_preserves_old_conditional_proof",
-            "typed_ffi_deferred_context_is_checker_owned_without_legacy_access",
+            "typed_ffi_symbolic_string_contexts_defer_without_legacy_access",
         ] {
             let output = std::process::Command::new(&cargo)
                 .args([
@@ -1196,17 +1227,45 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let audit_source =
+        std::fs::read_to_string(&path).expect("read legacy owner route audit source");
     assert!(
         stdout.contains(
-            "bytecode_route_receipt_binding=compile_mir_program_inner(program, Some(receipt))"
+            "bytecode_route_receipt_binding=compile_mir_program_inner(program, Some(receipt), validated_narrow_route)"
         ),
         "legacy owner audit must pin route receipt hand-off from the canonical bytecode entry"
     );
     assert!(
         stdout.contains(
-            "bytecode_direct_route_receipt_binding=ffi-call-site->MIR_BYTECODE_DIRECT_ROUTE_PROFILE->compile_mir_program_inner consumer=src/interp/bytecode/mir.rs::pub fn compile_mir_program("
+            "bytecode_direct_print_route_adapter_binding=ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE->validator+typed-token+receipt+single-inner-call consumer=src/interp/bytecode/mir.rs::compile_mir_program_with_route_receipt("
+        ),
+        "legacy owner audit must pin the direct-print adapter's exact typed token and receipt hand-off"
+    );
+    assert!(
+        stdout.contains(
+            "bytecode_direct_route_receipt_binding=ffi-call-site->MIR_BYTECODE_DIRECT_ROUTE_PROFILE->compile_mir_program_inner(program, receipt.as_ref(), None) consumer=src/interp/bytecode/mir.rs::pub fn compile_mir_program("
         ),
         "legacy owner audit must pin direct bytecode receipt derivation"
+    );
+    assert!(
+        stdout.contains(
+            "bytecode_ordinary_map_owned_any_v2_route_binding=11-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner("
+        ) && audit_source.contains(
+            r#"    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_values_producer_caller_route \
+        pub\ fn\ compile_mir_program_with_computed_key_get_route\( \
+        validate_ordinary_map_owned_any_v2_values_producer_caller_route \
+        ORDINARY_MAP_OWNED_ANY_V2_VALUES_PRODUCER_CALLER_PROFILE \
+        ValuesProducerCaller \
+        checker-validator"#
+        ),
+        "legacy owner audit must pin ValuesProducerCaller's typed route token and exact adapter boundary"
+    );
+    assert!(
+        stdout.contains(
+            "observer_v1_exact_route_binding=CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1->ordinary-map-owner-lifecycle-observer-v1->ordered-default-selector+materialization-receipt-equality+checker-MIR-bytecode-native-verifier-preflight+same-bytecode-and-native-receipt-adapters consumer=src/main/canonical_dispatch.rs+src/main/build.rs+src/interp/bytecode/mir.rs+src/codegen/mir/eligibility.rs"
+        ),
+        "legacy owner audit must pin the Observer V1 profile from default selection through exact receipt transfer"
     );
     assert!(
         stdout.contains(
@@ -1268,6 +1327,546 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         ),
         "legacy owner audit must pin native manifest adapter forwarding"
     );
+}
+
+#[test]
+fn legacy_owner_audit_rejects_map_any_route_regressions() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-map-any-route");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts"))
+        .expect("create Map/Any route audit temp root");
+    let excluded = [
+        "verifier/mod.rs",
+        "interp/bytecode/mir.rs",
+        "main/canonical_dispatch.rs",
+    ];
+    mirror_source_tree_except(
+        &root.join("src"),
+        &root.join("src"),
+        &temp_root.join("src"),
+        &excluded,
+    )
+    .expect("mirror source tree for isolated route mutations");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into Map/Any route audit temp root");
+    std::fs::copy(
+        root.join("scripts/audit-mir-legacy-owners.sh"),
+        temp_root.join("scripts/audit-mir-legacy-owners.sh"),
+    )
+    .expect("copy legacy owner audit script");
+    let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
+
+    let verifier_path = temp_root.join("src/verifier/mod.rs");
+    std::fs::copy(root.join("src/verifier/mod.rs"), &verifier_path)
+        .expect("copy verifier source before route mutations");
+    let bytecode_path = temp_root.join("src/interp/bytecode/mir.rs");
+    std::fs::copy(root.join("src/interp/bytecode/mir.rs"), &bytecode_path)
+        .expect("copy bytecode adapter source before route mutations");
+
+    let dispatcher_path = temp_root.join("src/main/canonical_dispatch.rs");
+    std::fs::copy(
+        root.join("src/main/canonical_dispatch.rs"),
+        &dispatcher_path,
+    )
+    .expect("copy default dispatcher source for Observer V1 route mutation");
+    let dispatcher_source =
+        std::fs::read_to_string(&dispatcher_path).expect("read copied default dispatcher source");
+    let wrong_observer_profile = dispatcher_source.replacen(
+        "mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE",
+        "mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND",
+        1,
+    );
+    assert!(
+        dispatcher_source != wrong_observer_profile,
+        "Observer V1 profile mutation fixture must replace the selected main-route profile"
+    );
+    std::fs::write(&dispatcher_path, wrong_observer_profile)
+        .expect("write dispatcher source with a mismatched Observer V1 profile");
+    let dispatcher_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a mismatched Observer V1 main-route profile");
+    assert!(
+        !dispatcher_output.status.success(),
+        "a default selector using the wrong Observer V1 receipt profile must fail closed:\n{}",
+        String::from_utf8_lossy(&dispatcher_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&dispatcher_output.stderr)
+            .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
+        "Observer V1 profile drift omitted the exact-route diagnostic:\n{}",
+        String::from_utf8_lossy(&dispatcher_output.stderr)
+    );
+    std::fs::write(&dispatcher_path, &dispatcher_source)
+        .expect("restore dispatcher source after Observer V1 profile mutation");
+
+    let zero_miss_route = "    if admission.ordinary_map_owned_any_v2_zero_miss_i32() {\n        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\n    }\n";
+    let values_producer_caller_route = "    if admission.ordinary_map_owned_any_v2_values_producer_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesProducerCaller\n            .as_str();\n    }\n";
+    let early_route_order = format!("{zero_miss_route}{values_producer_caller_route}");
+    let reversed_early_route_order =
+        format!("{values_producer_caller_route}{zero_miss_route}");
+    let reordered_early_routes =
+        dispatcher_source.replacen(&early_route_order, &reversed_early_route_order, 1);
+    assert_ne!(
+        dispatcher_source, reordered_early_routes,
+        "Observer V1 route-order fixture must swap the early V2 branches"
+    );
+    std::fs::write(&dispatcher_path, reordered_early_routes)
+        .expect("write dispatcher source with reordered early V2 routes");
+    let early_order_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against reordered early V2 routes");
+    assert!(
+        !early_order_output.status.success(),
+        "the default selector must preserve the complete early V2 route order:\n{}",
+        String::from_utf8_lossy(&early_order_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&early_order_output.stderr)
+            .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
+        "early V2 route order drift omitted the exact-route diagnostic:\n{}",
+        String::from_utf8_lossy(&early_order_output.stderr)
+    );
+    std::fs::write(&dispatcher_path, &dispatcher_source)
+        .expect("restore dispatcher source after early V2 route-order mutation");
+
+    let map_any_fallbacks = "    } else if admission.map_any_owner_complete() {\n        mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND\n    } else if admission.ordinary_map_owned_any_v2_complete() {\n        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND\n";
+    let reversed_map_any_fallbacks = "    } else if admission.ordinary_map_owned_any_v2_complete() {\n        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND\n    } else if admission.map_any_owner_complete() {\n        mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND\n";
+    let reordered_fallbacks =
+        dispatcher_source.replacen(map_any_fallbacks, reversed_map_any_fallbacks, 1);
+    assert_ne!(
+        dispatcher_source, reordered_fallbacks,
+        "Observer V1 route-order fixture must swap the broad owner fallbacks"
+    );
+    std::fs::write(&dispatcher_path, reordered_fallbacks)
+        .expect("write dispatcher source with reordered owner fallbacks");
+    let fallback_order_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against reordered owner fallbacks");
+    assert!(
+        !fallback_order_output.status.success(),
+        "the default selector must preserve the complete owner fallback order:\n{}",
+        String::from_utf8_lossy(&fallback_order_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&fallback_order_output.stderr)
+            .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
+        "owner fallback order drift omitted the exact-route diagnostic:\n{}",
+        String::from_utf8_lossy(&fallback_order_output.stderr)
+    );
+    std::fs::write(&dispatcher_path, &dispatcher_source)
+        .expect("restore dispatcher source after fallback-order mutation");
+
+    let verifier_source =
+        std::fs::read_to_string(&verifier_path).expect("read copied verifier source");
+    let missing_map_empty_selector = verifier_source.replacen(
+        "validate_map_empty_root_root_queries_v1_mir_route(program)",
+        "validate_ordinary_map_owner_lifecycle_observer_v1_mir_route(program)",
+        1,
+    );
+    assert!(
+        verifier_source != missing_map_empty_selector,
+        "verifier mutation fixture must remove the Map Empty Root selector"
+    );
+    std::fs::write(&verifier_path, missing_map_empty_selector)
+        .expect("write verifier source without the Map Empty Root selector");
+    let map_empty_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a missing Map Empty Root selector");
+    assert!(
+        !map_empty_output.status.success(),
+        "a verifier omitting the Map Empty Root route must fail closed:\n{}",
+        String::from_utf8_lossy(&map_empty_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&map_empty_output.stderr)
+            .contains("owner_audit_error=verifier_default_entry_profile_selector_missing="),
+        "Map Empty Root selector drift omitted the ordered-selector diagnostic:\n{}",
+        String::from_utf8_lossy(&map_empty_output.stderr)
+    );
+    std::fs::write(&verifier_path, &verifier_source)
+        .expect("restore verifier source after Map Empty Root selector mutation");
+
+    let missing_zero_miss_selector = verifier_source.replacen(
+        "validate_ordinary_map_owned_any_v2_zero_miss_i32_mir_route(\n            program,\n        )",
+        "validate_ordinary_map_owner_lifecycle_observer_v1_mir_route(program)",
+        1,
+    );
+    assert!(
+        verifier_source != missing_zero_miss_selector,
+        "verifier mutation fixture must remove the ZeroMissI32 selector"
+    );
+    std::fs::write(&verifier_path, missing_zero_miss_selector)
+        .expect("write verifier source without the ZeroMissI32 selector");
+    let zero_miss_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a missing ZeroMissI32 selector");
+    assert!(
+        !zero_miss_output.status.success(),
+        "a verifier omitting the ZeroMissI32 route must fail closed:\n{}",
+        String::from_utf8_lossy(&zero_miss_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&zero_miss_output.stderr)
+            .contains("owner_audit_error=verifier_default_entry_profile_selector_missing="),
+        "ZeroMissI32 selector drift omitted the ordered-selector diagnostic:\n{}",
+        String::from_utf8_lossy(&zero_miss_output.stderr)
+    );
+    std::fs::write(&verifier_path, &verifier_source)
+        .expect("restore verifier source after ZeroMissI32 selector mutation");
+
+    let wrong_observer_validator = verifier_source.replacen(
+        "validate_ordinary_map_owner_lifecycle_observer_v1_mir_route(program)",
+        "validate_ordinary_map_owned_any_v2_direct_print_mir_route(program)",
+        1,
+    );
+    assert!(
+        verifier_source != wrong_observer_validator,
+        "verifier mutation fixture must replace the Observer V1 selector validator"
+    );
+    std::fs::write(&verifier_path, wrong_observer_validator)
+        .expect("write verifier source with a regressed Observer V1 selector");
+    let observer_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a regressed Observer V1 selector");
+    assert!(
+        !observer_output.status.success(),
+        "a verifier pairing the Observer V1 receipt with the wrong validator must fail closed:\n{}",
+        String::from_utf8_lossy(&observer_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&observer_output.stderr)
+            .contains("owner_audit_error=verifier_default_entry_profile_selector_missing="),
+        "Observer V1 selector drift omitted the ordered-selector diagnostic:\n{}",
+        String::from_utf8_lossy(&observer_output.stderr)
+    );
+
+    std::fs::write(&verifier_path, &verifier_source)
+        .expect("restore verifier source after Observer V1 selector mutation");
+    let wrong_direct_print_profile = verifier_source.replacen(
+        "ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE",
+        "ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE",
+        1,
+    );
+    assert!(
+        verifier_source != wrong_direct_print_profile,
+        "verifier mutation fixture must replace the direct-print selector profile"
+    );
+    std::fs::write(&verifier_path, wrong_direct_print_profile)
+        .expect("write verifier source with a regressed direct-print profile");
+    let direct_print_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a regressed direct-print profile selector");
+    assert!(
+        !direct_print_output.status.success(),
+        "a verifier selecting the wrong direct-print profile must fail closed:\n{}",
+        String::from_utf8_lossy(&direct_print_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&direct_print_output.stderr)
+            .contains("owner_audit_error=verifier_default_entry_profile_selector_missing="),
+        "direct-print profile drift omitted the ordered-selector diagnostic:\n{}",
+        String::from_utf8_lossy(&direct_print_output.stderr)
+    );
+
+    let wrong_verifier_profile = verifier_source.replacen(
+        "ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE",
+        "ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE",
+        1,
+    );
+    assert!(
+        verifier_source != wrong_verifier_profile,
+        "verifier mutation fixture must replace the computed-key selector profile"
+    );
+    std::fs::write(&verifier_path, wrong_verifier_profile)
+        .expect("write verifier source with a regressed narrow profile");
+    let verifier_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against regressed verifier profile selector");
+    assert!(
+        !verifier_output.status.success(),
+        "a verifier selecting the wrong narrow Map/Any profile must fail closed:\n{}",
+        String::from_utf8_lossy(&verifier_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&verifier_output.stderr)
+            .contains("owner_audit_error=verifier_default_entry_profile_selector_missing="),
+        "wrong verifier profile expectation omitted the selector diagnostic:\n{}",
+        String::from_utf8_lossy(&verifier_output.stderr)
+    );
+
+    std::fs::write(&verifier_path, &verifier_source)
+        .expect("restore verifier source after route mutation");
+    let wrong_selector_order = verifier_source.replacen(
+        "validate_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_mir_route",
+        "validate_ordinary_map_owned_any_v2_values_mixed_snapshot_mir_route",
+        1,
+    );
+    assert!(
+        verifier_source != wrong_selector_order,
+        "selector-order fixture must replace the second narrow route branch"
+    );
+    std::fs::write(&verifier_path, wrong_selector_order)
+        .expect("write verifier source with a missing ordered narrow branch");
+    let order_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a reordered verifier selector");
+    assert!(
+        !order_output.status.success(),
+        "a verifier selector missing the required ordered narrow branch must fail closed:\n{}",
+        String::from_utf8_lossy(&order_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&order_output.stderr)
+            .contains("owner_audit_error=verifier_default_entry_profile_selector_missing="),
+        "selector order drift omitted the fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&order_output.stderr)
+    );
+
+    std::fs::write(&verifier_path, &verifier_source)
+        .expect("restore verifier source after selector-order mutation");
+    let wrong_default_route =
+        verifier_source.replacen("\"verifier-mir-v1\"", "\"verifier-mir-v2\"", 1);
+    assert!(
+        verifier_source != wrong_default_route,
+        "default-route fixture must replace the verifier fallback profile"
+    );
+    std::fs::write(&verifier_path, wrong_default_route)
+        .expect("write verifier source with a regressed default route");
+    let default_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a regressed verifier default route");
+    assert!(
+        !default_output.status.success(),
+        "a verifier selector with the wrong default route must fail closed:\n{}",
+        String::from_utf8_lossy(&default_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&default_output.stderr)
+            .contains("owner_audit_error=verifier_default_entry_profile_selector_missing="),
+        "default route drift omitted the fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&default_output.stderr)
+    );
+
+    std::fs::write(&verifier_path, &verifier_source)
+        .expect("restore verifier source after default-route mutation");
+    let bytecode_source =
+        std::fs::read_to_string(&bytecode_path).expect("read copied bytecode adapter source");
+    let wrong_bytecode_token = bytecode_source.replacen(
+        "Some(ValidatedOrdinaryMapOwnedAnyV2Route::ComputedKeyGet(",
+        "Some(ValidatedOrdinaryMapOwnedAnyV2Route::ValuesFieldMove(",
+        1,
+    );
+    assert!(
+        bytecode_source != wrong_bytecode_token,
+        "bytecode mutation fixture must replace the computed-key route token"
+    );
+    std::fs::write(&bytecode_path, wrong_bytecode_token)
+        .expect("write bytecode adapter source with a regressed route token");
+    let bytecode_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against regressed bytecode route token");
+    assert!(
+        !bytecode_output.status.success(),
+        "a bytecode adapter receiving the wrong narrow route token must fail closed:\n{}",
+        String::from_utf8_lossy(&bytecode_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&bytecode_output.stderr)
+            .contains("owner_audit_error=bytecode_narrow_map_any_adapter_token_missing="),
+        "wrong bytecode token expectation omitted the adapter diagnostic:\n{}",
+        String::from_utf8_lossy(&bytecode_output.stderr)
+    );
+
+    let raw_receipt_as_token = bytecode_source.replacen(
+        "Some(ValidatedOrdinaryMapOwnedAnyV2Route::ComputedKeyGet(\n            &receipt,\n        )),",
+        "Some(&receipt),",
+        1,
+    );
+    assert!(
+        bytecode_source != raw_receipt_as_token,
+        "bytecode token fixture must replace the typed route token with a raw receipt"
+    );
+    std::fs::write(&bytecode_path, raw_receipt_as_token)
+        .expect("write bytecode adapter source with a raw receipt in the token slot");
+    let raw_receipt_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a bytecode adapter receiving a raw receipt token");
+    assert!(
+        !raw_receipt_output.status.success(),
+        "a raw route receipt cannot replace the typed bytecode route token:\n{}",
+        String::from_utf8_lossy(&raw_receipt_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&raw_receipt_output.stderr)
+            .contains("owner_audit_error=bytecode_narrow_map_any_adapter_token_missing="),
+        "raw receipt token drift omitted the fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&raw_receipt_output.stderr)
+    );
+
+    let wrong_is_empty_token = bytecode_source.replacen(
+        "Some(ValidatedOrdinaryMapOwnedAnyV2Route::IsEmpty(&receipt)),",
+        "Some(ValidatedOrdinaryMapOwnedAnyV2Route::CloneIsolation(&receipt)),",
+        1,
+    );
+    assert!(
+        bytecode_source != wrong_is_empty_token,
+        "IsEmpty mutation fixture must replace its typed route token"
+    );
+    std::fs::write(&bytecode_path, wrong_is_empty_token)
+        .expect("write IsEmpty adapter source with a CloneIsolation route token");
+    let is_empty_token_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against an IsEmpty adapter with a CloneIsolation token");
+    assert!(
+        !is_empty_token_output.status.success(),
+        "the IsEmpty adapter must reject a CloneIsolation typed route token:\n{}",
+        String::from_utf8_lossy(&is_empty_token_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&is_empty_token_output.stderr)
+            .contains("owner_audit_error=bytecode_narrow_map_any_adapter_token_missing="),
+        "wrong IsEmpty token omitted the fail-closed adapter diagnostic:\n{}",
+        String::from_utf8_lossy(&is_empty_token_output.stderr)
+    );
+
+    for (variant, adapter, token_source) in [
+        (
+            "ZeroMissI32",
+            "compile_mir_program_with_ordinary_map_owned_any_v2_zero_miss_i32_route",
+            "Some(ValidatedOrdinaryMapOwnedAnyV2Route::ZeroMissI32(&receipt)),",
+        ),
+        (
+            "MapSetDropControl",
+            "compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route",
+            "Some(ValidatedOrdinaryMapOwnedAnyV2Route::MapSetDropControl(\n            &receipt,\n        )),",
+        ),
+        (
+            "BranchLocalSetDiamond",
+            "compile_mir_program_with_ordinary_map_owned_any_v2_branch_local_set_diamond_route",
+            "Some(ValidatedOrdinaryMapOwnedAnyV2Route::BranchLocalSetDiamond(\n            &receipt,\n        )),",
+        ),
+        (
+            "EmptyRootRootQueriesV1",
+            "compile_mir_program_with_empty_root_root_queries_v1_route",
+            "Some(ValidatedOrdinaryMapOwnedAnyV2Route::EmptyRootRootQueriesV1(\n            &receipt,\n        )),",
+        ),
+    ] {
+        let wrong_token = bytecode_source.replacen(
+            token_source,
+            "Some(ValidatedOrdinaryMapOwnedAnyV2Route::CloneIsolation(&receipt)),",
+            1,
+        );
+        assert!(
+            bytecode_source != wrong_token,
+            "{variant} mutation fixture must replace its typed route token"
+        );
+        std::fs::write(&bytecode_path, wrong_token)
+            .unwrap_or_else(|_| panic!("write {variant} adapter source with a CloneIsolation token"));
+        let token_output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(&temp_root)
+            .output()
+            .unwrap_or_else(|_| panic!("run audit against a {variant} token mutation"));
+        let token_stderr = String::from_utf8_lossy(&token_output.stderr);
+        assert!(
+            !token_output.status.success(),
+            "the {variant} adapter must reject a CloneIsolation typed route token:\n{}",
+            String::from_utf8_lossy(&token_output.stdout)
+        );
+        assert!(
+            token_stderr.contains("owner_audit_error=bytecode_narrow_map_any_adapter_token_missing=")
+                && token_stderr.contains(adapter),
+            "wrong {variant} token omitted its fail-closed adapter diagnostic:\n{token_stderr}"
+        );
+    }
+    std::fs::write(&bytecode_path, &bytecode_source)
+        .expect("restore bytecode adapter source after added route-token mutations");
+
+    let wrong_clone_validator = bytecode_source.replacen(
+        "validate_ordinary_map_owned_any_v2_clone_isolation_route(checked, program)",
+        "validate_ordinary_map_owned_any_v2_is_empty_route(checked, program)",
+        1,
+    );
+    assert!(
+        bytecode_source != wrong_clone_validator,
+        "CloneIsolation mutation fixture must replace its Checker/MIR validator"
+    );
+    std::fs::write(&bytecode_path, wrong_clone_validator)
+        .expect("write CloneIsolation adapter source with the IsEmpty validator");
+    let clone_validator_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a CloneIsolation adapter with the IsEmpty validator");
+    assert!(
+        !clone_validator_output.status.success(),
+        "the CloneIsolation adapter must reject an IsEmpty validator:\n{}",
+        String::from_utf8_lossy(&clone_validator_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&clone_validator_output.stderr)
+            .contains("owner_audit_error=bytecode_narrow_map_any_validator_missing="),
+        "wrong CloneIsolation validator omitted the fail-closed diagnostic:\n{}",
+        String::from_utf8_lossy(&clone_validator_output.stderr)
+    );
+
+    std::fs::write(&bytecode_path, &bytecode_source)
+        .expect("restore bytecode adapter source after route mutations");
+    let wrong_observer_receipt_handoff = bytecode_source.replacen(
+        "checker_receipts.clone(),\n                observer_bindings,",
+        "Vec::new(),\n                observer_bindings,",
+        1,
+    );
+    assert!(
+        bytecode_source != wrong_observer_receipt_handoff,
+        "Observer V1 mutation fixture must replace the Checker receipt transfer"
+    );
+    std::fs::write(&bytecode_path, wrong_observer_receipt_handoff)
+        .expect("write bytecode adapter source with a dropped Observer V1 receipt transfer");
+    let observer_handoff_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a dropped Observer V1 receipt transfer");
+    assert!(
+        !observer_handoff_output.status.success(),
+        "a bytecode anchor that drops the exact Observer V1 Checker receipts must fail closed:\n{}",
+        String::from_utf8_lossy(&observer_handoff_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&observer_handoff_output.stderr)
+            .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
+        "Observer V1 receipt-transfer drift omitted the exact-route diagnostic:\n{}",
+        String::from_utf8_lossy(&observer_handoff_output.stderr)
+    );
+    drop(cleanup);
 }
 
 #[test]
@@ -1356,7 +1955,6 @@ fn legacy_owner_audit_rejects_production_legacy_file_residency() {
     drop(cleanup);
 }
 
-
 #[test]
 fn legacy_owner_evidence_marker_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1370,9 +1968,13 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
     let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
         .expect("read legacy owner audit script");
     let tampered_script = source_script.replacen(
-        "    'MIR-COVERAGE-001'\n",
-        "    'MIR-COVERAGE-MISSING'\n",
+        "    'test_legacy_codegen_function_calls().is_empty()'\n",
+        "    'test_legacy_codegen_function_calls().missing()'\n",
         1,
+    );
+    assert_ne!(
+        source_script, tampered_script,
+        "owner evidence mutation must change the executable expected marker"
     );
     let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
     std::fs::write(&script_path, tampered_script).expect("write tampered audit script");
@@ -1406,7 +2008,7 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        stderr.contains("evidence_test_missing_marker=compile_checked_rejects_unmigrated_generic_body_without_legacy_owner"),
+        stderr.contains("evidence_test_missing_marker=compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access marker=test_legacy_codegen_function_calls().missing()"),
         "tampered owner evidence omitted marker failure:\n{stderr}"
     );
     std::fs::remove_dir_all(&temp_root).expect("remove audit temp root");
