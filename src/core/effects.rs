@@ -292,6 +292,9 @@ pub struct EffectDiagnostic {
 pub struct EffectAnalysis {
     pub summaries: BTreeMap<String, EffectSummary>,
     pub diagnostics: Vec<EffectDiagnostic>,
+    /// Exact checker owner identities for typed call-site consumers. The
+    /// source-keyed `summaries` map remains the compatibility-facing API.
+    pub(crate) owner_summaries: BTreeMap<String, EffectSummary>,
 }
 
 impl EffectAnalysis {
@@ -309,10 +312,15 @@ impl EffectAnalysis {
 
 #[derive(Debug, Clone)]
 struct Callable<'a> {
-    key: String,
+    node_key: String,
+    summary_key: String,
+    owner: crate::core::resolved::NodeId,
     function: &'a FuncDef,
     public: bool,
+    captured_scope: LexicalScope,
 }
+
+type LexicalScope = BTreeMap<String, Option<String>>;
 
 #[derive(Debug, Clone, Default)]
 struct DirectEffects {
@@ -335,29 +343,75 @@ impl DirectEffects {
 /// conservative by design: unresolved calls, extern calls, and calls through
 /// a value are marked `unknown` and therefore cannot become pure by accident.
 pub fn infer_items(items: &[Item]) -> EffectAnalysis {
+    infer_items_with_sources(items, None)
+}
+
+/// Checker entrypoint which preserves module-qualified roots from the source
+/// registry when constructing nested callable owner identities.
+pub(crate) fn infer_items_with_sources(
+    items: &[Item],
+    sources: Option<&crate::span::SourceRegistry>,
+) -> EffectAnalysis {
+    let qualified_names = sources
+        .map(|sources| crate::core::resolved::top_level_function_qualified_names(items, sources));
     let mut callables = Vec::<Callable<'_>>::new();
-    let mut by_short = HashMap::<String, Vec<String>>::new();
+    let mut top_level_names = HashMap::<String, Vec<String>>::new();
+    let mut method_names = HashMap::<String, Vec<String>>::new();
     let mut extern_names = HashSet::new();
     for item in items {
         match item {
             Item::Func(function) => {
+                let qualified_name = match (sources, qualified_names.as_ref()) {
+                    (Some(sources), Some(qualified_names)) => {
+                        crate::core::resolved::top_level_function_qualified_name(
+                            function,
+                            sources,
+                            qualified_names,
+                        )
+                    }
+                    _ => function.name.clone(),
+                };
+                let owner = crate::core::resolved::NodeId(format!("function:{qualified_name}"));
                 add_callable(
                     &mut callables,
-                    &mut by_short,
-                    function.name.clone(),
+                    &mut top_level_names,
+                    qualified_name,
+                    owner,
                     function,
+                    LexicalScope::new(),
                 );
             }
             Item::Impl(implementation) => {
                 for function in &implementation.methods {
                     let key = format!("{}::{}", implementation.type_name, function.name);
-                    add_callable(&mut callables, &mut by_short, key, function);
+                    let impl_name = crate::core::resolved::impl_qualified_name(
+                        &implementation.trait_name,
+                        &implementation.trait_args,
+                        &implementation.type_name,
+                    );
+                    let owner = crate::core::resolved::impl_method_owner(&impl_name, function);
+                    add_callable(
+                        &mut callables,
+                        &mut method_names,
+                        key,
+                        owner,
+                        function,
+                        LexicalScope::new(),
+                    );
                 }
             }
             Item::Actor(actor) => {
                 for function in &actor.methods {
                     let key = format!("{}::{}", actor.name, function.name);
-                    add_callable(&mut callables, &mut by_short, key, function);
+                    let owner = crate::core::resolved::NodeId(format!("function:{key}"));
+                    add_callable(
+                        &mut callables,
+                        &mut method_names,
+                        key,
+                        owner,
+                        function,
+                        LexicalScope::new(),
+                    );
                 }
             }
             Item::ExternBlock(block) => {
@@ -367,16 +421,32 @@ pub fn infer_items(items: &[Item]) -> EffectAnalysis {
         }
     }
 
+    // Nested declarations are latent callable nodes. Register the complete
+    // lexical directory before scanning bodies so forward sibling calls and
+    // recursive nested calls resolve to stable checker owner identities.
+    let roots = callables.clone();
+    for callable in &roots {
+        register_nested_callables(
+            &callable.function.body,
+            &callable.owner,
+            &callable.captured_scope,
+            &mut callables,
+        );
+    }
+
     let mut direct = BTreeMap::<String, DirectEffects>::new();
     for callable in &callables {
         let mut effects = DirectEffects::default();
-        scan_block(
+        scan_callable_block(
             &callable.function.body,
             &mut effects,
-            &by_short,
+            &callable.owner,
+            &callable.captured_scope,
+            &top_level_names,
+            &method_names,
             &extern_names,
         );
-        direct.insert(callable.key.clone(), effects);
+        direct.insert(callable.node_key.clone(), effects);
     }
 
     // A monotone union fixpoint handles recursion and mutually recursive
@@ -388,24 +458,23 @@ pub fn infer_items(items: &[Item]) -> EffectAnalysis {
     for _ in 0..=callables.len() {
         let mut changed = false;
         for callable in &callables {
-            let mut next = inferred.get(&callable.key).cloned().unwrap_or_default();
-            let Some(effects) = direct.get(&callable.key) else {
+            let mut next = inferred
+                .get(&callable.node_key)
+                .cloned()
+                .unwrap_or_default();
+            let Some(effects) = direct.get(&callable.node_key) else {
                 continue;
             };
             for callee in &effects.callees {
-                if let Some(targets) = by_short.get(callee) {
-                    for target in targets {
-                        if let Some(target_effects) = inferred.get(target) {
-                            changed |= next.union_with(target_effects);
-                        }
-                    }
+                if let Some(target_effects) = inferred.get(callee) {
+                    changed |= next.union_with(target_effects);
                 } else {
                     next.insert(EffectKind::Unknown);
                     changed = true;
                 }
             }
             changed |= inferred
-                .insert(callable.key.clone(), next.clone())
+                .insert(callable.node_key.clone(), next.clone())
                 .is_some_and(|old| old != next);
         }
         if !changed {
@@ -415,7 +484,7 @@ pub fn infer_items(items: &[Item]) -> EffectAnalysis {
 
     let mut analysis = EffectAnalysis::default();
     for callable in callables {
-        let inferred_set = inferred.remove(&callable.key).unwrap_or_default();
+        let inferred_set = inferred.remove(&callable.node_key).unwrap_or_default();
         let declared = if callable.function.effects.is_empty() {
             None
         } else {
@@ -423,7 +492,7 @@ pub fn infer_items(items: &[Item]) -> EffectAnalysis {
                 Ok(set) => Some(set),
                 Err(error) => {
                     analysis.diagnostics.push(EffectDiagnostic {
-                        callable: callable.key.clone(),
+                        callable: callable.summary_key.clone(),
                         message: error.to_string(),
                     });
                     None
@@ -434,7 +503,7 @@ pub fn infer_items(items: &[Item]) -> EffectAnalysis {
             inferred: inferred_set,
             declared,
             sources: direct
-                .get(&callable.key)
+                .get(&callable.node_key)
                 .map(|effects| effects.sources.clone())
                 .unwrap_or_default(),
         };
@@ -443,18 +512,18 @@ pub fn infer_items(items: &[Item]) -> EffectAnalysis {
         if let Some(declared) = &summary.declared {
             if summary.inferred.is_unknown() {
                 analysis.diagnostics.push(EffectDiagnostic {
-                    callable: callable.key.clone(),
+                    callable: callable.summary_key.clone(),
                     message: format!(
                         "callable '{}' reaches an unknown effect and cannot satisfy declared upper bound {}",
-                        callable.key, declared
+                        callable.summary_key, declared
                     ),
                 });
             } else if !summary.inferred.is_subset_of(declared) {
                 analysis.diagnostics.push(EffectDiagnostic {
-                    callable: callable.key.clone(),
+                    callable: callable.summary_key.clone(),
                     message: format!(
                         "callable '{}' inferred effects {} exceed declared upper bound {}",
-                        callable.key, summary.inferred, declared
+                        callable.summary_key, summary.inferred, declared
                     ),
                 });
             }
@@ -463,15 +532,18 @@ pub fn infer_items(items: &[Item]) -> EffectAnalysis {
         // default.  Existing stdlib/public code with no declaration remains
         // compatible until the new surface declaration is selected; callers
         // can use `validate_public_summaries` for a strict module boundary.
-        if callable.public && callable.function.effects.len() > 0 {
-            if let Err(message) = summary.validate_public(&callable.key) {
+        if callable.public && !callable.function.effects.is_empty() {
+            if let Err(message) = summary.validate_public(&callable.summary_key) {
                 analysis.diagnostics.push(EffectDiagnostic {
-                    callable: callable.key.clone(),
+                    callable: callable.summary_key.clone(),
                     message,
                 });
             }
         }
-        analysis.summaries.insert(callable.key, summary);
+        analysis
+            .owner_summaries
+            .insert(callable.owner.0.clone(), summary.clone());
+        analysis.summaries.insert(callable.summary_key, summary);
     }
     analysis
 }
@@ -497,76 +569,401 @@ pub fn validate_public_summaries(analysis: &EffectAnalysis) -> Vec<EffectDiagnos
 
 fn add_callable<'a>(
     callables: &mut Vec<Callable<'a>>,
-    by_short: &mut HashMap<String, Vec<String>>,
-    key: String,
+    names: &mut HashMap<String, Vec<String>>,
+    summary_key: String,
+    owner: crate::core::resolved::NodeId,
     function: &'a FuncDef,
+    captured_scope: LexicalScope,
 ) {
-    by_short
+    let node_key = owner.0.clone();
+    names
         .entry(function.name.clone())
         .or_default()
-        .push(key.clone());
+        .push(node_key.clone());
     callables.push(Callable {
-        key,
+        node_key,
+        summary_key,
+        owner,
         function,
         public: function.pub_,
+        captured_scope,
     });
 }
 
-fn scan_block(
-    block: &Block,
-    effects: &mut DirectEffects,
-    by_short: &HashMap<String, Vec<String>>,
-    extern_names: &HashSet<String>,
+fn register_nested_callables<'a>(
+    block: &'a Block,
+    owner: &crate::core::resolved::NodeId,
+    inherited_scope: &LexicalScope,
+    callables: &mut Vec<Callable<'a>>,
 ) {
+    let mut local = BTreeMap::<String, Option<String>>::new();
+    let mut declarations = Vec::new();
     for statement in block {
-        scan_stmt(statement, effects, by_short, extern_names);
+        let Stmt::Func(function) = statement.unlocated() else {
+            continue;
+        };
+        let nested_owner = crate::core::resolved::nested_function_owner(owner, function);
+        match local.get(&function.name) {
+            Some(_) => {
+                local.insert(function.name.clone(), None);
+            }
+            None => {
+                local.insert(function.name.clone(), Some(nested_owner.0.clone()));
+            }
+        }
+        declarations.push((function, nested_owner));
+    }
+    let mut scope = inherited_scope.clone();
+    scope.extend(local);
+
+    for (function, nested_owner) in &declarations {
+        callables.push(Callable {
+            node_key: nested_owner.0.clone(),
+            summary_key: nested_owner.0.clone(),
+            owner: nested_owner.clone(),
+            function,
+            public: function.pub_,
+            captured_scope: scope.clone(),
+        });
+    }
+    for (function, nested_owner) in declarations {
+        register_nested_callables(&function.body, &nested_owner, &scope, callables);
+    }
+    for statement in block {
+        if !matches!(statement.unlocated(), Stmt::Func(_)) {
+            register_nested_in_statement(statement, owner, &scope, callables);
+        }
     }
 }
 
-fn scan_stmt(
-    statement: &Stmt,
-    effects: &mut DirectEffects,
-    by_short: &HashMap<String, Vec<String>>,
-    extern_names: &HashSet<String>,
+fn register_nested_in_statement<'a>(
+    statement: &'a Stmt,
+    owner: &crate::core::resolved::NodeId,
+    scope: &LexicalScope,
+    callables: &mut Vec<Callable<'a>>,
 ) {
     match statement.unlocated() {
-        Stmt::Located { .. } => unreachable!(),
-        Stmt::Let { init, .. } => init
-            .as_ref()
-            .into_iter()
-            .for_each(|expr| scan_expr(expr, effects, by_short, extern_names)),
-        Stmt::Return(value) | Stmt::Break(value) => value
-            .as_ref()
-            .into_iter()
-            .for_each(|expr| scan_expr(expr, effects, by_short, extern_names)),
-        Stmt::Expr(expr)
-        | Stmt::Drop(expr)
-        | Stmt::Requires(expr, _)
-        | Stmt::Ensures(expr, _)
-        | Stmt::Invariant(expr, _) => scan_expr(expr, effects, by_short, extern_names),
         Stmt::If { cond, then_, else_ } => {
-            scan_expr(cond, effects, by_short, extern_names);
-            scan_block(then_, effects, by_short, extern_names);
+            register_nested_in_expr(cond, owner, scope, callables);
+            register_nested_callables(then_, owner, scope, callables);
             if let Some(other) = else_ {
-                scan_block(other, effects, by_short, extern_names);
+                register_nested_callables(other, owner, scope, callables);
             }
         }
         Stmt::IfLet {
             init, then_, else_, ..
         } => {
-            scan_expr(init, effects, by_short, extern_names);
-            scan_block(then_, effects, by_short, extern_names);
+            register_nested_in_expr(init, owner, scope, callables);
+            register_nested_callables(then_, owner, scope, callables);
             if let Some(other) = else_ {
-                scan_block(other, effects, by_short, extern_names);
+                register_nested_callables(other, owner, scope, callables);
             }
         }
         Stmt::While { cond, body } => {
-            scan_expr(cond, effects, by_short, extern_names);
-            scan_block(body, effects, by_short, extern_names);
+            register_nested_in_expr(cond, owner, scope, callables);
+            register_nested_callables(body, owner, scope, callables);
         }
         Stmt::WhileLet { init, body, .. } => {
-            scan_expr(init, effects, by_short, extern_names);
-            scan_block(body, effects, by_short, extern_names);
+            register_nested_in_expr(init, owner, scope, callables);
+            register_nested_callables(body, owner, scope, callables);
+        }
+        Stmt::For { iterable, body, .. } => {
+            register_nested_in_expr(iterable, owner, scope, callables);
+            register_nested_callables(body, owner, scope, callables);
+        }
+        Stmt::Loop(body)
+        | Stmt::Block(body)
+        | Stmt::Arena(body)
+        | Stmt::Unsafe(body)
+        | Stmt::IeeeFloat(body)
+        | Stmt::Defer(body)
+        | Stmt::OnFailure(body)
+        | Stmt::Parasteps(body) => register_nested_callables(body, owner, scope, callables),
+        Stmt::Pinned { expr, body, .. } => {
+            register_nested_in_expr(expr, owner, scope, callables);
+            register_nested_callables(body, owner, scope, callables);
+        }
+        Stmt::Let {
+            init: Some(expr), ..
+        }
+        | Stmt::SharedLet { init: expr, .. }
+        | Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Break(Some(expr))
+        | Stmt::Drop(expr)
+        | Stmt::Requires(expr, _)
+        | Stmt::Ensures(expr, _)
+        | Stmt::Invariant(expr, _) => register_nested_in_expr(expr, owner, scope, callables),
+        Stmt::Assign { target, value } => {
+            register_nested_in_expr(target, owner, scope, callables);
+            register_nested_in_expr(value, owner, scope, callables);
+        }
+        Stmt::Math(expressions) => {
+            for expression in expressions {
+                register_nested_in_expr(expression, owner, scope, callables);
+            }
+        }
+        Stmt::Located { .. } => unreachable!("Stmt::unlocated returned Located"),
+        Stmt::Func(_)
+        | Stmt::Let { init: None, .. }
+        | Stmt::Return(None)
+        | Stmt::Break(None)
+        | Stmt::Continue
+        | Stmt::Ellipsis => {}
+    }
+}
+
+fn register_nested_in_expr<'a>(
+    expression: &'a Expr,
+    owner: &crate::core::resolved::NodeId,
+    scope: &LexicalScope,
+    callables: &mut Vec<Callable<'a>>,
+) {
+    match expression.unlocated() {
+        Expr::Block(body) | Expr::Arena(body) => {
+            register_nested_callables(body, owner, scope, callables)
+        }
+        Expr::If { cond, then_, else_ } => {
+            register_nested_in_expr(cond, owner, scope, callables);
+            register_nested_callables(then_, owner, scope, callables);
+            if let Some(other) = else_ {
+                register_nested_callables(other, owner, scope, callables);
+            }
+        }
+        Expr::Lambda { body, .. } => register_nested_callables(body, owner, scope, callables),
+        Expr::Call(callee, arguments) => {
+            register_nested_in_expr(callee, owner, scope, callables);
+            for argument in arguments {
+                register_nested_in_expr(argument, owner, scope, callables);
+            }
+        }
+        Expr::Binary(_, left, right) => {
+            register_nested_in_expr(left, owner, scope, callables);
+            register_nested_in_expr(right, owner, scope, callables);
+        }
+        Expr::Unary(_, inner)
+        | Expr::Try(inner)
+        | Expr::OptionalChain(inner, _)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Old(inner)
+        | Expr::QuoteInterpolate(inner)
+        | Expr::NamedArg(_, inner)
+        | Expr::Cast(inner, _) => register_nested_in_expr(inner, owner, scope, callables),
+        Expr::Field(base, _) | Expr::TupleIndex(base, _) => {
+            register_nested_in_expr(base, owner, scope, callables)
+        }
+        Expr::Index(base, index) => {
+            register_nested_in_expr(base, owner, scope, callables);
+            register_nested_in_expr(index, owner, scope, callables);
+        }
+        Expr::Tuple(items) | Expr::List(items) | Expr::SetLiteral(items) => {
+            for item in items {
+                register_nested_in_expr(item, owner, scope, callables);
+            }
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            register_nested_in_expr(expr, owner, scope, callables);
+            register_nested_in_expr(iter, owner, scope, callables);
+            if let Some(guard) = guard {
+                register_nested_in_expr(guard, owner, scope, callables);
+            }
+        }
+        Expr::Match(subject, arms) => {
+            register_nested_in_expr(subject, owner, scope, callables);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    register_nested_in_expr(guard, owner, scope, callables);
+                }
+                register_nested_in_expr(&arm.body, owner, scope, callables);
+            }
+        }
+        Expr::Record { fields, rest, .. } => {
+            for field in fields {
+                register_nested_in_expr(&field.value, owner, scope, callables);
+            }
+            if let Some(rest) = rest {
+                register_nested_in_expr(rest, owner, scope, callables);
+            }
+        }
+        Expr::SliceExpr { target, start, end } => {
+            register_nested_in_expr(target, owner, scope, callables);
+            if let Some(start) = start {
+                register_nested_in_expr(start, owner, scope, callables);
+            }
+            if let Some(end) = end {
+                register_nested_in_expr(end, owner, scope, callables);
+            }
+        }
+        Expr::Turbofish(_, _, arguments) => {
+            for argument in arguments {
+                register_nested_in_expr(argument, owner, scope, callables);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                register_nested_in_expr(key, owner, scope, callables);
+                register_nested_in_expr(value, owner, scope, callables);
+            }
+        }
+        // The checker does not finalize declarations inside these opaque
+        // compile-time forms, matching the resolved syntax catalog.
+        Expr::Quote(_)
+        | Expr::Comptime(_)
+        | Expr::Literal(_)
+        | Expr::Ident(_)
+        | Expr::TypeInfo(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+    }
+}
+
+struct ScanEnv<'a> {
+    owner: &'a crate::core::resolved::NodeId,
+    scope: &'a LexicalScope,
+    top_level_names: &'a HashMap<String, Vec<String>>,
+    method_names: &'a HashMap<String, Vec<String>>,
+    extern_names: &'a HashSet<String>,
+}
+
+fn lexical_scope_for_block(
+    block: &Block,
+    owner: &crate::core::resolved::NodeId,
+    inherited_scope: &LexicalScope,
+) -> LexicalScope {
+    let mut local = BTreeMap::<String, Option<String>>::new();
+    for statement in block {
+        let Stmt::Func(function) = statement.unlocated() else {
+            continue;
+        };
+        let nested_owner = crate::core::resolved::nested_function_owner(owner, function);
+        match local.get(&function.name) {
+            Some(_) => {
+                local.insert(function.name.clone(), None);
+            }
+            None => {
+                local.insert(function.name.clone(), Some(nested_owner.0));
+            }
+        }
+    }
+    let mut scope = inherited_scope.clone();
+    scope.extend(local);
+    scope
+}
+
+fn scan_callable_block(
+    block: &Block,
+    effects: &mut DirectEffects,
+    owner: &crate::core::resolved::NodeId,
+    inherited_scope: &LexicalScope,
+    top_level_names: &HashMap<String, Vec<String>>,
+    method_names: &HashMap<String, Vec<String>>,
+    extern_names: &HashSet<String>,
+) {
+    let scope = lexical_scope_for_block(block, owner, inherited_scope);
+    let env = ScanEnv {
+        owner,
+        scope: &scope,
+        top_level_names,
+        method_names,
+        extern_names,
+    };
+    for statement in block {
+        scan_stmt(statement, effects, &env);
+    }
+}
+
+fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
+    match statement.unlocated() {
+        Stmt::Located { .. } => unreachable!(),
+        Stmt::Let { init, .. } => {
+            if let Some(init) = init {
+                scan_expr(init, effects, env);
+            }
+        }
+        Stmt::Return(value) | Stmt::Break(value) => {
+            if let Some(value) = value {
+                scan_expr(value, effects, env);
+            }
+        }
+        Stmt::Expr(expr)
+        | Stmt::Drop(expr)
+        | Stmt::Requires(expr, _)
+        | Stmt::Ensures(expr, _)
+        | Stmt::Invariant(expr, _) => scan_expr(expr, effects, env),
+        Stmt::If { cond, then_, else_ } => {
+            scan_expr(cond, effects, env);
+            scan_callable_block(
+                then_,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
+            if let Some(other) = else_ {
+                scan_callable_block(
+                    other,
+                    effects,
+                    env.owner,
+                    env.scope,
+                    env.top_level_names,
+                    env.method_names,
+                    env.extern_names,
+                );
+            }
+        }
+        Stmt::IfLet {
+            init, then_, else_, ..
+        } => {
+            scan_expr(init, effects, env);
+            scan_callable_block(
+                then_,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
+            if let Some(other) = else_ {
+                scan_callable_block(
+                    other,
+                    effects,
+                    env.owner,
+                    env.scope,
+                    env.top_level_names,
+                    env.method_names,
+                    env.extern_names,
+                );
+            }
+        }
+        Stmt::While { cond, body } => {
+            scan_expr(cond, effects, env);
+            scan_callable_block(
+                body,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
+        }
+        Stmt::WhileLet { init, body, .. } => {
+            scan_expr(init, effects, env);
+            scan_callable_block(
+                body,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
         }
         Stmt::Loop(body)
         | Stmt::Block(body)
@@ -579,36 +976,55 @@ fn scan_stmt(
             if matches!(statement.unlocated(), Stmt::Parasteps(_)) {
                 effects.add(EffectKind::Spawn, "parasteps");
             }
-            scan_block(body, effects, by_short, extern_names);
+            scan_callable_block(
+                body,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
         }
         Stmt::For { iterable, body, .. } => {
-            scan_expr(iterable, effects, by_short, extern_names);
-            scan_block(body, effects, by_short, extern_names);
+            scan_expr(iterable, effects, env);
+            scan_callable_block(
+                body,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
         }
         Stmt::Assign { target, value } => {
-            scan_expr(target, effects, by_short, extern_names);
-            scan_expr(value, effects, by_short, extern_names);
+            scan_expr(target, effects, env);
+            scan_expr(value, effects, env);
         }
         Stmt::SharedLet { init, .. } => {
             effects.add(EffectKind::SharedMutation, "shared binding");
-            scan_expr(init, effects, by_short, extern_names);
+            scan_expr(init, effects, env);
         }
         Stmt::Pinned { expr, body, .. } => {
             effects.add(EffectKind::Unknown, "pinned/FFI boundary");
-            scan_expr(expr, effects, by_short, extern_names);
-            scan_block(body, effects, by_short, extern_names);
+            scan_expr(expr, effects, env);
+            scan_callable_block(
+                body,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
         }
-        Stmt::Func(function) => scan_block(&function.body, effects, by_short, extern_names),
+        Stmt::Func(_) => {}
         Stmt::Continue | Stmt::Math(_) | Stmt::Ellipsis => {}
     }
 }
 
-fn scan_expr(
-    expression: &Expr,
-    effects: &mut DirectEffects,
-    by_short: &HashMap<String, Vec<String>>,
-    extern_names: &HashSet<String>,
-) {
+fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
     match expression.unlocated() {
         Expr::Located { .. } => unreachable!(),
         Expr::Call(callee, arguments) => {
@@ -623,119 +1039,166 @@ fn scan_expr(
                         || crate::core::builtins::is_language_intrinsic_callable(name)
                         || crate::core::builtins::is_language_constructor(name)
                     {
-                        // Known pure builtin/intrinsic.  Being absent from
-                        // the effect table is an intentional pure result;
-                        // it must not be confused with a dynamic call.
-                    } else if extern_names.contains(name) {
+                        // Known pure builtin/intrinsic.
+                    } else if let Some(target) = env.scope.get(name) {
+                        if let Some(target) = target {
+                            effects.callees.insert(target.clone());
+                        } else {
+                            effects.add(
+                                EffectKind::Unknown,
+                                format!("ambiguous nested call '{name}'"),
+                            );
+                        }
+                    } else if env.extern_names.contains(name) {
                         effects.add(EffectKind::Unknown, format!("extern '{name}'"));
-                    } else if by_short.contains_key(name) {
-                        effects.callees.insert(name.clone());
+                    } else if let Some(targets) = env.top_level_names.get(name) {
+                        effects.callees.extend(targets.iter().cloned());
+                    } else if let Some(targets) = env.method_names.get(name) {
+                        // Preserve the checker pass's historical support for
+                        // unqualified method calls inside an impl/actor body.
+                        effects.callees.extend(targets.iter().cloned());
                     } else {
-                        // Calls through a closure/generic function parameter or
-                        // an unresolved dynamic value are not pure.
                         effects.add(EffectKind::Unknown, format!("dynamic call '{name}'"));
                     }
                 }
                 Expr::Field(_, method) => {
-                    if by_short.contains_key(method) {
-                        effects.callees.insert(method.clone());
+                    if let Some(targets) = env.method_names.get(method) {
+                        effects.callees.extend(targets.iter().cloned());
                     } else if is_pure_builtin_method(method) {
-                        // Option/Result observation and extraction methods do
-                        // not perform an effect.  They may still trap on an
-                        // invalid value; traps are represented by the
-                        // canonical runtime error channel, not by `unknown`.
+                        // Closed observation/extraction methods are pure.
                     } else {
                         effects.add(EffectKind::Unknown, format!("dynamic method '{method}'"));
                     }
                 }
-                _ => {
-                    effects.add(EffectKind::Unknown, "dynamic call");
-                }
+                _ => effects.add(EffectKind::Unknown, "dynamic call"),
             }
-            scan_expr(callee, effects, by_short, extern_names);
+            scan_expr(callee, effects, env);
             for argument in arguments {
-                scan_expr(argument, effects, by_short, extern_names);
+                scan_expr(argument, effects, env);
             }
         }
         Expr::Spawn(inner) => {
             effects.add(EffectKind::Spawn, "spawn expression");
-            scan_expr(inner, effects, by_short, extern_names);
+            scan_expr(inner, effects, env);
         }
         Expr::Await(inner) => {
             effects.add(EffectKind::Suspend, "await expression");
-            scan_expr(inner, effects, by_short, extern_names);
+            scan_expr(inner, effects, env);
         }
-        Expr::Lambda { body, .. } => scan_block(body, effects, by_short, extern_names),
+        Expr::Lambda { body, .. } => scan_callable_block(
+            body,
+            effects,
+            env.owner,
+            env.scope,
+            env.top_level_names,
+            env.method_names,
+            env.extern_names,
+        ),
         Expr::If { cond, then_, else_ } => {
-            scan_expr(cond, effects, by_short, extern_names);
-            scan_block(then_, effects, by_short, extern_names);
+            scan_expr(cond, effects, env);
+            scan_callable_block(
+                then_,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
             if let Some(other) = else_ {
-                scan_block(other, effects, by_short, extern_names);
+                scan_callable_block(
+                    other,
+                    effects,
+                    env.owner,
+                    env.scope,
+                    env.top_level_names,
+                    env.method_names,
+                    env.extern_names,
+                );
             }
         }
         Expr::Block(body) | Expr::Arena(body) | Expr::Quote(body) | Expr::Comptime(body) => {
-            scan_block(body, effects, by_short, extern_names)
+            scan_callable_block(
+                body,
+                effects,
+                env.owner,
+                env.scope,
+                env.top_level_names,
+                env.method_names,
+                env.extern_names,
+            );
         }
         Expr::Binary(_, left, right) => {
-            scan_expr(left, effects, by_short, extern_names);
-            scan_expr(right, effects, by_short, extern_names);
+            scan_expr(left, effects, env);
+            scan_expr(right, effects, env);
         }
         Expr::Unary(_, inner)
         | Expr::Try(inner)
         | Expr::OptionalChain(inner, _)
         | Expr::TypeOf(inner)
         | Expr::Old(inner)
-        | Expr::QuoteInterpolate(inner) => scan_expr(inner, effects, by_short, extern_names),
-        Expr::Field(base, _) | Expr::TupleIndex(base, _) => {
-            scan_expr(base, effects, by_short, extern_names)
-        }
+        | Expr::QuoteInterpolate(inner)
+        | Expr::NamedArg(_, inner)
+        | Expr::Cast(inner, _) => scan_expr(inner, effects, env),
+        Expr::Field(base, _) | Expr::TupleIndex(base, _) => scan_expr(base, effects, env),
         Expr::Index(base, index) => {
-            scan_expr(base, effects, by_short, extern_names);
-            scan_expr(index, effects, by_short, extern_names);
+            scan_expr(base, effects, env);
+            scan_expr(index, effects, env);
         }
         Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
             for value in values {
-                scan_expr(value, effects, by_short, extern_names);
+                scan_expr(value, effects, env);
             }
         }
         Expr::Comprehension {
             expr, iter, guard, ..
         } => {
-            scan_expr(expr, effects, by_short, extern_names);
-            scan_expr(iter, effects, by_short, extern_names);
+            scan_expr(expr, effects, env);
+            scan_expr(iter, effects, env);
             if let Some(guard) = guard {
-                scan_expr(guard, effects, by_short, extern_names);
+                scan_expr(guard, effects, env);
             }
         }
         Expr::Match(subject, arms) => {
-            scan_expr(subject, effects, by_short, extern_names);
+            scan_expr(subject, effects, env);
             for arm in arms {
                 if let Some(guard) = &arm.guard {
-                    scan_expr(guard, effects, by_short, extern_names);
+                    scan_expr(guard, effects, env);
                 }
-                scan_expr(&arm.body, effects, by_short, extern_names);
+                scan_expr(&arm.body, effects, env);
             }
         }
         Expr::Record { fields, rest, .. } => {
             for field in fields {
-                scan_expr(&field.value, effects, by_short, extern_names);
+                scan_expr(&field.value, effects, env);
             }
             if let Some(rest) = rest {
-                scan_expr(rest, effects, by_short, extern_names);
+                scan_expr(rest, effects, env);
             }
         }
         Expr::SliceExpr { target, start, end } => {
-            scan_expr(target, effects, by_short, extern_names);
+            scan_expr(target, effects, env);
             if let Some(start) = start {
-                scan_expr(start, effects, by_short, extern_names);
+                scan_expr(start, effects, env);
             }
             if let Some(end) = end {
-                scan_expr(end, effects, by_short, extern_names);
+                scan_expr(end, effects, env);
             }
         }
         Expr::Turbofish(name, _, arguments) => {
-            if by_short.contains_key(name) {
-                effects.callees.insert(name.clone());
+            if let Some(target) = env.scope.get(name) {
+                if let Some(target) = target {
+                    effects.callees.insert(target.clone());
+                } else {
+                    effects.add(
+                        EffectKind::Unknown,
+                        format!("ambiguous nested generic call '{name}'"),
+                    );
+                }
+            } else if env.extern_names.contains(name) {
+                effects.add(EffectKind::Unknown, format!("extern generic call '{name}'"));
+            } else if let Some(targets) = env.top_level_names.get(name) {
+                effects.callees.extend(targets.iter().cloned());
             } else {
                 effects.add(
                     EffectKind::Unknown,
@@ -743,23 +1206,20 @@ fn scan_expr(
                 );
             }
             for argument in arguments {
-                scan_expr(argument, effects, by_short, extern_names);
+                scan_expr(argument, effects, env);
             }
-        }
-        Expr::NamedArg(_, inner) | Expr::Cast(inner, _) => {
-            scan_expr(inner, effects, by_short, extern_names)
         }
         Expr::Literal(Lit::FString(parts)) => {
             for part in parts {
                 if let crate::ast::FStringPart::Interp(expr) = part {
-                    scan_expr(&expr, effects, by_short, extern_names)
+                    scan_expr(expr, effects, env);
                 }
             }
         }
         Expr::MapLiteral { entries } => {
             for (key, value) in entries {
-                scan_expr(key, effects, by_short, extern_names);
-                scan_expr(value, effects, by_short, extern_names);
+                scan_expr(key, effects, env);
+                scan_expr(value, effects, env);
             }
         }
         Expr::Literal(_) | Expr::Ident(_) | Expr::TypeInfo(_) => {}
@@ -974,7 +1434,7 @@ pub fn builtin_effects(name: &str) -> EffectSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{AstNodeMeta, AstOrigin, Block, FuncDef, Item};
+    use crate::ast::{AstNodeMeta, AstOrigin, Block, ExternBlock, ExternFunc, FuncDef, Item};
 
     fn function(name: &str, body: Block) -> FuncDef {
         FuncDef {
@@ -994,6 +1454,13 @@ mod tests {
             has_ensures: false,
             has_mutate_params: false,
         }
+    }
+
+    fn call(name: &str) -> Stmt {
+        Stmt::Expr(Expr::Call(
+            Box::new(Expr::Ident(name.to_string())),
+            Vec::new(),
+        ))
     }
 
     #[test]
@@ -1063,6 +1530,162 @@ mod tests {
         );
         let analysis = infer_items(&[Item::Func(function)]);
         assert!(analysis.summary("f").unwrap().inferred.is_unknown());
+    }
+
+    #[test]
+    fn captured_pure_nested_helper_has_an_exact_latent_summary() {
+        let helper = function(
+            "captured_helper",
+            vec![Stmt::Return(Some(Expr::Ident("captured_value".into())))],
+        );
+        let helper_owner = crate::core::resolved::nested_function_owner(
+            &crate::core::resolved::NodeId("function:main".into()),
+            &helper,
+        );
+        let main = function("main", vec![Stmt::Func(helper), call("captured_helper")]);
+
+        let analysis = infer_items(&[Item::Func(main)]);
+        assert!(analysis.summary("main").unwrap().is_pure());
+        assert!(analysis
+            .owner_summaries
+            .get(&helper_owner.0)
+            .expect("nested helper summary is keyed by checker owner")
+            .is_pure());
+    }
+
+    #[test]
+    fn nested_lexical_shadowing_selects_the_exact_owner_and_keeps_bodies_latent() {
+        let global_helper = function(
+            "helper",
+            vec![Stmt::Expr(Expr::Call(
+                Box::new(Expr::Ident("read_file".into())),
+                vec![Expr::Literal(Lit::String("path".into()))],
+            ))],
+        );
+        let local_helper = function("helper", vec![]);
+        let local_owner = crate::core::resolved::nested_function_owner(
+            &crate::core::resolved::NodeId("function:main".into()),
+            &local_helper,
+        );
+        let main = function("main", vec![Stmt::Func(local_helper), call("helper")]);
+
+        let analysis = infer_items(&[Item::Func(global_helper), Item::Func(main)]);
+        assert!(analysis
+            .summary("helper")
+            .unwrap()
+            .inferred
+            .contains(EffectKind::FileRead));
+        assert!(analysis.summary("main").unwrap().is_pure());
+        assert!(analysis
+            .owner_summaries
+            .get(&local_owner.0)
+            .expect("lexical helper summary is keyed by its exact owner")
+            .is_pure());
+    }
+
+    #[test]
+    fn nearest_nested_scope_shadows_enclosing_function_without_charging_unused_body() {
+        let outer_helper = function(
+            "helper",
+            vec![Stmt::Expr(Expr::Call(
+                Box::new(Expr::Ident("write_file".into())),
+                Vec::new(),
+            ))],
+        );
+        let inner_helper = function("helper", Vec::new());
+        let outer = function(
+            "outer",
+            vec![
+                Stmt::Func(outer_helper.clone()),
+                Stmt::Func(function(
+                    "inner",
+                    vec![Stmt::Func(inner_helper.clone()), call("helper")],
+                )),
+                call("inner"),
+            ],
+        );
+        let outer_owner = crate::core::resolved::nested_function_owner(
+            &crate::core::resolved::NodeId("function:main".into()),
+            &outer,
+        );
+        let outer_helper_owner =
+            crate::core::resolved::nested_function_owner(&outer_owner, &outer_helper);
+        let inner = match outer.body.get(1).map(Stmt::unlocated) {
+            Some(Stmt::Func(inner)) => inner,
+            _ => unreachable!(),
+        };
+        let inner_owner = crate::core::resolved::nested_function_owner(&outer_owner, inner);
+        let inner_helper_owner =
+            crate::core::resolved::nested_function_owner(&inner_owner, &inner_helper);
+        let main = function("main", vec![Stmt::Func(outer), call("outer")]);
+
+        let analysis = infer_items(&[Item::Func(main)]);
+        assert!(analysis.summary("main").unwrap().is_pure());
+        assert!(analysis
+            .owner_summaries
+            .get(&outer_helper_owner.0)
+            .expect("outer helper summary")
+            .inferred
+            .contains(EffectKind::FileWrite));
+        assert!(analysis
+            .owner_summaries
+            .get(&inner_helper_owner.0)
+            .expect("nearest lexical helper summary")
+            .is_pure());
+    }
+
+    #[test]
+    fn nested_extern_and_dynamic_calls_remain_unknown() {
+        let external = ExternBlock {
+            meta: AstNodeMeta::synthetic(AstOrigin::User),
+            abi: "C".into(),
+            funcs: vec![ExternFunc {
+                meta: AstNodeMeta::synthetic(AstOrigin::User),
+                name: "foreign".into(),
+                params: Vec::new(),
+                ret: None,
+                requires: None,
+                ensures: None,
+                variadic: false,
+                no_panic: false,
+                returns_errno: false,
+            }],
+            explicit_errno_funcs: Vec::new(),
+            no_panic: false,
+            unsafe_: false,
+            returns_errno: false,
+        };
+        let external_helper = function("external_helper", vec![call("foreign")]);
+        let dynamic_helper = function("dynamic_helper", vec![call("callback")]);
+        let main_owner = crate::core::resolved::NodeId("function:main".into());
+        let external_owner =
+            crate::core::resolved::nested_function_owner(&main_owner, &external_helper);
+        let dynamic_owner =
+            crate::core::resolved::nested_function_owner(&main_owner, &dynamic_helper);
+        let main = function(
+            "main",
+            vec![
+                Stmt::Func(external_helper),
+                Stmt::Func(dynamic_helper),
+                call("external_helper"),
+                call("dynamic_helper"),
+            ],
+        );
+
+        let analysis = infer_items(&[Item::ExternBlock(external), Item::Func(main)]);
+        assert!(analysis.summary("main").unwrap().inferred.is_unknown());
+        assert!(analysis
+            .owner_summaries
+            .get(&external_owner.0)
+            .expect("external helper summary")
+            .inferred
+            .is_unknown());
+        assert!(analysis
+            .owner_summaries
+            .get(&dynamic_owner.0)
+            .expect("dynamic helper summary")
+            .inferred
+            .is_unknown());
     }
 
     #[test]
