@@ -3307,20 +3307,33 @@ impl BodyLowerer<'_> {
                 ),
             );
         }
-        let mut candidates = self
-            .functions
-            .values()
-            .filter(|function| function.qualified_name == site.callee)
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.node_id.cmp(&right.node_id));
-        let [function] = candidates.as_slice() else {
-            return Err(vec![ResolvedBodyError::new(
-                node_id.clone(),
-                format!(
-                    "function call '{}' does not resolve to exactly one callable identity",
-                    site.callee
-                ),
-            )]);
+        let function: &ResolvedFunction = if let Some(target) = site.target_function.as_ref() {
+            self.functions.get(target).ok_or_else(|| {
+                vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "qualified function call '{}' has no canonical target",
+                        site.callee
+                    ),
+                )]
+            })?
+        } else {
+            let mut candidates = self
+                .functions
+                .values()
+                .filter(|function| function.qualified_name == site.callee)
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+            let [function] = candidates.as_slice() else {
+                return Err(vec![ResolvedBodyError::new(
+                    node_id.clone(),
+                    format!(
+                        "function call '{}' does not resolve to exactly one callable identity",
+                        site.callee
+                    ),
+                )]);
+            };
+            *function
         };
         let signature = self.signatures.get(&function.node_id).ok_or_else(|| {
             vec![ResolvedBodyError::new(

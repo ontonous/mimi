@@ -4860,6 +4860,7 @@ fn nested_actor_function_callsite_uses_exact_checker_owner_and_effects() {
         .expect("scaled call site in Counter.bump");
 
     assert_eq!(site.kind, ResolvedCallKind::Function);
+    assert_eq!(site.target_function.as_ref(), Some(&expected_owner));
     assert!(matches!(
         site.resolved_callee.as_ref(),
         Some(crate::core::ir::ResolvedCallee::Function(target)) if target == &expected_owner

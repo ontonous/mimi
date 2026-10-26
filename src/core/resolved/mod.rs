@@ -272,6 +272,9 @@ pub struct ResolvedCallSite {
     /// Return type display from callee function directory when known.
     pub ret: Option<String>,
     pub kind: ResolvedCallKind,
+    /// Exact checker-selected function identity. Syntax-only collection cannot
+    /// always resolve nested declarations or distinguish same-named exports.
+    pub target_function: Option<NodeId>,
     /// Canonical callable identity recovered from the typed body call node.
     /// Surface call-site collection intentionally records only syntax facts;
     /// body lowering closes the method/trait target before backend use.
@@ -1327,6 +1330,24 @@ impl CheckedProgram {
                         ));
                         continue;
                     };
+                    if site
+                        .target_function
+                        .as_ref()
+                        .is_some_and(|existing| existing != target)
+                    {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: typed function call '{}' disagrees with syntax target '{}'",
+                                target.0,
+                                site.target_function
+                                    .as_ref()
+                                    .expect("target was just checked")
+                                    .0
+                            ),
+                            site.origin.user_span(),
+                        ));
+                        continue;
+                    }
                     // The syntax-only collector cannot see lexical nested
                     // declarations, so a source call such as `scaled(x)` may
                     // start as Unknown. Once the typed body supplies the exact
@@ -1335,6 +1356,7 @@ impl CheckedProgram {
                     // fail-closed for unresolved calls and require this exact
                     // summary rather than guessing from the short spelling.
                     site.kind = ResolvedCallKind::Function;
+                    site.target_function = Some(target.clone());
                     site.effects = summary.inferred.to_vec();
                 }
                 if let Some(effects) = actor_method_effects {
@@ -7916,6 +7938,7 @@ fn record_expr_call_site(
         effects,
         ret,
         kind,
+        target_function: None,
         resolved_callee: None,
         origin: resolve_origin(ast_origin, &origin_parent, span),
     };
