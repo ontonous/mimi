@@ -122,7 +122,19 @@ pub fn subst_type_params(
     type_map: &HashMap<String, Type>,
 ) -> Type {
     match ty {
-        Type::Located { meta, ty } => subst_type_params(ty, generics, type_map).with_meta(*meta),
+        Type::Located { meta, ty } => {
+            let substituted = subst_type_params(ty, generics, type_map);
+            // When this node is a generic binder (`T`) and substitution
+            // supplies a source-located concrete type, keep the concrete
+            // type's provenance. Replacing it with the binder's span can
+            // launder source-sensitive type restrictions (for example,
+            // user-authored `Any` through a stdlib `Wrap<T>` alias).
+            if matches!(substituted, Type::Located { .. }) {
+                substituted
+            } else {
+                substituted.with_meta(*meta)
+            }
+        }
         Type::Name(name, args) => {
             if is_type_param(name, generics) {
                 if let Some(concrete) = type_map.get(name) {

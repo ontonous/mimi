@@ -9,6 +9,8 @@
 // deterministic across runs and identical on both backends.
 
 // MapExt: Trait for Record (dictionary) operations.
+pub type MapValuesSnapshot = List<Any>
+
 trait MapExt {
     func get(key: string) -> (bool, Any)
     func set(key: string, value: Any) -> Record

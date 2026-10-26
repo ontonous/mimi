@@ -1491,6 +1491,7 @@ mod h1_generalize_collision_tests {
         );
     }
 }
+mod alias_predeclare;
 mod borrow;
 pub(crate) mod flow;
 mod func;

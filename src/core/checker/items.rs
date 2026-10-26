@@ -37,6 +37,7 @@ impl<'a> Checker<'a> {
         }
         // Register built-in Record types used by builtins
         self.register_builtin_types();
+        self.predeclare_imported_public_type_aliases();
         for item in &self.file.items {
             self.collect_item_decls(item);
         }
