@@ -450,7 +450,7 @@ require_passed_tests native-jit-l2 \
     codegen::mir::actor_status::tests::canonical_actor_native_jit_power_wrap_and_traps_join_before_reporting \
     codegen::mir::actor_status::tests::canonical_actor_native_jit_preserves_fixtures_state_and_domain_join \
     codegen::mir::actor_status::tests::canonical_actor_native_jit_tagged_traps_propagate_801_802_and_join
-run_gate actor-cli-l2 6 1 test --test real_world_cli canonical_actor_ -- --nocapture --test-threads=1 || true
+run_gate actor-cli-l2 5 1 test --test real_world_cli canonical_actor_ -- --nocapture --test-threads=1 || true
 
 require_passed_tests actor-cli-l2 \
     canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback \
