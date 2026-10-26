@@ -7,6 +7,7 @@ use crate::core::phase::{TypeScheme, ZonkedTy};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(test)]
 use std::sync::Arc;
 
 /// The only callers that may still access the retained surface body file.
@@ -17,6 +18,7 @@ use std::sync::Arc;
 /// island did not accidentally reopen a different AST consumer.  Removing a
 /// variant is the deletion gate for that consumer; adding one requires a new
 /// architecture decision and receipt.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum LegacyBodyConsumer {
     /// The legacy LLVM fifth pass for body classes not yet lowered to MIR.
@@ -29,6 +31,7 @@ pub(crate) enum LegacyBodyConsumer {
     DualVerifierCompatibility,
 }
 
+#[cfg(test)]
 impl LegacyBodyConsumer {
     #[cfg(test)]
     pub(crate) const fn as_str(self) -> &'static str {
@@ -740,21 +743,22 @@ pub struct TransitionTables {
 
 #[derive(Debug)]
 pub struct CheckedProgram {
-    /// Owned normalized source retained only while legacy consumers migrate.
-    /// This field is removed together with the final raw-AST consumer; that
-    /// migration is tracked in 0.31.8–0.31.16 (Flow core phase), NOT v0.31.5
-    /// — see CHANGELOG v0.31.6 and `devdocs/v0.31/01-foundation.md:27`.
+    /// Test-only compatibility snapshot used by the legacy body oracle and
+    /// codegen harnesses. Production CheckedProgram values retain no legacy
+    /// AST copy.
+    #[cfg(test)]
     legacy_file: Arc<File>,
     /// Whether the checked source was assembled from one or more imports.
     /// This is a typed route fact used by migration gates; consumers must not
-    /// inspect `legacy_file` merely to rediscover module composition.
+    /// inspect the test-only compatibility snapshot to rediscover module
+    /// composition.
     has_imports: bool,
     /// Checker-owned source provenance for route and diagnostic gates.
     ///
     /// This is metadata, not a second surface AST. Keeping the registry on
     /// `CheckedProgram` lets consumers answer source-origin questions without
-    /// reopening `legacy_file`; the registry will outlive the final legacy
-    /// body consumer when that field is removed.
+    /// reopening the test-only compatibility snapshot; this registry remains
+    /// available in production CheckedProgram values.
     source_registry: SourceRegistry,
     items: HashMap<NodeId, ResolvedItem>,
     node_meta: HashMap<NodeId, NodeMeta>,
@@ -1462,11 +1466,11 @@ impl CheckedProgram {
             origin_catalog.register(&extern_block.node_id, &extern_block.origin, &mut errors);
         }
         origin_catalog.validate(&mut errors);
-        // The loaded production path resolves imports and merges their items
-        // before checking. Preserve the import-presence fact for all callers
-        // below, but legacy body consumers need only source items and
-        // provenance. Do not retain a second AST copy of import directives
-        // in the compatibility snapshot.
+        // Keep the compatibility snapshot available to test-only legacy body
+        // oracles without retaining it in production CheckedProgram values.
+        // Import directives are omitted; their presence stays in the
+        // checker-owned route fact below.
+        #[cfg(test)]
         let legacy_file_clone = File {
             sources: file.sources.clone(),
             imports: Vec::new(),
@@ -1477,6 +1481,7 @@ impl CheckedProgram {
             return Err(errors);
         }
         Ok(Self {
+            #[cfg(test)]
             legacy_file: Arc::new(legacy_file_clone),
             has_imports: !file.imports.is_empty(),
             source_registry: file.sources.clone(),

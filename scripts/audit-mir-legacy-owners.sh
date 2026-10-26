@@ -634,6 +634,33 @@ direct_legacy_file_reads_are_owner_only() {
 
 direct_legacy_file_reads_are_owner_only
 
+checked_program_legacy_file_residency() {
+    local source="$ROOT_DIR/src/core/resolved/mod.rs"
+    local checked_program_context
+    checked_program_context="$(sed -n '/^pub struct CheckedProgram {/,/^}/p' "$source")"
+    if ! printf '%s\n' "$checked_program_context" \
+        | rg -U '#\[cfg\(test\)\]\s+legacy_file:\s*Arc<File>,' >/dev/null; then
+        printf 'owner_audit_error=checked_program_legacy_file_field_lost_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -U '#\[cfg\(test\)\]\s+let legacy_file_clone = File\s*\{\s*[^}]*\};' \
+        "$source" >/dev/null; then
+        printf 'owner_audit_error=checked_program_legacy_file_construction_lost_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    if ! rg -U '#\[cfg\(test\)\]\s+legacy_file:\s*Arc::new\(legacy_file_clone\),' \
+        "$source" >/dev/null; then
+        printf 'owner_audit_error=checked_program_legacy_file_initializer_lost_cfg_test\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'checked_program_legacy_file_residency=field+construction+initializer-cfg-test-only\n'
+}
+
+checked_program_legacy_file_residency
+
 route_receipt_profile_binding \
     src/main/canonical_dispatch.rs \
     'fn select_scalar_ffi_route(' \

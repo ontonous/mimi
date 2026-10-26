@@ -41,6 +41,34 @@ fn unique_legacy_owner_audit_temp_root(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{sequence}", std::process::id()))
 }
 
+fn mirror_source_tree_except(
+    source_root: &std::path::Path,
+    source_directory: &std::path::Path,
+    destination: &std::path::Path,
+    excluded: &[&str],
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source_directory)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let relative = source_path
+            .strip_prefix(source_root)
+            .expect("directory entry must be under its source tree");
+        if entry.file_type()?.is_dir() {
+            mirror_source_tree_except(source_root, &source_path, &destination_path, excluded)?;
+        } else if !excluded
+            .iter()
+            .any(|path| std::path::Path::new(path) == relative)
+        {
+            if std::fs::hard_link(&source_path, &destination_path).is_err() {
+                std::fs::copy(&source_path, &destination_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn legacy_owner_temp_root_residues(prefix: &str) -> Vec<std::path::PathBuf> {
     let entries = std::fs::read_dir(std::env::temp_dir())
         .expect("scan temporary directory for owner audit residues");
@@ -1241,6 +1269,93 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         "legacy owner audit must pin native manifest adapter forwarding"
     );
 }
+
+#[test]
+fn legacy_owner_audit_rejects_production_legacy_file_residency() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-file-residency");
+    let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
+    std::fs::create_dir_all(temp_root.join("scripts"))
+        .expect("create legacy-file residency audit temp root");
+    mirror_source_tree_except(
+        &root.join("src"),
+        &root.join("src"),
+        &temp_root.join("src"),
+        &["core/resolved/mod.rs"],
+    )
+    .expect("mirror source tree for legacy-file cfg mutations");
+    std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
+        .expect("link integration tests into legacy-file residency temp root");
+    std::fs::copy(
+        root.join("scripts/audit-mir-legacy-owners.sh"),
+        temp_root.join("scripts/audit-mir-legacy-owners.sh"),
+    )
+    .expect("copy legacy owner audit script");
+
+    let resolved_path = temp_root.join("src/core/resolved/mod.rs");
+    std::fs::copy(root.join("src/core/resolved/mod.rs"), &resolved_path)
+        .expect("copy CheckedProgram source for cfg mutations");
+    let resolved_source =
+        std::fs::read_to_string(&resolved_path).expect("read copied CheckedProgram source");
+    let baseline = std::process::Command::new("bash")
+        .arg(temp_root.join("scripts/audit-mir-legacy-owners.sh"))
+        .current_dir(&temp_root)
+        .output()
+        .expect("run baseline legacy-file residency audit");
+    assert!(
+        baseline.status.success(),
+        "unmodified CheckedProgram cfg gates must pass the audit:\n{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+
+    for (label, guarded, unguarded, diagnostic) in [
+        (
+            "CheckedProgram field",
+            "#[cfg(test)]\n    legacy_file: Arc<File>,",
+            "    legacy_file: Arc<File>,",
+            "owner_audit_error=checked_program_legacy_file_field_lost_cfg_test",
+        ),
+        (
+            "legacy snapshot construction",
+            "#[cfg(test)]\n        let legacy_file_clone = File {",
+            "        let legacy_file_clone = File {",
+            "owner_audit_error=checked_program_legacy_file_construction_lost_cfg_test",
+        ),
+        (
+            "CheckedProgram initializer",
+            "#[cfg(test)]\n            legacy_file: Arc::new(legacy_file_clone),",
+            "            legacy_file: Arc::new(legacy_file_clone),",
+            "owner_audit_error=checked_program_legacy_file_initializer_lost_cfg_test",
+        ),
+    ] {
+        let changed = resolved_source.replacen(guarded, unguarded, 1);
+        assert!(
+            resolved_source != changed,
+            "{label} mutation fixture must remove its cfg(test) gate"
+        );
+        std::fs::write(&resolved_path, changed)
+            .unwrap_or_else(|_| panic!("write {label} without its cfg(test) gate"));
+        let output = std::process::Command::new("bash")
+            .arg(temp_root.join("scripts/audit-mir-legacy-owners.sh"))
+            .current_dir(&temp_root)
+            .output()
+            .unwrap_or_else(|_| panic!("run audit against the ungated {label}"));
+        assert!(
+            !output.status.success(),
+            "an ungated {label} must fail the legacy owner audit:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "ungated {label} omitted its fail-closed diagnostic:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::write(&resolved_path, &resolved_source)
+            .unwrap_or_else(|_| panic!("restore CheckedProgram source after {label} mutation"));
+    }
+    drop(cleanup);
+}
+
 
 #[test]
 fn legacy_owner_evidence_marker_drift_fails_closed() {
