@@ -152,6 +152,18 @@ pub(crate) fn verify(
     let canonical_receipt = canonical
         .as_ref()
         .map(|program| program.route_receipt("verify-canonical-v1"));
+    if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+        if let Some(receipt) = canonical_receipt.as_ref() {
+            let admission_mode = if mir { "explicit-mir" } else { "default" };
+            eprintln!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=verify mode={} checker_profile={} mir_digest={} receipt_identity_digest={}",
+                admission_mode,
+                "verify-canonical-v1",
+                receipt.mir_digest,
+                receipt.semantic_identity_digest(),
+            );
+        }
+    }
 
     let mut results = if let Some(canonical) = canonical {
         // The shared dispatcher checks the complete graph. Executable inputs

@@ -699,7 +699,7 @@ pub(crate) fn build(
     codegen.shared = shared;
     codegen.target_triple = target.map(|s| s.to_string());
 
-    let (compile_result, canonical_default) = if mir {
+    let (compile_result, canonical_default, route_admission_census_line) = if mir {
         let canonical = match canonical_for_build.take() {
             Some(canonical) => canonical,
             None => {
@@ -707,40 +707,66 @@ pub(crate) fn build(
             }
         };
         let receipt = canonical.route_receipt("build-canonical-v1");
-        (
-            codegen.compile_checked_mir_native_with_route_receipt(
-                &checked_program,
-                &canonical,
-                &receipt,
-            ),
-            false,
-        )
+        let compile_result = codegen.compile_checked_mir_native_with_route_receipt(
+            &checked_program,
+            &canonical,
+            &receipt,
+        );
+        let route_admission_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+            let admission_mode = if mir { "explicit-mir" } else { "default" };
+            Some(format!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=build mode={} checker_profile={} mir_digest={} receipt_identity_digest={}",
+                admission_mode,
+                "build-canonical-v1",
+                receipt.mir_digest,
+                receipt.semantic_identity_digest(),
+            ))
+        } else {
+            None
+        };
+        (compile_result, false, route_admission_census_line)
     } else if let Some(canonical) = canonical_for_build.take() {
         let receipt = canonical.route_receipt("build-canonical-v1");
-        (
-            codegen.compile_checked_mir_native_with_route_receipt(
-                &checked_program,
-                &canonical,
-                &receipt,
-            ),
-            true,
-        )
+        let compile_result = codegen.compile_checked_mir_native_with_route_receipt(
+            &checked_program,
+            &canonical,
+            &receipt,
+        );
+        let route_admission_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+            Some(format!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=build mode=default checker_profile={} mir_digest={} receipt_identity_digest={}",
+                "build-canonical-v1",
+                receipt.mir_digest,
+                receipt.semantic_identity_digest(),
+            ))
+        } else {
+            None
+        };
+        (compile_result, true, route_admission_census_line)
     } else {
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
                 let receipt = canonical.route_receipt("build-canonical-v1");
-                (
-                    codegen.compile_checked_mir_native_with_route_receipt(
-                        &checked_program,
-                        &canonical,
-                        &receipt,
-                    ),
-                    true,
-                )
+                let compile_result = codegen.compile_checked_mir_native_with_route_receipt(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                );
+                let route_admission_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+                    Some(format!(
+                        "MIMI_ROUTE_CENSUS route-admission consumer=build mode=default checker_profile={} mir_digest={} receipt_identity_digest={}",
+                        "build-canonical-v1",
+                        receipt.mir_digest,
+                        receipt.semantic_identity_digest(),
+                    ))
+                } else {
+                    None
+                };
+                (compile_result, true, route_admission_census_line)
             }
             crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
                 crate::canonical_dispatch::report_legacy_route(_reason);
-                (codegen.compile_checked(&checked_program), false)
+                (codegen.compile_checked(&checked_program), false, None)
             }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
                 return Err(format!("default Canonical MIR route rejected: {reason}"));
@@ -935,6 +961,9 @@ pub(crate) fn build(
     }
 
     if status.success() {
+        if let Some(line) = route_admission_census_line {
+            eprintln!("{line}");
+        }
         let kind = if shared {
             "shared library"
         } else {

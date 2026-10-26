@@ -171,6 +171,16 @@ fn run_once(
     };
     if let Some(canonical) = canonical {
         let receipt = canonical.route_receipt("run-canonical-v1");
+        if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+            let admission_mode = if mir { "explicit-mir" } else { "default" };
+            eprintln!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=run mode={} checker_profile={} mir_digest={} receipt_identity_digest={}",
+                admission_mode,
+                "run-canonical-v1",
+                canonical.canonical_digest(),
+                receipt.semantic_identity_digest(),
+            );
+        }
         let prog =
             mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
                 .map_err(|errors| {
