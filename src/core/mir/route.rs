@@ -7065,4 +7065,474 @@ func main() -> i32 {
             FlatCopyRecordAdmission::MixedCoverage
         );
     }
+
+
+    fn direct_nested_callable(program: &CheckedProgram, parent: &NodeId) -> NodeId {
+        program
+            .callable(parent)
+            .expect("parent callable")
+            .body
+            .root
+            .statements
+            .iter()
+            .find_map(|statement| match &statement.kind {
+                crate::core::ir::ResolvedStmtKind::NestedCallable(owner) => Some(owner.clone()),
+                _ => None,
+            })
+            .expect("direct nested callable")
+    }
+
+    fn call_site_to_function<'a>(
+        program: &'a CheckedProgram,
+        owner: &NodeId,
+        target: &NodeId,
+    ) -> &'a crate::core::ResolvedCallSite {
+        program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| {
+                site.owner == owner.0
+                    && matches!(
+                        site.resolved_callee.as_ref(),
+                        Some(crate::core::ir::ResolvedCallee::Function(callee))
+                            if callee == target
+                    )
+            })
+            .expect("typed call site to expected function identity")
+    }
+
+
+    #[test]
+    fn actor_nested_helper_fixtures_have_direct_typed_targets_and_exact_effect_summaries() {
+        for (source, actor_name, method_name) in [
+            (
+                include_str!("../../../tests/real_world/actor_nested_func_capture.mimi"),
+                "Counter",
+                "bump",
+            ),
+            (
+                include_str!("../../../tests/real_world/actor_nested_func_shadow.mimi"),
+                "Shadower",
+                "touch",
+            ),
+        ] {
+            let program = checked(source);
+            let method_owner = NodeId(format!("function:{actor_name}::{method_name}"));
+            let helper_owner = direct_nested_callable(&program, &method_owner);
+            let method = program.callable(&method_owner).expect("Actor method body");
+            let nested_call = call_site_to_function(&program, &method_owner, &helper_owner);
+
+            assert_eq!(nested_call.owner, method_owner.0);
+            assert!(matches!(
+                nested_call.resolved_callee.as_ref(),
+                Some(crate::core::ir::ResolvedCallee::Function(target)) if target == &helper_owner
+            ));
+            assert_eq!(nested_call.target_function.as_ref(), Some(&helper_owner));
+            assert!(
+                !nested_call.effects.iter().any(|effect| effect == "unknown"),
+                "a checker-resolved pure nested target must not inherit unknown effects"
+            );
+            assert!(
+                !method
+                    .signature
+                    .effects
+                    .iter()
+                    .any(|effect| effect.as_str() == "unknown"),
+                "a pure Actor method calling a resolved nested helper has no unknown effect"
+            );
+            assert!(unknown_effect_boundary_reason(&program).is_none());
+            program
+                .actor_descriptor(&NodeId(format!("actor:{actor_name}")))
+                .expect("fixture Actor descriptor")
+                .scalar_i32_receipt(&program)
+                .expect("fixture scalar Actor receipt");
+        }
+    }
+
+    #[test]
+    fn actor_nested_helper_does_not_receipt_an_unrelated_extern_call() {
+        let program = checked(
+            r#"
+extern "C" { func foreign_i32(x: i32) -> i32; }
+actor Counter {
+    value: i32 = 0;
+    func bump(x: i32) -> i32 {
+        func local(x: i32) -> i32 { x + 1 }
+        let next = local(x)
+        foreign_i32(x)
+        self.value = next
+        self.value
+    }
+}
+func main() -> i32 {
+    let counter = Counter.spawn()
+    counter.bump(1)
+    0
+}
+"#,
+        );
+        let method_owner = NodeId("function:Counter::bump".into());
+        let helper_owner = direct_nested_callable(&program, &method_owner);
+        let helper_call = call_site_to_function(&program, &method_owner, &helper_owner);
+        assert!(
+            !helper_call.effects.iter().any(|effect| effect == "unknown"),
+            "an unrelated extern call must not taint the pure nested helper call site"
+        );
+
+        let foreign_call = program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| site.owner == method_owner.0 && site.callee == "foreign_i32")
+            .expect("method-local extern call site");
+        assert!(foreign_call
+            .effects
+            .iter()
+            .any(|effect| effect == "unknown"));
+        assert!(matches!(
+            foreign_call.resolved_callee.as_ref(),
+            Some(crate::core::ir::ResolvedCallee::Extern(_))
+        ));
+        assert!(unknown_effect_boundary_reason(&program).is_some());
+    }
+
+    #[test]
+    fn unknown_call_inside_actor_nested_helper_is_checked_under_helper_owner() {
+        let program = checked(
+            r#"
+extern "C" { func foreign_i32(x: i32) -> i32; }
+actor Counter {
+    value: i32 = 0;
+    func bump(x: i32) -> i32 {
+        func local(x: i32) -> i32 { foreign_i32(x) }
+        self.value = local(x)
+        self.value
+    }
+}
+func main() -> i32 {
+    let counter = Counter.spawn()
+    counter.bump(1)
+    0
+}
+"#,
+        );
+        let method_owner = NodeId("function:Counter::bump".into());
+        let helper_owner = direct_nested_callable(&program, &method_owner);
+        let helper_call = call_site_to_function(&program, &method_owner, &helper_owner);
+        assert!(helper_call.effects.iter().any(|effect| effect == "unknown"));
+
+        let helper_foreign_call = program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| site.owner == helper_owner.0 && site.callee == "foreign_i32")
+            .expect("nested-helper-owned extern call site");
+        assert!(helper_foreign_call
+            .effects
+            .iter()
+            .any(|effect| effect == "unknown"));
+        assert!(matches!(
+            helper_foreign_call.resolved_callee.as_ref(),
+            Some(crate::core::ir::ResolvedCallee::Extern(_))
+        ));
+        assert!(unknown_effect_boundary_reason(&program).is_some());
+    }
+
+    #[test]
+    fn actor_method_callsite_uses_exact_finite_effect_summary() {
+        let program = checked(
+            r#"
+func local(x: i32) -> i32 {
+    read_file("/tmp/mimi-effect-route")
+    http_get("https://example.invalid/")
+    x
+}
+actor Counter {
+    value: i32 = 0;
+    func bump(x: i32) -> i32 {
+        func local(x: i32) -> i32 {
+            read_file("/tmp/mimi-effect-route")
+            http_get("https://example.invalid/")
+            x
+        }
+        self.value = local(x)
+        self.value
+    }
+
+}
+actor OtherCounter {
+    value: i32 = 0;
+    func bump(x: i32) -> i32 {
+        write_file("/tmp/mimi-effect-route-other", "other")
+        self.value = x
+        self.value
+    }
+}
+func main() -> i32 {
+    let counter = Counter.spawn()
+    counter.bump(1)
+    0
+}
+"#,
+        );
+        let method_owner = NodeId("function:Counter::bump".into());
+        let helper_owner = direct_nested_callable(&program, &method_owner);
+        let method = program.callable(&method_owner).expect("Actor method body");
+        assert!(method
+            .signature
+            .effects
+            .iter()
+            .any(|effect| effect.as_str() == "file.read"));
+        assert!(method
+            .signature
+            .effects
+            .iter()
+            .any(|effect| effect.as_str() == "network"));
+        assert!(!method
+            .signature
+            .effects
+            .iter()
+            .any(|effect| effect.as_str() == "unknown"));
+        assert!(!method
+            .signature
+            .effects
+            .iter()
+            .any(|effect| effect.as_str() == "file.write"));
+        let other_method = program
+            .callable(&NodeId("function:OtherCounter::bump".into()))
+            .expect("same-named method on the unrelated Actor");
+        assert!(other_method
+            .signature
+            .effects
+            .iter()
+            .any(|effect| effect.as_str() == "file.write"));
+
+        for (callee, effect) in [("read_file", "file.read"), ("http_get", "network")] {
+            let site = program
+                .call_sites_sorted()
+                .into_iter()
+                .find(|site| site.owner == helper_owner.0 && site.callee == callee)
+                .expect("nested-helper builtin call site");
+            assert!(site.effects.iter().any(|observed| observed == effect));
+        }
+        let mailbox_call = program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| {
+                site.owner == "function:main"
+                    && matches!(
+                        site.resolved_callee.as_ref(),
+                        Some(crate::core::ir::ResolvedCallee::ActorMethod { actor, method })
+                            if actor.0 == "actor:Counter"
+                                && method.as_str() == "function:Counter::bump"
+                    )
+            })
+            .expect("main mailbox call to the finite-effect Actor method");
+        assert!(!mailbox_call
+            .effects
+            .iter()
+            .any(|effect| effect == "unknown"));
+        assert!(mailbox_call
+            .effects
+            .iter()
+            .any(|effect| effect == "file.read"));
+        assert!(mailbox_call
+            .effects
+            .iter()
+            .any(|effect| effect == "network"));
+        assert!(!mailbox_call
+            .effects
+            .iter()
+            .any(|effect| effect == "file.write"));
+        let method_effects = method
+            .signature
+            .effects
+            .iter()
+            .map(|effect| effect.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mailbox_effects = mailbox_call
+            .effects
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(mailbox_effects, method_effects);
+        assert!(unknown_effect_boundary_reason(&program).is_some());
+        assert!(program
+            .actor_descriptor(&NodeId("actor:Counter".into()))
+            .expect("Actor descriptor")
+            .scalar_i32_receipt(&program)
+            .is_err());
+    }
+
+    #[test]
+    fn pure_actor_nested_helper_callsite_uses_exact_function_summary() {
+        let program = checked(
+            r#"
+actor Counter {
+    base: i32 = 0;
+    func bump(delta: i32) -> i32 {
+        let scale = 10
+        func scaled(d: i32) -> i32 { scale + d }
+        self.base = self.base + scaled(delta)
+        self.base
+    }
+}
+func main() -> i32 {
+    let counter = Counter.spawn()
+    counter.bump(5)
+    0
+}
+"#,
+        );
+        let method_owner = NodeId("function:Counter::bump".into());
+        let helper_owner = direct_nested_callable(&program, &method_owner);
+        let site = program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| site.owner == method_owner.0 && site.callee == "scaled")
+            .expect("nested helper call-site record");
+        assert_eq!(site.kind, crate::core::ResolvedCallKind::Function);
+        assert!(matches!(
+            site.resolved_callee.as_ref(),
+            Some(crate::core::ir::ResolvedCallee::Function(target)) if target == &helper_owner
+        ));
+        assert!(site.effects.is_empty(), "pure helper summary: {site:?}");
+        assert_eq!(
+            unknown_effect_boundary_reason(&program),
+            None,
+            "the exact pure nested target must not look like an opaque dynamic call"
+        );
+    }
+
+    #[test]
+    fn actor_nested_helper_does_not_receipt_unknown_top_level_helper() {
+        let program = checked(
+            r#"
+extern "C" { func foreign_i32(x: i32) -> i32; }
+func opaque_helper(x: i32) -> i32 { foreign_i32(x) }
+actor Counter {
+    value: i32 = 0;
+    func bump(x: i32) -> i32 {
+        func local(x: i32) -> i32 { x + 1 }
+        self.value = local(x) + opaque_helper(x)
+        self.value
+    }
+}
+func main() -> i32 {
+    let counter = Counter.spawn()
+    counter.bump(1)
+    0
+}
+"#,
+        );
+        let method_owner = NodeId("function:Counter::bump".into());
+        let nested_owner = direct_nested_callable(&program, &method_owner);
+        let global_owner = NodeId("function:opaque_helper".into());
+        assert_ne!(nested_owner, global_owner);
+        let global_call = call_site_to_function(&program, &method_owner, &global_owner);
+        assert!(global_call.effects.iter().any(|effect| effect == "unknown"));
+        assert!(unknown_effect_boundary_reason(&program).is_some());
+    }
+
+    #[test]
+    fn unreachable_user_callable_with_unknown_call_remains_fail_closed() {
+        let program = checked(
+            r#"
+extern "C" { func foreign_i32(x: i32) -> i32; }
+func dormant(x: i32) -> i32 { foreign_i32(x) }
+func main() -> i32 { 0 }
+"#,
+        );
+        let dormant_owner = NodeId("function:dormant".into());
+        let foreign_call = program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| site.owner == dormant_owner.0 && site.callee == "foreign_i32")
+            .expect("unreachable callable's extern call site");
+        assert!(foreign_call
+            .effects
+            .iter()
+            .any(|effect| effect == "unknown"));
+        assert!(matches!(
+            foreign_call.resolved_callee.as_ref(),
+            Some(crate::core::ir::ResolvedCallee::Extern(_))
+        ));
+        assert!(unknown_effect_boundary_reason(&program).is_some());
+    }
+
+    #[test]
+    fn ordinary_unreachable_function_cannot_borrow_actor_callsite_receipts() {
+        let program = checked(
+            r#"
+actor Counter {
+    value: i32 = 0;
+    func bump(x: i32) -> i32 {
+        func local(y: i32) -> i32 { y + 1 }
+        self.value = local(x)
+        self.value
+    }
+}
+func ordinary() -> i32 {
+    let counter = Counter.spawn()
+    counter.bump(1)
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        let ordinary_owner = NodeId("function:ordinary".into());
+        let ordinary = program
+            .callable(&ordinary_owner)
+            .expect("ordinary non-Actor callable");
+        assert!(ordinary
+            .signature
+            .effects
+            .iter()
+            .any(|effect| effect.as_str() == "unknown"));
+
+        let spawn_call = program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| {
+                site.owner == ordinary_owner.0
+                    && matches!(
+                        site.resolved_callee.as_ref(),
+                        Some(crate::core::ir::ResolvedCallee::Builtin(builtin))
+                            if builtin.as_str() == "actor.spawn"
+                    )
+            })
+            .expect("ordinary function's typed Actor spawn call");
+        assert!(spawn_call.effects.iter().any(|effect| effect == "unknown"));
+        assert!(super::actor_unknown_call_site_is_receipted(
+            &program, spawn_call
+        ));
+
+        let mailbox_call = program
+            .call_sites_sorted()
+            .into_iter()
+            .find(|site| {
+                site.owner == ordinary_owner.0
+                    && matches!(
+                        site.resolved_callee.as_ref(),
+                        Some(crate::core::ir::ResolvedCallee::ActorMethod { actor, method })
+                            if actor.0 == "actor:Counter"
+                                && method.as_str() == "function:Counter::bump"
+                    )
+            })
+            .expect("ordinary function's typed Actor mailbox call");
+        assert!(mailbox_call
+            .effects
+            .iter()
+            .any(|effect| effect == "unknown"));
+        assert!(super::actor_unknown_call_site_is_receipted(
+            &program,
+            mailbox_call
+        ));
+
+        assert!(!super::actor_unknown_effects_are_receipted(
+            &program,
+            &ordinary_owner
+        ));
+        let reason = unknown_effect_boundary_reason(&program)
+            .expect("ordinary owner cannot inherit call-site Actor receipts");
+        assert!(reason.contains("ordinary"), "{reason}");
+        assert!(reason.contains("unknown"), "{reason}");
+    }
 }

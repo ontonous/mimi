@@ -854,10 +854,10 @@ mod tests {
             })
             .expect("checked mailbox call");
         assert_eq!(call.permission, Some(Permission::Mutate));
-        assert_eq!(
-            call.effects,
-            vec![crate::core::EffectId::new("unknown").unwrap()]
-        );
+        let checked_method = program
+            .callable(&NodeId("function:Counter::bump".into()))
+            .expect("checked Actor method summary");
+        assert_eq!(call.effects, checked_method.signature.effects);
         assert!(call.session.is_empty());
         actors.validate_source_mailbox_call(call).unwrap();
         for permission in [None, Some(Permission::View), Some(Permission::Consume)] {

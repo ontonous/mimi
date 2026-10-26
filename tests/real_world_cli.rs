@@ -25506,58 +25506,60 @@ fn canonical_mir_string_assign_keeps_compatibility_route() {
 // The two original Actor regressions now require the same checked state,
 // mailbox and lexical environment graph through default and explicit routes.
 fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memcheck: bool) {
-    let source = project_root().join("tests/real_world").join(fixture);
-    let dir = std::env::temp_dir().join(format!(
+    let source = ::std::path::Path::new(::std::env!("CARGO_MANIFEST_DIR"))
+        .join("tests/real_world")
+        .join(fixture);
+    let dir = ::std::env::temp_dir().join(::std::format!(
         "mimi-actor-route-{}-{}-{}",
         fixture,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        ::std::process::id(),
+        ::std::time::SystemTime::now()
+            .duration_since(::std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    fs::create_dir_all(&dir).unwrap();
+    ::std::fs::create_dir_all(&dir).unwrap();
     if strict_memcheck {
-        let version = Command::new("valgrind")
+        let version = ::std::process::Command::new("valgrind")
             .arg("--version")
             .output()
             .expect("strict Actor L3 requires Valgrind; it must not be skipped");
-        assert!(
+        ::std::assert!(
             version.status.success(),
             "strict Actor L3 requires a working Valgrind executable: {}",
-            String::from_utf8_lossy(&version.stderr)
+            ::std::string::String::from_utf8_lossy(&version.stderr)
         );
-        eprintln!(
+        ::std::eprintln!(
             "strict Actor L3 Valgrind: {}",
-            String::from_utf8_lossy(&version.stdout).trim()
+            ::std::string::String::from_utf8_lossy(&version.stdout).trim()
         );
     }
-    let receipt = Command::new(mimi_bin())
+    let receipt = ::std::process::Command::new(::std::env!("CARGO_BIN_EXE_mimi"))
         .arg("mir")
         .arg(&source)
         .arg("--receipt")
         .output()
         .unwrap();
-    assert!(
+    ::std::assert!(
         receipt.status.success(),
         "{}",
-        String::from_utf8_lossy(&receipt.stderr)
+        ::std::string::String::from_utf8_lossy(&receipt.stderr)
     );
-    let manifest = String::from_utf8_lossy(&receipt.stdout);
+    let manifest = ::std::string::String::from_utf8_lossy(&receipt.stdout);
     let digest = manifest
         .lines()
         .find_map(|line| line.strip_prefix("mir_digest="))
         .expect("Actor inspection digest")
         .to_owned();
-    assert!(
-        !String::from_utf8_lossy(&receipt.stderr).contains("canonical route disposition: legacy")
-    );
+    ::std::assert!(!::std::string::String::from_utf8_lossy(&receipt.stderr)
+        .contains("canonical route disposition: legacy"));
+    let mut route_identities = [None, None, None];
     for explicit in [false, true] {
         let binary = dir.join(if explicit { "explicit" } else { "default" });
-        for command in ["run", "build", "verify"] {
-            let mut child = Command::new(mimi_bin());
+        for (command_index, command) in ["run", "build", "verify"].into_iter().enumerate() {
+            let mut child = ::std::process::Command::new(::std::env!("CARGO_BIN_EXE_mimi"));
             child
-                .current_dir(project_root())
+                .current_dir(::std::path::Path::new(::std::env!("CARGO_MANIFEST_DIR")))
                 .env("MIMI_ROUTE_CENSUS", "1")
                 .arg(command)
                 .arg(&source);
@@ -25568,49 +25570,115 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memch
                 child.arg("--output").arg(&binary);
             }
             let observed = child.output().expect("original Actor CLI route");
-            let stderr = String::from_utf8_lossy(&observed.stderr);
-            assert!(
+            let stderr = ::std::string::String::from_utf8_lossy(&observed.stderr);
+            ::std::assert!(
                 observed.status.success(),
                 "{fixture} {command} explicit={explicit}: {stderr}"
             );
-            assert!(
+            ::std::assert!(
                 !stderr.contains("canonical route disposition: legacy"),
                 "{fixture} must have no Actor fallback: {stderr}"
             );
-            if !explicit {
-                assert!(stderr.contains(&format!("canonical route disposition: canonical (scalar-actor-domain-v1) mir_digest={digest}")), "{fixture} {command} must use the shared graph digest: {stderr}");
+            let route_mode = if explicit { "explicit-mir" } else { "default" };
+            let census_prefix = ::std::format!(
+                "MIMI_ROUTE_CENSUS route-admission consumer={command} mode={route_mode} checker_profile="
+            );
+            let census_lines = stderr
+                .lines()
+                .filter(|line| line.starts_with(&census_prefix))
+                .collect::<Vec<_>>();
+            ::std::assert_eq!(
+                census_lines.len(),
+                1,
+                "{fixture} {command} explicit={explicit} must emit exactly one canonical route receipt census line: {stderr}"
+            );
+            let census_line = census_lines[0];
+            let census_field = |name: &str| {
+                census_line.split_whitespace().find_map(|field| {
+                    field
+                        .strip_prefix(name)
+                        .and_then(|value| value.strip_prefix('='))
+                })
+            };
+            let checker_profile = census_field("checker_profile")
+                .expect("Actor route census checker profile")
+                .to_owned();
+            let route_digest = census_field("mir_digest")
+                .expect("Actor route census MIR digest")
+                .to_owned();
+            let receipt_identity_digest = census_field("receipt_identity_digest")
+                .expect("Actor route census receipt identity digest")
+                .to_owned();
+            ::std::assert!(
+                receipt_identity_digest.len() == 64
+                    && receipt_identity_digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{fixture} {command} explicit={explicit} must emit a complete lowercase route receipt identity digest: {stderr}"
+            );
+            let expected_checker_profile = match command {
+                "run" => "run-canonical-v1",
+                "build" => "build-canonical-v1",
+                "verify" => "verify-canonical-v1",
+                _ => unreachable!("fixed Actor CLI consumer list"),
+            };
+            ::std::assert_eq!(
+                checker_profile, expected_checker_profile,
+                "{fixture} {command} explicit={explicit} must use its canonical consumer profile: {stderr}"
+            );
+            ::std::assert_eq!(
+                route_digest, digest,
+                "{fixture} {command} explicit={explicit} must use the inspected canonical Actor graph: {stderr}"
+            );
+            let identity = (checker_profile, route_digest, receipt_identity_digest);
+            if explicit {
+                let default_identity = route_identities[command_index]
+                    .as_ref()
+                    .expect("default Actor route census identity was captured first");
+                ::std::assert_eq!(
+                    &identity, default_identity,
+                    "{fixture} {command} default and explicit routes must share the canonical profile, MIR digest, and receipt identity"
+                );
+            } else {
+                ::std::assert!(
+                    stderr.contains(&::std::format!(
+                        "canonical route disposition: canonical (scalar-actor-domain-v1) mir_digest={digest}"
+                    )),
+                    "{fixture} {command} default route must use the Actor domain route and inspected graph: {stderr}"
+                );
+                route_identities[command_index] = Some(identity);
             }
             if command == "run" {
-                assert_eq!(observed.stdout, expected);
+                ::std::assert_eq!(observed.stdout, expected);
             }
             if command == "verify" {
-                let stdout = String::from_utf8_lossy(&observed.stdout);
-                assert!(
+                let stdout = ::std::string::String::from_utf8_lossy(&observed.stdout);
+                ::std::assert!(
                     stdout.contains("No contracts to verify"),
                     "neutral Actor verifier: {stdout}"
                 );
-                assert!(
+                ::std::assert!(
                     !stdout.contains("Proven"),
                     "Actor NoContracts must not masquerade as a proof"
                 );
             }
         }
-        let native = Command::new(&binary)
+        let native = ::std::process::Command::new(&binary)
             .output()
             .expect("original Actor native executable");
-        assert!(
+        ::std::assert!(
             native.status.success(),
             "{}",
-            String::from_utf8_lossy(&native.stderr)
+            ::std::string::String::from_utf8_lossy(&native.stderr)
         );
-        assert_eq!(native.stdout, expected);
+        ::std::assert_eq!(native.stdout, expected);
         if strict_memcheck {
             let mode = if explicit {
                 "explicit --mir"
             } else {
                 "default route"
             };
-            let checked = Command::new("valgrind")
+            let checked = ::std::process::Command::new("valgrind")
                 .args([
                     "--tool=memcheck",
                     "--leak-check=full",
@@ -25619,63 +25687,64 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memch
                     "--error-exitcode=99",
                 ])
                 .arg(&binary)
-                .current_dir(project_root())
+                .current_dir(::std::path::Path::new(::std::env!("CARGO_MANIFEST_DIR")))
                 .output()
                 .expect("strict Actor L3 Valgrind Memcheck invocation");
-            let report = String::from_utf8_lossy(&checked.stderr);
-            eprintln!("Memcheck {fixture} ({mode}) report:\n{report}");
-            assert_eq!(
+            let report = ::std::string::String::from_utf8_lossy(&checked.stderr);
+            ::std::eprintln!("Memcheck {fixture} ({mode}) report:\n{report}");
+            ::std::assert_eq!(
                 checked.status.code(),
                 Some(0),
                 "Memcheck {fixture} ({mode}) must exit 0; status={:?}\n{report}",
                 checked.status
             );
-            assert_eq!(
-                checked.stdout, expected,
+            ::std::assert_eq!(
+                checked.stdout,
+                expected,
                 "Memcheck {fixture} ({mode}) stdout must match the original Actor result"
             );
             for leak_kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-                assert!(
+                ::std::assert!(
                     report.lines().any(|line| {
-                        line.contains(&format!("{leak_kind}: 0 bytes in 0 blocks"))
+                        line.contains(&::std::format!("{leak_kind}: 0 bytes in 0 blocks"))
                     }),
                     "Memcheck {fixture} ({mode}) must report zero {leak_kind}:\n{report}"
                 );
             }
-            assert!(
+            ::std::assert!(
                 report
                     .lines()
                     .any(|line| line.contains("ERROR SUMMARY: 0 errors")),
                 "Memcheck {fixture} ({mode}) must report ERROR SUMMARY: 0 errors:\n{report}"
             );
-            assert!(
+            ::std::assert!(
                 report.contains("still reachable:"),
                 "retain the actual still-reachable count in the Memcheck report:\n{report}"
             );
         }
     }
-    let disasm = Command::new(mimi_bin())
+    let disasm = ::std::process::Command::new(::std::env!("CARGO_BIN_EXE_mimi"))
         .env("MIMI_ROUTE_CENSUS", "1")
         .arg("disasm")
         .arg(&source)
         .output()
         .unwrap();
-    assert!(
+    ::std::assert!(
         disasm.status.success(),
         "{}",
-        String::from_utf8_lossy(&disasm.stderr)
+        ::std::string::String::from_utf8_lossy(&disasm.stderr)
     );
-    let opcodes = String::from_utf8_lossy(&disasm.stdout);
-    assert!(
+    let opcodes = ::std::string::String::from_utf8_lossy(&disasm.stdout);
+    ::std::assert!(
         opcodes.contains("MIR_ACTOR_SPAWN")
             && opcodes.contains("MIR_ACTOR_CALL")
             && opcodes.contains("MIR_ACTOR_FIELD_STORE")
     );
-    assert!(
-        !String::from_utf8_lossy(&disasm.stderr).contains("canonical route disposition: legacy")
-    );
-    assert!(String::from_utf8_lossy(&disasm.stderr).contains(&format!("mir_digest={digest}")));
-    fs::remove_dir_all(&dir).unwrap();
+    ::std::assert!(!::std::string::String::from_utf8_lossy(&disasm.stderr)
+        .contains("canonical route disposition: legacy"));
+    ::std::assert!(::std::string::String::from_utf8_lossy(&disasm.stderr)
+        .contains(&::std::format!("mir_digest={digest}")));
+    ::std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -25732,6 +25801,7 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
             .find_map(|line| line.strip_prefix("mir_digest="))
             .expect("original Actor MIR receipt digest")
             .to_owned();
+        let mut default_l3_build_identity: Option<(String, String, String)> = None;
 
         for explicit_mir in [false, true] {
             let mode = if explicit_mir {
@@ -25779,6 +25849,86 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
                     "{fixture} default native build must use the inspected Actor graph:\n{build_stderr}"
                 );
             }
+
+            let route_mode = if explicit_mir {
+                "explicit-mir"
+            } else {
+                "default"
+            };
+            let census_prefix = "MIMI_ROUTE_CENSUS route-admission consumer=build ";
+            let census_lines = build_stderr
+                .lines()
+                .filter(|line| line.starts_with(census_prefix))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                census_lines.len(),
+                1,
+                "{fixture} {mode} Memcheck binary must have exactly one build route-admission census line:\n{build_stderr}"
+            );
+            let census_line = census_lines[0];
+            let census_fields = census_line.split_whitespace().collect::<Vec<_>>();
+            assert_eq!(
+                census_fields.len(),
+                7,
+                "{fixture} {mode} Memcheck build census must contain only its route identity fields:\n{build_stderr}"
+            );
+            assert_eq!(census_fields[0], "MIMI_ROUTE_CENSUS");
+            assert_eq!(census_fields[1], "route-admission");
+            assert_eq!(census_fields[2], "consumer=build");
+            assert_eq!(
+                census_fields[3],
+                format!("mode={route_mode}"),
+                "{fixture} {mode} Memcheck build census has the wrong route mode:\n{build_stderr}"
+            );
+            let census_field = |index: usize, name: &str| {
+                census_fields[index]
+                    .strip_prefix(name)
+                    .and_then(|value| value.strip_prefix('='))
+                    .filter(|value| !value.is_empty())
+            };
+            let checker_profile = census_field(4, "checker_profile")
+                .expect("strict Actor L3 build checker profile")
+                .to_owned();
+            let route_digest = census_field(5, "mir_digest")
+                .expect("strict Actor L3 build MIR digest")
+                .to_owned();
+            let receipt_identity_digest = census_field(6, "receipt_identity_digest")
+                .expect("strict Actor L3 build receipt identity digest")
+                .to_owned();
+            assert_eq!(
+                checker_profile, "build-canonical-v1",
+                "{fixture} {mode} Memcheck binary must use the canonical build profile:\n{build_stderr}"
+            );
+            assert_eq!(
+                route_digest, digest,
+                "{fixture} {mode} Memcheck binary must bind to the inspected Actor MIR receipt:\n{build_stderr}"
+            );
+            assert!(
+                receipt_identity_digest.len() == 64
+                    && receipt_identity_digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{fixture} {mode} Memcheck binary must expose a canonical lowercase 64-hex receipt identity:\n{build_stderr}"
+            );
+            let identity = (
+                checker_profile.clone(),
+                route_digest.clone(),
+                receipt_identity_digest.clone(),
+            );
+            if explicit_mir {
+                assert_eq!(
+                    &identity,
+                    default_l3_build_identity
+                        .as_ref()
+                        .expect("default Actor L3 build identity was captured first"),
+                    "{fixture} default and explicit Memcheck builds must share profile, MIR digest, and receipt identity"
+                );
+            } else {
+                default_l3_build_identity = Some(identity.clone());
+            }
+            eprintln!(
+                "Actor L3 route-binding fixture={fixture} mode={route_mode} checker_profile={checker_profile} mir_digest={route_digest} receipt_identity_digest={receipt_identity_digest}"
+            );
 
             let native = Command::new(&binary)
                 .current_dir(project_root())

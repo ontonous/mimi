@@ -71,6 +71,21 @@ fn canonical_actor_reference_preserves_original_shadow_and_global_stdout() {
 }
 
 #[test]
+fn canonical_actor_nested_helpers_use_actor_environment_receipts() {
+    for source in [CAPTURE, SHADOW] {
+        let program = canonical(source);
+        assert!(
+            !program.actor_environments().is_empty(),
+            "each original nested Actor helper has a dedicated lexical-environment receipt"
+        );
+        assert!(
+            program.nested_callable_scopes().is_empty(),
+            "Actor helpers must not be claimed by the ordinary nested-callable receipt"
+        );
+    }
+}
+
+#[test]
 fn canonical_actor_reference_repeated_turns_keep_state_and_root_replay_resets_it() {
     let source = CAPTURE.replace("println(r)", "println(r)\n    println(c.bump(7))");
     let program = canonical(&source);
