@@ -93,6 +93,7 @@ mm_probe_*.txt
 evidence/**/native/case-*/default-build/program
 evidence/**/native/case-*/explicit-build/program
 evidence/**/native/**/program
+evidence/**/strict-l3/native-*/program
 evidence/**/cli-*-build/program
 evidence/**/consumer-evidence/**/native-false
 evidence/**/consumer-evidence/**/native-true
