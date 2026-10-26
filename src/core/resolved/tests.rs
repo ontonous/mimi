@@ -4822,3 +4822,47 @@ fn canonical_actor_nested_regressions_have_scalar_declaration_receipts() {
         }
     }
 }
+
+#[test]
+fn nested_actor_function_callsite_uses_exact_checker_owner_and_effects() {
+    let file = parse(include_str!(
+        "../../../tests/real_world/actor_nested_func_capture.mimi"
+    ));
+    let program = crate::core::check_program(&file).expect("checked nested Actor fixture");
+    let method_owner = NodeId("function:Counter::bump".into());
+    let actor_method = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Actor(actor) if actor.name == "Counter" => {
+                actor.methods.iter().find(|method| method.name == "bump")
+            }
+            _ => None,
+        })
+        .expect("Counter.bump syntax");
+    let nested = actor_method
+        .body
+        .iter()
+        .find_map(|statement| match statement.unlocated() {
+            crate::ast::Stmt::Func(function) if function.name == "scaled" => Some(function),
+            _ => None,
+        })
+        .expect("nested scaled helper syntax");
+    let expected_owner = nested_function_owner(&method_owner, nested);
+    let helper = program
+        .functions()
+        .get(&expected_owner)
+        .expect("nested helper's exact canonical function entry");
+    let site = program
+        .call_sites_sorted()
+        .into_iter()
+        .find(|site| site.owner == method_owner.0 && site.callee == "scaled")
+        .expect("scaled call site in Counter.bump");
+
+    assert_eq!(site.kind, ResolvedCallKind::Function);
+    assert!(matches!(
+        site.resolved_callee.as_ref(),
+        Some(crate::core::ir::ResolvedCallee::Function(target)) if target == &expected_owner
+    ));
+    assert_eq!(site.effects, helper.effects);
+}

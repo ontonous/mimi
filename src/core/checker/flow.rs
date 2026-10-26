@@ -44,6 +44,8 @@ pub struct FlowAcc {
     /// CheckedProgram so codegen dispatch can distinguish `map<U>` (method-level
     /// generic) from plain trait methods without re-deriving from surface AST.
     pub trait_method_generics: HashMap<(String, String), Vec<String>>,
+    /// Checker-owned finite effect summaries (E-01..E-03).
+    pub effect_summaries: HashMap<String, crate::core::effects::EffectSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +162,7 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         zonked_expr_types: std::mem::take(&mut checker.zonked_expr_types),
         session_actions: std::mem::take(&mut checker.session_actions),
         trait_method_generics: std::mem::take(&mut checker.trait_method_generics),
+        effect_summaries: std::mem::take(&mut checker.effect_summaries),
     }
 }
 

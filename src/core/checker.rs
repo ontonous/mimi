@@ -247,6 +247,11 @@ pub(crate) struct Checker<'a> {
             crate::core::phase::ZonkedTy,
         >,
     >,
+    /// Checker-owned finite effect summaries.  The surface AST keeps the
+    /// legacy string vector for migration, while all propagation and backend
+    /// gates consume this canonical map.
+    pub(crate) effect_summaries:
+        std::collections::HashMap<String, crate::core::effects::EffectSummary>,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -368,6 +373,7 @@ impl<'a> Checker<'a> {
             zonked_nested_func_types: HashMap::new(),
             current_expr_types: None,
             zonked_expr_types: std::collections::BTreeMap::new(),
+            effect_summaries: std::collections::HashMap::new(),
         }
     }
 

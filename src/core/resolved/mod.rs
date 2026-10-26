@@ -985,11 +985,70 @@ impl CheckedProgram {
             zonked_expr_types,
             session_actions,
             trait_method_generics,
+            effect_summaries,
             ..
         } = acc;
         let mut program = Self::from_checked_file_base(file)?;
         let mut errors = Vec::new();
         let mut zonked_by_node = HashMap::new();
+
+        // Install the checker-owned inferred summary before canonical
+        // signatures and typed call sites are lowered.  This keeps the old
+        // surface `FuncDef::effects` storage as a compatibility input while
+        // making resolved/MIR/verifier consumers observe the same propagated
+        // finite set.
+        for function in program.functions.values_mut() {
+            if let Some(summary) = effect_summaries
+                .get(&function.node_id.0)
+                .cloned()
+                .or_else(|| effect_summary_for_name(&effect_summaries, &function.qualified_name))
+            {
+                function.effects = summary.inferred.to_vec();
+            }
+        }
+        for site in program.call_sites.values_mut() {
+            // Surface collection records Option/Result builtin methods as
+            // `Unknown` because their receiver type is not available to the
+            // syntax-only directory pass.  The checker has already resolved
+            // these closed extraction/observation methods; restore their
+            // finite (empty) effect summary before the MIR route gate sees
+            // the call site.
+            let method_name = site
+                .callee
+                .rsplit('.')
+                .next()
+                .unwrap_or(site.callee.as_str());
+            if crate::core::effects::is_pure_builtin_method(method_name)
+                && matches!(
+                    site.kind,
+                    ResolvedCallKind::Unknown | ResolvedCallKind::Method
+                )
+            {
+                site.effects.clear();
+                // Keep method identity for the semantic lowerer.  Marking
+                // this as `Builtin` would make the surface spelling
+                // (`snapshot.unwrap`) look like a free builtin name during
+                // MIR materialization; `Method` lets typed lowering use its
+                // resolved builtin-method identity.
+                if matches!(site.kind, ResolvedCallKind::Unknown) {
+                    site.kind = ResolvedCallKind::Method;
+                }
+            } else if let Some(summary) = effect_summary_for_name(&effect_summaries, &site.callee) {
+                site.effects = summary.inferred.to_vec();
+            } else if !crate::core::effects::builtin_effects(&site.callee).is_empty() {
+                site.effects = crate::core::effects::builtin_effects(&site.callee).to_vec();
+            } else if matches!(
+                site.kind,
+                ResolvedCallKind::Extern | ResolvedCallKind::Unknown
+            ) && crate::core::effects::builtin_effects(&site.callee).is_empty()
+            {
+                // Extern and dynamic call sites are retained as an explicit
+                // unknown effect.  The checker has already rejected truly
+                // undefined names, but the resolved boundary must still keep
+                // opaque FFI/dynamic calls from looking pure.
+                site.effects = vec!["unknown".into()];
+            }
+        }
 
         // Override declaration snapshots only with mandatory-finalized checker
         // artifacts. Raw checker types are not a backend input.
@@ -1178,6 +1237,46 @@ impl CheckedProgram {
             };
         for body in program.resolved_bodies.values() {
             for (call_node, callee) in &body.resolved_calls {
+                // The syntax-only method collector may have selected a bare
+                // method signature before the receiver's canonical Actor
+                // identity was available. Once lowering resolves an
+                // ActorMethod, replace that snapshot with the checker-final
+                // effect summary for its exact callable owner. Do not resolve
+                // effects by short method name: separate Actors may reuse it.
+                let actor_method_effects = match callee {
+                    crate::core::ir::ResolvedCallee::ActorMethod { actor, method } => {
+                        let actor_def = program.actors.get(actor);
+                        let method_owner = NodeId(method.as_str().to_owned());
+                        let method_def = program.functions.get(&method_owner);
+                        match (actor_def, method_def) {
+                            (Some(actor_def), Some(method_def))
+                                if method_def
+                                    .qualified_name
+                                    .strip_prefix(&format!("{}::", actor_def.qualified_name))
+                                    .is_some() =>
+                            {
+                                // Actor mailbox dispatch has a dedicated MIR
+                                // operation receipt. Its source effect set is
+                                // therefore the exact checked method summary;
+                                // do not inject a generic `unknown` that would
+                                // diverge from the method receipt and disable
+                                // finite-effect Actor routes.
+                                Some(method_def.effects.clone())
+                            }
+                            _ => {
+                                errors.push(Diagnostic::error(
+                                    format!(
+                                        "TOOL-RESOLUTION-001: typed Actor method '{}' has no matching canonical effect summary for '{}'",
+                                        method.as_str(), actor.0
+                                    ),
+                                    Span::UNKNOWN,
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    _ => None,
+                };
                 let Some(site) = program.call_sites.get_mut(call_node) else {
                     errors.push(Diagnostic::error(
                         format!(
@@ -1206,6 +1305,40 @@ impl CheckedProgram {
                         ),
                         site.origin.user_span(),
                     ));
+                }
+                if let crate::core::ir::ResolvedCallee::Function(target) = &callee {
+                    if !program.functions.contains_key(target) {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: typed function call '{}' has no exact callable directory entry",
+                                target.0
+                            ),
+                            site.origin.user_span(),
+                        ));
+                        continue;
+                    }
+                    let Some(summary) = effect_summaries.get(&target.0) else {
+                        errors.push(Diagnostic::error(
+                            format!(
+                                "TOOL-RESOLUTION-001: typed function call '{}' has no exact checker effect summary",
+                                target.0
+                            ),
+                            site.origin.user_span(),
+                        ));
+                        continue;
+                    };
+                    // The syntax-only collector cannot see lexical nested
+                    // declarations, so a source call such as `scaled(x)` may
+                    // start as Unknown. Once the typed body supplies the exact
+                    // checker Function owner and summary, canonicalize the
+                    // call-site kind from that identity. Keep the route gate
+                    // fail-closed for unresolved calls and require this exact
+                    // summary rather than guessing from the short spelling.
+                    site.kind = ResolvedCallKind::Function;
+                    site.effects = summary.inferred.to_vec();
+                }
+                if let Some(effects) = actor_method_effects {
+                    site.effects = effects;
                 }
             }
         }
@@ -2277,6 +2410,31 @@ impl CheckedProgram {
     }
 }
 
+/// Resolve an inferred effect summary for a canonical callable name.  Impl
+/// and actor method owners include trait/generic suffixes in Resolved IR,
+/// whereas the checker effect pass keys methods by `Type::method` or
+/// `Actor::method`; an exact hit wins and a unique `::method` suffix is the
+/// only fallback accepted here.
+fn effect_summary_for_name(
+    summaries: &HashMap<String, crate::core::effects::EffectSummary>,
+    name: &str,
+) -> Option<crate::core::effects::EffectSummary> {
+    if let Some(summary) = summaries.get(name) {
+        return Some(summary.clone());
+    }
+    let short = name.rsplit("::").next()?;
+    let mut candidates = summaries
+        .iter()
+        .filter(|(key, _)| key.rsplit("::").next() == Some(short))
+        .map(|(_, summary)| summary.clone())
+        .collect::<Vec<_>>();
+    if candidates.len() == 1 {
+        candidates.pop()
+    } else {
+        None
+    }
+}
+
 fn validate_resolved_callable_bodies(program: &CheckedProgram) -> Result<(), Vec<Diagnostic>> {
     let mut errors = Vec::new();
     for (owner, body) in &program.resolved_bodies {
@@ -2474,6 +2632,62 @@ fn backend_supports(backend: BackendProfile, capability: &str) -> bool {
         // Component IR consumers cannot yet lower Flow runtime features.
         BackendProfile::Component => !matches!(capability, "flow.multi_target"),
     }
+}
+
+/// Assign stable module-qualified names to colliding top-level functions.
+/// The same map is consumed by item metadata, function bodies, and call-site
+/// owners so a pair of same-named exports cannot collide in only one catalog.
+pub(crate) fn top_level_function_qualified_names(
+    items: &[Item],
+    sources: &SourceRegistry,
+) -> HashMap<(String, String), String> {
+    let mut source_identities: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut function_sources = Vec::new();
+    for item in items {
+        let Item::Func(function) = item else { continue };
+        let source_identity = sources
+            .key(function.meta.span.source_id)
+            .map(|key| key.as_str().to_string())
+            .unwrap_or_else(|| format!("<source:{}>", function.meta.span.source_id.raw()));
+        source_identities
+            .entry(function.name.clone())
+            .or_default()
+            .insert(source_identity.clone());
+        function_sources.push((source_identity, function.name.clone()));
+    }
+
+    function_sources
+        .into_iter()
+        .map(|(source_identity, name)| {
+            let qualified = if source_identities
+                .get(&name)
+                .is_some_and(|identities| identities.len() > 1)
+            {
+                // File-merge mode has no exported module alias yet. Use the
+                // stable source key as an internal disambiguator; ambiguous
+                // short names remain fail-closed at later call binding.
+                format!("{source_identity}::{name}")
+            } else {
+                name.clone()
+            };
+            ((source_identity, name), qualified)
+        })
+        .collect()
+}
+
+pub(crate) fn top_level_function_qualified_name(
+    function: &crate::ast::FuncDef,
+    sources: &SourceRegistry,
+    names: &HashMap<(String, String), String>,
+) -> String {
+    let source_identity = sources
+        .key(function.meta.span.source_id)
+        .map(|key| key.as_str().to_string())
+        .unwrap_or_else(|| format!("<source:{}>", function.meta.span.source_id.raw()));
+    names
+        .get(&(source_identity, function.name.clone()))
+        .cloned()
+        .unwrap_or_else(|| function.name.clone())
 }
 
 fn collect_items(

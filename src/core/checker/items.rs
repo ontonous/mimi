@@ -42,6 +42,25 @@ impl<'a> Checker<'a> {
         }
         // Check for type alias cycles
         self.check_alias_cycles();
+        // E-01..E-03: infer the finite effect summary after every callable
+        // declaration is visible.  The pass is conservative for extern and
+        // dynamic calls (they carry `unknown`) and therefore never turns an
+        // opaque operation into an accidental pure call.  Public declaration
+        // enforcement is kept as an explicit module-boundary operation until
+        // the replacement surface syntax is selected; existing stdlib files
+        // still use the removed `with` spelling and must remain loadable.
+        let analysis = crate::core::effects::infer_items_with_sources(
+            &self.file.items,
+            Some(&self.file.sources),
+        );
+        for diagnostic in analysis.diagnostics {
+            self.emit_code(
+                crate::diagnostic::codes::E0722,
+                format!("effect boundary: {}", diagnostic.message),
+            );
+        }
+        self.effect_summaries = analysis.summaries.into_iter().collect();
+        self.effect_summaries.extend(analysis.owner_summaries);
     }
 
     fn register_builtin_types(&mut self) {
