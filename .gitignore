@@ -21,12 +21,10 @@ Cargo.lock
 
 # Mimi compiled executables and object files
 *.o
-examples/*
-demos/*
-!examples/*.mimi
-!examples/kernel-card/
-!examples/kernel-card/*.mimi
-!demos/*.mimi
+# Known example/demo executables; keep nested source, docs, and evidence visible.
+/examples/benchmark
+/demos/04_adt_match
+/demos/08_algorithms
 projects/*/src/main
 projects/*/main
 tests/real_world/*_mimi
@@ -76,16 +74,9 @@ references/
 # used when /tmp does not persist, e.g. sandboxed agent shells)
 .llvm-wrapper/
 
-# Real-world suite generated binaries (kept by .mimi sources/scripts/docs)
-tests/real_world/**/*
-!tests/real_world/**/*.mimi
-!tests/real_world/**/*.py
-!tests/real_world/**/*.md
-!tests/real_world/**/*.toml
-!tests/real_world/projects/
-!tests/real_world/projects/*/
-!tests/real_world/projects/*/*.mimi
-!tests/real_world/projects/*/*.toml
+# Real-world suite generated project executables. Keep all inputs and evidence visible.
+/tests/real_world/projects/*/src/main
+/tests/real_world/projects/*/main
 !/main
 /main
 docs/compose/
