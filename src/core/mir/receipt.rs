@@ -4478,6 +4478,14 @@ impl CanonicalMirRouteReceipt {
             && self.root_owners == other.root_owners
     }
 
+    /// Compare the complete route receipt identity, including the selected
+    /// consumer profile. Use this when proving that admission and a concrete
+    /// backend consumed the same route; cache reuse should continue to use
+    /// [`Self::same_semantic_identity`] instead.
+    pub fn same_route_identity(&self, other: &CanonicalMirRouteReceipt) -> bool {
+        self.profile == other.profile && self.same_semantic_identity(other)
+    }
+
     /// Return the deterministic digest used when a consumer needs a cache
     /// identity for this receipt.  The profile remains excluded for the same
     /// reason as [`Self::same_semantic_identity`]: it records which consumer
@@ -4501,6 +4509,16 @@ impl CanonicalMirRouteReceipt {
         for owner in &self.root_owners {
             frame(&owner.0);
         }
+        blake3::hash(framed.as_bytes()).to_hex().to_string()
+    }
+
+    /// Return the deterministic digest of the full route identity, including
+    /// its profile. This is distinct from `semantic_identity_digest`, which
+    /// intentionally omits invocation provenance for cache reuse.
+    pub fn route_identity_digest(&self) -> String {
+        let mut framed = String::from("mimi-proof-mir-route-identity-v1");
+        push_frame(&mut framed, &self.profile);
+        push_frame(&mut framed, &self.semantic_identity_digest());
         blake3::hash(framed.as_bytes()).to_hex().to_string()
     }
 
@@ -5878,9 +5896,25 @@ func main() -> i32 {
             profile.semantic_identity_digest(),
             "consumer profile is provenance and must not split semantic cache identity"
         );
+        assert!(
+            !receipt.same_route_identity(&profile),
+            "consumer-specific route identity must include the selected profile"
+        );
+        assert_ne!(
+            receipt.route_identity_digest(),
+            profile.route_identity_digest(),
+            "route identity digest must distinguish profiles even when semantic identity is shared"
+        );
+        let same_route = receipt.clone();
+        assert!(receipt.same_route_identity(&same_route));
+        assert_eq!(
+            receipt.route_identity_digest(),
+            same_route.route_identity_digest()
+        );
         let mut mir_digest = receipt.clone();
         mir_digest.mir_digest = "b".repeat(64);
         assert!(!receipt.same_semantic_identity(&mir_digest));
+        assert!(!receipt.same_route_identity(&mir_digest));
         assert_ne!(
             receipt.semantic_identity_digest(),
             mir_digest.semantic_identity_digest()
@@ -5907,6 +5941,10 @@ func main() -> i32 {
             ("flow_transition_digest", flow_transition_digest),
             ("root_owners", root_owners),
         ] {
+            assert!(
+                !receipt.same_route_identity(&drifted),
+                "route identity must detect {field} drift"
+            );
             let error = receipt
                 .verify_against_receipt(&drifted)
                 .expect_err("receipt identity drift must fail closed");
