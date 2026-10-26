@@ -232,6 +232,27 @@ impl ModuleLoader {
         Ok(main)
     }
 
+    /// Load an already-parsed main file and retain the exact text snapshots
+    /// read for its imported modules. This is intended for read-only tooling
+    /// that needs to fingerprint the source bytes used during parsing.
+    pub fn load_main_with_file_and_source_texts(
+        &mut self,
+        path: &Path,
+        file: crate::ast::File,
+    ) -> Result<(LoadedModule, HashMap<PathBuf, String>), String> {
+        let mut acc = Acc::new(self.base_dir.clone())
+            .with_source_registry(self.source_ids.clone(), self.source_registry.clone());
+        acc.enable_source_text_capture();
+        acc.loaded = self.loaded.clone();
+        acc.modules = self.modules.clone();
+        let (acc, main) = flow::flow_load_main_with_file(acc, path, file)?;
+        let source_texts = acc.captured_source_texts().clone();
+        self.loaded = acc.loaded.clone();
+        self.modules = acc.modules.clone();
+        (self.source_ids, self.source_registry) = acc.into_source_registry();
+        Ok((main, source_texts))
+    }
+
     /// Source-aware counterpart of [`Self::load_main_with_file`].  On failure
     /// it retains dependency source records and an exact import/lexer/parser
     /// span whenever one exists.
@@ -288,6 +309,12 @@ pub fn load_prelude_items() -> Vec<Item> {
 }
 
 fn load_prelude_items_with_registry(source_registry: &mut SourceRegistry) -> Vec<Item> {
+    load_prelude_items_and_source_with_registry(source_registry).0
+}
+
+fn load_prelude_items_and_source_with_registry(
+    source_registry: &mut SourceRegistry,
+) -> (Vec<Item>, Option<String>) {
     let std_dir = match stdlib_dir() {
         Some(d) => d,
         None => {
@@ -295,7 +322,7 @@ fn load_prelude_items_with_registry(source_registry: &mut SourceRegistry) -> Vec
                 "[mimi] warning: stdlib directory not found; prelude not loaded \
                  (set MIMI_STDLIB or run from a checkout that contains std/)"
             );
-            return vec![];
+            return (vec![], None);
         }
     };
     let prelude_path = std_dir.join("prelude.mimi");
@@ -304,21 +331,21 @@ fn load_prelude_items_with_registry(source_registry: &mut SourceRegistry) -> Vec
             "[mimi] warning: prelude file missing: {}",
             prelude_path.display()
         );
-        return vec![];
+        return (vec![], None);
     }
     // CL-H1: size-cap prelude reads the same way as CLI source loads.
     let source = match crate::path_safety::read_source_capped(&prelude_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[mimi] warning: failed to read prelude: {}", e);
-            return vec![];
+            return (vec![], None);
         }
     };
     let tokens = match crate::lexer::Lexer::new(&source).tokenize() {
         Ok(t) => t,
         Err(e) => {
             eprintln!("[mimi] warning: failed to tokenize prelude: {}", e);
-            return vec![];
+            return (vec![], None);
         }
     };
     let prelude_path = prelude_path.canonicalize().unwrap_or(prelude_path);
@@ -335,7 +362,7 @@ fn load_prelude_items_with_registry(source_registry: &mut SourceRegistry) -> Vec
         Ok(source_id) => source_id,
         Err(error) => {
             eprintln!("[mimi] warning: failed to register prelude source: {error}");
-            return vec![];
+            return (vec![], None);
         }
     };
     match crate::parser::Parser::new_with_source_registry(
@@ -345,18 +372,26 @@ fn load_prelude_items_with_registry(source_registry: &mut SourceRegistry) -> Vec
     )
     .parse_file()
     {
-        Ok(file) => file.items,
+        Ok(file) => (file.items, Some(source)),
         Err(e) => {
             eprintln!("[mimi] warning: failed to parse prelude: {}", e);
-            vec![]
+            (vec![], Some(source))
         }
     }
 }
 
 pub fn merge_prelude_into(dest: &mut File) {
-    let prelude_items = load_prelude_items_with_registry(&mut dest.sources);
+    let _ = merge_prelude_into_with_source_text(dest);
+}
+
+/// Merge the prelude and return the exact source text parsed for it, when it
+/// was available. Read-only evidence tools use this to bind a source digest
+/// to the prelude bytes without reopening the file after checking.
+pub fn merge_prelude_into_with_source_text(dest: &mut File) -> Option<String> {
+    let (prelude_items, source_text) =
+        load_prelude_items_and_source_with_registry(&mut dest.sources);
     if prelude_items.is_empty() {
-        return;
+        return source_text;
     }
     let existing: std::collections::HashSet<String> =
         dest.items.iter().filter_map(item_name).collect();
@@ -371,6 +406,7 @@ pub fn merge_prelude_into(dest: &mut File) {
         }
     }
     dest.items.splice(0..0, new_items);
+    source_text
 }
 
 fn item_name(item: &Item) -> Option<String> {
@@ -405,7 +441,9 @@ fn item_name(item: &Item) -> Option<String> {
 
 #[cfg(test)]
 mod source_entry_tests {
-    use super::{load_prelude_items_with_registry, parser_for_path, source_context_for_path};
+    use super::{
+        load_prelude_items_with_registry, parser_for_path, source_context_for_path, ModuleLoader,
+    };
     use crate::ast::Item;
     use crate::span::SourceRegistry;
 
@@ -440,6 +478,50 @@ mod source_entry_tests {
             .expect_err("malformed signature");
         assert!(error.source_id.is_known());
         assert_eq!(error.to_diagnostic().span.source_id, error.source_id);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn module_loader_retains_imported_text_from_the_parse_read() {
+        let root =
+            std::env::temp_dir().join(format!("mimi_source_snapshot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create source snapshot directory");
+        let main_path = root.join("main.mimi");
+        let helper_path = root.join("receipt_helper.mimi");
+        let main_source = "use receipt_helper;\nfunc main() -> i32 { receipt_value() }\n";
+        let helper_source = "pub func receipt_value() -> i32 { 7 }\n";
+        std::fs::write(&main_path, main_source).expect("write main source");
+        std::fs::write(&helper_path, helper_source).expect("write imported source");
+
+        let tokens = crate::lexer::Lexer::new(main_source)
+            .tokenize()
+            .expect("lex main source");
+        let file = parser_for_path(tokens, &main_path)
+            .expect("create main parser")
+            .parse_file()
+            .expect("parse main source");
+        let mut loader = ModuleLoader::new(root.clone());
+        let (_, source_texts) = loader
+            .load_main_with_file_and_source_texts(&main_path, file)
+            .expect("load imports with source snapshots");
+        let canonical_helper_path = helper_path
+            .canonicalize()
+            .expect("canonicalize imported source path");
+        assert_eq!(
+            source_texts.get(&canonical_helper_path).map(String::as_str),
+            Some(helper_source),
+            "the loader snapshot must be the text used to parse the imported file"
+        );
+
+        std::fs::write(&helper_path, "pub func receipt_value() -> i32 { 99 }\n")
+            .expect("mutate imported source after load");
+        assert_eq!(
+            source_texts.get(&canonical_helper_path).map(String::as_str),
+            Some(helper_source),
+            "later disk changes must not rewrite the retained parse snapshot"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

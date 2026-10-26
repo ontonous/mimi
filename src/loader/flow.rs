@@ -38,6 +38,8 @@ pub struct Acc {
     dependency_identities: HashMap<String, String>,
     source_ids: HashMap<PathBuf, SourceId>,
     source_registry: SourceRegistry,
+    capture_source_texts: bool,
+    source_texts: HashMap<PathBuf, String>,
 }
 
 impl Acc {
@@ -48,6 +50,14 @@ impl Acc {
         };
         acc.init_deps();
         acc
+    }
+
+    pub(crate) fn enable_source_text_capture(&mut self) {
+        self.capture_source_texts = true;
+    }
+
+    pub(crate) fn captured_source_texts(&self) -> &HashMap<PathBuf, String> {
+        &self.source_texts
     }
 
     fn init_deps(&mut self) {
@@ -973,6 +983,13 @@ fn flow_load_file_diagnostic(
             diagnostic: Box::new(error.to_diagnostic()),
             sources: acc.source_registry.clone(),
         })?;
+
+        if acc.capture_source_texts {
+            // Keep the exact text that was tokenized and parsed. Inspection
+            // receipts can then bind to the checked source snapshot without
+            // reopening imported paths after checking has completed.
+            acc.source_texts.insert(file_path.clone(), source);
+        }
 
         // Resolve imports for this file
         let mut resolved: Vec<ResolvedImport> = Vec::new();
