@@ -77,6 +77,7 @@ references/
 # Real-world suite generated project executables. Keep all inputs and evidence visible.
 /tests/real_world/projects/*/src/main
 /tests/real_world/projects/*/main
+/tests/real_world/.*.temp-archive/
 !/main
 /main
 docs/compose/
