@@ -97,6 +97,7 @@ evidence/**/strict-l3/native-*/program
 evidence/**/cli-*-build/program
 evidence/**/consumer-evidence/**/native-false
 evidence/**/consumer-evidence/**/native-true
+evidence/**/canonical_mir_string_list_clone_oom
 evidence/**/callback-test
 evidence/**/strict-l3/*-native
 evidence/**/raw-memcheck/*-native
