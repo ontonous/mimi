@@ -1,0 +1,17 @@
+trait Marker<T> { func read() -> i32; }
+
+impl Marker<i32> for List<i32> {
+    func read() -> i32 { 11 }
+}
+
+impl Marker<i64> for List<i64> {
+    func read() -> i32 { 22 }
+}
+
+func main() -> i32 {
+    let numbers: List<i32> = [1]
+    let wide: List<i64> = [2]
+    println(wide.read())
+    println(numbers.read())
+    0
+}

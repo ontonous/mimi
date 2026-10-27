@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::interp::SharedString;
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::sync::Arc;
@@ -22,6 +23,397 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
         crate::core::ResolvedConstValue::Unit => "unit".into(),
         crate::core::ResolvedConstValue::Complex => "complex".into(),
     }
+}
+
+/// Receipt profile for concrete, checker-selected trait specializations that
+/// share one generic receiver family.  The corresponding admission predicate
+/// is intentionally limited to exact static impl owners and monomorphic impl
+/// bodies; dynamic dispatch and generic impl templates stay outside it.
+pub const STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE: &str =
+    "static-generic-trait-specialization-v1";
+
+/// The parser injects this exact Flow around ordinary scripts that define a
+/// top-level `main`.  It has no user state/transition contract: the only
+/// evidence accepted here is the checker-retained RuntimeSystem provenance
+/// chain plus the complete, known injected state/transition table.  A Flow
+/// with the same name but any user-authored node or altered graph stays out.
+fn has_only_parser_synthetic_main_flow(program: &crate::core::CheckedProgram) -> bool {
+    if program.flows().is_empty() {
+        return true;
+    }
+    if program.flows().len() != 1 || program.transitions().len() != 5 {
+        return false;
+    }
+
+    let Some(flow) = program.flows().values().next() else {
+        return false;
+    };
+    let flow_node = crate::core::NodeId("flow:Main".into());
+    let main_node = crate::core::NodeId("function:main".into());
+    let Some(main) = program.functions().get(&main_node) else {
+        return false;
+    };
+    if flow.id.0 != "Main"
+        || flow.node_id != flow_node
+        || main.qualified_name != "main"
+        || !matches!(main.origin, crate::core::Origin::User(_))
+        || !matches!(
+            &flow.origin,
+            crate::core::Origin::RuntimeSystem { parent, rule, span }
+                if parent == &main_node
+                    && rule == "progressive.main"
+                    && *span == main.origin.user_span()
+        )
+        || !flow.generic_parameters.is_empty()
+        || !flow.persistent_fields.is_empty()
+        || flow.max_children.is_some()
+        || flow.mailbox_depth.is_some()
+        || flow.states.len() != 2
+    {
+        return false;
+    }
+
+    let Some(single) = flow.states.get("Single") else {
+        return false;
+    };
+    let Some(fault) = flow.states.get("Fault") else {
+        return false;
+    };
+    if single.node_id.0 != "state:Main::Single"
+        || single.id.flow.0 != "Main"
+        || single.id.name != "Single"
+        || !single.payload.is_empty()
+        || !single.field_ids.is_empty()
+        || !matches!(
+            &single.origin,
+            crate::core::Origin::RuntimeSystem { parent, rule, span }
+                if parent == &flow_node
+                    && rule == "progressive.single"
+                    && *span == flow.origin.user_span()
+        )
+        || fault.node_id.0 != "state:Main::Fault"
+        || fault.id.flow.0 != "Main"
+        || fault.id.name != "Fault"
+        || fault.payload.len() != 4
+        || fault
+            .payload
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<HashSet<_>>()
+            != HashSet::from(["last_state", "unexpected_event", "snapshot", "trace"])
+        || fault
+            .field_ids
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>()
+            != HashSet::from(["last_state", "unexpected_event", "snapshot", "trace"])
+        || fault.payload.iter().any(|(name, ty)| {
+            let expected = match name.as_str() {
+                "last_state" => "flow::Main::StateId",
+                "unexpected_event" => "flow::Main::EventId",
+                "snapshot" => "string",
+                "trace" => "SystemTrace",
+                _ => return true,
+            };
+            crate::core::fmt_type(ty) != expected
+        })
+        || !matches!(
+            &fault.origin,
+            crate::core::Origin::RuntimeSystem { parent, rule, span }
+                if parent == &flow_node
+                    && rule == "flow.fault_state"
+                    && *span == flow.origin.user_span()
+        )
+    {
+        return false;
+    }
+
+    let expected = [
+        ("run", "Single", "Single", false, true, "progressive.run"),
+        (
+            "peer_fault",
+            "Single",
+            "Fault",
+            true,
+            false,
+            "flow.peer_fault",
+        ),
+        (
+            "peer_fault",
+            "Fault",
+            "Fault",
+            true,
+            true,
+            "flow.peer_fault",
+        ),
+        ("reset", "Fault", "Single", true, false, "flow.reset"),
+        ("recover", "Fault", "Single", true, false, "flow.recover"),
+    ];
+    if flow.transitions.len() != expected.len() {
+        return false;
+    }
+    expected.iter().all(
+        |(event, source, target, is_fallback, silent, origin_rule)| {
+            let Some(transition) = program.transition("Main", event, source) else {
+                return false;
+            };
+            transition.targets.len() == 1
+                && transition.targets[0].flow == flow.id
+                && transition.targets[0].name == *target
+                && transition.params.is_empty()
+                && transition.fails.is_none()
+                && transition.is_fallback == *is_fallback
+                && !transition.is_ffi_pinned
+                && transition.silent_transition == *silent
+                && flow.transitions.contains(&transition.id)
+                && program.resolved_body(&transition.node_id).is_none()
+                && matches!(
+                    &transition.origin,
+                    crate::core::Origin::RuntimeSystem { parent, rule, span }
+                        if parent == &flow_node
+                            && rule == origin_rule
+                            && *span == flow.origin.user_span()
+                )
+        },
+    )
+}
+
+fn resolved_type_contains_parser_main_state(
+    type_id: &crate::core::ResolvedTypeId,
+    types: &crate::core::ResolvedTypeTable,
+    seen: &mut HashSet<crate::core::ResolvedTypeId>,
+) -> bool {
+    if !seen.insert(type_id.clone()) {
+        return false;
+    }
+    use crate::core::ResolvedType;
+    match types.get(type_id) {
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) => {
+            let identity = item.as_str();
+            identity.starts_with("state:Main::")
+                || identity == "flow::Main::StateId"
+                || identity == "flow::Main::EventId"
+                || arguments
+                    .iter()
+                    .any(|argument| resolved_type_contains_parser_main_state(argument, types, seen))
+        }
+        Some(ResolvedType::FlowStateSet { flow, .. }) => flow.as_str() == "flow:Main",
+        Some(ResolvedType::Reference { target, .. })
+        | Some(ResolvedType::CBuffer(target))
+        | Some(ResolvedType::Ownership { target, .. })
+        | Some(ResolvedType::Newtype { inner: target, .. })
+        | Some(ResolvedType::Array {
+            element: target, ..
+        })
+        | Some(ResolvedType::Slice(target))
+        | Some(ResolvedType::RawPointer { target, .. })
+        | Some(ResolvedType::Option(target)) => {
+            resolved_type_contains_parser_main_state(target, types, seen)
+        }
+        Some(ResolvedType::Result { ok, error }) => {
+            resolved_type_contains_parser_main_state(ok, types, seen)
+                || resolved_type_contains_parser_main_state(error, types, seen)
+        }
+        Some(ResolvedType::Tuple(elements)) => elements
+            .iter()
+            .any(|element| resolved_type_contains_parser_main_state(element, types, seen)),
+        Some(ResolvedType::Function {
+            parameters, result, ..
+        }) => {
+            parameters
+                .iter()
+                .any(|parameter| resolved_type_contains_parser_main_state(parameter, types, seen))
+                || resolved_type_contains_parser_main_state(result, types, seen)
+        }
+        Some(
+            ResolvedType::Primitive(_)
+            | ResolvedType::GenericParameter(_)
+            | ResolvedType::Capability(_)
+            | ResolvedType::Trait { .. }
+            | ResolvedType::DynamicAny { .. },
+        )
+        | None => false,
+    }
+}
+
+/// User callable types and user-origin typed expressions may not mention the
+/// injected Main states or its transition id enums. Parser-generated Flow
+/// scaffolding is excluded by the provenance filter above, so this detects
+/// real state use without treating the wrapper itself as user semantics.
+fn has_user_main_flow_state_use(program: &crate::core::CheckedProgram) -> bool {
+    let contains = |type_id: &crate::core::ResolvedTypeId| {
+        resolved_type_contains_parser_main_state(
+            type_id,
+            program.resolved_types(),
+            &mut HashSet::new(),
+        )
+    };
+    for (node, type_id) in program.resolved_node_types() {
+        if program
+            .node_meta()
+            .get(node)
+            .is_some_and(|meta| !matches!(meta.origin, crate::core::Origin::RuntimeSystem { .. }))
+            && contains(type_id)
+        {
+            return true;
+        }
+    }
+    for (node, type_id) in program.resolved_type_operands() {
+        if program
+            .node_meta()
+            .get(node)
+            .is_some_and(|meta| !matches!(meta.origin, crate::core::Origin::RuntimeSystem { .. }))
+            && contains(type_id)
+        {
+            return true;
+        }
+    }
+    for (node, type_arguments) in program.resolved_type_arguments() {
+        if program
+            .node_meta()
+            .get(node)
+            .is_some_and(|meta| !matches!(meta.origin, crate::core::Origin::RuntimeSystem { .. }))
+            && type_arguments.iter().any(|type_id| contains(type_id))
+        {
+            return true;
+        }
+    }
+    for (owner, signature) in program.resolved_signatures() {
+        if program.functions().contains_key(owner)
+            && (signature
+                .parameters
+                .iter()
+                .any(|parameter| contains(&parameter.ty))
+                || contains(&signature.result))
+        {
+            return true;
+        }
+    }
+    program
+        .resolved_bodies()
+        .values()
+        .any(|body| body.locals.values().any(|local| contains(&local.ty)))
+}
+
+/// Whether the checked program calls two or more exact impls of the same
+/// protocol method for the same supported generic receiver constructor (for
+/// example, `Marker<i32> for List<i32>` and `Marker<i64> for List<i64>`).
+///
+/// This is a bounded route predicate, not a general trait capability claim:
+/// each checked method must map to exactly one monomorphic impl body, and no
+/// reachable generic free-function call may be smuggled into this route.
+pub fn has_static_generic_trait_specialization_candidate(
+    program: &crate::core::CheckedProgram,
+) -> bool {
+    if !has_only_parser_synthetic_main_flow(program)
+        || has_user_main_flow_state_use(program)
+        || !program.actors().is_empty()
+        || !program.sessions().is_empty()
+        || !program.extern_blocks().is_empty()
+    {
+        return false;
+    }
+    let declarations = program.native_declarations();
+    let mut specializations = HashMap::<(String, String, String), HashSet<String>>::new();
+    let mut selected_method: Option<(String, String, String)> = None;
+
+    for site in program.call_sites().values() {
+        // `has_only_parser_synthetic_main_flow` above has already checked the
+        // complete generated Main graph and its RuntimeSystem provenance. Its
+        // transition dispatch call sites are generated scaffolding, so they
+        // do not participate in the user's static generic-trait call census.
+        // User-authored Flow is rejected by that exact graph check.
+        if site.owner.starts_with("transition:Main::") {
+            continue;
+        }
+        // The MIR constructor and every consumer for this route exclude the
+        // checker-known prelude source, so dormant compatibility helpers in
+        // that source do not widen the executable candidate's call surface.
+        if program
+            .source_registry()
+            .key(site.origin.user_span().source_id)
+            .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
+        {
+            continue;
+        }
+        let Some(callee) = site.resolved_callee.as_ref() else {
+            return false;
+        };
+        let crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method } = callee else {
+            if matches!(callee, crate::core::ir::ResolvedCallee::Builtin(builtin) if builtin.as_str() == "println")
+            {
+                continue;
+            }
+            return false;
+        };
+
+        let callable = crate::core::NodeId(method.as_str().to_owned());
+        let mut bindings = declarations
+            .impls
+            .values()
+            .filter(|implementation| implementation.trait_owner == *protocol)
+            .flat_map(|implementation| {
+                implementation
+                    .methods
+                    .iter()
+                    .filter(|binding| binding.callable == callable)
+                    .map(move |binding| (implementation, binding))
+            });
+        let Some((implementation, binding)) = bindings.next() else {
+            return false;
+        };
+        if bindings.next().is_some()
+            || !implementation.generics.is_empty()
+            || !binding.generics.is_empty()
+        {
+            return false;
+        }
+
+        let Some(receiver) = binding.signature.parameters.first().and_then(|parameter| {
+            program.resolved_types().get(&parameter.ty)
+        }) else {
+            return false;
+        };
+        let crate::core::ResolvedType::Nominal {
+            item, arguments, ..
+        } = receiver
+        else {
+            return false;
+        };
+        if item.as_str() != "builtin:type:List"
+            || !matches!(arguments.as_slice(), [element]
+                if matches!(
+                    program.resolved_types().get(element),
+                    Some(
+                        crate::core::ResolvedType::Primitive(
+                            crate::core::PrimitiveType::I32 | crate::core::PrimitiveType::I64
+                        )
+                    )
+                ))
+        {
+            return false;
+        }
+        let method_key = (
+            protocol.0.clone(),
+            binding.name.clone(),
+            item.as_str().to_owned(),
+        );
+        if selected_method
+            .as_ref()
+            .is_some_and(|selected| selected != &method_key)
+        {
+            return false;
+        }
+        selected_method.get_or_insert_with(|| method_key.clone());
+        specializations
+            .entry(method_key)
+            .or_default()
+            .insert(implementation.owner.0.clone());
+    }
+
+    specializations.len() == 1 && specializations.values().any(|owners| owners.len() >= 2)
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -462,6 +854,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_ownership_actions = Some(ownership_actions);
         self.resolved_ownership_merges = Some(ownership_merges);
 
+            if has_static_generic_trait_specialization_candidate(program) {
+                return self.compile_static_generic_trait_specializations(program);
+            }
         self.resolved_backend_requirements = Some(
             program
                 .backend_requirements()
@@ -980,6 +1375,73 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete scalar collection MIR island materialization failed: {message}"
                         ),
                     ),
+    fn compile_static_generic_trait_specializations(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+        let span = program.entry_span().unwrap_or(crate::span::Span::UNKNOWN);
+        if let Some(reason) = crate::core::mir::unknown_effect_boundary_reason(program) {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                reason,
+                span,
+            )]);
+        }
+        let excluded_sources = program
+            .source_registry()
+            .records()
+            .iter()
+            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+            .map(|record| record.id)
+            .collect::<HashSet<_>>();
+        let canonical =
+            crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+                program,
+                &excluded_sources,
+            )
+            .map_err(|error| error.to_diagnostics())?;
+        crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+            Self::mir_gate_diagnostics(
+                program,
+                "MIR verifier capability",
+                STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE,
+                errors,
+            )
+        })?;
+        let receipt = canonical.route_receipt(STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE);
+        crate::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+            .map_err(|errors| {
+                Self::mir_gate_diagnostics(
+                    program,
+                    "MIR bytecode",
+                    STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE,
+                    errors,
+                )
+            })?;
+        crate::codegen::mir::validate_mir_native(&canonical)?;
+        let results =
+            crate::verifier::verify_mir_with_route_receipt(&canonical, &receipt, String::new())
+                .map_err(|error| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-VERIFY-001",
+                        format!("MIR generic trait specialization verifier pass failed: {error}"),
+                        span,
+                    )]
+                })?;
+        if !crate::verifier::canonical_execution_route_verifier_ready(
+            &results,
+            crate::core::mir::is_exact_cross_state_f64_failure_receipt(program),
+            crate::core::mir::contains_multi_target_flow_union_candidate(&canonical),
+        ) {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                "MIR-VERIFY-001",
+                "MIR verifier returned an unsupported or inconclusive result for static generic trait specialization",
+                span,
+            )]);
+        }
+        self.compile_mir_native_with_route_receipt(&canonical, &receipt)
+    }
+
                     (
                         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,

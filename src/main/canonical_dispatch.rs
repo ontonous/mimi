@@ -399,6 +399,8 @@ fn select_default_route_for_purpose(
             .is_candidate();
         let is_scalar_export = admission.scalar_export;
         let is_scalar_nested = admission.scalar_nested;
+        let is_static_generic_trait_specialization =
+            mimi::codegen::has_static_generic_trait_specialization_candidate(checked);
         // `MIMI_VERBOSE` is an established CLI diagnostic surface and must
         // not add stderr to ordinary canonical programs. Keep the
         // MapRoot/MapAnyOwner-specific evidence there; the whole-program
@@ -424,6 +426,8 @@ fn select_default_route_for_purpose(
                 mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND
             } else if is_map_root {
                 mimi::core::mir::MAP_ROOT_ISLAND
+            } else if is_static_generic_trait_specialization {
+                mimi::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE
             } else if admission.scalar_actor {
                 mimi::core::mir::SCALAR_ACTOR_ISLAND
             } else if is_scalar_export {
@@ -928,6 +932,30 @@ fn select_default_route_inner(
     // promoted tagged-union contract after materialization; the open face
     // still trips the union compatibility veto below.
     let union_candidate_hint = may_contain_multi_target_flow_union(checked);
+    let generic_trait_candidate =
+        mimi::codegen::has_static_generic_trait_specialization_candidate(checked);
+    let generic_trait_only_candidate = generic_trait_candidate
+        && !record_hint
+        && !flow_candidate
+        && !complete_flow_candidate
+        && !flow_failure_retry_hint
+        && !union_candidate_hint
+        && !user_record_hint
+        && !option_string_hint
+        && !option_nested_tuple_hint
+        && !generic_variant_hint
+        && !generic_option_projection_hint
+        && !generic_option_projection_fallback_hint
+        && !generic_result_projection_hint
+        && !generic_result_projection_fallback_hint
+        && !managed_result_call_hint
+        && !copy_option_i32_hint
+        && !copy_option_bool_hint
+        && !copy_option_i64_hint
+        && !copy_option_f64_hint
+        && !copy_result_i32_hint
+        && !session_hint
+        && !module_alias_call_hint;
     if !collection_hint
         && !record_hint
         && !flow_candidate
@@ -949,6 +977,7 @@ fn select_default_route_inner(
         && !copy_result_i32_hint
         && !session_hint
         && !module_alias_call_hint
+        && !generic_trait_only_candidate
     {
         return DefaultMirRoute::Legacy(LegacyRouteReason::OutsideMigratedProfile);
     }
@@ -1081,6 +1110,15 @@ fn select_default_route_inner(
             true,
             "nested Option tuple variant candidate is outside complete coverage",
         );
+    }
+
+    if generic_trait_only_candidate {
+        return match build_canonical_program(checked, merged_file) {
+            Ok(program) => select_static_generic_trait_specialization_route(program),
+            Err(reason) => DefaultMirRoute::Rejected(format!(
+                "static generic trait specialization canonical MIR construction failed: {reason}"
+            )),
+        };
     }
 
     let route = match materialize_canonical_route(checked, merged_file) {
@@ -2572,6 +2610,38 @@ fn select_scalar_generic_identity_route(
         }
     }
 }
+
+/// Consumer preflight for the bounded static generic-trait specialization
+/// route.  The candidate predicate admits one checked protocol method with at
+/// least two concrete, monomorphic impl owners for the same generic receiver
+/// constructor; this gate then requires all four canonical consumers.
+fn select_static_generic_trait_specialization_route(program: MirProgram) -> DefaultMirRoute {
+    const ISLAND: &str = mimi::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE;
+    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
+        return DefaultMirRoute::Rejected(format!("{ISLAND} MIR verifier capability: {errors:?}"));
+    }
+    let receipt = program.route_receipt(ISLAND);
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+    {
+        return DefaultMirRoute::Rejected(format!("{ISLAND} MIR bytecode capability: {errors:?}"));
+    }
+    if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
+        return DefaultMirRoute::Rejected(format!("{ISLAND} MIR native capability: {errors:?}"));
+    }
+    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            DefaultMirRoute::Canonical(Box::new(program))
+        }
+        Ok(results) => DefaultMirRoute::Rejected(format!(
+            "{ISLAND} MIR verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => DefaultMirRoute::Rejected(format!("{ISLAND} MIR verifier pass: {error}")),
+    }
+}
+
 
 fn reject_migrated_candidates(
     flow_candidate: bool,
@@ -7276,6 +7346,82 @@ func main() -> i32 {
             "{reason}"
         );
         assert!(reason.contains("None and Some"), "{reason}");
+    }
+
+    #[test]
+    fn generic_trait_specializations_use_default_canonical_route() {
+        let (checked, file) = checked(
+            r#"
+                trait Marker<T> { func read() -> i32; }
+                impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+                impl Marker<i64> for List<i64> { func read() -> i32 { 22 } }
+                func main() -> i32 {
+                    let numbers: List<i32> = [1]
+                    let wide: List<i64> = [2]
+                    println(wide.read())
+                    println(numbers.read())
+                    0
+                }
+            "#,
+        );
+        assert!(mimi::codegen::has_static_generic_trait_specialization_candidate(&checked));
+        let synthetic_main = checked.flow("Main").expect("parser-synthesized Main flow");
+        assert!(matches!(
+            &synthetic_main.origin,
+            mimi::core::Origin::RuntimeSystem { parent, rule, .. }
+                if parent.0 == "function:main" && rule == "progressive.main"
+        ));
+        let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
+            panic!("concrete generic trait specializations must select canonical MIR");
+        };
+        let receipt =
+            program.route_receipt(mimi::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE);
+        assert_eq!(
+            receipt.profile,
+            mimi::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE
+        );
+        let bytecode =
+            mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
+                .expect("default route bytecode consumer accepts the selected graph");
+        let mut vm = mimi::interp::bytecode::BytecodeVM::new(bytecode);
+        vm.enable_stdout_capture();
+        assert!(matches!(
+            vm.run_value().expect("default canonical route execution"),
+            mimi::interp::Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), "22\n11\n");
+    }
+
+    #[test]
+    fn generic_trait_specialization_does_not_admit_a_user_flow() {
+        let (checked, file) = checked(
+            r#"
+                trait Marker<T> { func read() -> i32; }
+                impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+                impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+                flow Counter {
+                    state Ready { value: i32 }
+                    transition tick(Ready) -> Ready {
+                        return Ready { value: self.value + 1 }
+                    }
+                }
+                func main() -> i32 {
+                    let numbers: List<i32> = [1]
+                    let words: List<string> = ["x"]
+                    println(words.read())
+                    println(numbers.read())
+                    0
+                }
+            "#,
+        );
+        assert!(
+            checked.flow("Counter").is_some(),
+            "fixture contains a real Flow"
+        );
+        assert!(
+            !mimi::codegen::has_static_generic_trait_specialization_candidate(&checked),
+            "the static trait route may admit only the parser's exact synthetic Main Flow"
+        );
     }
 
     #[test]

@@ -3011,15 +3011,15 @@ fn checked_generic_protocol_method_stops_before_compatibility_abi_emission() {
 }
 
 #[test]
-fn checked_generic_trait_calls_use_exact_impl_owner() {
+fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
     let source = r#"
         trait Marker<T> { func read() -> i32; }
         impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
-        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+        impl Marker<i64> for List<i64> { func read() -> i32 { 22 } }
         func main() -> i32 {
             let numbers: List<i32> = [1]
-            let words: List<string> = ["x"]
-            println(words.read())
+            let wide: List<i64> = [2]
+            println(wide.read())
             println(numbers.read())
             0
         }
@@ -3036,36 +3036,133 @@ fn checked_generic_trait_calls_use_exact_impl_owner() {
         .filter(|implementation| implementation.trait_name == "Marker")
         .collect::<Vec<_>>();
     assert_eq!(implementations.len(), 2);
-    let method_symbols = implementations
+    let method_owners = implementations
         .iter()
         .map(|implementation| {
             let [method] = implementation.methods.as_slice() else {
                 panic!("Marker impl must have exactly one method");
             };
-            method.symbol.clone()
+            method.callable.clone()
         })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        method_symbols.len(),
+        method_owners.len(),
         2,
-        "each checked impl owns a distinct body"
+        "each checked impl has a distinct canonical callable owner"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("concrete generic trait impls lower into canonical MIR");
+    assert!(
+        method_owners
+            .iter()
+            .all(|owner| mir.functions().contains_key(owner)),
+        "every specialized implementation body must have its exact MIR function owner"
+    );
+    let main_owner = crate::core::NodeId("function:main".into());
+    let main_mir = mir.functions().get(&main_owner).expect("main MIR");
+    let call_owners = main_mir
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. },
+                ..
+            } => Some(crate::core::NodeId(method.as_str().to_owned())),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        call_owners, method_owners,
+        "each concrete List receiver must call its checker-selected impl owner"
+    );
+
+    let receipt =
+        mir.route_receipt(crate::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE);
+    assert_eq!(
+        receipt.profile,
+        crate::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE
+    );
+    let reference = crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+        .with_route_receipt(&receipt)
+        .execute_with_output(&main_owner, &[])
+        .expect("reference MIR dispatches both impls");
+    assert_eq!(reference.output, "22\n11\n");
+    assert_eq!(
+        reference.value,
+        crate::core::mir::reference::MirRuntimeValue::Int(0)
     );
 
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "checked_generic_trait_call_owners");
+    let mut codegen = CodeGenerator::new(&context, "mir_generic_trait_call_owners");
     codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("compile both exact checked generic trait calls");
+        .compile_mir_native_with_route_receipt(&mir, &receipt)
+        .expect("compile exact generic trait calls through receipted canonical MIR");
     codegen.module.verify().expect("valid IR");
-    let main = codegen
-        .module
-        .get_function("main")
-        .expect("compiled main")
-        .to_string();
-    for symbol in method_symbols {
+    let native_ir = codegen.emit_ir();
+    for owner in &method_owners {
+        let symbol = crate::codegen::mir::native_symbol_for_owner(owner)
+            .expect("canonical native method symbol");
         assert!(
-            main.contains(&symbol),
-            "main must call the exact checker-selected impl body {symbol}"
+            native_ir.contains(&symbol),
+            "canonical native IR must retain the exact impl method {symbol}"
+        );
+    }
+    if crate::tests::can_link() {
+        let native = crate::tests::link_and_observe_canonical_mir(&codegen)
+            .expect("execute canonical MIR native output");
+        assert_eq!(native.stdout, "22\n11\n");
+        assert_eq!(native.stderr, "");
+    }
+
+    assert!(crate::codegen::has_static_generic_trait_specialization_candidate(&program));
+
+    let user_flow_source = format!(
+        r#"
+            flow UserFlow {{
+                state Ready {{ value: i32 }}
+                transition stay(Ready) -> Ready {{
+                    return Ready {{ value: self.value }}
+                }}
+            }}
+            {source}
+        "#
+    );
+    let user_flow_file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(&user_flow_source)
+            .tokenize()
+            .expect("lex user Flow candidate"),
+    )
+    .parse_file()
+    .expect("parse user Flow candidate");
+    let user_flow_program = crate::core::check_program(&user_flow_file)
+        .expect("check user Flow candidate");
+    assert!(
+        !crate::codegen::has_static_generic_trait_specialization_candidate(&user_flow_program),
+        "the generated Main call-site exemption must not admit a user Flow"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut checked_codegen = CodeGenerator::new(&context, "checked_mir_generic_trait_call_owners");
+    checked_codegen
+        .compile_checked(&program)
+        .expect("public checked-program entry selects the canonical trait specialization route");
+    checked_codegen
+        .module
+        .verify()
+        .expect("valid checked MIR IR");
+    let checked_native_ir = checked_codegen.emit_ir();
+    for owner in &method_owners {
+        let symbol = crate::codegen::mir::native_symbol_for_owner(owner)
+            .expect("canonical native method symbol");
+        assert!(
+            checked_native_ir.contains(&symbol),
+            "public checked-program native output must retain exact impl method {symbol}"
         );
     }
 }
@@ -3524,6 +3621,13 @@ fn checked_actor_tuple_text_alias_header_matches_legacy_worker_layout() {
         worker.get_nth_param(1).expect("tuple argument").get_type(),
         header.parameters[0],
         "worker parameter layout must match the checked mailbox declaration"
+    let synthetic_main = program.flow("Main").expect("parser-synthesized Main");
+    assert!(matches!(
+        &synthetic_main.origin,
+        crate::core::Origin::RuntimeSystem { parent, rule, .. }
+            if parent.0 == "function:main" && rule == "progressive.main"
+    ));
+    assert_eq!(synthetic_main.transitions.len(), 5);
     );
     assert_eq!(
         worker.get_type().get_return_type(),
@@ -3546,6 +3650,16 @@ fn checked_actor_mailbox_header_preserves_order_and_explicit_abi_boundaries() {
     let file =
         crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
             .parse_file()
+    let bytecode = crate::interp::bytecode::compile_mir_program_with_route_receipt(&mir, &receipt)
+        .expect("compile AST-free bytecode from receipted canonical MIR");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    vm.enable_stdout_capture();
+    assert!(matches!(
+        vm.run_value().expect("MIR bytecode execution"),
+        crate::interp::Value::Int(0)
+    ));
+    assert_eq!(vm.take_stdout(), "22\n11\n");
+
             .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
     let context = Context::create();
@@ -3563,6 +3677,122 @@ fn checked_actor_mailbox_header_preserves_order_and_explicit_abi_boundaries() {
         "declaration order is the runtime dispatch ordinal"
     );
     assert_eq!(
+    if crate::tests::can_link() {
+        let native = crate::tests::link_and_observe_canonical_mir(&checked_codegen)
+            .expect("execute checked-program canonical native output");
+        assert_eq!(native.stdout, "22\n11\n");
+        assert_eq!(native.stderr, "");
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
+
+    // Redirecting a call to the other specialization must fail its receiver
+    // ABI check before any MIR consumer can reinterpret the method spelling.
+    let mut forged_functions = mir.functions().clone();
+    let main = forged_functions
+        .get_mut(&main_owner)
+        .expect("mutable main MIR");
+    let first_call = main
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::Call {
+                    callee: crate::core::ir::ResolvedCallee::ProtocolMethod { .. },
+                    ..
+                }
+            )
+        })
+        .expect("first checked protocol call");
+    let current_method = match &first_call.kind {
+        crate::core::mir::MirInstructionKind::Call {
+            callee: crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. },
+            ..
+        } => method.as_str(),
+        _ => unreachable!(),
+    };
+    let other_owner = method_owners
+        .iter()
+        .find(|owner| owner.0 != current_method)
+        .expect("other specialized method");
+    let crate::core::mir::MirInstructionKind::Call { callee, .. } = &mut first_call.kind else {
+        unreachable!();
+    };
+    let crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. } = callee else {
+        unreachable!();
+    };
+    *method = crate::core::ir::MethodId::new(other_owner.0.clone()).expect("method ID");
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged_functions,
+        mir.type_catalog().clone(),
+    )
+    .expect_err("cross-specialization receiver ABI drift must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("protocol method argument 0 TypeDesc disagrees")
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
+}
+
+#[test]
+fn static_generic_trait_route_keeps_list_string_outside_the_mir_glue_contract() {
+    let source = r#"
+        trait Marker<T> { func read() -> i32; }
+        impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+        func main() -> i32 {
+            let numbers: List<i32> = [1]
+            let words: List<string> = ["x"]
+            let answer = words.read() + numbers.read()
+            drop(words)
+            answer
+        }
+    "#;
+    let file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(source).tokenize().expect("lex"),
+    )
+    .parse_file()
+    .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert!(
+        !crate::codegen::has_static_generic_trait_specialization_candidate(&program),
+        "List<i32> + List<string> must stay outside the bounded MIR candidate"
+    );
+
+    let excluded_sources = program
+        .source_registry()
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let error = crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+        &program,
+        &excluded_sources,
+    )
+    .expect_err("List<string> must stay outside the canonical List glue contract");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("outside the canonical Copy scalar")
+            || message.contains("List<string>"),
+        "unexpected List<string> fail-closed diagnostic: {message}"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "generic_trait_list_string_fail_closed");
+    let diagnostics = codegen
+        .compile_checked(&program)
+        .expect_err("unsupported List<string> generic-trait MIR must not fall back to legacy");
+    assert!(!diagnostics.is_empty(), "unsupported trait route fails closed");
+    assert!(codegen.module.get_function("main").is_none());
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
         second.parameters,
         [BasicTypeEnum::IntType(context.i32_type())]
     );

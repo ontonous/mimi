@@ -3,6 +3,10 @@ mod actors;
 mod block;
 pub mod builtins;
 mod compile;
+pub use compile::{
+    has_static_generic_trait_specialization_candidate,
+    STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE,
+};
 mod expr;
 mod float_chain;
 mod func;
