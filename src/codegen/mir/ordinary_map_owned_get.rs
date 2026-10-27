@@ -1687,12 +1687,74 @@ func main() -> i32 {
                 .iter()
                 .find(|result| result.func_name.ends_with("alias_read_after_source_drop"))
                 .expect("alias size ensures proof");
-            assert_eq!(
-                proof.status,
-                crate::verifier::VerifStatus::Proven,
-                "{profile}: {}",
-                proof.message
-            );
+            if profile.starts_with("owner-lifecycle") {
+                let expected = "canonical MIR body can reach trap 'E0800' under requires";
+                assert_eq!(
+                    proof.status,
+                    crate::verifier::VerifStatus::Disproven,
+                    "{profile}: {proof:?}"
+                );
+                assert_eq!(
+                    proof.message, expected,
+                    "{profile}: unexpected failure reason"
+                );
+                let diagnostic = proof
+                    .diagnostic
+                    .as_ref()
+                    .expect("reachable allocator E0800 has a source diagnostic");
+                assert_eq!(diagnostic.message, expected, "{profile}");
+                let map_new_call = program
+                    .proof_source_census()
+                    .owner(&owner)
+                    .expect("alias callable's independent source census")
+                    .body_calls()
+                    .find(|call| call.callee_identity().contains("map_new"))
+                    .expect("the exact source Map-root constructor call");
+                let expected_call_suffix = map_new_call
+                    .call_node()
+                    .0
+                    .rsplit_once("/node:")
+                    .map(|(_, suffix)| format!("/node:{suffix}"))
+                    .expect("source call identity has a canonical expression node");
+                let diagnostic_call = diagnostic
+                    .origin
+                    .as_ref()
+                    .and_then(|origin| origin.parent_node_id.as_deref())
+                    .expect("E0800 diagnostic records its source call identity");
+                assert!(
+                    diagnostic_call.ends_with(&expected_call_suffix),
+                    "{profile}: E0800 must identify map_new at {}, got {diagnostic_call}",
+                    map_new_call.call_node().0
+                );
+                assert_eq!(
+                    proof.trusted_subset_domain,
+                    Some(crate::verifier::TrustedSubsetDomain::Body),
+                    "{profile}: a reachable runtime trap is a body failure"
+                );
+                let artifact = proof
+                    .artifact
+                    .as_ref()
+                    .expect("definitive E0800 result retains MIR provenance");
+                assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+                assert_eq!(artifact.mir_hash, digest, "{profile}: artifact MIR digest");
+            } else {
+                assert_eq!(
+                    proof.status,
+                    crate::verifier::VerifStatus::Proven,
+                    "{profile}: {}",
+                    proof.message
+                );
+                assert_eq!(
+                    proof.message, "canonical MIR ensures contract proven",
+                    "{profile}: unexpected proof reason"
+                );
+                let artifact = proof
+                    .artifact
+                    .as_ref()
+                    .expect("successful alias Ensures proof retains MIR provenance");
+                assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+                assert_eq!(artifact.mir_hash, digest, "{profile}: artifact MIR digest");
+            }
 
             let context = Context::create();
             let mut generator = CodeGenerator::new(&context, "mir_ordinary_map_alias_same_program");
