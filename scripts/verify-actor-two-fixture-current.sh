@@ -11,6 +11,7 @@ set -o noclobber
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_RELATIVE="scripts/verify-actor-two-fixture-current.sh"
 LLVM_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}"
+export LLVM_SYS_181_PREFIX="$LLVM_PREFIX"
 ARTIFACT_REQUESTED="${MIMI_ACTOR_TWO_FIXTURE_ARTIFACT_DIR:-}"
 GATE_FAILURES=0
 SNAPSHOT_FAILURE=0
