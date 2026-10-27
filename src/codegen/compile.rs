@@ -634,6 +634,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
                 return self.compile_mir_native_with_route_receipt(&canonical, &receipt);
             }
+            if has_static_generic_trait_specialization_candidate(program) {
+                return self.compile_static_generic_trait_specializations(program);
+            }
         }
         // 0.40.1.3 (A3, `blind-spots-evaluation-2026-08-29.md` §1.3-3/4): fatal
         // gate — fail closed on native return types whose heap ownership the
@@ -854,9 +857,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.resolved_ownership_actions = Some(ownership_actions);
         self.resolved_ownership_merges = Some(ownership_merges);
 
-            if has_static_generic_trait_specialization_candidate(program) {
-                return self.compile_static_generic_trait_specializations(program);
-            }
         self.resolved_backend_requirements = Some(
             program
                 .backend_requirements()
