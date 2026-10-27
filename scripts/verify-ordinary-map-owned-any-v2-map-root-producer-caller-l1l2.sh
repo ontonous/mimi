@@ -46,6 +46,7 @@ while IFS= read -r file; do sha256sum -- "$file"; done \
 
 overall_status=0
 checker_status=125
+observer_status=125
 cli_status=125
 run_gate() {
     local gate_name="$1"
@@ -64,6 +65,9 @@ run_gate() {
 run_gate checker-mir-backend env CARGO_BUILD_JOBS=1 LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" \
     cargo test --manifest-path "$repo_root/Cargo.toml" --lib map_root_producer_caller -- --nocapture --test-threads=1
 checker_status="$(sed -n 's/^exit_code=//p' "$artifact_dir/checker-mir-backend.status")"
+run_gate observer-route env CARGO_BUILD_JOBS=1 LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" \
+    cargo test --manifest-path "$repo_root/Cargo.toml" --lib ordinary_map_owner_observer_v1 -- --nocapture --test-threads=1
+observer_status="$(sed -n 's/^exit_code=//p' "$artifact_dir/observer-route.status")"
 run_gate cli-routes env CARGO_BUILD_JOBS=1 LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}" \
     cargo test --manifest-path "$repo_root/Cargo.toml" --test canonical_mir_ordinary_map_owned_any_v2_map_root_producer_caller_cli -- --nocapture --test-threads=1
 cli_status="$(sed -n 's/^exit_code=//p' "$artifact_dir/cli-routes.status")"
@@ -83,8 +87,8 @@ else
     overall_status=98
 fi
 
-printf 'profile=ordinary-map-owned-any-v2-map-root-producer-caller-v1\nexit_code=%s\nchecker_exit_code=%s\ncli_exit_code=%s\nsource_tree_unchanged=%s\nglobal_map_any_v2_production_ready=false\n' \
-    "$overall_status" "$checker_status" "$cli_status" "$source_unchanged" > "$artifact_dir/gate.status"
+printf 'profile=ordinary-map-owned-any-v2-map-root-producer-caller-v1\nexit_code=%s\nchecker_exit_code=%s\nobserver_route_exit_code=%s\ncli_exit_code=%s\nsource_tree_unchanged=%s\nglobal_map_any_v2_production_ready=false\n' \
+    "$overall_status" "$checker_status" "$observer_status" "$cli_status" "$source_unchanged" > "$artifact_dir/gate.status"
 (cd -- "$artifact_dir" && find . -type f ! -name SHA256SUMS -print0 \
     | LC_ALL=C sort -z | xargs -0 -r sha256sum) > "$artifact_dir/SHA256SUMS"
 if [[ "$overall_status" == 0 ]]; then
