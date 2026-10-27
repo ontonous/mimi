@@ -24,16 +24,24 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn collect_decls(&mut self) {
-        // Process imports: add module names to use_imports
+        // Keep merged bare lookup while retaining explicit module identities
+        // for source-ordered imported alias predeclaration.
         for import in &self.file.imports {
+            let canonical_path = import.path.join("::");
             let module_name = import
                 .alias
                 .as_deref()
                 .or_else(|| import.path.first().map(|s| s.as_str()))
-                .map(|s| s.to_string());
+                .map(str::to_owned);
             if let Some(name) = module_name {
-                self.use_imports.push(name);
+                if !self.use_imports.contains(&name) {
+                    self.use_imports.push(name.clone());
+                }
+                self.module_aliases.insert(name, canonical_path.clone());
             }
+            self.module_aliases
+                .entry(canonical_path.clone())
+                .or_insert(canonical_path);
         }
         // Register built-in Record types used by builtins
         self.register_builtin_types();

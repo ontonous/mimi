@@ -117,6 +117,8 @@ pub(crate) struct Checker<'a> {
     pub(crate) trait_method_generics: HashMap<(String, String), Vec<String>>,
     /// Track imported module names (from `use` statements)
     pub(crate) use_imports: Vec<String>,
+    /// Explicit aliases and canonical paths of imported modules.
+    pub(crate) module_aliases: HashMap<String, String>,
     /// Track current module path for qualified names
     /// Track loop nesting depth for break/continue validation
     pub(crate) loop_depth: usize,
@@ -336,6 +338,7 @@ impl<'a> Checker<'a> {
             trait_method_sigs: HashMap::new(),
             trait_method_generics: HashMap::new(),
             use_imports: Vec::new(),
+            module_aliases: HashMap::new(),
             loop_depth: 0,
             generic_scope: Vec::new(),
             arena_depth: 0,

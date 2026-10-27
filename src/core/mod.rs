@@ -6,6 +6,7 @@ pub(crate) use std::collections::HashMap;
 pub mod builtins;
 pub mod cfg;
 mod checker;
+mod module_identity;
 pub mod effects;
 pub(crate) mod helpers;
 pub mod phase;
