@@ -3029,6 +3029,13 @@ fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
             .parse_file()
             .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
+    let synthetic_main = program.flow("Main").expect("parser-synthesized Main");
+    assert!(matches!(
+        &synthetic_main.origin,
+        crate::core::Origin::RuntimeSystem { parent, rule, .. }
+            if parent.0 == "function:main" && rule == "progressive.main"
+    ));
+    assert_eq!(synthetic_main.transitions.len(), 5);
     let implementations = program
         .native_declarations()
         .impls
@@ -3095,6 +3102,16 @@ fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
         reference.value,
         crate::core::mir::reference::MirRuntimeValue::Int(0)
     );
+
+    let bytecode = crate::interp::bytecode::compile_mir_program_with_route_receipt(&mir, &receipt)
+        .expect("compile AST-free bytecode from receipted canonical MIR");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    vm.enable_stdout_capture();
+    assert!(matches!(
+        vm.run_value().expect("MIR bytecode execution"),
+        crate::interp::Value::Int(0)
+    ));
+    assert_eq!(vm.take_stdout(), "22\n11\n");
 
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "mir_generic_trait_call_owners");
@@ -3165,6 +3182,66 @@ fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
             "public checked-program native output must retain exact impl method {symbol}"
         );
     }
+
+    if crate::tests::can_link() {
+        let native = crate::tests::link_and_observe_canonical_mir(&checked_codegen)
+            .expect("execute checked-program canonical native output");
+        assert_eq!(native.stdout, "22\n11\n");
+        assert_eq!(native.stderr, "");
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
+
+    // Redirecting a call to the other specialization must fail its receiver
+    // ABI check before any MIR consumer can reinterpret the method spelling.
+    let mut forged_functions = mir.functions().clone();
+    let main = forged_functions
+        .get_mut(&main_owner)
+        .expect("mutable main MIR");
+    let first_call = main
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                crate::core::mir::MirInstructionKind::Call {
+                    callee: crate::core::ir::ResolvedCallee::ProtocolMethod { .. },
+                    ..
+                }
+            )
+        })
+        .expect("first checked protocol call");
+    let current_method = match &first_call.kind {
+        crate::core::mir::MirInstructionKind::Call {
+            callee: crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. },
+            ..
+        } => method.as_str(),
+        _ => unreachable!(),
+    };
+    let other_owner = method_owners
+        .iter()
+        .find(|owner| owner.0 != current_method)
+        .expect("other specialized method");
+    let crate::core::mir::MirInstructionKind::Call { callee, .. } = &mut first_call.kind else {
+        unreachable!();
+    };
+    let crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. } = callee else {
+        unreachable!();
+    };
+    *method = crate::core::ir::MethodId::new(other_owner.0.clone()).expect("method ID");
+    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
+        forged_functions,
+        mir.type_catalog().clone(),
+    )
+    .expect_err("cross-specialization receiver ABI drift must fail closed");
+    assert!(errors.iter().any(|error| {
+        error
+            .message
+            .contains("protocol method argument 0 TypeDesc disagrees")
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }
 
 #[test]
@@ -3564,18 +3641,12 @@ fn checked_actor_mailbox_headers_emit_real_resolved_calls_without_actor_ast_cach
 }
 
 #[test]
-fn checked_actor_tuple_text_alias_header_matches_legacy_worker_layout() {
+fn checked_actor_tuple_text_alias_header_uses_transitive_alias_layout() {
     let source = r#"
         type InnerText = string
         type Text = InnerText
         actor Echo {
             func echo(value: (Text, i32)) -> (Text, i32) { value }
-        }
-        func main() -> i32 {
-            let echo = Echo.spawn()
-            let source: (Text, i32) = ("A\0雪", 73)
-            let result = echo.echo(source)
-            if result.0 == "A\0雪" && result.1 == 73 { 0 } else { 1 }
         }
     "#;
     let file =
@@ -3603,36 +3674,27 @@ fn checked_actor_tuple_text_alias_header_matches_legacy_worker_layout() {
 
     let mut codegen = CodeGenerator::new(&context, "actor_tuple_text_alias_header");
     codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("compile resolved caller and native actor worker");
-    codegen.module.verify().expect("valid LLVM module");
-
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
     let actor = crate::core::NodeId("actor:Echo".into());
     let header = codegen
         .checked_actor_mailbox_header(&program, &actor, "echo")
         .expect("checked mailbox header")
         .expect("canonical tuple header");
-    let worker = codegen
-        .module
-        .get_function("Echo__echo__method")
-        .expect("actor worker method");
     assert_eq!(header.parameters.len(), 1);
-    assert_eq!(
-        worker.get_nth_param(1).expect("tuple argument").get_type(),
-        header.parameters[0],
-        "worker parameter layout must match the checked mailbox declaration"
-    let synthetic_main = program.flow("Main").expect("parser-synthesized Main");
-    assert!(matches!(
-        &synthetic_main.origin,
-        crate::core::Origin::RuntimeSystem { parent, rule, .. }
-            if parent.0 == "function:main" && rule == "progressive.main"
-    ));
-    assert_eq!(synthetic_main.transitions.len(), 5);
+    let tuple_layout = header.parameters[0].into_struct_type();
+    let widened_i32 = crate::codegen::abi::layout::widen_product_field(
+        &context,
+        BasicTypeEnum::IntType(context.i32_type()),
     );
     assert_eq!(
-        worker.get_type().get_return_type(),
-        Some(header.result),
-        "worker return layout must match the checked mailbox declaration"
+        tuple_layout.get_field_types(),
+        vec![alias_layout, widened_i32],
+        "the checker-owned tuple ABI must retain the transitively resolved String alias"
+    );
+    assert_eq!(
+        header.result, header.parameters[0],
+        "the checked mailbox result and argument share the tuple alias ABI"
     );
 }
 
@@ -3650,16 +3712,6 @@ fn checked_actor_mailbox_header_preserves_order_and_explicit_abi_boundaries() {
     let file =
         crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
             .parse_file()
-    let bytecode = crate::interp::bytecode::compile_mir_program_with_route_receipt(&mir, &receipt)
-        .expect("compile AST-free bytecode from receipted canonical MIR");
-    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
-    vm.enable_stdout_capture();
-    assert!(matches!(
-        vm.run_value().expect("MIR bytecode execution"),
-        crate::interp::Value::Int(0)
-    ));
-    assert_eq!(vm.take_stdout(), "22\n11\n");
-
             .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
     let context = Context::create();
@@ -3677,65 +3729,47 @@ fn checked_actor_mailbox_header_preserves_order_and_explicit_abi_boundaries() {
         "declaration order is the runtime dispatch ordinal"
     );
     assert_eq!(
-    if crate::tests::can_link() {
-        let native = crate::tests::link_and_observe_canonical_mir(&checked_codegen)
-            .expect("execute checked-program canonical native output");
-        assert_eq!(native.stdout, "22\n11\n");
-        assert_eq!(native.stderr, "");
-    }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
+        second.parameters,
+        [BasicTypeEnum::IntType(context.i32_type())]
+    );
+    let implicit = codegen
+        .checked_actor_mailbox_header(&program, &actor, "implicit")
+        .expect("header")
+        .expect("implicit sentinel");
+    assert_eq!(implicit.result, BasicTypeEnum::IntType(context.i64_type()));
+    assert_eq!(implicit.method_id, 2);
+    let unit = codegen
+        .checked_actor_mailbox_header(&program, &actor, "explicit_unit")
+        .expect("header")
+        .expect("unit header");
+    assert_eq!(unit.result, BasicTypeEnum::IntType(context.i64_type()));
+    assert!(
+        codegen
+            .checked_actor_mailbox_header(&program, &actor, "first")
+            .expect("known unmigrated ABI")
+            .is_none(),
+        "Option<List> preserves compatibility disposition"
+    );
+    assert!(codegen
+        .checked_actor_mailbox_header(&program, &actor, "absent")
+        .is_err());
 
-    // Redirecting a call to the other specialization must fail its receiver
-    // ABI check before any MIR consumer can reinterpret the method spelling.
-    let mut forged_functions = mir.functions().clone();
-    let main = forged_functions
-        .get_mut(&main_owner)
-        .expect("mutable main MIR");
-    let first_call = main
-        .blocks
-        .values_mut()
-        .flat_map(|block| block.instructions.iter_mut())
-        .find(|instruction| {
-            matches!(
-                instruction.kind,
-                crate::core::mir::MirInstructionKind::Call {
-                    callee: crate::core::ir::ResolvedCallee::ProtocolMethod { .. },
-                    ..
-                }
-            )
-        })
-        .expect("first checked protocol call");
-    let current_method = match &first_call.kind {
-        crate::core::mir::MirInstructionKind::Call {
-            callee: crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. },
-            ..
-        } => method.as_str(),
-        _ => unreachable!(),
-    };
-    let other_owner = method_owners
-        .iter()
-        .find(|owner| owner.0 != current_method)
-        .expect("other specialized method");
-    let crate::core::mir::MirInstructionKind::Call { callee, .. } = &mut first_call.kind else {
-        unreachable!();
-    };
-    let crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. } = callee else {
-        unreachable!();
-    };
-    *method = crate::core::ir::MethodId::new(other_owner.0.clone()).expect("method ID");
-    let errors = crate::core::mir::reference::MirProgram::with_type_catalog(
-        forged_functions,
-        mir.type_catalog().clone(),
-    )
-    .expect_err("cross-specialization receiver ABI drift must fail closed");
-    assert!(errors.iter().any(|error| {
-        error
-            .message
-            .contains("protocol method argument 0 TypeDesc disagrees")
-    }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
+    let mut incomplete = CodeGenerator::new(&context, "mailbox_header_missing_catalog_actor");
+    incomplete
+        .install_checked_declaration_names(&program)
+        .expect("install checked declarations");
+    incomplete
+        .checked_native_declarations
+        .as_mut()
+        .expect("production declaration catalog")
+        .actors
+        .remove(&actor);
+    assert!(
+        incomplete
+            .checked_actor_mailbox_header(&program, &actor, "second")
+            .is_err(),
+        "an installed but incomplete native Actor schema must fail closed"
+    );
 }
 
 #[test]
@@ -3793,45 +3827,4 @@ fn static_generic_trait_route_keeps_list_string_outside_the_mir_glue_contract() 
     assert!(codegen.module.get_function("main").is_none());
     assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
-        second.parameters,
-        [BasicTypeEnum::IntType(context.i32_type())]
-    );
-    let implicit = codegen
-        .checked_actor_mailbox_header(&program, &actor, "implicit")
-        .expect("header")
-        .expect("implicit sentinel");
-    assert_eq!(implicit.result, BasicTypeEnum::IntType(context.i64_type()));
-    assert_eq!(implicit.method_id, 2);
-    let unit = codegen
-        .checked_actor_mailbox_header(&program, &actor, "explicit_unit")
-        .expect("header")
-        .expect("unit header");
-    assert_eq!(unit.result, BasicTypeEnum::IntType(context.i64_type()));
-    assert!(
-        codegen
-            .checked_actor_mailbox_header(&program, &actor, "first")
-            .expect("known unmigrated ABI")
-            .is_none(),
-        "Option<List> preserves compatibility disposition"
-    );
-    assert!(codegen
-        .checked_actor_mailbox_header(&program, &actor, "absent")
-        .is_err());
-
-    let mut incomplete = CodeGenerator::new(&context, "mailbox_header_missing_catalog_actor");
-    incomplete
-        .install_checked_declaration_names(&program)
-        .expect("install checked declarations");
-    incomplete
-        .checked_native_declarations
-        .as_mut()
-        .expect("production declaration catalog")
-        .actors
-        .remove(&actor);
-    assert!(
-        incomplete
-            .checked_actor_mailbox_header(&program, &actor, "second")
-            .is_err(),
-        "an installed but incomplete native Actor schema must fail closed"
-    );
 }
