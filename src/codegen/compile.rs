@@ -1155,6 +1155,73 @@ impl<'ctx> CodeGenerator<'ctx> {
         )])
     }
 
+    fn compile_static_generic_trait_specializations(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+        let span = program.entry_span().unwrap_or(crate::span::Span::UNKNOWN);
+        if let Some(reason) = crate::core::mir::unknown_effect_boundary_reason(program) {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                reason,
+                span,
+            )]);
+        }
+        let excluded_sources = program
+            .source_registry()
+            .records()
+            .iter()
+            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+            .map(|record| record.id)
+            .collect::<HashSet<_>>();
+        let canonical =
+            crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+                program,
+                &excluded_sources,
+            )
+            .map_err(|error| error.to_diagnostics())?;
+        crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
+            Self::mir_gate_diagnostics(
+                program,
+                "MIR verifier capability",
+                STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE,
+                errors,
+            )
+        })?;
+        let receipt = canonical.route_receipt(STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE);
+        crate::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+            .map_err(|errors| {
+                Self::mir_gate_diagnostics(
+                    program,
+                    "MIR bytecode",
+                    STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE,
+                    errors,
+                )
+            })?;
+        crate::codegen::mir::validate_mir_native(&canonical)?;
+        let results =
+            crate::verifier::verify_mir_with_route_receipt(&canonical, &receipt, String::new())
+                .map_err(|error| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-VERIFY-001",
+                        format!("MIR generic trait specialization verifier pass failed: {error}"),
+                        span,
+                    )]
+                })?;
+        if !crate::verifier::canonical_execution_route_verifier_ready(
+            &results,
+            crate::core::mir::is_exact_cross_state_f64_failure_receipt(program),
+            crate::core::mir::contains_multi_target_flow_union_candidate(&canonical),
+        ) {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                "MIR-VERIFY-001",
+                "MIR verifier returned an unsupported or inconclusive result for static generic trait specialization",
+                span,
+            )]);
+        }
+        self.compile_mir_native_with_route_receipt(&canonical, &receipt)
+    }
+
     /// Probe the direct native boundary for already closed MIR islands.
     ///
     /// The probe is deliberately checker-admission-first: an unrelated or
@@ -1375,72 +1442,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete scalar collection MIR island materialization failed: {message}"
                         ),
                     ),
-    fn compile_static_generic_trait_specializations(
-        &mut self,
-        program: &crate::core::CheckedProgram,
-    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
-        let span = program.entry_span().unwrap_or(crate::span::Span::UNKNOWN);
-        if let Some(reason) = crate::core::mir::unknown_effect_boundary_reason(program) {
-            return Err(vec![crate::diagnostic::Diagnostic::error_code(
-                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
-                reason,
-                span,
-            )]);
-        }
-        let excluded_sources = program
-            .source_registry()
-            .records()
-            .iter()
-            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-            .map(|record| record.id)
-            .collect::<HashSet<_>>();
-        let canonical =
-            crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
-                program,
-                &excluded_sources,
-            )
-            .map_err(|error| error.to_diagnostics())?;
-        crate::verifier::validate_mir_capabilities(&canonical).map_err(|errors| {
-            Self::mir_gate_diagnostics(
-                program,
-                "MIR verifier capability",
-                STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE,
-                errors,
-            )
-        })?;
-        let receipt = canonical.route_receipt(STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE);
-        crate::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
-            .map_err(|errors| {
-                Self::mir_gate_diagnostics(
-                    program,
-                    "MIR bytecode",
-                    STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE,
-                    errors,
-                )
-            })?;
-        crate::codegen::mir::validate_mir_native(&canonical)?;
-        let results =
-            crate::verifier::verify_mir_with_route_receipt(&canonical, &receipt, String::new())
-                .map_err(|error| {
-                    vec![crate::diagnostic::Diagnostic::error_code(
-                        "MIR-VERIFY-001",
-                        format!("MIR generic trait specialization verifier pass failed: {error}"),
-                        span,
-                    )]
-                })?;
-        if !crate::verifier::canonical_execution_route_verifier_ready(
-            &results,
-            crate::core::mir::is_exact_cross_state_f64_failure_receipt(program),
-            crate::core::mir::contains_multi_target_flow_union_candidate(&canonical),
-        ) {
-            return Err(vec![crate::diagnostic::Diagnostic::error_code(
-                "MIR-VERIFY-001",
-                "MIR verifier returned an unsupported or inconclusive result for static generic trait specialization",
-                span,
-            )]);
-        }
-        self.compile_mir_native_with_route_receipt(&canonical, &receipt)
-    }
 
                     (
                         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
