@@ -190,7 +190,7 @@ codegen_generic_trait_mir_evidence() {
         'has_static_generic_trait_specialization_candidate(&checked)' \
         'select_default_route(&checked, &file)' \
         'STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE' \
-        '"22\n11\n"'; do
+        '"33\n22\n11\n"'; do
         if ! printf '%s\n' "$context" | rg -F "$marker" >/dev/null; then
             printf 'owner_audit_error=generic_trait_default_route_evidence_missing test=%s marker=%s\n' \
                 "$name" "$marker" >&2
@@ -216,7 +216,7 @@ codegen_generic_trait_mir_evidence() {
         'static_generic_trait_specialization_runs_through_default_and_explicit_mir_cli_routes' \
         'static-generic-trait-specialization-v1' \
         'explicit canonical (run-canonical-v1)' \
-        '22\n11\n'; do
+        '33\n22\n11\n'; do
         if ! rg -F "$marker" "$cli_test" >/dev/null; then
             printf 'owner_audit_error=generic_trait_cli_route_evidence_missing marker=%s\n' \
                 "$marker" >&2
