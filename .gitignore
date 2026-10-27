@@ -89,7 +89,8 @@ tests/stdlib_matrix_scratch/
 mm_probe_*.txt
 
 # Reproducible native binaries emitted by gate evidence, including strict L3.
-# Keep gate manifests, command transcripts, checksums, and source snapshots visible.
+# Keep raw stdout/stderr captures (*.bin), manifests, command transcripts,
+# checksums, and source snapshots visible; ignore only the generated executables below.
 evidence/**/native/case-*/default-build/program
 evidence/**/native/case-*/explicit-build/program
 evidence/**/native/**/program
