@@ -98,6 +98,8 @@ evidence/**/cli-*-build/program
 evidence/**/consumer-evidence/**/native-false
 evidence/**/consumer-evidence/**/native-true
 evidence/**/canonical_mir_string_list_clone_oom
+evidence/**/map-root-producer-caller-l3-*/test-artifacts/strict-memcheck/native-default
+evidence/**/map-root-producer-caller-l3-*/test-artifacts/strict-memcheck/native-explicit-mir
 evidence/**/callback-test
 evidence/**/strict-l3/*-native
 evidence/**/raw-memcheck/*-native
