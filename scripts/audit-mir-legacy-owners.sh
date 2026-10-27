@@ -135,6 +135,7 @@ codegen_generic_trait_mir_evidence() {
     local tests="$ROOT_DIR/src/codegen/tests.rs"
     local context
     local name
+    local default_route_stdout_marker='"33\n22\n11\n"'
 
     name='checked_generic_trait_specializations_install_exact_vtables_from_checked_catalog'
     context="$(sed -n "/^[[:space:]]*fn ${name}(/,/^[[:space:]]*#\\[test\\]/p" "$tests")"
@@ -190,7 +191,7 @@ codegen_generic_trait_mir_evidence() {
         'has_static_generic_trait_specialization_candidate(&checked)' \
         'select_default_route(&checked, &file)' \
         'STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE' \
-        '"33\n22\n11\n"'; do
+        "$default_route_stdout_marker"; do
         if ! printf '%s\n' "$context" | rg -F "$marker" >/dev/null; then
             printf 'owner_audit_error=generic_trait_default_route_evidence_missing test=%s marker=%s\n' \
                 "$name" "$marker" >&2
@@ -198,6 +199,7 @@ codegen_generic_trait_mir_evidence() {
             return
         fi
     done
+    printf 'generic_trait_default_route_stdout_marker=%s\n' "$default_route_stdout_marker"
     name='generic_trait_specialization_does_not_admit_a_user_flow'
     context="$(sed -n "/^[[:space:]]*fn ${name}(/,/^[[:space:]]*#\\[test\\]/p" \
         "$ROOT_DIR/src/main/canonical_dispatch.rs")"
@@ -1340,6 +1342,7 @@ bytecode_observer_v1_route_receipt_binding() {
     anchor_pattern='bind_ordinary_map_owner_observer_v1_route_anchor\(\s*entry,\s*&functions,\s*&builtin_names,\s*route_receipt,\s*checker_receipts\.clone\(\),\s*observer_bindings,'
     main_profile_pattern='let admission\s*=\s*mimi::core::mir::classify_canonical_mir_route_admission\(checked\);\s*if admission\.ordinary_map_owned_any_v2_zero_miss_i32\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_values_producer_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesProducerCaller\s*\.as_str\(\);\s*\}'
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_map_root_producer_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2MapRootProducerCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapEmptyRootRootQueriesV1\s*\{\s*return mimi::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::IsEmpty\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControl\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE;\s*\}'
@@ -1360,7 +1363,7 @@ bytecode_observer_v1_route_receipt_binding() {
     main_profile_pattern+='\s*else if admission\.map_root_complete\(\)\s*\{\s*mimi::core::mir::MAP_ROOT_ISLAND\s*\}\s*else\s*\{\s*default_profile\s*\}'
     main_route_pattern='let observer_admission = admission\.ordinary_map_owner_lifecycle_observer_v1;[\s\S]*?if observer_admission\.has_profile_signal\(\) && !observer_admission\.is_complete\(\)[\s\S]*?if observer_admission\.is_complete\(\)\s*\{\s*return match materialize_canonical_route\(checked, merged_file\)\s*\{\s*Ok\(route\)\s*if ordinary_map_owner_lifecycle_observer_v1_materialization_is_exact\(&route\)\s*=>\s*\{\s*select_ordinary_map_owner_lifecycle_observer_v1_route\(checked, route\.program\)'
     local selector_profile_count
-    selector_profile_count="$(printf '%s\n' "$main_profile_context" | { rg -o 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(ZERO_MISS_I32_PROFILE|IS_EMPTY_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || true; } | wc -l | tr -d '[:space:]')"
+    selector_profile_count="$(printf '%s\n' "$main_profile_context" | { rg -o 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesProducerCaller|OrdinaryMapOwnedAnyV2MapRootProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(ZERO_MISS_I32_PROFILE|IS_EMPTY_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || true; } | wc -l | tr -d '[:space:]')"
     if ! printf '%s\n' "$inner_context" | rg -U "$profile_pattern" >/dev/null \
         || ! printf '%s\n' "$profile_context" | rg -U 'Self::OrdinaryMapOwnerLifecycleObserverV1\s*=>\s*\{\s*ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE\s*\}' >/dev/null \
         || ! rg -U 'pub use super::receipt::\{\s*[^}]*ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE[^}]*\};' "$route_source" >/dev/null \
@@ -1370,7 +1373,7 @@ bytecode_observer_v1_route_receipt_binding() {
         || ! printf '%s\n' "$observer_nodes_context" | rg -U 'OrdinaryMapOwnerLifecycleObserverToJson\s*\{\s*\.\.\s*\}\s*\|\s*MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln\s*\{\s*\.\.\s*\}' >/dev/null \
         || ! printf '%s\n' "$observer_anchor_context" | rg -F 'ordinary_map_owner_observer_v1_receipts.as_ref()' >/dev/null \
         || ! printf '%s\n' "$observer_anchor_context" | rg -U "$anchor_pattern" >/dev/null \
-        || [ "$selector_profile_count" -ne 15 ] \
+        || [ "$selector_profile_count" -ne 16 ] \
         || ! printf '%s\n' "$main_profile_context" | rg -U "$main_profile_pattern" >/dev/null \
         || ! printf '%s\n' "$main_route_context" | rg -U "$main_route_pattern" >/dev/null \
         || ! printf '%s\n' "$materialization_context" | rg -F 'route.materialized_ordinary_map_owner_lifecycle_observer_v1_candidate' >/dev/null \

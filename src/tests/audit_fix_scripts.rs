@@ -306,6 +306,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         }
     }
     for expected in [
+        "generic_trait_default_route_stdout_marker=\"33\\n22\\n11\\n\"",
         "closed_scalar_zero_owner_evidence=",
         "closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()",
         "closed_scalar_cli_evidence=",
@@ -1404,35 +1405,51 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
 
     let zero_miss_route = "    if admission.ordinary_map_owned_any_v2_zero_miss_i32() {\n        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\n    }\n";
     let values_producer_caller_route = "    if admission.ordinary_map_owned_any_v2_values_producer_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesProducerCaller\n            .as_str();\n    }\n";
-    let early_route_order = format!("{zero_miss_route}{values_producer_caller_route}");
-    let reversed_early_route_order =
-        format!("{values_producer_caller_route}{zero_miss_route}");
-    let reordered_early_routes =
-        dispatcher_source.replacen(&early_route_order, &reversed_early_route_order, 1);
-    assert_ne!(
-        dispatcher_source, reordered_early_routes,
-        "Observer V1 route-order fixture must swap the early V2 branches"
-    );
-    std::fs::write(&dispatcher_path, reordered_early_routes)
-        .expect("write dispatcher source with reordered early V2 routes");
-    let early_order_output = std::process::Command::new("bash")
-        .arg(&script_path)
-        .current_dir(&temp_root)
-        .output()
-        .expect("run audit against reordered early V2 routes");
-    assert!(
-        !early_order_output.status.success(),
-        "the default selector must preserve the complete early V2 route order:\n{}",
-        String::from_utf8_lossy(&early_order_output.stdout)
-    );
-    assert!(
-        String::from_utf8_lossy(&early_order_output.stderr)
-            .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
-        "early V2 route order drift omitted the exact-route diagnostic:\n{}",
-        String::from_utf8_lossy(&early_order_output.stderr)
-    );
-    std::fs::write(&dispatcher_path, &dispatcher_source)
-        .expect("restore dispatcher source after early V2 route-order mutation");
+    let map_root_producer_caller_route = "    if admission.ordinary_map_owned_any_v2_map_root_producer_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2MapRootProducerCaller\n            .as_str();\n    }\n";
+    let early_route_order =
+        format!("{zero_miss_route}{values_producer_caller_route}{map_root_producer_caller_route}");
+    let early_route_reorders = [
+        (
+            "zero-miss and ValuesProducerCaller",
+            format!(
+                "{values_producer_caller_route}{zero_miss_route}{map_root_producer_caller_route}"
+            ),
+        ),
+        (
+            "ValuesProducerCaller and MapRootProducerCaller",
+            format!(
+                "{zero_miss_route}{map_root_producer_caller_route}{values_producer_caller_route}"
+            ),
+        ),
+    ];
+    for (order_name, reordered_early_route_order) in early_route_reorders {
+        let reordered_early_routes =
+            dispatcher_source.replacen(&early_route_order, &reordered_early_route_order, 1);
+        assert_ne!(
+            dispatcher_source, reordered_early_routes,
+            "Observer V1 route-order fixture must swap {order_name}"
+        );
+        std::fs::write(&dispatcher_path, reordered_early_routes)
+            .expect("write dispatcher source with reordered early V2 routes");
+        let early_order_output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .current_dir(&temp_root)
+            .output()
+            .expect("run audit against reordered early V2 routes");
+        assert!(
+            !early_order_output.status.success(),
+            "the default selector must preserve the complete early V2 route order ({order_name}):\n{}",
+            String::from_utf8_lossy(&early_order_output.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&early_order_output.stderr)
+                .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
+            "early V2 route order drift ({order_name}) omitted the exact-route diagnostic:\n{}",
+            String::from_utf8_lossy(&early_order_output.stderr)
+        );
+        std::fs::write(&dispatcher_path, &dispatcher_source)
+            .expect("restore dispatcher source after early V2 route-order mutation");
+    }
 
     let map_any_fallbacks = "    } else if admission.map_any_owner_complete() {\n        mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND\n    } else if admission.ordinary_map_owned_any_v2_complete() {\n        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND\n";
     let reversed_map_any_fallbacks = "    } else if admission.ordinary_map_owned_any_v2_complete() {\n        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND\n    } else if admission.map_any_owner_complete() {\n        mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND\n";
