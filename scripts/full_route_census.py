@@ -118,7 +118,7 @@ except ImportError:  # pragma: no cover - older Python fails closed on Cargo con
     tomllib = None
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = "0.1.11-full-route-census-v4"
+SCHEMA_VERSION = "0.1.11-full-route-census-v5"
 EXPECTATION_SCHEMA_VERSION = 4
 EXPECTATION_CLASSES = {
     "required_compile",
@@ -157,11 +157,19 @@ ACTOR_HELPER_NAME = "assert_original_actor_cli_routes"
 # CLI assertions themselves. Pin its active implementation so changing it to
 # a no-op cannot preserve authority merely by retaining the two callsites.
 ACTOR_HELPER_SHA256 = "ff9ac0114e27da92f68d3b02a35c823e00a2a4ba91f4613d9dce0c01c90b24cc"
-LEGACY_OWNER_NAMES = (
+ACTIVE_LEGACY_OWNER_NAMES = (
     "CodegenLegacyRemainder",
-    "FlowVerifierCompatibility",
     "FfiVerifierCompatibility",
+)
+RETIRED_LEGACY_OWNER_NAMES = (
+    "FlowVerifierCompatibility",
     "DualVerifierCompatibility",
+)
+LEGACY_OWNER_NAMES = ACTIVE_LEGACY_OWNER_NAMES + RETIRED_LEGACY_OWNER_NAMES
+RETIRED_FLOW_DUAL_PARITY_TESTS = (
+    "flow_scalar_migration_keeps_mir_and_dual_verdicts",
+    "flow_transition_invariant_and_field_projection_owner_parity",
+    "canonical_mir_transition_preserves_contract_kinds",
 )
 EXCLUDED_DIRS = {
     ".git",
@@ -4250,10 +4258,45 @@ def _actor_fallback_evidence(
 
 def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
     owners: dict[str, dict[str, Any]] = {}
+    owner_field_counts: Counter[tuple[str, str]] = Counter()
+    duplicate_owner_fields: list[str] = []
+    unknown_owner_names: set[str] = set()
+    malformed_condition_rows: list[str] = []
+    malformed_owner_rows: list[str] = []
+    pending_condition_owner: str | None = None
+    retired_summaries: list[re.Match[str]] = []
+    retired_summary_count = 0
+
+    def assign_owner_field(name: str, field: str, value: Any) -> None:
+        if name not in ACTIVE_LEGACY_OWNER_NAMES:
+            unknown_owner_names.add(name)
+            return
+        owner_field_counts[(name, field)] += 1
+        if owner_field_counts[(name, field)] > 1:
+            duplicate_owner_fields.append(f"{name}.{field}")
+            return
+        owners.setdefault(name, {})[field] = value
+
+    retirement_pattern = re.compile(
+        r"retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;"
+        r"transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence="
+        r"([^+]+)\+([^+]+)\+([^+]+)$"
+    )
     for line in stdout.splitlines():
+        owner_prefix = re.match(r"owner=([^ ]+)", line)
+        if owner_prefix and owner_prefix.group(1) not in LEGACY_OWNER_NAMES:
+            unknown_owner_names.add(owner_prefix.group(1))
+        if line.startswith("retired_flow_dual_owners="):
+            retired_summary_count += 1
+            match = retirement_pattern.fullmatch(line)
+            if match is not None:
+                retired_summaries.append(match)
+            continue
         match = re.match(r"owner=([^ ]+) production_accessor_call_sites=(\d+)$", line)
         if match:
-            owners.setdefault(match.group(1), {})["production_accessor_call_sites"] = int(match.group(2))
+            assign_owner_field(
+                match.group(1), "production_accessor_call_sites", int(match.group(2))
+            )
             continue
         match = re.match(
             r"owner=([^ ]+) production_access_status=([^ ]+) dependency_class=([^ ]+) "
@@ -4261,36 +4304,63 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
             line,
         )
         if match:
-            item = owners.setdefault(match.group(1), {})
-            item.update({
-                "production_access_status": match.group(2),
-                "dependency_class": match.group(3),
-                "owner_deletion_ready": match.group(4) == "1",
-                "owner_deletion_blocker": match.group(5),
-            })
+            name = match.group(1)
+            assign_owner_field(name, "production_access_status", match.group(2))
+            assign_owner_field(name, "dependency_class", match.group(3))
+            assign_owner_field(name, "owner_deletion_ready", match.group(4) == "1")
+            assign_owner_field(name, "owner_deletion_blocker", match.group(5))
             continue
         match = re.match(r"owner=([^ ]+) owner_deletion_condition_digest=([0-9a-f]{64})$", line)
         if match:
-            owners.setdefault(match.group(1), {})["deletion_condition_sha256"] = match.group(2)
+            if pending_condition_owner is not None:
+                malformed_condition_rows.append("condition digest before prior condition text")
+            name = match.group(1)
+            assign_owner_field(name, "deletion_condition_sha256", match.group(2))
+            pending_condition_owner = name
             continue
         match = re.match(r"owner_deletion_condition=(.*)$", line)
         if match:
-            # The audit prints one condition directly after each owner digest.
-            pending = next(
-                (name for name in LEGACY_OWNER_NAMES if name in owners and "deletion_condition" not in owners[name]),
-                None,
+            if pending_condition_owner is None:
+                malformed_condition_rows.append("condition text without a preceding owner digest")
+            else:
+                assign_owner_field(
+                    pending_condition_owner, "deletion_condition", match.group(1)
+                )
+                pending_condition_owner = None
+            continue
+        if owner_prefix:
+            name = owner_prefix.group(1)
+            is_known_context_row = (
+                name in ACTIVE_LEGACY_OWNER_NAMES
+                and (
+                    re.fullmatch(
+                        r"owner=[^ ]+ evidence_scope=.+ evidence_test=\S+ evidence_marker=.+",
+                        line,
+                    )
+                    is not None
+                    or re.fullmatch(
+                        r"owner=[^ ]+ closed_route_guard=\S+ context=.+",
+                        line,
+                    )
+                    is not None
+                )
             )
-            if pending is not None:
-                owners[pending]["deletion_condition"] = match.group(1)
+            if name in LEGACY_OWNER_NAMES and not is_known_context_row:
+                malformed_owner_rows.append(line)
+    if pending_condition_owner is not None:
+        malformed_condition_rows.append("owner digest without condition text")
     parsed = [
         {"name": name, **owners.get(name, {})}
-        for name in LEGACY_OWNER_NAMES
+        for name in ACTIVE_LEGACY_OWNER_NAMES
     ]
     actual_condition_set = "".join(
         f"{owner['name']}={owner.get('deletion_condition_sha256', '')}\n"
         for owner in parsed
     )
-    reported_set_digest = _parse_assignment(stdout, "owner_deletion_condition_set_digest")
+    condition_set_values = re.findall(
+        r"(?m)^owner_deletion_condition_set_digest=([^\r\n]*)$", stdout
+    )
+    reported_set_digest = condition_set_values[0] if len(condition_set_values) == 1 else None
     condition_digests_match = all(
         owner.get("deletion_condition_sha256") == sha256_bytes(
             str(owner.get("deletion_condition", "")).encode("utf-8")
@@ -4300,7 +4370,7 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
     condition_set_digest_matches = (
         reported_set_digest == sha256_bytes(actual_condition_set.encode("utf-8"))
     )
-    complete = all(
+    owner_rows_complete = all(
         isinstance(owner.get("production_accessor_call_sites"), int)
         and owner.get("production_access_status") in {"sealed", "open"}
         and isinstance(owner.get("dependency_class"), str)
@@ -4310,13 +4380,68 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
         and bool(owner.get("deletion_condition"))
         and isinstance(owner.get("deletion_condition_sha256"), str)
         for owner in parsed
-    ) and condition_digests_match and condition_set_digest_matches
+    )
+    owner_count_values = re.findall(r"(?m)^owner_count=(\d+)$", stdout)
+    owner_count_reported = int(owner_count_values[0]) if len(owner_count_values) == 1 else None
+    dynamic_probe_values = re.findall(r"(?m)^dynamic_probe_status=([^\r\n]*)$", stdout)
+    dynamic_probe_status = dynamic_probe_values[0] if len(dynamic_probe_values) == 1 else None
+    audit_status_values = re.findall(r"(?m)^audit_status=([^\r\n]*)$", stdout)
+    audit_status = audit_status_values[0] if len(audit_status_values) == 1 else None
+    retired_test_names = (
+        list(retired_summaries[0].groups()) if len(retired_summaries) == 1 else []
+    )
+    retired_owner_evidence_complete = (
+        retired_summary_count == 1
+        and len(retired_summaries) == 1
+        and tuple(retired_test_names) == RETIRED_FLOW_DUAL_PARITY_TESTS
+        and dynamic_probe_status == "not_run"
+    )
+    retired_owners = [
+        {
+            "name": name,
+            "status": "physically_retired" if retired_owner_evidence_complete else "unverified",
+            "retirement_evidence_kind": "audit_script_source_checks",
+            "retirement_evidence_complete": retired_owner_evidence_complete,
+            "declared_parity_test_names": retired_test_names,
+            "dynamic_probe_status": dynamic_probe_status,
+        }
+        for name in RETIRED_LEGACY_OWNER_NAMES
+    ]
+    owner_set_complete = (
+        {owner["name"] for owner in parsed} == set(ACTIVE_LEGACY_OWNER_NAMES)
+        and len(parsed) == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and owner_count_reported == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and not unknown_owner_names
+        and not duplicate_owner_fields
+        and not malformed_condition_rows
+        and not malformed_owner_rows
+        and len(condition_set_values) == 1
+        and len(owner_count_values) == 1
+        and audit_status == "ok"
+        and len(audit_status_values) == 1
+    )
+    complete = (
+        owner_set_complete
+        and owner_rows_complete
+        and condition_digests_match
+        and condition_set_digest_matches
+        and retired_owner_evidence_complete
+    )
     return {
         "owners": parsed,
-        "owner_count_reported": _parse_int_assignment(stdout, "owner_count"),
+        "retired_owners": retired_owners,
+        "owner_count_reported": owner_count_reported,
         "owner_deletion_condition_set_sha256": reported_set_digest,
         "deletion_condition_digests_match_text": condition_digests_match,
         "deletion_condition_set_digest_matches": condition_set_digest_matches,
+        "retired_owner_evidence_complete": retired_owner_evidence_complete,
+        "retired_owner_evidence_status": "complete" if retired_owner_evidence_complete else "incomplete",
+        "retired_owner_parity_tests_declared": retired_test_names,
+        "dynamic_probe_status": dynamic_probe_status,
+        "unknown_owner_names": sorted(unknown_owner_names),
+        "duplicate_owner_fields": duplicate_owner_fields,
+        "malformed_condition_rows": malformed_condition_rows,
+        "malformed_owner_rows": malformed_owner_rows,
         "parsed_owner_set_complete": complete,
     }
 
@@ -4368,13 +4493,27 @@ def _collect_legacy_owner_audit(
     stdout_artifact = _write_raw_artifact(logs_root / "legacy-owner-audit.stdout.bin", stdout_bytes)
     stderr_artifact = _write_raw_artifact(logs_root / "legacy-owner-audit.stderr.bin", stderr_bytes)
     parsed = _parse_legacy_owner_audit(stdout_text)
-    expected = set(LEGACY_OWNER_NAMES)
-    actual = {str(owner["name"]) for owner in parsed["owners"] if owner.get("production_accessor_call_sites") is not None}
+    expected_active = set(ACTIVE_LEGACY_OWNER_NAMES)
+    expected_retired = set(RETIRED_LEGACY_OWNER_NAMES)
+    actual_active = {
+        str(owner["name"])
+        for owner in parsed["owners"]
+        if owner.get("production_accessor_call_sites") is not None
+    }
+    actual_retired = {
+        str(owner["name"])
+        for owner in parsed["retired_owners"]
+        if owner.get("retirement_evidence_complete") is True
+    }
     accepted = (
         run_status == "completed"
         and exit_code == 0
-        and parsed["owner_count_reported"] == len(LEGACY_OWNER_NAMES)
-        and actual == expected
+        and parsed["owner_count_reported"] == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and len(parsed["owners"]) == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and actual_active == expected_active
+        and len(parsed["retired_owners"]) == len(RETIRED_LEGACY_OWNER_NAMES)
+        and actual_retired == expected_retired
+        and parsed["retired_owner_evidence_complete"]
         and parsed["parsed_owner_set_complete"]
         and bool(re.fullmatch(r"[0-9a-f]{64}", parsed["owner_deletion_condition_set_sha256"] or ""))
         and _parse_assignment(stdout_text, "audit_status") == "ok"
@@ -5882,10 +6021,24 @@ def _gate_report(
     owner_names = {
         str(owner.get("name")) for owner in owner_rows if isinstance(owner, Mapping)
     }
+    retired_owner_rows = legacy_owner_audit.get("retired_owners", [])
+    retired_owner_names = {
+        str(owner.get("name"))
+        for owner in retired_owner_rows
+        if isinstance(owner, Mapping)
+    }
     owner_rows_complete = (
-        owner_names == set(LEGACY_OWNER_NAMES)
-        and len(owner_rows) == len(LEGACY_OWNER_NAMES)
-        and legacy_owner_audit.get("owner_count_reported") == len(LEGACY_OWNER_NAMES)
+        owner_names == set(ACTIVE_LEGACY_OWNER_NAMES)
+        and len(owner_rows) == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and legacy_owner_audit.get("owner_count_reported") == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and retired_owner_names == set(RETIRED_LEGACY_OWNER_NAMES)
+        and len(retired_owner_rows) == len(RETIRED_LEGACY_OWNER_NAMES)
+        and legacy_owner_audit.get("retired_owner_evidence_complete") is True
+        and legacy_owner_audit.get("parsed_owner_set_complete") is True
+        and legacy_owner_audit.get("deletion_condition_digests_match_text") is True
+        and not legacy_owner_audit.get("unknown_owner_names")
+        and not legacy_owner_audit.get("duplicate_owner_fields")
+        and not legacy_owner_audit.get("malformed_condition_rows")
         and bool(
             re.fullmatch(
                 r"[0-9a-f]{64}",
@@ -5902,6 +6055,15 @@ def _gate_report(
             and bool(owner.get("deletion_condition"))
             and bool(re.fullmatch(r"[0-9a-f]{64}", str(owner.get("deletion_condition_sha256", ""))))
             for owner in owner_rows
+        )
+        and all(
+            isinstance(owner, Mapping)
+            and owner.get("status") == "physically_retired"
+            and owner.get("retirement_evidence_kind") == "audit_script_source_checks"
+            and owner.get("retirement_evidence_complete") is True
+            and owner.get("declared_parity_test_names") == list(RETIRED_FLOW_DUAL_PARITY_TESTS)
+            and owner.get("dynamic_probe_status") == "not_run"
+            for owner in retired_owner_rows
         )
     )
     expected_input_count = len(manifest)
@@ -5957,7 +6119,7 @@ def _gate_report(
         ),
         "both_exact_actor_rust_tests_ran_and_passed": actor_test_execution_exact,
         "actor_fallback_cases_are_canonical_without_fallback": actor_no_fallback,
-        "all_four_legacy_owners_are_audited": (
+        "two_active_owners_audited_and_two_retired_owners_statically_verified": (
             bool(legacy_owner_audit.get("accepted_as_complete_inventory")) and owner_rows_complete
         ),
         "no_missing_tracked_inputs": not missing_manifest_inputs,
@@ -6081,7 +6243,8 @@ def _write_inventory_artifacts(
         "scope_exclusions": list(scope_exclusions),
         "source_scope": dict(source_scope),
         "required_actor_fallback_inputs": list(ACTOR_FALLBACK_INPUTS),
-        "legacy_owner_names_requiring_individual_status": list(LEGACY_OWNER_NAMES),
+        "legacy_owner_names_requiring_individual_status": list(ACTIVE_LEGACY_OWNER_NAMES),
+        "legacy_owner_names_with_static_retirement_evidence": list(RETIRED_LEGACY_OWNER_NAMES),
         "tracked_git_inventory": dict(tracked_inventory),
         "unfollowed_mimi_symlinks": list(excluded_symlinks),
         "inventory_rule": {
@@ -6271,7 +6434,14 @@ def collect(args: argparse.Namespace) -> int:
         )
         base["legacy_owner_audit"] = {
             "status": "not_run_inventory_only",
-            "owners": [{"name": name, "status": "not_assessed"} for name in LEGACY_OWNER_NAMES],
+            "owners": [
+                {"name": name, "status": "not_assessed"}
+                for name in ACTIVE_LEGACY_OWNER_NAMES
+            ],
+            "retired_owners": [
+                {"name": name, "status": "unverified"}
+                for name in RETIRED_LEGACY_OWNER_NAMES
+            ],
         }
         base["candidate_classification_counts"] = _count_by(
             [{"classification": row["candidate_classification"]} for row in base["records"]],

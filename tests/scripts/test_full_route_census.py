@@ -1178,7 +1178,201 @@ class BuildFailureClassificationTests(unittest.TestCase):
         self.assertEqual(unmatched_failure["class"], "unknown")
 
 
+class LegacyOwnerAuditParserTests(unittest.TestCase):
+    @staticmethod
+    def _audit_text(
+        *,
+        missing_active: tuple[str, ...] = (),
+        retirement_line: str | None = None,
+        dynamic_probe_status: str = "not_run",
+        extra_lines: tuple[str, ...] = (),
+    ) -> str:
+        condition_by_name = {
+            name: f"remove {name} after its remaining scope is migrated"
+            for name in census.ACTIVE_LEGACY_OWNER_NAMES
+        }
+        digest_by_name = {
+            name: census.sha256_bytes(condition.encode("utf-8"))
+            for name, condition in condition_by_name.items()
+        }
+        lines = ["schema=canonical-mir-legacy-owner-audit-v1"]
+        for name in census.ACTIVE_LEGACY_OWNER_NAMES:
+            if name in missing_active:
+                continue
+            condition = condition_by_name[name]
+            lines.extend([
+                f"owner={name} production_accessor_call_sites=0",
+                f"owner={name} owner_deletion_condition_digest={digest_by_name[name]}",
+                f"owner={name} production_access_status=sealed dependency_class=fixture-dependency "
+                "owner_deletion_ready=0 owner_deletion_blocker=retained test compatibility surface",
+                f"owner_deletion_condition={condition}",
+            ])
+        set_digest = "".join(
+            f"{name}={digest_by_name[name] if name not in missing_active else ''}\n"
+            for name in census.ACTIVE_LEGACY_OWNER_NAMES
+        )
+        default_retirement_line = (
+            "retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;"
+            "transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence="
+            + "+".join(census.RETIRED_FLOW_DUAL_PARITY_TESTS)
+        )
+        lines.extend([
+            retirement_line if retirement_line is not None else default_retirement_line,
+            f"owner_deletion_condition_set_digest={census.sha256_bytes(set_digest.encode('utf-8'))}",
+            f"owner_count={len(census.ACTIVE_LEGACY_OWNER_NAMES)}",
+            f"dynamic_probe_status={dynamic_probe_status}",
+            "audit_status=ok",
+            *extra_lines,
+        ])
+        return "\n".join(lines) + "\n"
+
+    def test_active_and_physically_retired_rosters_are_separate(self) -> None:
+        parsed = census._parse_legacy_owner_audit(self._audit_text())
+
+        self.assertTrue(parsed["parsed_owner_set_complete"])
+        self.assertEqual(
+            [owner["name"] for owner in parsed["owners"]],
+            list(census.ACTIVE_LEGACY_OWNER_NAMES),
+        )
+        self.assertEqual(
+            [owner["name"] for owner in parsed["retired_owners"]],
+            list(census.RETIRED_LEGACY_OWNER_NAMES),
+        )
+        self.assertTrue(all(owner["retirement_evidence_complete"] for owner in parsed["retired_owners"]))
+        self.assertEqual(parsed["dynamic_probe_status"], "not_run")
+
+    def test_repository_audit_script_output_matches_the_parser_contract(self) -> None:
+        script = census.ROOT / "scripts/audit-mir-legacy-owners.sh"
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=census.ROOT,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        parsed = census._parse_legacy_owner_audit(
+            result.stdout.decode("utf-8", errors="replace")
+        )
+        self.assertTrue(parsed["parsed_owner_set_complete"])
+        self.assertEqual(parsed["dynamic_probe_status"], "not_run")
+
+    def test_each_missing_active_owner_fails_even_with_retirement_evidence(self) -> None:
+        for missing in census.ACTIVE_LEGACY_OWNER_NAMES:
+            with self.subTest(owner=missing):
+                parsed = census._parse_legacy_owner_audit(
+                    self._audit_text(missing_active=(missing,))
+                )
+                self.assertFalse(parsed["parsed_owner_set_complete"])
+
+    def test_retirement_summary_and_declared_tests_fail_closed(self) -> None:
+        valid = (
+            "retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;"
+            "transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence="
+            + "+".join(census.RETIRED_FLOW_DUAL_PARITY_TESTS)
+        )
+        for line in ("", valid.replace("file-adapter=deleted", "file-adapter=retained"),
+                     valid.replace(census.RETIRED_FLOW_DUAL_PARITY_TESTS[1], "unknown_test")):
+            with self.subTest(retirement_line=line):
+                parsed = census._parse_legacy_owner_audit(
+                    self._audit_text(retirement_line=line)
+                )
+                self.assertFalse(parsed["retired_owner_evidence_complete"])
+                self.assertFalse(parsed["parsed_owner_set_complete"])
+
+        dynamic = census._parse_legacy_owner_audit(
+            self._audit_text(dynamic_probe_status="passed")
+        )
+        self.assertFalse(dynamic["retired_owner_evidence_complete"])
+
+    def test_duplicate_fields_summaries_and_unknown_owners_fail_closed(self) -> None:
+        base = self._audit_text()
+        duplicate_field = census._parse_legacy_owner_audit(
+            base.replace(
+                "owner_count=2\n",
+                f"owner={census.ACTIVE_LEGACY_OWNER_NAMES[0]} production_accessor_call_sites=0\nowner_count=2\n",
+            )
+        )
+        self.assertTrue(duplicate_field["duplicate_owner_fields"])
+        self.assertFalse(duplicate_field["parsed_owner_set_complete"])
+
+        retirement = base.splitlines()[1 + 4 * len(census.ACTIVE_LEGACY_OWNER_NAMES)]
+        duplicate_summary = census._parse_legacy_owner_audit(
+            self._audit_text(extra_lines=(retirement,))
+        )
+        self.assertFalse(duplicate_summary["retired_owner_evidence_complete"])
+
+        unknown = census._parse_legacy_owner_audit(
+            self._audit_text(extra_lines=("owner=UnexpectedOwner production_accessor_call_sites=0",))
+        )
+        self.assertIn("UnexpectedOwner", unknown["unknown_owner_names"])
+        self.assertFalse(unknown["parsed_owner_set_complete"])
+
+    def test_malformed_active_and_reintroduced_retired_owner_rows_fail_closed(self) -> None:
+        malformed_rows = (
+            f"owner={census.ACTIVE_LEGACY_OWNER_NAMES[0]} "
+            "production_accessor_call_sites=not-a-number",
+            f"owner={census.ACTIVE_LEGACY_OWNER_NAMES[0]} garbage",
+        )
+        for row in malformed_rows:
+            with self.subTest(row=row):
+                malformed = census._parse_legacy_owner_audit(
+                    self._audit_text(extra_lines=(row,))
+                )
+                self.assertTrue(malformed["malformed_owner_rows"])
+                self.assertFalse(malformed["parsed_owner_set_complete"])
+
+        reintroduced = census._parse_legacy_owner_audit(
+            self._audit_text(extra_lines=(
+                f"owner={census.RETIRED_LEGACY_OWNER_NAMES[0]} status=retired",
+            ))
+        )
+        self.assertTrue(reintroduced["malformed_owner_rows"])
+        self.assertFalse(reintroduced["parsed_owner_set_complete"])
+
+
 class StrictGateTests(unittest.TestCase):
+    @staticmethod
+    def _owner_audit() -> dict:
+        owners = []
+        for name in census.ACTIVE_LEGACY_OWNER_NAMES:
+            condition = f"remove {name} after its remaining scope is migrated"
+            owners.append({
+                "name": name,
+                "production_accessor_call_sites": 0,
+                "production_access_status": "sealed",
+                "dependency_class": "fixture-dependency",
+                "owner_deletion_ready": False,
+                "owner_deletion_blocker": "retained compatibility evidence",
+                "deletion_condition": condition,
+                "deletion_condition_sha256": census.sha256_bytes(condition.encode("utf-8")),
+            })
+        retired_owners = [
+            {
+                "name": name,
+                "status": "physically_retired",
+                "retirement_evidence_kind": "audit_script_source_checks",
+                "retirement_evidence_complete": True,
+                "declared_parity_test_names": list(census.RETIRED_FLOW_DUAL_PARITY_TESTS),
+                "dynamic_probe_status": "not_run",
+            }
+            for name in census.RETIRED_LEGACY_OWNER_NAMES
+        ]
+        return {
+            "accepted_as_complete_inventory": True,
+            "owner_count_reported": len(owners),
+            "owner_deletion_condition_set_sha256": "e" * 64,
+            "deletion_condition_digests_match_text": True,
+            "parsed_owner_set_complete": True,
+            "retired_owner_evidence_complete": True,
+            "dynamic_probe_status": "not_run",
+            "unknown_owner_names": [],
+            "duplicate_owner_fields": [],
+            "malformed_condition_rows": [],
+            "malformed_owner_rows": [],
+            "owners": owners,
+            "retired_owners": retired_owners,
+        }
+
     @staticmethod
     def _record(path: str, *, route: str = "canonical", fallback: bool = False) -> dict:
         stdout = b"out"
@@ -1372,33 +1566,15 @@ class StrictGateTests(unittest.TestCase):
             root=census.ROOT,
             cargo_authority=actor_cargo_authority,
         )
-        owners = [
-            {
-                "name": name,
-                "production_accessor_call_sites": 0,
-                "production_access_status": "sealed",
-                "dependency_class": "fixture-dependency",
-                "owner_deletion_ready": False,
-                "owner_deletion_blocker": "retained compatibility evidence",
-                "deletion_condition": "remove after explicit migration completion",
-                "deletion_condition_sha256": "d" * 64,
-            }
-            for name in census.LEGACY_OWNER_NAMES
-        ]
         owner_stdout = census._raw_capture(
             b"owner audit output\n", "legacy-owner-audit.stdout.bin"
         )
         owner_stderr = census._raw_capture(
             b"", "legacy-owner-audit.stderr.bin"
         )
-        owner_audit = {
-            "accepted_as_complete_inventory": True,
-            "owner_count_reported": len(owners),
-            "owner_deletion_condition_set_sha256": "e" * 64,
-            "owners": owners,
-            "stdout_raw": owner_stdout,
-            "stderr_raw": owner_stderr,
-        }
+        owner_audit = cls._owner_audit()
+        owner_audit["stdout_raw"] = owner_stdout
+        owner_audit["stderr_raw"] = owner_stderr
         with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
             logs_root = Path(temporary) / "logs"
             logs_root.mkdir()
@@ -1682,19 +1858,6 @@ class StrictGateTests(unittest.TestCase):
         ]
         records = [self._record(path), self._record(path)]
         actors = census._actor_fallback_evidence(manifest, records)
-        owners = [
-            {
-                "name": name,
-                "production_accessor_call_sites": 0,
-                "production_access_status": "sealed",
-                "dependency_class": "fixture-dependency",
-                "owner_deletion_ready": False,
-                "owner_deletion_blocker": "retained compatibility evidence",
-                "deletion_condition": "remove after explicit migration completion",
-                "deletion_condition_sha256": "d" * 64,
-            }
-            for name in census.LEGACY_OWNER_NAMES
-        ]
         gate = census._gate_report(
             records,
             manifest,
@@ -1702,12 +1865,7 @@ class StrictGateTests(unittest.TestCase):
             [],
             {"status": "available", "path_count": 0, "paths_sha256": census._manifest_paths_hash([])},
             actors,
-            {
-                "accepted_as_complete_inventory": True,
-                "owner_count_reported": len(owners),
-                "owner_deletion_condition_set_sha256": "e" * 64,
-                "owners": owners,
-            },
+            self._owner_audit(),
         )
 
         self.assertEqual(gate["duplicate_record_paths"], [path])
@@ -1723,12 +1881,8 @@ class StrictGateTests(unittest.TestCase):
         ]
         records = [self._record(path) for path in census.ACTOR_FALLBACK_INPUTS]
         actors = census._actor_fallback_evidence(manifest, records[:1])
-        owner_audit = {
-            "accepted_as_complete_inventory": True,
-            "owner_count_reported": 4,
-            "owner_deletion_condition_set_sha256": "e" * 64,
-            "owners": [],
-        }
+        owner_audit = self._owner_audit()
+        owner_audit["owners"] = owner_audit["owners"][1:]
         gate = census._gate_report(
             records,
             manifest,
@@ -1739,7 +1893,11 @@ class StrictGateTests(unittest.TestCase):
             owner_audit,
         )
         self.assertFalse(gate["checks"]["both_actor_fallback_cases_are_in_denominator"])
-        self.assertFalse(gate["checks"]["all_four_legacy_owners_are_audited"])
+        self.assertFalse(
+            gate["checks"][
+                "two_active_owners_audited_and_two_retired_owners_statically_verified"
+            ]
+        )
 
 
 class ExpectationContractTests(unittest.TestCase):
