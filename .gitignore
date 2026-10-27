@@ -101,8 +101,8 @@ evidence/**/canonical_mir_string_list_clone_oom
 evidence/**/string-list-clone-oom-*/canonical_mir.o
 evidence/**/string-list-clone-oom-*/clone_oom_harness.o
 evidence/**/string-list-clone-oom-*/canonical_mir_clone_oom
-evidence/**/map-root-producer-caller-l3-*/test-artifacts/strict-memcheck/native-default
-evidence/**/map-root-producer-caller-l3-*/test-artifacts/strict-memcheck/native-explicit-mir
+evidence/**/test-artifacts/strict-memcheck/native-default
+evidence/**/test-artifacts/strict-memcheck/native-explicit-mir
 evidence/**/callback-test
 evidence/**/strict-l3/*-native
 evidence/**/raw-memcheck/*-native
