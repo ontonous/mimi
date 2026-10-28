@@ -2791,6 +2791,228 @@ def _expected_rejection_test_authority_is_valid(
     )
 
 
+def _required_compile_test_authority_is_valid(
+    *,
+    test_id: Any,
+    source_path: str,
+    target_kind: str,
+    source_text: str,
+    assertion_line: Any,
+) -> bool:
+    """Require a direct successful default build of the exact cited Mimi input.
+
+    The accepted Rust body is deliberately straight-line and narrow: it joins
+    the cited repository-relative source beneath ``CARGO_MANIFEST_DIR``, runs
+    Cargo's Mimi binary with the default ``build`` command, enables route
+    telemetry, and asserts the canonical MIR route and native receipt markers.
+    The exact test still has to be built and run by Cargo before it becomes
+    effective authority.
+    """
+    if (
+        not isinstance(test_id, str)
+        or Path(source_path).suffix != ".mimi"
+        or target_kind not in {"executable", "shared_library_probe"}
+        or not isinstance(assertion_line, int)
+        or isinstance(assertion_line, bool)
+    ):
+        return False
+    span = _rust_test_function_span(source_text, test_id)
+    if span is None:
+        return False
+    function_start, function_end = span
+    code_text = _mask_rust_comments_and_strings(source_text)
+    body_open = code_text.find("{", function_start, function_end)
+    if body_open < 0:
+        return False
+    statements = _rust_top_level_statements(
+        source_text, body_open + 1, function_end - 1
+    )
+    if statements is None or len(statements) < 10:
+        return False
+    values = [[token[1] for token in statement] for statement in statements]
+
+    fixture_statement = statements[0]
+    if len(values[0]) < 3 or values[0][0] != "let" or values[0][2] != "=":
+        return False
+    fixture_variable = values[0][1]
+    fixture_prefix = [
+        ("ident", "let"), ("ident", fixture_variable), ("punct", "="),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "path"), ("punct", "::"), ("ident", "Path"),
+        ("punct", "::"), ("ident", "new"), ("punct", "("),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "env"), ("punct", "!"), ("punct", "("),
+        ("string", "CARGO_MANIFEST_DIR"), ("punct", ")"), ("punct", ")"),
+    ]
+    if not _token_pattern_matches(fixture_statement[:len(fixture_prefix)], fixture_prefix):
+        return False
+    joined_parts: list[str] = []
+    cursor = len(fixture_prefix)
+    while cursor < len(fixture_statement):
+        if values[0][cursor:cursor + 3] != [".", "join", "("]:
+            return False
+        literal_index = cursor + 3
+        if (
+            literal_index + 1 >= len(fixture_statement)
+            or fixture_statement[literal_index][0] != "string"
+            or values[0][literal_index + 1] != ")"
+        ):
+            return False
+        joined_parts.append(values[0][literal_index])
+        cursor = literal_index + 2
+    if tuple(joined_parts) != tuple(Path(source_path).parts):
+        return False
+
+    command_statement = statements[1]
+    if (
+        values[1][0:1] != ["let"]
+        or len(values[1]) < 3
+        or command_statement[1][0] != "ident"
+        or values[1][2] != "="
+    ):
+        return False
+    output_variable = values[1][1]
+    command_prefix = [
+        ("ident", "let"), ("ident", output_variable), ("punct", "="),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "process"), ("punct", "::"), ("ident", "Command"),
+        ("punct", "::"), ("ident", "new"), ("punct", "("),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "env"), ("punct", "!"), ("punct", "("),
+        ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+        ("punct", "."), ("ident", "current_dir"), ("punct", "("),
+        ("punct", "::"), ("ident", "std"), ("punct", "::"),
+        ("ident", "env"), ("punct", "!"), ("punct", "("),
+        ("string", "CARGO_MANIFEST_DIR"), ("punct", ")"), ("punct", ")"),
+        ("punct", "."), ("ident", "arg"),
+        ("punct", "("), ("string", "build"), ("punct", ")"),
+    ]
+    if not _token_pattern_matches(command_statement[:len(command_prefix)], command_prefix):
+        return False
+    cursor = len(command_prefix)
+    if target_kind == "shared_library_probe":
+        shared_pattern = [
+            ("punct", "."), ("ident", "arg"), ("punct", "("),
+            ("string", "--shared"), ("punct", ")"),
+        ]
+        if not _token_pattern_matches(
+            command_statement[cursor:cursor + len(shared_pattern)], shared_pattern
+        ):
+            return False
+        cursor += len(shared_pattern)
+    command_middle = [
+        ("punct", "."), ("ident", "arg"), ("punct", "("),
+        ("punct", "&"), ("ident", fixture_variable), ("punct", ")"),
+        ("punct", "."), ("ident", "arg"), ("punct", "("),
+        ("string", "-o"), ("punct", ")"),
+        ("punct", "."), ("ident", "arg"), ("punct", "("),
+        ("string", None), ("punct", ")"),
+        ("punct", "."), ("ident", "env"), ("punct", "("),
+        ("string", "MIMI_ROUTE_CENSUS"), ("punct", ","),
+        ("string", "1"), ("punct", ")"),
+        ("punct", "."), ("ident", "output"), ("punct", "("),
+        ("punct", ")"), ("punct", "."), ("ident", "expect"),
+        ("punct", "("), ("string", None), ("punct", ")"),
+    ]
+    if not _token_pattern_matches(command_statement[cursor:], command_middle):
+        return False
+    output_path_index = cursor + 14
+    if not command_statement[output_path_index][1].strip():
+        return False
+
+    if not _token_pattern_matches(
+        statements[2],
+        [
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "assert"), ("punct", "!"), ("punct", "("),
+            ("ident", output_variable), ("punct", "."), ("ident", "status"),
+            ("punct", "."), ("ident", "success"), ("punct", "("),
+            ("punct", ")"), ("punct", ")"),
+        ],
+    ):
+        return False
+    if not _token_pattern_matches(
+        statements[3],
+        [
+            ("ident", "let"), ("ident", None), ("punct", "="),
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "string"), ("punct", "::"), ("ident", "String"),
+            ("punct", "::"), ("ident", "from_utf8_lossy"), ("punct", "("),
+            ("punct", "&"), ("ident", output_variable), ("punct", "."),
+            ("ident", "stderr"), ("punct", ")"),
+        ],
+    ):
+        return False
+    stderr_variable = values[3][1]
+
+    required_present = {
+        "canonical route disposition: canonical (",
+        "MIMI_ROUTE_CENSUS route-admission consumer=build mode=default ",
+        "MIMI_ROUTE_CENSUS canonical-native-build consumer=build ",
+        "mir_digest=",
+        "receipt_identity_digest=",
+    }
+    required_absent = {
+        "canonical route disposition: legacy",
+        "canonical route disposition: compatibility",
+        "fallback",
+        "compatibility",
+    }
+    asserted_present: set[str] = set()
+    asserted_absent: set[str] = set()
+    cited_route_assertion = False
+    for statement in statements[4:]:
+        if len(statement) < 12:
+            return False
+        negative = statement[6][1] == "!"
+        prefix = [
+            ("punct", "::"), ("ident", "std"), ("punct", "::"),
+            ("ident", "assert"), ("punct", "!"), ("punct", "("),
+        ]
+        if not _token_pattern_matches(statement[:len(prefix)], prefix):
+            return False
+        inner = statement[len(prefix):]
+        if negative:
+            if not _token_pattern_matches(
+                inner,
+                [
+                    ("punct", "!"), ("ident", stderr_variable), ("punct", "."),
+                    ("ident", "contains"), ("punct", "("), ("string", None),
+                    ("punct", ")"), ("punct", ")"),
+                ],
+            ):
+                return False
+        else:
+            if not _token_pattern_matches(
+                inner,
+                [
+                    ("ident", stderr_variable), ("punct", "."),
+                    ("ident", "contains"), ("punct", "("), ("string", None),
+                    ("punct", ")"), ("punct", ")"),
+                ],
+            ):
+                return False
+        literal = inner[5 if negative else 4][1]
+        if negative:
+            if literal not in required_absent or literal in asserted_absent:
+                return False
+            asserted_absent.add(literal)
+        else:
+            if literal not in required_present or literal in asserted_present:
+                return False
+            asserted_present.add(literal)
+        line_start = source_text.count("\n", 0, statement[0][2]) + 1
+        line_end = source_text.count("\n", 0, statement[-1][3]) + 1
+        if line_start <= assertion_line <= line_end:
+            cited_route_assertion = True
+
+    return bool(
+        asserted_present == required_present
+        and asserted_absent == required_absent
+        and cited_route_assertion
+    )
+
+
 def _cargo_metadata(
     root: Path,
     timeout: float = 120.0,
@@ -3085,6 +3307,7 @@ def bind_expectations_to_inventory(
     duplicate_inventory_paths = sorted(
         name for name, count in Counter(inventory_paths).items() if count > 1
     )
+    actor_contracts = actor_fixture_test_contracts(root)
     missing_paths = sorted(inventory_set - set(expectations))
     extra_paths = sorted(set(expectations) - inventory_set)
     bound: dict[str, Any] = {}
@@ -3107,9 +3330,17 @@ def bind_expectations_to_inventory(
 
         item = dict(declared)
         item["path"] = name
+        item["target_kind"] = source.get("target_kind", "unknown")
         item["authority_status"] = "not_applicable"
         item["authority_valid"] = False
         item["test_execution_valid"] = None
+        if item.get("class") == "required_compile":
+            item["test_contract_valid"] = False
+            item["source_authority_valid"] = False
+            item["cargo_target_valid"] = False
+            item["cargo_test_target"] = None
+            item["test_execution_valid"] = False
+            item["test_execution_proof"] = None
         if item.get("class") == "expected_build_rejection":
             item["test_contract_valid"] = False
             item["source_authority_valid"] = False
@@ -3173,6 +3404,41 @@ def bind_expectations_to_inventory(
                         item["source_authority_valid"] = bool(
                             base_authority_valid and item["test_contract_valid"]
                         )
+                    elif item.get("class") == "required_compile":
+                        actor_contract = actor_contracts.get(name, {})
+                        actor_authority = actor_contract.get("authority")
+                        actor_specific_authority = bool(
+                            name in ACTOR_FALLBACK_INPUTS
+                            and actor_contract.get("authority_valid") is True
+                            and isinstance(actor_authority, Mapping)
+                            and dict(actor_authority) == dict(authority)
+                        )
+                        item["actor_specific_authority"] = actor_specific_authority
+                        direct_test_contract = _required_compile_test_authority_is_valid(
+                            test_id=authority.get("test_id"),
+                            source_path=name,
+                            target_kind=str(source.get("target_kind", "unknown")),
+                            source_text=assertion_text,
+                            assertion_line=assertion.get("line"),
+                        )
+                        item["test_contract_valid"] = (
+                            actor_specific_authority or direct_test_contract
+                        )
+                        item["source_authority_valid"] = bool(
+                            base_authority_valid and item["test_contract_valid"]
+                        )
+                        item["authority_valid"] = bool(
+                            actor_specific_authority and item["source_authority_valid"]
+                        )
+                        item["authority_status"] = (
+                            "actor_helper_authority"
+                            if actor_specific_authority and item["source_authority_valid"]
+                            else (
+                                "requires_cargo_target_and_execution"
+                                if item["source_authority_valid"]
+                                else "required_compile_test_contract_mismatch"
+                            )
+                        )
                     regular_source_file = assertion_file.is_file() and not assertion_file.is_symlink()
                 except (OSError, UnicodeDecodeError, ValueError, TypeError):
                     assertion_hash_matches = False
@@ -3183,9 +3449,14 @@ def bind_expectations_to_inventory(
                         item["test_contract_valid"] = False
                         item["test_execution_valid"] = False
                         item["source_authority_valid"] = False
+                    elif item.get("class") == "required_compile":
+                        item["test_contract_valid"] = False
+                        item["test_execution_valid"] = False
+                        item["source_authority_valid"] = False
+                        item["authority_status"] = "required_compile_test_contract_mismatch"
                 authority_valid = (
                     False
-                    if item.get("class") == "expected_build_rejection"
+                    if item.get("class") in {"expected_build_rejection", "required_compile"}
                     else (
                         regular_source_file
                         and assertion_hash_matches
@@ -3200,10 +3471,15 @@ def bind_expectations_to_inventory(
                     else (
                         "rejection_test_contract_mismatch"
                         if item.get("class") == "expected_build_rejection"
-                        else ("valid" if authority_valid else "source_location_or_hash_mismatch")
+                        else (
+                            item.get("authority_status")
+                            if item.get("class") == "required_compile"
+                            else ("valid" if authority_valid else "source_location_or_hash_mismatch")
+                        )
                     )
                 )
-                item["authority_valid"] = authority_valid
+                if item.get("class") != "required_compile":
+                    item["authority_valid"] = authority_valid
         item["source_hash_matches"] = input_hash_matches
         bound[name] = item
 
@@ -3896,7 +4172,11 @@ def _expectation_result(
             and expectation.get("source_hash_status") == "matched"
             and expectation.get("authority_valid") is True
             and (
-                expectation_class != "expected_build_rejection"
+                (
+                    expectation_class == "required_compile"
+                    and expectation.get("actor_specific_authority") is True
+                )
+                or expectation_class not in {"required_compile", "expected_build_rejection"}
                 or (
                     expectation.get("test_execution_valid") is True
                     and isinstance(expectation.get("test_execution_proof"), Mapping)
@@ -4120,6 +4400,9 @@ def _expectation_result(
         "authority_status": expectation.get("authority_status"),
         "authority_valid": expectation.get("authority_valid"),
         "test_contract_valid": expectation.get("test_contract_valid"),
+        "source_authority_valid": expectation.get("source_authority_valid"),
+        "actor_specific_authority": expectation.get("actor_specific_authority"),
+        "target_kind": expectation.get("target_kind"),
         "cargo_target_valid": expectation.get("cargo_target_valid"),
         "cargo_test_target": expectation.get("cargo_test_target"),
         "test_execution_valid": expectation.get("test_execution_valid"),
@@ -4941,6 +5224,299 @@ def _expected_rejection_execution_proof_is_valid(
     )
 
 
+def _required_compile_source_authority_is_valid(
+    expectation: Mapping[str, Any], *, root: Path
+) -> bool:
+    """Recheck a schema-v4 required-compile source contract from current bytes."""
+    if expectation.get("class") != "required_compile":
+        return False
+    if expectation.get("actor_specific_authority") is True:
+        return True
+    authority = expectation.get("authority")
+    assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+    source_path = expectation.get("path")
+    if (
+        not isinstance(authority, Mapping)
+        or not isinstance(assertion, Mapping)
+        or not isinstance(source_path, str)
+        or not isinstance(assertion.get("path"), str)
+        or not _is_sha256(assertion.get("sha256"))
+    ):
+        return False
+    assertion_file = root / str(assertion["path"])
+    try:
+        resolved = assertion_file.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+        if not assertion_file.is_file() or assertion_file.is_symlink():
+            return False
+        raw = assertion_file.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    lines = text.splitlines()
+    test_id_present, assertion_line_valid = _test_authority_is_structurally_valid(
+        authority.get("test_id"), text, lines, assertion.get("line")
+    )
+    return bool(
+        sha256_bytes(raw) == assertion.get("sha256")
+        and test_id_present
+        and assertion_line_valid
+        and _required_compile_test_authority_is_valid(
+            test_id=authority.get("test_id"),
+            source_path=source_path,
+            target_kind=str(expectation.get("target_kind", "unknown")),
+            source_text=text,
+            assertion_line=assertion.get("line"),
+        )
+    )
+
+
+def _required_compile_execution_proof_is_valid(
+    expectation: Mapping[str, Any],
+    *,
+    root: Path,
+    logs_root: Path | None,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> bool:
+    """Require the exact active Cargo test to pass with stable source hashes."""
+    if (
+        expectation.get("class") != "required_compile"
+        or expectation.get("test_contract_valid") is not True
+        or expectation.get("source_authority_valid") is not True
+        or not _required_compile_source_authority_is_valid(expectation, root=root)
+    ):
+        return False
+    return _expected_rejection_execution_proof_is_valid(
+        expectation,
+        root=root,
+        logs_root=logs_root,
+        cargo_authority=cargo_authority,
+    )
+
+
+def _run_required_compile_authority_tests(
+    root: Path,
+    logs_root: Path,
+    sources: Sequence[Mapping[str, Any]],
+    expectations: Mapping[str, dict[str, Any]],
+    timeout: float,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compile and run exact Rust authorities for generic required_compile rows.
+
+    The two built-in Actor authorities use their independently pinned helper
+    contract and are intentionally left to ``_run_actor_authority_tests``.
+    """
+    source_by_path = {str(source.get("path")): source for source in sources}
+    required_items = {
+        path: item
+        for path, item in expectations.items()
+        if isinstance(item, dict)
+        and item.get("class") == "required_compile"
+        and item.get("actor_specific_authority") is not True
+    }
+    if not required_items:
+        return {"status": "not_required", "cargo_metadata": None, "targets": [], "tests": []}
+    if cargo_authority is None:
+        cargo_authority = cargo_test_toolchain_authority(root)
+
+    metadata_result, metadata_document = _cargo_metadata(root, timeout, cargo_authority)
+    metadata_record = {
+        "command": metadata_result["command"],
+        "cargo_toolchain_identity_sha256": metadata_result["cargo_toolchain_identity_sha256"],
+        "cargo_execution": metadata_result["cargo_execution"],
+        "cwd": metadata_result["cwd"],
+        "run_status": metadata_result["run_status"],
+        "exit_code": metadata_result["exit_code"],
+        "stdout_raw": metadata_result["stdout_raw"],
+        "stderr_raw": metadata_result["stderr_raw"],
+    }
+    groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    rejected: list[str] = []
+    for path, item in sorted(required_items.items()):
+        item["cargo_metadata"] = metadata_record
+        item["cargo_target_valid"] = False
+        item["cargo_test_target"] = None
+        item["authority_valid"] = False
+        item["test_execution_valid"] = False
+        source = source_by_path.get(path)
+        authority = item.get("authority")
+        assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+        if (
+            source is None
+            or item.get("source_authority_valid") is not True
+            or item.get("test_contract_valid") is not True
+            or not isinstance(authority, Mapping)
+            or not isinstance(assertion, Mapping)
+            or metadata_result.get("run_status") != "completed"
+            or metadata_result.get("exit_code") != 0
+        ):
+            item["authority_status"] = "cargo_target_or_source_contract_unproven"
+            rejected.append(path)
+            continue
+        test_id = authority.get("test_id")
+        authority_path = assertion.get("path")
+        target = _cargo_test_target_for_source(metadata_document, root, str(authority_path))
+        if not isinstance(test_id, str) or target is None:
+            item["authority_status"] = "not_a_cargo_test_target"
+            rejected.append(path)
+            continue
+        item["cargo_test_target"] = target
+        item["cargo_target_valid"] = True
+        item["authority_status"] = "valid_cargo_test_target"
+        key = (str(target["manifest_path"]), str(target["target_name"]), str(target["package_id"]))
+        groups.setdefault(key, []).append((path, item, target))
+
+    target_reports: list[dict[str, Any]] = []
+    test_reports: list[dict[str, Any]] = []
+    for target_index, (key, entries) in enumerate(sorted(groups.items()), 1):
+        manifest_path, target_name, _package_id = key
+        fixture_before = {
+            path: _regular_file_sha256(root / path) for path, _item, _target in entries
+        }
+        authority_paths = {
+            str(item["authority"]["assertion"]["path"])
+            for _path, item, _target in entries
+        }
+        authority_before = {
+            path: _regular_file_sha256(root / path) for path in authority_paths
+        }
+        cargo_path = str(cargo_authority.get("cargo", {}).get("path"))
+        build_command = [
+            cargo_path, "test", "--manifest-path", manifest_path,
+            "--test", target_name, "--no-run",
+        ]
+        build_result = _run_cargo_authority_command(
+            build_command, root, timeout, cargo_authority
+        )
+        fixture_after_build = {
+            path: _regular_file_sha256(root / path) for path, _item, _target in entries
+        }
+        authority_after_build = {
+            path: _regular_file_sha256(root / path) for path in authority_paths
+        }
+        target_stem = sha256_bytes("\0".join(key).encode("utf-8"))[:12]
+        build_record = _authority_command_record(
+            build_result, logs_root,
+            f"required-compile-target-{target_index:03d}-{target_stem}.build",
+        )
+        target_reports.append({
+            "target": entries[0][2],
+            "build": build_record,
+            "fixture_sha256_before": fixture_before,
+            "fixture_sha256_after": fixture_after_build,
+            "authority_sha256_before": authority_before,
+            "authority_sha256_after": authority_after_build,
+        })
+        for test_index, (path, item, target) in enumerate(entries, 1):
+            authority = item["authority"]
+            assertion = authority["assertion"]
+            test_id = str(authority["test_id"])
+            authority_path = str(assertion["path"])
+            run_command = [
+                cargo_path, "test", "--manifest-path", manifest_path,
+                "--test", target_name, test_id, "--", "--exact", "--nocapture",
+            ]
+            source_before_test = _regular_file_sha256(root / authority_path)
+            fixture_before_test = _regular_file_sha256(root / path)
+            if build_record.get("run_status") == "completed" and build_record.get("exit_code") == 0:
+                run_result = _run_cargo_authority_command(
+                    run_command, root, timeout, cargo_authority
+                )
+                run_record = _authority_command_record(
+                    run_result,
+                    logs_root,
+                    f"required-compile-target-{target_index:03d}-{target_stem}.test-{test_index:03d}",
+                )
+            else:
+                run_record = {
+                    "command": run_command,
+                    "command_sha256": sha256_bytes(
+                        json.dumps(run_command, separators=(",", ":")).encode("utf-8")
+                    ),
+                    "cwd": str(root),
+                    "run_status": "not_run_target_build_failed",
+                    "exit_code": None,
+                    "stdout_raw": None,
+                    "stderr_raw": None,
+                }
+            source_after_test = _regular_file_sha256(root / authority_path)
+            fixture_after_test = _regular_file_sha256(root / path)
+            proof = {
+                "status": "pending",
+                "cargo_toolchain_identity_sha256": cargo_authority.get("identity_sha256"),
+                "test_id": test_id,
+                "authority_path": authority_path,
+                "fixture_path": path,
+                "cargo_metadata": metadata_record,
+                "cargo_test_target": target,
+                "target_build": build_record,
+                "exact_test_run": run_record,
+                "authority_source_hashes": {
+                    "expected": assertion.get("sha256"),
+                    "before_build": authority_before.get(authority_path),
+                    "after_build": authority_after_build.get(authority_path),
+                    "before_test": source_before_test,
+                    "after_test": source_after_test,
+                },
+                "fixture_source_hashes": {
+                    "path": path,
+                    "expected": item.get("source_sha256"),
+                    "before_build": fixture_before.get(path),
+                    "after_build": fixture_after_build.get(path),
+                    "before_test": fixture_before_test,
+                    "after_test": fixture_after_test,
+                },
+            }
+            proof["status"] = (
+                "passed"
+                if _required_compile_execution_proof_is_valid(
+                    {**item, "path": path, "test_execution_proof": proof},
+                    root=root,
+                    logs_root=logs_root,
+                    cargo_authority=cargo_authority,
+                )
+                else "failed"
+            )
+            item["test_execution_proof"] = proof
+            item["test_execution_valid"] = proof["status"] == "passed"
+            item["authority_valid"] = bool(
+                item.get("source_authority_valid") is True
+                and item.get("cargo_target_valid") is True
+                and item.get("test_execution_valid") is True
+            )
+            item["authority_status"] = (
+                "valid" if item["authority_valid"] else "cargo_test_execution_unproven"
+            )
+            test_reports.append({"path": path, **proof})
+
+    for path in rejected:
+        item = required_items[path]
+        proof = {
+            "status": "failed",
+            "path": path,
+            "test_id": (item.get("authority") or {}).get("test_id"),
+            "authority_path": ((item.get("authority") or {}).get("assertion") or {}).get("path"),
+            "fixture_path": path,
+            "cargo_metadata": metadata_record,
+            "reason": item.get("authority_status"),
+        }
+        item["test_execution_proof"] = proof
+        item["test_execution_valid"] = False
+        test_reports.append(proof)
+
+    passed = (
+        len(test_reports) == len(required_items)
+        and all(item.get("test_execution_valid") is True for item in required_items.values())
+    )
+    return {
+        "status": "passed" if passed else "failed",
+        "cargo_metadata": metadata_record,
+        "targets": target_reports,
+        "tests": test_reports,
+    }
+
+
 def _run_expected_rejection_authority_tests(
     root: Path,
     logs_root: Path,
@@ -5670,6 +6246,30 @@ def _gate_report(
             and record.get("source_stable_for_input") is True
         )
 
+    def required_compile_authority_is_proven(record: Mapping[str, Any]) -> bool:
+        expectation = nested(record, "expectation")
+        if (
+            expectation.get("class") != "required_compile"
+            or expectation.get("test_contract_valid") is not True
+            or expectation.get("authority_valid") is not True
+            or expectation.get("source_hash_status") != "matched"
+        ):
+            return False
+        if expectation.get("actor_specific_authority") is True:
+            # Actor helper execution is independently rechecked below by the
+            # pinned actor test runner and its fixture/helper hash contract.
+            return True
+        return bool(
+            expectation.get("cargo_target_valid") is True
+            and expectation.get("test_execution_valid") is True
+            and _required_compile_execution_proof_is_valid(
+                expectation,
+                root=root,
+                logs_root=logs_root,
+                cargo_authority=expected_rejection_cargo_authority,
+            )
+        )
+
     manifest_paths = [str(record.get("path")) for record in manifest]
     record_paths = [str(record.get("path")) for record in records]
     expected_paths = set(manifest_paths)
@@ -5919,7 +6519,7 @@ def _gate_report(
         and nested(record, "expectation").get("matched") is True
         and nested(record, "expectation").get("explicit_expectation") is True
         and nested(record, "expectation").get("source_hash_status") == "matched"
-        and nested(record, "expectation").get("authority_valid") is True
+        and required_compile_authority_is_proven(record)
         and record.get("run_status") == "completed"
         and record.get("exit_code") == 0
         and nested(record, "route").get("disposition") == "canonical"
@@ -6475,6 +7075,12 @@ def collect(args: argparse.Namespace) -> int:
     )
     base["expected_rejection_authority_execution"] = (
         expected_rejection_authority_execution
+    )
+    required_compile_authority_execution = _run_required_compile_authority_tests(
+        root, logs_root, sources, expectations, args.timeout, cargo_authority
+    )
+    base["required_compile_authority_execution"] = (
+        required_compile_authority_execution
     )
     expectation_contract["invalid_authority_paths"] = sorted(
         name

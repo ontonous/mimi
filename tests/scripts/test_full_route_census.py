@@ -2064,6 +2064,65 @@ class ExpectationContractTests(unittest.TestCase):
             )
         return result
 
+    def _execute_required_compile_authority_tests(
+        self,
+        root: Path,
+        sources: list[dict],
+        bound: dict,
+    ) -> dict:
+        logs = root / "required-compile-authority-logs"
+        logs.mkdir(exist_ok=True)
+        first = next(
+            item for item in bound.values()
+            if item.get("class") == "required_compile"
+        )
+        authority_path = root / first["authority"]["assertion"]["path"]
+        target = {
+            "name": authority_path.stem,
+            "src_path": str(authority_path.resolve()),
+            "kind": ["test"],
+            "crate_types": ["bin"],
+            "test": True,
+            "doc": False,
+        }
+        package_id = "fixture 0.1.0 (path+file:///fixture)"
+        metadata = {
+            "packages": [{
+                "id": package_id,
+                "name": "fixture",
+                "manifest_path": str(root / "Cargo.toml"),
+                "targets": [target],
+            }],
+            "workspace_members": [package_id],
+            "workspace_root": str(root),
+            "target_directory": str(root / "target"),
+        }
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            if command[1] == "metadata":
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps(metadata).encode("utf-8"), b""
+                )
+            if "--no-run" in command:
+                return subprocess.CompletedProcess(command, 0, b"Finished test target\n", b"")
+            test_id = next(
+                (str(part) for part in command if str(part).startswith("test_")),
+                "test_route_contract",
+            )
+            stdout = (
+                f"running 1 test\ntest {test_id} ... ok\n\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                "0 filtered out; finished in 0.00s\n"
+            ).encode("utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout, b"")
+
+        cargo_authority = census.cargo_test_toolchain_authority(root)
+        with patch.object(census.subprocess, "run", side_effect=fake_run):
+            return census._run_required_compile_authority_tests(
+                root, logs, sources, bound, timeout=5,
+                cargo_authority=cargo_authority,
+            )
+
     def _valid_expected_rejection_record(
         self, root: Path, source_path: str = "case.mimi"
     ) -> tuple[dict, dict, dict, dict]:
@@ -2221,7 +2280,10 @@ class ExpectationContractTests(unittest.TestCase):
             bound, coverage = self._load_and_bind(root, {"case.mimi": entry}, [source])
 
             self.assertEqual(bound["case.mimi"]["class"], "required_compile")
-            self.assertTrue(bound["case.mimi"]["authority_valid"])
+            self.assertTrue(bound["case.mimi"]["test_contract_valid"])
+            self.assertTrue(bound["case.mimi"]["source_authority_valid"])
+            self.assertFalse(bound["case.mimi"]["authority_valid"])
+            self.assertFalse(bound["case.mimi"]["test_execution_valid"])
             self.assertEqual(bound["case.mimi"]["source_hash_status"], "matched")
             self.assertTrue(coverage["exact_bijection"])
 
@@ -2239,6 +2301,90 @@ class ExpectationContractTests(unittest.TestCase):
             rejection_entry.pop("expected_diagnostic_codes")
             with self.assertRaisesRegex(ValueError, "expected_diagnostic_codes"):
                 self._load_and_bind(root, {"case.mimi": rejection_entry}, [source])
+
+    def test_required_compile_authority_rejects_unrelated_test_path_or_assertion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            relative = "tests/fixtures/case.mimi"
+            source_path = root / relative
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("func main() { println(1) }\n", encoding="utf-8")
+            source = census.source_record(source_path, root)
+            entry = self._entry(root, relative, source["sha256"])
+            authority_path = root / entry["authority"]["assertion"]["path"]
+            original = authority_path.read_text(encoding="utf-8")
+            cases = {
+                "unrelated test id": original.replace(
+                    "fn test_route_contract()", "fn test_other_contract()"
+                ),
+                "unrelated source path": original.replace(
+                    '.join("case.mimi")', '.join("different.mimi")'
+                ),
+                "explicit MIR build": original.replace(
+                    '.arg("build")', '.arg("build")\n        .arg("--mir")'
+                ),
+                "unrelated assertion only": original.split(
+                    '    ::std::assert!(stderr.contains("canonical route disposition: canonical ("));'
+                )[0]
+                + "}\n",
+            }
+            for label, altered in cases.items():
+                with self.subTest(authority=label):
+                    authority_path.write_text(altered, encoding="utf-8")
+                    entry["authority"]["assertion"]["sha256"] = census.sha256_file(
+                        authority_path
+                    )
+                    bound, coverage = self._load_and_bind(root, {relative: entry}, [source])
+                    self.assertFalse(bound[relative]["test_contract_valid"])
+                    self.assertFalse(bound[relative]["source_authority_valid"])
+                    self.assertFalse(bound[relative]["authority_valid"])
+                    self.assertEqual(coverage["invalid_authority_paths"], [relative])
+
+            authority_path.write_text(original, encoding="utf-8")
+            entry["authority"]["assertion"]["sha256"] = census.sha256_file(authority_path)
+            entry["authority"]["assertion"]["line"] = 13
+            cited_unrelated_assertion, _coverage = self._load_and_bind(
+                root, {relative: entry}, [source]
+            )
+
+        self.assertFalse(cited_unrelated_assertion[relative]["test_contract_valid"])
+
+    def test_required_compile_authority_runs_the_pinned_exact_source_test(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            relative = "tests/fixtures/case.mimi"
+            source_path = root / relative
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("func main() { println(1) }\n", encoding="utf-8")
+            source = census.source_record(source_path, root)
+            entry = self._entry(root, relative, source["sha256"])
+            bound, coverage = self._load_and_bind(root, {relative: entry}, [source])
+
+            self.assertTrue(bound[relative]["test_contract_valid"])
+            execution = self._execute_required_compile_authority_tests(
+                root, [source], bound
+            )
+            coverage["invalid_authority_paths"] = sorted(
+                path for path, item in bound.items()
+                if item.get("class") != "unmapped" and item.get("authority_valid") is not True
+            )
+            result = census._expectation_result(
+                relative,
+                0,
+                {"disposition": "canonical", "classification_status": "observed"},
+                bound,
+                run_status="completed",
+                captured_output=b"canonical route disposition: canonical (default-route)\n",
+                output_artifact={"sha256": "a" * 64, "bytes": 8},
+            )
+
+        self.assertEqual(execution["status"], "passed")
+        self.assertEqual(bound[relative]["authority_status"], "valid")
+        self.assertTrue(bound[relative]["test_execution_valid"])
+        self.assertEqual(bound[relative]["test_execution_proof"]["test_id"], "test_route_contract")
+        self.assertEqual(bound[relative]["test_execution_proof"]["fixture_path"], relative)
+        self.assertTrue(result["matched"])
+        self.assertTrue(coverage["exact_bijection"])
 
     def test_expected_rejection_schema_requires_disposition_reason_and_failure(self) -> None:
         required_fields = (
