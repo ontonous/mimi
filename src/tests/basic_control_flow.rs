@@ -595,7 +595,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("[1, 2, 3]".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("[1, 2, 3]".to_string()))
     );
 }
 
@@ -680,7 +680,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("你好".into()))
+        interp::Value::String(crate::interp::SharedString::new("你好".into()))
     );
 }
 
@@ -759,7 +759,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("[20, 30]".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("[20, 30]".to_string()))
     );
 }
 
@@ -773,7 +773,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("hello".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello".to_string()))
     );
 }
 

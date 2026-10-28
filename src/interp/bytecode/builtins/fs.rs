@@ -178,7 +178,7 @@ fn builtin_read_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         if meta.len() > crate::path_safety::MAX_SOURCE_BYTES {
             return Ok(Value::Variant(
                 "Err".into(),
-                vec![Value::String(Arc::new(
+                vec![Value::String(crate::interp::SharedString::new(
                     "read_file: file too large".to_string(),
                 ))],
             ));
@@ -187,11 +187,11 @@ fn builtin_read_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(Value::Variant(
             "Ok".into(),
-            vec![Value::String(Arc::new(content))],
+            vec![Value::String(crate::interp::SharedString::new(content))],
         )),
         Err(e) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(Arc::new(e.to_string()))],
+            vec![Value::String(crate::interp::SharedString::new(e.to_string()))],
         )),
     }
 }
@@ -209,7 +209,7 @@ fn builtin_write_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
         Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
         Err(e) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(Arc::new(e.to_string()))],
+            vec![Value::String(crate::interp::SharedString::new(e.to_string()))],
         )),
     }
 }
@@ -258,7 +258,7 @@ fn builtin_listdir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
         Ok(entries) => {
             let mut result = Vec::new();
             for entry in entries.flatten() {
-                result.push(Value::String(Arc::new(
+                result.push(Value::String(crate::interp::SharedString::new(
                     entry.file_name().to_string_lossy().to_string(),
                 )));
             }
@@ -311,7 +311,7 @@ fn builtin_walk_dir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
     Ok(Value::List(Arc::new(
         result
             .into_iter()
-            .map(|s| Value::String(Arc::new(s)))
+            .map(|s| Value::String(crate::interp::SharedString::new(s)))
             .collect(),
     )))
 }
@@ -324,7 +324,7 @@ fn builtin_path_basename(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(Value::String(Arc::new(basename)))
+    Ok(Value::String(crate::interp::SharedString::new(basename)))
 }
 
 fn builtin_path_dirname(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -334,7 +334,7 @@ fn builtin_path_dirname(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         .and_then(|p| p.to_str())
         .unwrap_or("")
         .to_string();
-    Ok(Value::String(Arc::new(dirname)))
+    Ok(Value::String(crate::interp::SharedString::new(dirname)))
 }
 
 fn builtin_path_ext(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -343,14 +343,14 @@ fn builtin_path_ext(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
         .extension()
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(Value::String(Arc::new(ext)))
+    Ok(Value::String(crate::interp::SharedString::new(ext)))
 }
 
 fn builtin_path_join(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let base = expect_str(args, 0)?;
     let other = expect_str(args, 1)?;
     let joined = std::path::Path::new(&base).join(&other);
-    Ok(Value::String(Arc::new(
+    Ok(Value::String(crate::interp::SharedString::new(
         joined.to_string_lossy().to_string(),
     )))
 }
@@ -361,7 +361,7 @@ fn builtin_args(vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpErr
     let args: Vec<Value> = vm
         .cli_args
         .iter()
-        .map(|s| Value::String(Arc::new(s.clone())))
+        .map(|s| Value::String(crate::interp::SharedString::new(s.clone())))
         .collect();
     Ok(Value::List(Arc::new(args)))
 }
@@ -377,11 +377,11 @@ fn builtin_getenv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
     match std::env::var(&key) {
         Ok(val) => Ok(Value::Variant(
             "Ok".into(),
-            vec![Value::String(Arc::new(val))],
+            vec![Value::String(crate::interp::SharedString::new(val))],
         )),
         Err(_) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(Arc::new(format!(
+            vec![Value::String(crate::interp::SharedString::new(format!(
                 "env var '{}' not set",
                 key
             )))],

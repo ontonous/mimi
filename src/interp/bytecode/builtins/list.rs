@@ -363,7 +363,7 @@ fn builtin_reverse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
             Arc::make_mut(&mut reversed).reverse();
             Ok(Value::List(reversed))
         }
-        Value::String(s) => Ok(Value::String(Arc::new(s.chars().rev().collect()))),
+        Value::String(s) => Ok(Value::String(crate::interp::SharedString::new(s.chars().rev().collect()))),
         _ => Err(InterpError::new("reverse: expected list or string")),
     }
 }
@@ -448,7 +448,7 @@ fn builtin_to_list(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
         Value::Tuple(t) => Ok(Value::List(Arc::new(t.clone()))),
         Value::String(s) => Ok(Value::List(Arc::new(
             s.chars()
-                .map(|c| Value::String(Arc::new(c.to_string())))
+                .map(|c| Value::String(crate::interp::SharedString::new(c.to_string())))
                 .collect(),
         ))),
         Value::Set(s) => Ok(Value::List(Arc::new(s.clone()))),
@@ -588,7 +588,7 @@ fn builtin_keys(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
             keys.sort();
             let out: Vec<Value> = keys
                 .into_iter()
-                .map(|k| Value::String(Arc::new(k.to_string())))
+                .map(|k| Value::String(crate::interp::SharedString::new(k.to_string())))
                 .collect();
             Ok(Value::List(Arc::new(out)))
         }
@@ -689,9 +689,9 @@ fn builtin_slice(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
                 return Err(InterpError::slice_error("slice start > end"));
             }
             if start == end {
-                return Ok(Value::String(Arc::new(String::new())));
+                return Ok(Value::String(crate::interp::SharedString::new(String::new())));
             }
-            Ok(Value::String(Arc::new(chars[start..end].iter().collect())))
+            Ok(Value::String(crate::interp::SharedString::new(chars[start..end].iter().collect())))
         }
         other => Err(InterpError::new(format!(
             "__slice: expected List or String, got {}",
@@ -714,12 +714,12 @@ fn builtin_type_name(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         Value::Set(_) => "set",
         Value::Array(_) => "array",
         Value::Tuple(_) => "tuple",
-        Value::Variant(tag, _) => return Ok(Value::String(Arc::new(tag.clone()))),
-        Value::Record(Some(name), _) => return Ok(Value::String(Arc::new(name.clone()))),
+        Value::Variant(tag, _) => return Ok(Value::String(crate::interp::SharedString::new(tag.clone()))),
+        Value::Record(Some(name), _) => return Ok(Value::String(crate::interp::SharedString::new(name.clone()))),
         Value::Record(None, _) => "record",
         Value::Error(_) => "error",
-        Value::Newtype(name, _) => return Ok(Value::String(Arc::new(name.clone()))),
-        Value::Type(name) => return Ok(Value::String(Arc::new(name.clone()))),
+        Value::Newtype(name, _) => return Ok(Value::String(crate::interp::SharedString::new(name.clone()))),
+        Value::Type(name) => return Ok(Value::String(crate::interp::SharedString::new(name.clone()))),
         Value::Closure { .. } | Value::BytecodeClosure { .. } => "closure",
         Value::Shared(_) => "shared",
         Value::LocalShared(_) => "local_shared",
@@ -731,5 +731,5 @@ fn builtin_type_name(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         Value::DynTrait { .. } => "dyn_trait",
         _ => "unknown",
     };
-    Ok(Value::String(Arc::new(name.to_string())))
+    Ok(Value::String(crate::interp::SharedString::new(name.to_string())))
 }

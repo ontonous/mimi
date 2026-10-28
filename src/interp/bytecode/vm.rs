@@ -298,7 +298,7 @@ fn try_copy_ordinary_map_owned_get_string(value: &str, reserve_terminator: bool)
     Some(copy)
 }
 
-fn try_concatenate_canonical_strings(left: &str, right: &str) -> Result<Arc<String>, InterpError> {
+fn try_concatenate_canonical_strings(left: &str, right: &str) -> Result<crate::interp::SharedString, InterpError> {
     let total_len = left
         .len()
         .checked_add(right.len())
@@ -316,7 +316,7 @@ fn try_concatenate_canonical_strings(left: &str, right: &str) -> Result<Arc<Stri
         .map_err(|_| InterpError::new("[E0800] String concatenation allocation failed"))?;
     concatenated.push_str(left);
     concatenated.push_str(right);
-    let concatenated = Arc::new(concatenated);
+    let concatenated = crate::interp::SharedString::new(concatenated);
     crate::runtime::ordinary_map_string_concat_checkpoint(1)
         .map_err(|_| InterpError::new("[E0800] String concatenation publication failed"))?;
     Ok(concatenated)
@@ -344,7 +344,7 @@ fn clone_ordinary_map_owned_any_v2_entries(
                     })?;
                 crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
                     type_id: type_id.clone(),
-                    text: Arc::new(text),
+                    text: crate::interp::SharedString::new(text),
                 }
             }
             crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
@@ -359,7 +359,7 @@ fn clone_ordinary_map_owned_any_v2_entries(
                 crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
                     type_id: type_id.clone(),
                     nominal: nominal.clone(),
-                    text: Arc::new(text),
+                    text: crate::interp::SharedString::new(text),
                 }
             }
         };
@@ -391,7 +391,7 @@ fn stage_ordinary_map_owned_any_v2_set_payload(
             })?;
             Ok(Payload::String {
                 type_id: binding.type_id.clone(),
-                text: Arc::new(text),
+                text: crate::interp::SharedString::new(text),
             })
         }
         (
@@ -415,7 +415,7 @@ fn stage_ordinary_map_owned_any_v2_set_payload(
             Ok(Payload::Record {
                 type_id: binding.type_id.clone(),
                 nominal: actual_nominal.clone(),
-                text: Arc::new(text),
+                text: crate::interp::SharedString::new(text),
             })
         }
         (_, other) => Err(InterpError::new(format!(
@@ -505,7 +505,7 @@ fn copy_ordinary_map_owned_any_v2_record_for_unpack(
     })?;
     Ok(Value::Record(
         Some(expected_nominal.to_owned()),
-        HashMap::from([("text".to_owned(), Value::String(Arc::new(text)))]),
+        HashMap::from([("text".to_owned(), Value::String(crate::interp::SharedString::new(text)))]),
     ))
 }
 
@@ -3467,10 +3467,10 @@ impl BytecodeVM {
                     let suffix = self.get_reg(rb).to_string();
                     let target = self.get_reg_mut(ra);
                     match target {
-                        Value::String(s) => Arc::make_mut(s).push_str(&suffix),
+                        Value::String(s) => crate::interp::SharedString::make_mut(s).push_str(&suffix),
                         other => {
                             let base = other.to_string();
-                            *other = Value::String(Arc::new(format!("{}{}", base, suffix)));
+                            *other = Value::String(crate::interp::SharedString::new(format!("{}{}", base, suffix)));
                         }
                     }
                 }
@@ -4308,7 +4308,7 @@ impl BytecodeVM {
                                     chars.len()
                                 )));
                             }
-                            Value::String(Arc::new(chars[idx].to_string()))
+                            Value::String(crate::interp::SharedString::new(chars[idx].to_string()))
                         }
                         Value::Set(s) => {
                             let idx = if idx_raw < 0 {
@@ -5201,7 +5201,7 @@ impl BytecodeVM {
                             })?,
                         ),
                         Value::String(value) => {
-                            crate::interp::value::CanonicalMapRootValue::String(Arc::clone(value))
+                            crate::interp::value::CanonicalMapRootValue::String(crate::interp::SharedString::clone(value))
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -5347,9 +5347,7 @@ impl BytecodeVM {
                             )
                         }
                         Value::String(value) => {
-                            crate::interp::value::CanonicalMapAnyOwnerV1Value::String(Arc::clone(
-                                value,
-                            ))
+                            crate::interp::value::CanonicalMapAnyOwnerV1Value::String(crate::interp::SharedString::clone(value))
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -5547,7 +5545,7 @@ impl BytecodeVM {
                         }
                         Value::String(value) => {
                             crate::interp::value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value::String(
-                                Arc::clone(value),
+                                crate::interp::SharedString::clone(value),
                             )
                         }
                         other => {
@@ -5772,7 +5770,7 @@ impl BytecodeVM {
                         }
                         Value::String(value) => {
                             crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value::String(
-                                Arc::clone(value),
+                                crate::interp::SharedString::clone(value),
                             )
                         }
                         other => {
@@ -6039,7 +6037,7 @@ impl BytecodeVM {
                                         ) {
                                             None => (3, Value::Int(3)),
                                             Some(owned) => {
-                                                (0, Value::String(Arc::new(owned)))
+                                                (0, Value::String(crate::interp::SharedString::new(owned)))
                                             }
                                         }
                                     }
@@ -6313,7 +6311,7 @@ impl BytecodeVM {
                             let rd = rd.ok_or_else(|| {
                                 InterpError::new("managed Any UnpackString has no destination")
                             })?;
-                            self.set_reg(rd, Value::String(Arc::new(owned)));
+                            self.set_reg(rd, Value::String(crate::interp::SharedString::new(owned)));
                         }
                     }
                 }
@@ -6881,7 +6879,7 @@ impl BytecodeVM {
                         ordinary_map_owned_any_v2_string_copy_checkpoint(
                             crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
                         )?;
-                        self.set_reg(rd, Value::String(Arc::new(owned)));
+                        self.set_reg(rd, Value::String(crate::interp::SharedString::new(owned)));
                     } else {
                         let selected_nominal = selected
                             .as_ref()
@@ -7080,7 +7078,7 @@ impl BytecodeVM {
                                     )
                                 })?;
                             ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()?;
-                            Value::String(Arc::new(text))
+                            Value::String(crate::interp::SharedString::new(text))
                         }
                         CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal }
                             if binding.conversion_to
@@ -7121,7 +7119,7 @@ impl BytecodeVM {
                             ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()?;
                             Value::Record(
                                 record_nominal,
-                                HashMap::from([("text".to_owned(), Value::String(Arc::new(text)))]),
+                                HashMap::from([("text".to_owned(), Value::String(crate::interp::SharedString::new(text)))]),
                             )
                         }
                         _ => {
@@ -8348,12 +8346,12 @@ impl BytecodeVM {
                     match v {
                         Value::Variant(name, _) => {
                             // Return tag as a string (for comparison).
-                            self.set_reg(rd, Value::String(Arc::new(name.clone())));
+                            self.set_reg(rd, Value::String(crate::interp::SharedString::new(name.clone())));
                         }
                         Value::CanonicalVariant { tag, .. } => {
                             // Canonical identity is preserved in the source;
                             // this projection exposes only the surface tag.
-                            self.set_reg(rd, Value::String(Arc::new(tag.clone())));
+                            self.set_reg(rd, Value::String(crate::interp::SharedString::new(tag.clone())));
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -8477,7 +8475,7 @@ impl BytecodeVM {
                 Op::ToString { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "to-string")?;
                     let v = self.get_reg(ra).clone();
-                    self.set_reg(rd, Value::String(Arc::new(v.to_string())));
+                    self.set_reg(rd, Value::String(crate::interp::SharedString::new(v.to_string())));
                 }
                 Op::Cast { rd, ra, target } => {
                     self.ensure_unary_regs(rd, ra, "cast")?;
@@ -8551,7 +8549,7 @@ impl BytecodeVM {
                         Value::Actor(_) => "actor".to_string(),
                         _ => crate::interp::type_name(v).to_string(),
                     };
-                    self.set_reg(rd, Value::String(Arc::new(name)));
+                    self.set_reg(rd, Value::String(crate::interp::SharedString::new(name)));
                 }
                 Op::Trap { msg } => {
                     let msg_str = match proto.constants.get(msg as usize) {
@@ -11239,9 +11237,9 @@ impl BytecodeVM {
             ConstValue::Int(v) => Value::Int(*v),
             ConstValue::Float(v) => Value::Float(*v),
             ConstValue::Bool(v) => Value::Bool(*v),
-            ConstValue::Str(v) => Value::String(Arc::new(v.clone())),
+            ConstValue::Str(v) => Value::String(crate::interp::SharedString::new(v.clone())),
             ConstValue::Unit => Value::Unit,
-            ConstValue::Type(t) => Value::String(Arc::new(format!("<type {:?}>", t))),
+            ConstValue::Type(t) => Value::String(crate::interp::SharedString::new(format!("<type {:?}>", t))),
             ConstValue::QuoteAst(q) => Value::QuoteAst(q.clone()),
             ConstValue::LambdaSpec { .. } => Value::Unit,
             ConstValue::Pattern(_) => Value::Unit,
@@ -11269,7 +11267,7 @@ impl BytecodeVM {
             Expr::Literal(Lit::Int(n)) => Some(Value::Int(*n)),
             Expr::Literal(Lit::Float(f)) => Some(Value::Float(*f)),
             Expr::Literal(Lit::Bool(b)) => Some(Value::Bool(*b)),
-            Expr::Literal(Lit::String(s)) => Some(Value::String(Arc::new(s.clone()))),
+            Expr::Literal(Lit::String(s)) => Some(Value::String(crate::interp::SharedString::new(s.clone()))),
             Expr::Literal(Lit::Unit) => Some(Value::Unit),
             // Negative literals: -42, -3.14
             Expr::Unary(UnOp::Neg, inner) => match Self::eval_init_expr(inner.unlocated())? {
@@ -11433,7 +11431,7 @@ impl BytecodeVM {
                 crate::ast::Type::Name(n, _) if n == "f64" => Value::Float(0.0),
                 crate::ast::Type::Name(n, _) if n == "bool" => Value::Bool(false),
                 crate::ast::Type::Name(n, _) if n == "string" => {
-                    Value::String(Arc::new(String::new()))
+                    Value::String(crate::interp::SharedString::new(String::new()))
                 }
                 crate::ast::Type::Name(n, _) if n == "List" || n == "Vec" => {
                     Value::List(Arc::new(Vec::new()))
@@ -11477,7 +11475,7 @@ impl BytecodeVM {
                                             Value::Bool(false)
                                         }
                                         crate::ast::Type::Name(n, _) if n == "string" => {
-                                            Value::String(Arc::new(String::new()))
+                                            Value::String(crate::interp::SharedString::new(String::new()))
                                         }
                                         _ => Value::Unit,
                                     };
@@ -11553,11 +11551,11 @@ mod ordinary_map_owned_any_v2_tests {
         CanonicalManagedAnyV2, CanonicalOrdinaryMapOwnedAnyV2Value as Payload, Value,
     };
     use std::collections::{BTreeMap, HashMap};
-    use std::sync::{Arc, Weak};
+    use std::sync::Arc;
 
     #[test]
     fn v2_snapshot_clone_preserves_nominal_identity_and_copies_string_owners() {
-        let text = Arc::new(String::from("same payload shape"));
+        let text = crate::interp::SharedString::new(String::from("same payload shape"));
         let first_type_id =
             crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:first");
         let second_type_id =
@@ -11568,7 +11566,7 @@ mod ordinary_map_owned_any_v2_tests {
                 Payload::Record {
                     type_id: first_type_id.clone(),
                     nominal: String::from("item:type:demo::First"),
-                    text: Arc::clone(&text),
+                    text: crate::interp::SharedString::clone(&text),
                 },
             ),
             (
@@ -11576,7 +11574,7 @@ mod ordinary_map_owned_any_v2_tests {
                 Payload::Record {
                     type_id: second_type_id.clone(),
                     nominal: String::from("item:type:demo::Second"),
-                    text: Arc::clone(&text),
+                    text: crate::interp::SharedString::clone(&text),
                 },
             ),
         ]);
@@ -11605,9 +11603,9 @@ mod ordinary_map_owned_any_v2_tests {
         assert_eq!(second_cloned_type_id, &second_type_id);
         assert_eq!(first_nominal, "item:type:demo::First");
         assert_eq!(second_nominal, "item:type:demo::Second");
-        assert!(!Arc::ptr_eq(first_text, &text));
-        assert!(!Arc::ptr_eq(second_text, &text));
-        assert!(!Arc::ptr_eq(first_text, second_text));
+        assert!(!crate::interp::SharedString::ptr_eq(first_text, &text));
+        assert!(!crate::interp::SharedString::ptr_eq(second_text, &text));
+        assert!(!crate::interp::SharedString::ptr_eq(first_text, second_text));
     }
 
     #[test]
@@ -11619,12 +11617,12 @@ mod ordinary_map_owned_any_v2_tests {
         let first = Payload::Record {
             type_id: first_type_id,
             nominal: String::from("item:type:demo::First"),
-            text: Arc::new(String::from("same")),
+            text: crate::interp::SharedString::new(String::from("same")),
         };
         let second = Payload::Record {
             type_id: second_type_id,
             nominal: String::from("item:type:demo::Second"),
-            text: Arc::new(String::from("same")),
+            text: crate::interp::SharedString::new(String::from("same")),
         };
 
         assert_ne!(first, second);
@@ -11633,14 +11631,14 @@ mod ordinary_map_owned_any_v2_tests {
     #[test]
     fn v2_direct_string_set_getany_and_unpack_each_own_their_payload() {
         let type_id = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
-        let source_text = Arc::new(String::from("detached string payload"));
+        let source_text = crate::interp::SharedString::new(String::from("detached string payload"));
         let binding = CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
             type_id: type_id.clone(),
             type_desc_digest: "a".repeat(64),
             kind: CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String,
         };
         let staged = stage_ordinary_map_owned_any_v2_set_payload(
-            &Value::String(Arc::clone(&source_text)),
+            &Value::String(crate::interp::SharedString::clone(&source_text)),
             &binding,
         )
         .expect("Set snapshots a direct String payload");
@@ -11650,7 +11648,7 @@ mod ordinary_map_owned_any_v2_tests {
         else {
             panic!("Set staged the payload as direct String");
         };
-        assert!(!Arc::ptr_eq(&source_text, staged_text));
+        assert!(!crate::interp::SharedString::ptr_eq(&source_text, staged_text));
 
         let entries = BTreeMap::from([(String::from("text"), staged)]);
         let cloned = clone_ordinary_map_owned_any_v2_entries(&entries)
@@ -11661,7 +11659,7 @@ mod ordinary_map_owned_any_v2_tests {
         else {
             panic!("String payload retained its direct String representation");
         };
-        assert!(!Arc::ptr_eq(&source_text, cloned_text));
+        assert!(!crate::interp::SharedString::ptr_eq(&source_text, cloned_text));
 
         let any = copy_ordinary_map_owned_any_v2_payload(
             entries.get("text").expect("source direct String payload"),
@@ -11673,7 +11671,7 @@ mod ordinary_map_owned_any_v2_tests {
             .string_for_type_id(&type_id)
             .expect("Any token retains the exact String TypeDesc");
         assert_eq!(any_text, source_text.as_str());
-        assert_ne!(any_text.as_ptr(), source_text.as_ptr());
+        assert_ne!(any_text.as_ptr(), source_text.as_str().as_ptr());
 
         let unpacked = copy_ordinary_map_owned_any_v2_string_for_unpack(&any, &type_id)
             .expect("unpack deep-copies into its own output allocation");
@@ -11708,7 +11706,7 @@ mod ordinary_map_owned_any_v2_tests {
             panic!("Label.text remains an owned String");
         };
         assert_eq!(unpacked_text.as_str(), "independent record payload");
-        assert_ne!(unpacked_text.as_ptr(), source_ptr);
+        assert_ne!(unpacked_text.as_str().as_ptr(), source_ptr);
 
         let wrong_nominal = copy_ordinary_map_owned_any_v2_record_for_unpack(
             &owner,
@@ -11869,7 +11867,7 @@ fn default_value_for_type_str(
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" => Value::Int(0),
         "f32" | "f64" | "float" => Value::Float(0.0),
         "bool" => Value::Bool(false),
-        "string" => Value::String(Arc::new(String::new())),
+        "string" => Value::String(crate::interp::SharedString::new(String::new())),
         "unit" => Value::Unit,
         other => {
             if record_fields.contains_key(other) {

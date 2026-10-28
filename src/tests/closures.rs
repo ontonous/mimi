@@ -227,7 +227,7 @@ func main() -> i32 {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String(Arc::new("hello".to_string())))
+        Ok(interp::Value::String(crate::interp::SharedString::new("hello".to_string())))
     );
 }
 
@@ -334,7 +334,7 @@ func main() -> i32 {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String(Arc::new("hello".to_string())))
+        Ok(interp::Value::String(crate::interp::SharedString::new("hello".to_string())))
     );
 }
 

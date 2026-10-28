@@ -323,7 +323,7 @@ func main() -> string {
 "#;
     assert_eq!(
         dual_interp(src),
-        interp::Value::String(Arc::new("hello world".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
     );
 }
 
@@ -337,7 +337,7 @@ func main() -> string {
 "#;
     assert_eq!(
         dual_interp(src),
-        interp::Value::String(Arc::new("value is 42".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("value is 42".to_string()))
     );
 }
 

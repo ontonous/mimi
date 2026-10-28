@@ -838,7 +838,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello".to_string())));
 }
 
 #[test]

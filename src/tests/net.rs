@@ -56,13 +56,13 @@ fn net_echo_server() {
 
     assert_eq!(
         server_result,
-        interp::Value::String(Arc::new("hello".to_string())),
+        interp::Value::String(crate::interp::SharedString::new("hello".to_string())),
         "Server should receive 'hello', got {:?}",
         server_result
     );
     assert_eq!(
         client_result,
-        interp::Value::String(Arc::new("echo: hello".to_string())),
+        interp::Value::String(crate::interp::SharedString::new("echo: hello".to_string())),
         "Client should receive 'echo: hello', got {:?}",
         client_result
     );
@@ -119,13 +119,13 @@ func main() -> string {
 
     assert_eq!(
         server_result,
-        interp::Value::String(Arc::new("abcd".to_string())),
+        interp::Value::String(crate::interp::SharedString::new("abcd".to_string())),
         "Server should receive 'ab' + 'cd', got {:?}",
         server_result
     );
     assert_eq!(
         client_result,
-        interp::Value::String(Arc::new("ack1: aback2: cd".to_string())),
+        interp::Value::String(crate::interp::SharedString::new("ack1: aback2: cd".to_string())),
         "Client should receive ack'd responses, got {:?}",
         client_result
     );
@@ -176,13 +176,13 @@ func main() -> string {
 
     assert_eq!(
         server_result,
-        interp::Value::String(Arc::new("world".to_string())),
+        interp::Value::String(crate::interp::SharedString::new("world".to_string())),
         "Server should receive 'world', got {:?}",
         server_result
     );
     assert_eq!(
         client_result,
-        interp::Value::String(Arc::new("received: world".to_string())),
+        interp::Value::String(crate::interp::SharedString::new("received: world".to_string())),
         "Client should receive 'received: world', got {:?}",
         client_result
     );

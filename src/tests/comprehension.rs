@@ -38,7 +38,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello! world!".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello! world!".to_string()))
     );
 }
 

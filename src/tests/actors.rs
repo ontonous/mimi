@@ -156,7 +156,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("hello".into()))
+        interp::Value::String(crate::interp::SharedString::new("hello".into()))
     );
 }
 
@@ -275,7 +275,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("user:alice".into()))
+        interp::Value::String(crate::interp::SharedString::new("user:alice".into()))
     );
 }
 

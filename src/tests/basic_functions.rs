@@ -215,7 +215,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello beautiful world".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello beautiful world".to_string()))
     );
 }
 
@@ -227,7 +227,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("1 + 2 = 3".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("1 + 2 = 3".to_string())));
 }
 
 #[test]
@@ -240,7 +240,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello world".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
     );
 }
 
@@ -254,7 +254,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("int=42 float=3.14 str=test".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("int=42 float=3.14 str=test".to_string()))
     );
 }
 
@@ -272,7 +272,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello world".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
     );
 }
 
@@ -288,7 +288,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("hello mimi".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello mimi".to_string())));
 }
 
 #[test]
@@ -333,7 +333,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("(0,5)".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("(0,5)".to_string())));
 }
 
 #[test]
@@ -360,7 +360,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("abc".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("abc".to_string())));
 }
 
 #[test]

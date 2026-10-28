@@ -274,7 +274,7 @@ fn builtin_format(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
         rest = &rest[pos + 2..];
     }
     result.push_str(rest);
-    Ok(Value::String(Arc::new(result)))
+    Ok(Value::String(crate::interp::SharedString::new(result)))
 }
 
 // ── Substring / search ──────────────────────────────────
@@ -288,7 +288,7 @@ fn builtin_str_substring(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
             if si > ei {
                 return Err(InterpError::new("str_substring: start > end"));
             }
-            Ok(Value::String(Arc::new(chars[si..ei].iter().collect())))
+            Ok(Value::String(crate::interp::SharedString::new(chars[si..ei].iter().collect())))
         }
         _ => Err(InterpError::new("str_substring expects (string, int, int)")),
     }
@@ -311,7 +311,7 @@ fn builtin_substring_method(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Valu
                     chars.len()
                 )));
             }
-            Ok(Value::String(Arc::new(chars[si..ei].iter().collect())))
+            Ok(Value::String(crate::interp::SharedString::new(chars[si..ei].iter().collect())))
         }
         _ => Err(InterpError::new("substring expects (string, int, int)")),
     }
@@ -341,7 +341,7 @@ fn builtin_str_split(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         (Value::String(s), Value::String(d)) => {
             let parts: Vec<Value> = s
                 .split(d.as_str())
-                .map(|p| Value::String(Arc::new(p.to_string())))
+                .map(|p| Value::String(crate::interp::SharedString::new(p.to_string())))
                 .collect();
             Ok(Value::List(Arc::new(parts)))
         }
@@ -359,7 +359,7 @@ fn builtin_str_join(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
                     _ => return Err(InterpError::new("str_join: list must contain only strings")),
                 }
             }
-            Ok(Value::String(Arc::new(strings.join(sep.as_str()))))
+            Ok(Value::String(crate::interp::SharedString::new(strings.join(sep.as_str()))))
         }
         _ => Err(InterpError::new("str_join expects (list, string)")),
     }
@@ -421,7 +421,7 @@ fn builtin_str_count_substring(_vm: &mut BytecodeVM, args: &[Value]) -> Result<V
 
 fn builtin_str_replace(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match (&args[0], &args[1], &args[2]) {
-        (Value::String(s), Value::String(from), Value::String(to)) => Ok(Value::String(Arc::new(
+        (Value::String(s), Value::String(from), Value::String(to)) => Ok(Value::String(crate::interp::SharedString::new(
             s.replace(from.as_str(), to.as_str()),
         ))),
         _ => Err(InterpError::new("replace expects (string, string, string)")),
@@ -430,21 +430,21 @@ fn builtin_str_replace(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
 
 fn builtin_str_trim(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(s) => Ok(Value::String(Arc::new(s.trim().to_string()))),
+        Value::String(s) => Ok(Value::String(crate::interp::SharedString::new(s.trim().to_string()))),
         _ => Err(InterpError::new("trim expects a string")),
     }
 }
 
 fn builtin_str_to_upper(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(s) => Ok(Value::String(Arc::new(s.to_uppercase()))),
+        Value::String(s) => Ok(Value::String(crate::interp::SharedString::new(s.to_uppercase()))),
         _ => Err(InterpError::new("to_upper expects a string")),
     }
 }
 
 fn builtin_str_to_lower(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     match &args[0] {
-        Value::String(s) => Ok(Value::String(Arc::new(s.to_lowercase()))),
+        Value::String(s) => Ok(Value::String(crate::interp::SharedString::new(s.to_lowercase()))),
         _ => Err(InterpError::new("to_lower expects a string")),
     }
 }
@@ -472,7 +472,7 @@ fn builtin_str_repeat(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
             }
             let count = usize::try_from(count)
                 .map_err(|_| InterpError::new("str_repeat: count overflows target usize"))?;
-            Ok(Value::String(Arc::new(s.repeat(count))))
+            Ok(Value::String(crate::interp::SharedString::new(s.repeat(count))))
         }
         _ => Err(InterpError::new("repeat expects (string, int)")),
     }
@@ -489,7 +489,7 @@ fn builtin_str_char_at(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
         Value::String(s) => s
             .chars()
             .nth(idx)
-            .map(|c| Value::String(Arc::new(c.to_string())))
+            .map(|c| Value::String(crate::interp::SharedString::new(c.to_string())))
             .ok_or_else(|| InterpError::new(format!("char_at: index {} out of bounds", idx))),
         _ => Err(InterpError::new("char_at expects (string, int)")),
     }
@@ -518,7 +518,7 @@ fn builtin_chr(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErro
                 )));
             }
             char::from_u32(*code as u32)
-                .map(|c| Value::String(Arc::new(c.to_string())))
+                .map(|c| Value::String(crate::interp::SharedString::new(c.to_string())))
                 .ok_or_else(|| InterpError::new(format!("chr: invalid code point {}", code)))
         }
         _ => Err(InterpError::new("chr expects an integer")),
@@ -549,7 +549,7 @@ fn builtin_str_parse_float(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
 }
 
 fn builtin_to_string_val(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
-    Ok(Value::String(Arc::new(args[0].to_string())))
+    Ok(Value::String(crate::interp::SharedString::new(args[0].to_string())))
 }
 
 // ── Regex ───────────────────────────────────────────────
@@ -571,8 +571,8 @@ fn builtin_regex_find(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
             let re = regex::Regex::new(pattern)
                 .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
             match re.find(text) {
-                Some(m) => Ok(Value::String(Arc::new(m.as_str().to_string()))),
-                None => Ok(Value::String(Arc::new(String::new()))),
+                Some(m) => Ok(Value::String(crate::interp::SharedString::new(m.as_str().to_string()))),
+                None => Ok(Value::String(crate::interp::SharedString::new(String::new()))),
             }
         }
         _ => Err(InterpError::new("regex_find expects (string, string)")),
@@ -584,7 +584,7 @@ fn builtin_regex_replace(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
         (Value::String(text), Value::String(pattern), Value::String(replacement)) => {
             let re = regex::Regex::new(pattern)
                 .map_err(|e| InterpError::new(format!("regex error: {}", e)))?;
-            Ok(Value::String(Arc::new(
+            Ok(Value::String(crate::interp::SharedString::new(
                 re.replace_all(text, replacement.as_str()).to_string(),
             )))
         }
@@ -631,7 +631,7 @@ mod tests {
         let mut vm = crate::interp::bytecode::vm::BytecodeVM::new(std::sync::Arc::new(prog));
         builtin_str_repeat(
             &mut vm,
-            &[Value::String(Arc::new(s.to_string())), Value::Int(n)],
+            &[Value::String(crate::interp::SharedString::new(s.to_string())), Value::Int(n)],
         )
     }
 
@@ -657,15 +657,15 @@ mod tests {
     fn str_repeat_small_counts_still_work() {
         assert_eq!(
             repeat("ab", 3).unwrap(),
-            Value::String(Arc::new("ababab".to_string()))
+            Value::String(crate::interp::SharedString::new("ababab".to_string()))
         );
         assert_eq!(
             repeat("", 1_000_000).unwrap(),
-            Value::String(Arc::new(String::new()))
+            Value::String(crate::interp::SharedString::new(String::new()))
         );
         assert_eq!(
             repeat("x", 0).unwrap(),
-            Value::String(Arc::new(String::new()))
+            Value::String(crate::interp::SharedString::new(String::new()))
         );
     }
 }

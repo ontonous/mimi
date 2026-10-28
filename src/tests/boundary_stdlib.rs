@@ -74,7 +74,7 @@ fn boundary_sha256_empty() {
     let v = run_source("func main() -> string { sha256(\"\") }");
     assert_eq!(
         v,
-        interp::Value::String(Arc::new(
+        interp::Value::String(crate::interp::SharedString::new(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
         ))
     );
@@ -85,7 +85,7 @@ fn boundary_sha256_known_vector() {
     let v = run_source("func main() -> string { sha256(\"abc\") }");
     assert_eq!(
         v,
-        interp::Value::String(Arc::new(
+        interp::Value::String(crate::interp::SharedString::new(
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()
         ))
     );
@@ -100,13 +100,13 @@ fn boundary_sha256_length() {
 #[test]
 fn boundary_base64_encode_empty() {
     let v = run_source("func main() -> string { base64_encode(\"\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("".to_string())));
 }
 
 #[test]
 fn boundary_base64_encode_known() {
     let v = run_source("func main() -> string { base64_encode(\"Hello\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("SGVsbG8=".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("SGVsbG8=".to_string())));
 }
 
 #[test]
@@ -126,7 +126,7 @@ func main() -> string {
     );
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("Hello, Mimi!".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("Hello, Mimi!".to_string()))
     );
 }
 
@@ -143,7 +143,7 @@ func main() -> string {
 }
 "#,
     );
-    assert_eq!(v, interp::Value::String(Arc::new("err".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("err".to_string())));
 }
 
 // ====== Path Join Tests ======
@@ -151,13 +151,13 @@ func main() -> string {
 #[test]
 fn boundary_path_join_empty() {
     let v = run_source("func main() -> string { path_join(\"\", \"b\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("b".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("b".to_string())));
 }
 
 #[test]
 fn boundary_path_join_triple() {
     let v = run_source("func main() -> string { path_join(path_join(\"a\", \"b\"), \"c\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("a/b/c".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("a/b/c".to_string())));
 }
 
 #[test]
@@ -169,31 +169,31 @@ fn boundary_path_ext_no_ext() {
 #[test]
 fn boundary_path_ext_has_ext() {
     let v = run_source("func main() -> string { path_ext(\"file.txt\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("txt".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("txt".to_string())));
 }
 
 #[test]
 fn boundary_path_basename_root() {
     let v = run_source("func main() -> string { path_basename(\"/\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("".to_string())));
 }
 
 #[test]
 fn boundary_path_dirname_root() {
     let v = run_source("func main() -> string { path_dirname(\"/\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("".to_string())));
 }
 
 #[test]
 fn boundary_path_basename_simple() {
     let v = run_source("func main() -> string { path_basename(\"/a/b/c.txt\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("c.txt".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("c.txt".to_string())));
 }
 
 #[test]
 fn boundary_path_dirname_simple() {
     let v = run_source("func main() -> string { path_dirname(\"/a/b/c.txt\") }");
-    assert_eq!(v, interp::Value::String(Arc::new("/a/b".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("/a/b".to_string())));
 }
 
 // ====== Codegen boundary tests ======

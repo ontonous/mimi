@@ -897,11 +897,11 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let mut fault_fields = std::collections::HashMap::new();
     fault_fields.insert(
         "last_state".to_string(),
-        Value::String(Arc::new(state_name.clone())),
+        Value::String(crate::interp::SharedString::new(state_name.clone())),
     );
     fault_fields.insert(
         "unexpected_event".to_string(),
-        Value::String(Arc::new("inject_fault".to_string())),
+        Value::String(crate::interp::SharedString::new("inject_fault".to_string())),
     );
     fault_fields.insert("snapshot".to_string(), args[0].clone());
 
@@ -909,15 +909,15 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let mut trace_fields = std::collections::HashMap::new();
     trace_fields.insert(
         "last_state_name".to_string(),
-        Value::String(Arc::new(state_name)),
+        Value::String(crate::interp::SharedString::new(state_name)),
     );
     trace_fields.insert(
         "unexpected_event".to_string(),
-        Value::String(Arc::new("inject_fault".to_string())),
+        Value::String(crate::interp::SharedString::new("inject_fault".to_string())),
     );
     trace_fields.insert(
         "snapshot".to_string(),
-        Value::String(Arc::new(String::new())),
+        Value::String(crate::interp::SharedString::new(String::new())),
     );
 
     // MemoryDump: empty dump.
@@ -933,13 +933,13 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let mut panic_fields = std::collections::HashMap::new();
     panic_fields.insert(
         "error_type".to_string(),
-        Value::String(Arc::new("InjectFault".to_string())),
+        Value::String(crate::interp::SharedString::new("InjectFault".to_string())),
     );
-    panic_fields.insert("file".to_string(), Value::String(Arc::new(String::new())));
+    panic_fields.insert("file".to_string(), Value::String(crate::interp::SharedString::new(String::new())));
     panic_fields.insert("line".to_string(), Value::Int(0));
     panic_fields.insert(
         "stack_snapshot".to_string(),
-        Value::String(Arc::new(String::new())),
+        Value::String(crate::interp::SharedString::new(String::new())),
     );
     trace_fields.insert(
         "panic_payload".to_string(),
@@ -968,9 +968,9 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
             for actor_val in actor_names.iter() {
                 if let Value::String(name) = actor_val {
                     match vm.spawn_actor(name, false) {
-                        Ok(_) => results.push(Value::String(Arc::new(format!("spawned:{}", name)))),
+                        Ok(_) => results.push(Value::String(crate::interp::SharedString::new(format!("spawned:{}", name)))),
                         Err(e) => {
-                            results.push(Value::String(Arc::new(format!("failed:{}:{}", name, e))))
+                            results.push(Value::String(crate::interp::SharedString::new(format!("failed:{}:{}", name, e))))
                         }
                     }
                 }
@@ -989,7 +989,7 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
                             }
                         })
                         .unwrap_or_default();
-                    results.push(Value::String(Arc::new(format!("called:{}", method))));
+                    results.push(Value::String(crate::interp::SharedString::new(format!("called:{}", method))));
                 }
             }
         }
@@ -1006,7 +1006,7 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
                             }
                         })
                         .unwrap_or_default();
-                    results.push(Value::String(Arc::new(format!("injected:{}", ftype))));
+                    results.push(Value::String(crate::interp::SharedString::new(format!("injected:{}", ftype))));
                 }
             }
         }

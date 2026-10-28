@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock, Weak as ArcWeak};
 
+/// Shared VM string storage. Clones share the allocation; mutation uses COW.
+pub type SharedString = triomphe::Arc<String>;
+
 /// Poll-based future state.
 /// For async fn: deferred (waiting to be evaluated by executor).
 /// For actor spawn: Pending with a channel receiver (polled on await).
@@ -242,7 +245,7 @@ pub enum RuntimeProjection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalMapRootValue {
     I32(i32),
-    String(Arc<String>),
+    String(SharedString),
 }
 
 /// Values admitted by the separately versioned Checker-receipted
@@ -252,7 +255,7 @@ pub enum CanonicalMapRootValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalMapAnyOwnerV1Value {
     I32(i32),
-    String(Arc<String>),
+    String(SharedString),
 }
 
 /// Values admitted by the independent source-Map owner lifecycle profile.
@@ -261,7 +264,7 @@ pub enum CanonicalMapAnyOwnerV1Value {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value {
     I32(i32),
-    String(Arc<String>),
+    String(SharedString),
 }
 
 /// Values admitted by the independent ordinary Map owned-Get profile. Its
@@ -270,7 +273,7 @@ pub enum CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalOrdinaryMapOwnedGetI32StringV1Value {
     I32(i32),
-    String(Arc<String>),
+    String(SharedString),
 }
 
 /// Values admitted by the independent ordinary Map/Any owner-v2 profile.
@@ -287,7 +290,7 @@ pub enum CanonicalOrdinaryMapOwnedAnyV2Value {
     },
     String {
         type_id: crate::core::ResolvedTypeId,
-        text: Arc<String>,
+        text: SharedString,
     },
     /// A one-String-field nominal payload keeps its concrete nominal identity
     /// in the VM snapshot. Shape alone is not an Any descriptor: two nominal
@@ -295,7 +298,7 @@ pub enum CanonicalOrdinaryMapOwnedAnyV2Value {
     Record {
         type_id: crate::core::ResolvedTypeId,
         nominal: String,
-        text: Arc<String>,
+        text: SharedString,
     },
 }
 
@@ -513,7 +516,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    String(Arc<String>),
+    String(SharedString),
     Unit,
     List(Arc<Vec<Value>>),
     Set(Vec<Value>),
@@ -658,7 +661,7 @@ impl Clone for Value {
             Value::Int(v) => Value::Int(*v),
             Value::Float(v) => Value::Float(*v),
             Value::Bool(v) => Value::Bool(*v),
-            Value::String(v) => Value::String(Arc::clone(v)),
+            Value::String(v) => Value::String(SharedString::clone(v)),
             Value::Unit => Value::Unit,
             Value::List(v) => Value::List(Arc::clone(v)),
             Value::Set(v) => Value::Set(v.clone()),
@@ -1736,8 +1739,8 @@ impl ActorHandle {
             let msg = ActorMailboxMsg {
                 method: "peer_fault".to_string(),
                 args: vec![
-                    Value::String(Arc::new(self.id.to_string())),
-                    Value::String(Arc::new(reason.to_string())),
+                    Value::String(SharedString::new(self.id.to_string())),
+                    Value::String(SharedString::new(reason.to_string())),
                 ],
                 response: tx,
                 deadline: None,

@@ -3553,7 +3553,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             Expr::Literal(Lit::Float(f)) => crate::interp::Value::Float(*f),
             Expr::Literal(Lit::Bool(b)) => crate::interp::Value::Bool(*b),
             Expr::Literal(Lit::String(s)) => {
-                crate::interp::Value::String(std::sync::Arc::new(s.clone()))
+                crate::interp::Value::String(SharedString::new(s.clone()))
             }
             _ => {
                 return Err(CompileError::LlvmError(format!(

@@ -181,7 +181,7 @@ func main() -> string {
     str_char_at("hello", 1)
 }
 "#;
-    assert_eq!(run_source(src), interp::Value::String(Arc::new("e".into())));
+    assert_eq!(run_source(src), interp::Value::String(crate::interp::SharedString::new("e".into())));
 }
 
 #[test]
@@ -193,7 +193,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("hello".into()))
+        interp::Value::String(crate::interp::SharedString::new("hello".into()))
     );
 }
 

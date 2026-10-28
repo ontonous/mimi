@@ -794,9 +794,9 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
                 if ptr.is_null() {
                     return std::ptr::null_mut();
                 }
-                std::ptr::copy_nonoverlapping(s.as_ptr(), ptr, len);
+                std::ptr::copy_nonoverlapping(s.as_bytes().as_ptr(), ptr, len);
                 *ptr.add(len) = 0;
-                Arc::make_mut(s).clear();
+                crate::interp::SharedString::make_mut(s).clear();
                 ptr as *mut std::ffi::c_char
             }
             _ => std::ptr::null_mut(),
@@ -827,7 +827,7 @@ pub unsafe extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *
             .to_string_lossy()
             .into_owned();
         libc::free(c_str as *mut libc::c_void);
-        let value = Box::new(Value::String(Arc::new(s)));
+        let value = Box::new(Value::String(crate::interp::SharedString::new(s)));
         Box::into_raw(value)
     }
 }
@@ -1263,7 +1263,7 @@ mod tests {
 
     #[test]
     fn string_c_api_len_and_borrow() {
-        let value = Box::new(Value::String(Arc::new("hello".to_string())));
+        let value = Box::new(Value::String(crate::interp::SharedString::new("hello".to_string())));
         let raw = Box::into_raw(value);
 
         // SAFETY: raw is a freshly created valid Mimi string value.
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[test]
     fn string_c_api_free_all_clears_pending() {
-        let value = Box::new(Value::String(Arc::new("bulk".to_string())));
+        let value = Box::new(Value::String(crate::interp::SharedString::new("bulk".to_string())));
         let raw = Box::into_raw(value);
 
         // SAFETY: raw is a freshly created valid Mimi string value.
@@ -1305,7 +1305,7 @@ mod tests {
     #[test]
     fn string_into_raw_from_raw_use_libc_malloc_buffers() {
         // SAFETY: fresh heap Value wrapping a String; ownership passes to raw.
-        let raw = Box::into_raw(Box::new(Value::String(Arc::new("hello".to_string()))));
+        let raw = Box::into_raw(Box::new(Value::String(crate::interp::SharedString::new("hello".to_string()))));
         // SAFETY: raw is a valid heap Value; ownership of string content transfers.
         let c_str = unsafe { mimi_string_into_raw(raw) };
         assert!(!c_str.is_null());
@@ -1324,7 +1324,7 @@ mod tests {
 
         // Round-trip through mimi_string_from_raw should consume the libc buffer.
         // SAFETY: fresh heap Value wrapping a String.
-        let raw2 = Box::into_raw(Box::new(Value::String(Arc::new("world".to_string()))));
+        let raw2 = Box::into_raw(Box::new(Value::String(crate::interp::SharedString::new("world".to_string()))));
         // SAFETY: raw2 is a valid heap Value; ownership of string content transfers.
         let c_str2 = unsafe { mimi_string_into_raw(raw2) };
         assert!(!c_str2.is_null());
@@ -1437,7 +1437,7 @@ mod tests {
 
         // SAFETY: fresh heap Value wrapping a String.
         let make_value = || {
-            let v = Box::new(Value::String(Arc::new("0123456789abcdef".to_string())));
+            let v = Box::new(Value::String(crate::interp::SharedString::new("0123456789abcdef".to_string())));
             Box::into_raw(v)
         };
 

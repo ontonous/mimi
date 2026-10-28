@@ -4,7 +4,6 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
-use std::sync::Arc;
 
 /// Display for print/println: auto-deref Shared/LocalShared so dual-backend
 /// matches codegen (which loads the payload, not the wrapper tag).
@@ -109,7 +108,7 @@ fn builtin_input_line(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, In
     std::io::stdin()
         .read_line(&mut input)
         .map_err(|e| InterpError::new(format!("input_line error: {}", e)))?;
-    Ok(Value::String(Arc::new(input.trim_end().to_string())))
+    Ok(Value::String(crate::interp::SharedString::new(input.trim_end().to_string())))
 }
 
 fn builtin_try_input_line(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
@@ -117,17 +116,17 @@ fn builtin_try_input_line(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value
     match std::io::stdin().read_line(&mut input) {
         Ok(0) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(Arc::new(
+            vec![Value::String(crate::interp::SharedString::new(
                 "input: EOF or read error".to_string(),
             ))],
         )),
         Ok(_) => Ok(Value::Variant(
             "Ok".into(),
-            vec![Value::String(Arc::new(input.trim_end().to_string()))],
+            vec![Value::String(crate::interp::SharedString::new(input.trim_end().to_string()))],
         )),
         Err(e) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(Arc::new(format!("input: {}", e)))],
+            vec![Value::String(crate::interp::SharedString::new(format!("input: {}", e)))],
         )),
     }
 }

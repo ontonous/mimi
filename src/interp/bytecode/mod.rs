@@ -366,7 +366,7 @@ mod tests {
         assert_owned_get_result(
             &values[5],
             "Ok",
-            &Value::String(std::sync::Arc::new("owned\0é".into())),
+            &Value::String(crate::interp::SharedString::new("owned\0é".into())),
         );
         assert_owned_get_result(&values[6], "Err", &Value::Int(2));
         assert_owned_get_result(&values[7], "Err", &Value::Int(2));
@@ -406,7 +406,7 @@ mod tests {
         assert_owned_get_result(
             &result,
             "Ok",
-            &Value::String(std::sync::Arc::new("owned-value".into())),
+            &Value::String(crate::interp::SharedString::new("owned-value".into())),
         );
     }
 

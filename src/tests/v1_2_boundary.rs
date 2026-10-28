@@ -48,7 +48,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("你好，世界！🚀".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("你好，世界！🚀".to_string()))
     );
 }
 
@@ -129,6 +129,6 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("".to_string()))
     );
 }

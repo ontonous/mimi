@@ -37,6 +37,7 @@ libffi = { version = "4.1", features = ["system"] }
 either = "1.16.0"
 regex = "1"
 blake3 = "1"
+triomphe = { version = "=0.1.16", default-features = false, features = ["std"] }
 
 [features]
 # All ordinary build, test, and lint entrypoints use the host LLVM 18 shared

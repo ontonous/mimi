@@ -12255,7 +12255,7 @@ mod tests {
                         "payload".into(),
                     ),
                 ),
-                Value::String(Arc::new("payload".into())),
+                Value::String(crate::interp::SharedString::new("payload".into())),
             )
             .expect("canonical runtime tag compares");
         assert!(matches!(valid, Value::Bool(true)));
@@ -12269,7 +12269,7 @@ mod tests {
             .execute_managed_any_string_compare_for_test(
                 entry,
                 Value::CanonicalManagedAnyI32StringV1(forged),
-                Value::String(Arc::new("payload".into())),
+                Value::String(crate::interp::SharedString::new("payload".into())),
             )
             .expect_err("forged runtime tag must trap");
         assert!(
@@ -12987,7 +12987,7 @@ mod tests {
                     nominal: nominal.clone(),
                     variant: fixture.some.clone(),
                     tag: "Some".into(),
-                    payload: vec![Value::String(std::sync::Arc::new("owned".into()))],
+                    payload: vec![Value::String(crate::interp::SharedString::new("owned".into()))],
                 }],
             )
             .expect("bytecode consuming Some projection");
@@ -13047,11 +13047,11 @@ mod tests {
                     std::collections::HashMap::from([
                         (
                             "left".into(),
-                            Value::String(std::sync::Arc::new("left".into())),
+                            Value::String(crate::interp::SharedString::new("left".into())),
                         ),
                         (
                             "right".into(),
-                            Value::String(std::sync::Arc::new("right".into())),
+                            Value::String(crate::interp::SharedString::new("right".into())),
                         ),
                     ]),
                 )],
@@ -13160,8 +13160,8 @@ mod tests {
                     variant: fixture.keep.clone(),
                     tag: "Keep".into(),
                     payload: vec![
-                        Value::String(std::sync::Arc::new("keep".into())),
-                        Value::String(std::sync::Arc::new("residual".into())),
+                        Value::String(crate::interp::SharedString::new("keep".into())),
+                        Value::String(crate::interp::SharedString::new("residual".into())),
                     ],
                 }],
             )
@@ -13179,7 +13179,7 @@ mod tests {
                     nominal: fixture.nominal,
                     variant: fixture.keep,
                     tag: "Keep".into(),
-                    payload: vec![Value::String(std::sync::Arc::new("truncated".into()))],
+                    payload: vec![Value::String(crate::interp::SharedString::new("truncated".into()))],
                 }],
             )
             .expect_err("variant payload arity drift must trap");
@@ -17731,7 +17731,7 @@ mod tests {
         assert!(matches!(
             value,
             Value::Record(_, fields)
-                if fields.get("name") == Some(&Value::String(std::sync::Arc::new("owned".into())))
+                if fields.get("name") == Some(&Value::String(crate::interp::SharedString::new("owned".into())))
                     && fields.get("count") == Some(&Value::Int(41))
         ));
     }
@@ -18182,7 +18182,7 @@ mod tests {
                 if nominal.as_str() == "builtin:type:Option"
                     && variant.0 == "builtin:variant:Option::Some"
                     && tag == "Some"
-                    && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
+                    && payload == vec![Value::String(crate::interp::SharedString::new("owned".to_string()))]
         ));
     }
 
@@ -18260,7 +18260,7 @@ mod tests {
                 if nominal.as_str() == "builtin:type:Result"
                     && variant.0 == "builtin:variant:Result::Ok"
                     && tag == "Ok"
-                    && payload == vec![Value::String(std::sync::Arc::new("owned".to_string()))]
+                    && payload == vec![Value::String(crate::interp::SharedString::new("owned".to_string()))]
         ));
     }
 
@@ -18638,7 +18638,7 @@ mod tests {
             Value::Tuple(items)
                 if items.as_slice()
                     == [
-                        Value::String(std::sync::Arc::new("owned".to_string())),
+                        Value::String(crate::interp::SharedString::new("owned".to_string())),
                         Value::Int(41),
                     ]
         ));
@@ -18712,7 +18712,7 @@ mod tests {
             Value::Tuple(items)
                 if items.as_slice() == [
                     Value::Tuple(vec![
-                        Value::String(std::sync::Arc::new("inner".to_string())),
+                        Value::String(crate::interp::SharedString::new("inner".to_string())),
                         Value::Int(41),
                     ]),
                     Value::Bool(true)
@@ -20685,7 +20685,7 @@ func main() -> i32 {
                 crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
                     type_id: record_type,
                     nominal,
-                    text: Arc::new("copied label".into()),
+                    text: crate::interp::SharedString::new("copied label".into()),
                 },
             );
             entries.insert(
@@ -20699,7 +20699,7 @@ func main() -> i32 {
                 "m".to_owned(),
                 crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
                     type_id: string_type,
-                    text: Arc::new("copied direct string".into()),
+                    text: crate::interp::SharedString::new("copied direct string".into()),
                 },
             );
         }
@@ -20717,7 +20717,7 @@ func main() -> i32 {
             crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
                 type_id,
                 nominal,
-                text: Arc::new(text.to_owned()),
+                text: crate::interp::SharedString::new(text.to_owned()),
             },
         )])))
     }
@@ -20786,7 +20786,7 @@ func main() -> i32 {
             .execute_ordinary_map_owned_any_v2_get_any_for_test(
                 0,
                 root,
-                Value::String(Arc::new("label".into())),
+                Value::String(crate::interp::SharedString::new("label".into())),
             )
             .expect("GetAny hit plus a subsequent read of its still-live source root");
         let Value::Tuple(result) = value else {
@@ -21107,7 +21107,7 @@ func main() -> i32 {
             .execute_ordinary_map_owned_any_v2_get_any_for_test(
                 0,
                 root,
-                Value::String(Arc::new("missing".into())),
+                Value::String(crate::interp::SharedString::new("missing".into())),
             )
             .expect("GetAny miss plus a subsequent read of its still-live source root");
         let Value::Tuple(result) = value else {
@@ -21131,7 +21131,7 @@ func main() -> i32 {
             crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
                 type_id: type_id.clone(),
                 nominal: nominal.clone(),
-                text: Arc::new("fixture payload".into()),
+                text: crate::interp::SharedString::new("fixture payload".into()),
             },
         )]));
         let duplicate = Arc::clone(&duplicate_root);
@@ -21139,7 +21139,7 @@ func main() -> i32 {
             .execute_ordinary_map_owned_any_v2_get_any_for_test(
                 0,
                 Value::CanonicalOrdinaryMapOwnedAnyV2(duplicate_root),
-                Value::String(Arc::new("label".into())),
+                Value::String(crate::interp::SharedString::new("label".into())),
             )
             .expect_err("GetAny cannot borrow a duplicated owner");
         assert!(error.message().contains("stale or duplicate owner"));
@@ -21154,14 +21154,14 @@ func main() -> i32 {
                 crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
                     type_id: unselected_type,
                     nominal,
-                    text: Arc::new("fixture payload".into()),
+                    text: crate::interp::SharedString::new("fixture payload".into()),
                 },
             )])));
         let error = BytecodeVM::new(bytecode)
             .execute_ordinary_map_owned_any_v2_get_any_for_test(
                 0,
                 wrong_payload_root,
-                Value::String(Arc::new("label".into())),
+                Value::String(crate::interp::SharedString::new("label".into())),
             )
             .expect_err("GetAny cannot infer or widen payload selection from runtime shape");
         assert!(error
@@ -21416,7 +21416,7 @@ func main() -> i32 {
                         panic!("String unpack returns an owned String");
                     };
                     assert_eq!(&**text, "copied direct string");
-                    assert_eq!(Arc::strong_count(&text), 1);
+                    assert_eq!(crate::interp::SharedString::strong_count(&text), 1);
                 }
                 "label" => {
                     let Value::Record(Some(actual_nominal), fields) = result else {
@@ -21427,7 +21427,7 @@ func main() -> i32 {
                         panic!("Label output has its owned text field");
                     };
                     assert_eq!(&**text, "copied label");
-                    assert_eq!(Arc::strong_count(text), 1);
+                    assert_eq!(crate::interp::SharedString::strong_count(text), 1);
                 }
                 _ => unreachable!(),
             }

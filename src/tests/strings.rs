@@ -11,7 +11,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello world".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
     );
 }
 
@@ -24,7 +24,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("abc".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("abc".to_string())));
 }
 
 #[test]
@@ -83,7 +83,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("hi".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hi".to_string())));
 }
 
 #[test]
@@ -98,7 +98,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("HELLO".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("HELLO".to_string())));
 }
 
 #[test]
@@ -113,7 +113,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello".to_string())));
 }
 
 #[test]
@@ -143,7 +143,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("e".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("e".to_string())));
 }
 
 #[test]
@@ -158,7 +158,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("hello".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello".to_string())));
 }
 
 #[test]
@@ -175,7 +175,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello there".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello there".to_string()))
     );
 }
 
@@ -225,7 +225,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("Hello, World!".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("Hello, World!".to_string()))
     );
 }
 
@@ -239,7 +239,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("1 + 2 = 3".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("1 + 2 = 3".to_string())));
 }
 
 #[test]
@@ -250,7 +250,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("just text".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("just text".to_string())));
 }
 
 #[test]
@@ -264,7 +264,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("double is 20".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("double is 20".to_string()))
     );
 }
 
@@ -280,7 +280,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("Hi, Alice!".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("Hi, Alice!".to_string())));
 }
 
 #[test]
@@ -313,7 +313,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("abcde".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("abcde".to_string()))
     );
 }
 
@@ -328,7 +328,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("sum = 30".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("sum = 30".to_string()))
     );
 }
 
@@ -343,7 +343,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("ok".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("ok".to_string())));
 }
 
 #[test]
@@ -357,7 +357,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("flag is true".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("flag is true".to_string()))
     );
 }
 
@@ -374,7 +374,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("hello world".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
     );
 }
 
@@ -389,7 +389,7 @@ func main() -> string {
 "#;
     assert_eq!(
         run_source(src),
-        interp::Value::String(Arc::new("prefix".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("prefix".to_string()))
     );
 }
 
@@ -454,7 +454,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("42".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("42".to_string())));
 }
 
 #[test]
@@ -465,7 +465,7 @@ func main() -> string {
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::String(Arc::new("".to_string())));
+    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("".to_string())));
 }
 
 #[test]
@@ -478,7 +478,7 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello X world X end".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello X world X end".to_string()))
     );
 }
 
@@ -492,6 +492,6 @@ func main() -> string {
     let v = run_source(src);
     assert_eq!(
         v,
-        interp::Value::String(Arc::new("hello world".to_string()))
+        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
     );
 }
