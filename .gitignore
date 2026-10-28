@@ -105,6 +105,8 @@ evidence/**/test-artifacts/strict-memcheck/native-explicit-mir
 evidence/**/callback-test
 evidence/**/strict-l3/*-native
 evidence/**/raw-memcheck/*-native
+# Observer V1 manual L3 gates emit profile-specific native executables.
+evidence/**/observer-v1-l3-manual-*/*-native
 
 # Local Rust/LLVM probe artifacts created at the repository root
 /a.out
