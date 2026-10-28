@@ -95,6 +95,8 @@ mm_probe_*.txt
 # Full-route census JSON, journals, and logs preserve each run's denominator,
 # per-input results, and raw command output.
 evidence/**/program
+evidence/**/source*.tmp
+evidence/**/files.sha256.tmp
 evidence/**/consumer-evidence/**/native-false
 evidence/**/consumer-evidence/**/native-true
 evidence/**/canonical_mir_string_list_clone_oom
