@@ -94,7 +94,10 @@ finalize() {
         "$profile" "$status" "$stable" > "$artifact_dir/gate.status"
     (
         cd -- "$artifact_dir"
-        find . -type f ! -name SHA256SUMS -print0 \
+        find . -type f ! -name SHA256SUMS \
+            ! -path './native/default/program' \
+            ! -path './native/explicit-mir/program' \
+            -print0 \
             | LC_ALL=C sort -z | xargs -0 -r sha256sum
     ) > "$artifact_dir/SHA256SUMS"
     if [[ "$status" == 0 ]]; then
