@@ -81,16 +81,24 @@ fn assert_zero_error_summary(line: &str) {
         words[7], "from",
         "unexpected Memcheck suppression summary: {line}"
     );
-    words[6].parse::<u64>().unwrap_or_else(|error| {
+    let suppressed_errors = words[6].parse::<u64>().unwrap_or_else(|error| {
         panic!("invalid Memcheck suppressed error count in {line}: {error}")
     });
-    words[8]
+    let suppressed_contexts = words[8]
         .strip_suffix(')')
         .unwrap_or_else(|| panic!("unexpected Memcheck suppression summary: {line}"))
         .parse::<u64>()
         .unwrap_or_else(|error| {
             panic!("invalid Memcheck suppressed context count in {line}: {error}")
         });
+    assert_eq!(
+        suppressed_errors, 0,
+        "strict Memcheck must not suppress any errors: {line}"
+    );
+    assert_eq!(
+        suppressed_contexts, 0,
+        "strict Memcheck must not suppress any error contexts: {line}"
+    );
 }
 
 pub fn parse(report: &str) -> MemcheckSummary {
@@ -284,6 +292,14 @@ mod tests {
             ALL_FREE_REPORT.replace(
                 "ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)",
                 "ERROR SUMMARY: 0 errors from 1 contexts (suppressed: 0 from 0)",
+            ),
+            ALL_FREE_REPORT.replace(
+                "ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)",
+                "ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 1 from 0)",
+            ),
+            ALL_FREE_REPORT.replace(
+                "ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)",
+                "ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 1)",
             ),
             // A nonzero explicit loss row or reachable allocation contradicts
             // the all-free claim and must never be hidden by inferred zeros.
