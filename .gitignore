@@ -92,6 +92,8 @@ mm_probe_*.txt
 # Keep raw stdout/stderr captures (*.bin), manifests, command transcripts,
 # checksums, and source snapshots visible; gate executables use the stable
 # `program` filename across profile-specific output directories.
+# Full-route census JSON, journals, and logs preserve each run's denominator,
+# per-input results, and raw command output.
 evidence/**/program
 evidence/**/consumer-evidence/**/native-false
 evidence/**/consumer-evidence/**/native-true
