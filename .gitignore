@@ -90,12 +90,9 @@ mm_probe_*.txt
 
 # Reproducible native binaries emitted by gate evidence, including strict L3.
 # Keep raw stdout/stderr captures (*.bin), manifests, command transcripts,
-# checksums, and source snapshots visible; ignore only the generated executables below.
-evidence/**/native/case-*/default-build/program
-evidence/**/native/case-*/explicit-build/program
-evidence/**/native/**/program
-evidence/**/strict-l3/native-*/program
-evidence/**/cli-*-build/program
+# checksums, and source snapshots visible; gate executables use the stable
+# `program` filename across profile-specific output directories.
+evidence/**/program
 evidence/**/consumer-evidence/**/native-false
 evidence/**/consumer-evidence/**/native-true
 evidence/**/canonical_mir_string_list_clone_oom
