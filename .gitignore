@@ -101,6 +101,12 @@ evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/native-object
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/runtime-archive
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/relinked-program
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/native-tmp/
+# GetOrDefault<i32> L3 reuses the strict gate's named replay artifacts. The
+# generic evidence/**/program and *.o rules above already cover those names.
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/native-object
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/runtime-archive
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/relinked-program
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/native-tmp/
 # Full-route census JSON, journals, and logs preserve each run's denominator,
 # per-input results, and raw command output.
 evidence/**/program
