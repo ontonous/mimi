@@ -26,9 +26,22 @@ fail_early() {
     exit 2
 }
 
-for required_tool in cargo python3 sha256sum sort find xargs cmp awk grep realpath date git uname env; do
+for required_tool in cargo rustc python3 sha256sum sort find xargs cmp awk grep realpath date git uname env; do
     command -v "$required_tool" >/dev/null 2>&1 || fail_early "Actor two-fixture replay requires $required_tool"
 done
+NATIVE_HOST_TARGET="$(rustc -vV | awk '$1 == "host:" { print $2; exit }')"
+[[ -n "$NATIVE_HOST_TARGET" ]] || fail_early "could not resolve the active Rust host target"
+if [[ ${MIMI_ACTOR_TWO_FIXTURE_TARGET_DIR+x} ]]; then
+    [[ -n "$MIMI_ACTOR_TWO_FIXTURE_TARGET_DIR" ]] || \
+        fail_early "MIMI_ACTOR_TWO_FIXTURE_TARGET_DIR must not be empty"
+    [[ "$MIMI_ACTOR_TWO_FIXTURE_TARGET_DIR" == /* ]] || \
+        fail_early "MIMI_ACTOR_TWO_FIXTURE_TARGET_DIR must be an absolute path"
+    TARGET_DIR_REQUESTED="$MIMI_ACTOR_TWO_FIXTURE_TARGET_DIR"
+else
+    TARGET_DIR_REQUESTED="$ROOT_DIR/target"
+fi
+EFFECTIVE_TARGET_DIR="$(realpath -m -- "$TARGET_DIR_REQUESTED")" || \
+    fail_early "could not normalize Cargo target directory: $TARGET_DIR_REQUESTED"
 
 if [[ -z "$ARTIFACT_REQUESTED" ]]; then
     ARTIFACT_REQUESTED="evidence/0.1.11-dev/gates/actor-two-fixture-current-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -95,6 +108,7 @@ capture_environment() {
         printf 'git_head=%s\n' "$(git rev-parse HEAD 2>/dev/null || printf '<unavailable>')"
         printf 'git_branch=%s\n' "$(git symbolic-ref --quiet --short HEAD 2>/dev/null || printf '<detached-or-unavailable>')"
         printf 'host=%s\n' "$(uname -a)"
+        printf 'native_host_target=%s\n' "$NATIVE_HOST_TARGET"
         printf 'LLVM_SYS_181_PREFIX=%q\n' "$LLVM_PREFIX"
         if [[ -e "$LLVM_PREFIX" ]]; then
             printf 'LLVM_SYS_181_PREFIX_realpath=%s\n' "$(realpath -- "$LLVM_PREFIX")"
@@ -103,7 +117,7 @@ capture_environment() {
         fi
         printf 'effective.CARGO_BUILD_JOBS=1\n'
         printf 'effective.CARGO_TERM_COLOR=never\n'
-        printf 'effective.CARGO_TARGET_DIR=%q\n' "$ROOT_DIR/target"
+        printf 'effective.CARGO_TARGET_DIR=%q\n' "$EFFECTIVE_TARGET_DIR"
         for name in CARGO_HOME CARGO_TARGET_DIR CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET \
             CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_NET_OFFLINE CARGO_TERM_COLOR \
             CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL \
@@ -233,12 +247,125 @@ source_snapshot() {
     mv -- "$snapshot_tmp" "$snapshot_path" || return 1
 }
 
+validate_cargo_target_configuration() {
+    local host_target="$1" report_path="$2" status
+    if python3 - "$ROOT_DIR" "$host_target" > "$report_path" 2>&1 <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+host = sys.argv[2]
+issues = []
+print(f"native_host_target={host}")
+
+environment_target = os.environ.get("CARGO_BUILD_TARGET")
+if environment_target is None:
+    print("env.CARGO_BUILD_TARGET=<unset>")
+else:
+    print(f"env.CARGO_BUILD_TARGET={json.dumps(environment_target)}")
+    if environment_target != host:
+        issues.append(f"CARGO_BUILD_TARGET selects {environment_target!r}, expected native host {host!r}")
+
+config_paths = []
+for directory in (root, *root.parents):
+    cargo_dir = directory / ".cargo"
+    for name in ("config.toml", "config"):
+        candidate = cargo_dir / name
+        if candidate.is_file():
+            config_paths.append(candidate)
+
+cargo_home = os.environ.get("CARGO_HOME")
+if cargo_home == "":
+    issues.append("CARGO_HOME is set to an empty path")
+    cargo_home_path = root / ".cargo-home-unavailable"
+elif cargo_home:
+    cargo_home_path = Path(cargo_home)
+    if not cargo_home_path.is_absolute():
+        cargo_home_path = root / cargo_home_path
+else:
+    cargo_home_path = Path(os.path.expanduser("~")) / ".cargo"
+for name in ("config.toml", "config"):
+    candidate = cargo_home_path / name
+    if candidate.is_file() and candidate not in config_paths:
+        config_paths.append(candidate)
+
+toml = None
+if config_paths:
+    try:
+        import tomllib as toml
+    except ImportError:
+        try:
+            import tomli as toml
+        except ImportError:
+            issues.append("Python tomllib/tomli is required to inspect Cargo target configuration")
+
+if toml is not None:
+    for path in config_paths:
+        try:
+            raw = path.read_bytes()
+            config = toml.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, ValueError) as error:
+            issues.append(f"could not parse Cargo config {path}: {error}")
+            continue
+        digest = hashlib.sha256(raw).hexdigest()
+        build = config.get("build", {})
+        if not isinstance(build, dict):
+            issues.append(f"Cargo config {path} has a non-table [build] value")
+            continue
+        configured_target = build.get("target")
+        print(f"cargo_config={json.dumps(str(path))} sha256={digest}")
+        if configured_target is None:
+            print("  build.target=<unset>")
+            continue
+        if isinstance(configured_target, str):
+            targets = [configured_target]
+        elif isinstance(configured_target, list) and all(isinstance(item, str) for item in configured_target):
+            targets = configured_target
+        else:
+            issues.append(f"Cargo config {path} has an unsupported build.target value")
+            continue
+        if not targets:
+            issues.append(f"Cargo config {path} has an empty build.target list")
+        for target in targets:
+            print(f"  build.target={json.dumps(target)}")
+            if target != host:
+                issues.append(f"Cargo config {path} selects {target!r}, expected native host {host!r}")
+
+if not config_paths:
+    print("cargo_config_build.target=<unset>")
+if issues:
+    for issue in issues:
+        print(f"FAIL {issue}")
+    raise SystemExit(1)
+print("PASS Cargo target settings select the native host or are unset")
+PY
+    then
+        return 0
+    else
+        status=$?
+        printf 'FAIL could not validate native Cargo target configuration (status=%s)\n' "$status" \
+            >> "$report_path"
+        return 1
+    fi
+}
+
 source_snapshot "$ARTIFACT_DIR/source.inputs.before.nul" "$ARTIFACT_DIR/source.before.sha256" || {
     write_failure_state "could not capture before source snapshot"
     exit 1
 }
 sha256sum "$ARTIFACT_DIR/source.inputs.before.nul" > "$ARTIFACT_DIR/source.before.inventory.sha256"
 sha256sum "$ARTIFACT_DIR/source.before.sha256" > "$ARTIFACT_DIR/source.before.manifest.sha256"
+
+if ! validate_cargo_target_configuration "$NATIVE_HOST_TARGET" \
+    "$ARTIFACT_DIR/cargo-target-configuration.txt"; then
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+    printf 'FAIL native evidence gate rejected cross-target or unreadable Cargo target configuration; see cargo-target-configuration.txt\n' \
+        >| "$ARTIFACT_DIR/result.txt"
+    exit 1
+fi
 
 record_gate() {
     local label="$1" expected_test="$2" expected_passed="$3"
@@ -258,19 +385,19 @@ record_gate() {
     cargo_path="$(command -v cargo)"
     {
         printf 'LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never CARGO_TARGET_DIR=%q %q ' \
-            "$LLVM_PREFIX" "$ROOT_DIR/target" "$cargo_path"
+            "$LLVM_PREFIX" "$EFFECTIVE_TARGET_DIR" "$cargo_path"
         printf '%q ' "${cargo_args[@]}"
         printf '\n'
     } > "$gate_dir/command.txt"
     printf '%s\0' "$cargo_path" "${cargo_args[@]}" > "$gate_dir/argv.nul"
     {
         printf 'LLVM_SYS_181_PREFIX=%s\n' "$LLVM_PREFIX"
-        printf 'CARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\nCARGO_TARGET_DIR=%s/target\n' "$ROOT_DIR"
+        printf 'CARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\nCARGO_TARGET_DIR=%q\n' "$EFFECTIVE_TARGET_DIR"
         printf 'working_directory=%s\n' "$ROOT_DIR"
         printf 'expected_test_id=%s\nexpected_passed=%s\n' "$expected_test" "$expected_passed"
     } > "$gate_dir/environment.txt"
     if env LLVM_SYS_181_PREFIX="$LLVM_PREFIX" CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never \
-        CARGO_TARGET_DIR="$ROOT_DIR/target" \
+        CARGO_TARGET_DIR="$EFFECTIVE_TARGET_DIR" \
         "$cargo_path" "${cargo_args[@]}" > "$gate_dir/stdout.bin" 2> "$gate_dir/stderr.bin"; then
         status=0
     else
@@ -329,17 +456,17 @@ record_build() {
         return 1
     }
     cargo_path="$(command -v cargo)"
-    build_target_dir="$ROOT_DIR/target/actor-two-fixture-current-cargo-${BASHPID:-$$}"
+    build_target_dir="$EFFECTIVE_TARGET_DIR/actor-two-fixture-current-cargo-${BASHPID:-$$}"
     if [[ "${cargo_args[0]:-}" != "build" ]]; then
         GATE_FAILURES=$((GATE_FAILURES + 1))
         printf 'FAIL current-source binary recorder requires a cargo build command\n' \
             > "$gate_dir/validation.txt"
         return 1
     fi
-    host_target="$(rustc -vV | awk '$1 == "host:" { print $2; exit }')"
-    if [[ -z "$host_target" ]]; then
+    host_target="$NATIVE_HOST_TARGET"
+    if ! validate_cargo_target_configuration "$host_target" "$gate_dir/cargo-target-configuration.txt"; then
         GATE_FAILURES=$((GATE_FAILURES + 1))
-        printf 'FAIL could not resolve the active Rust host target\n' \
+        printf 'FAIL Cargo target configuration changed or no longer selects the native host\n' \
             > "$gate_dir/validation.txt"
         return 1
     fi
@@ -361,7 +488,7 @@ record_build() {
     printf '%s\0' "$cargo_path" "${cargo_args[@]}" > "$gate_dir/argv.nul"
     {
         printf 'LLVM_SYS_181_PREFIX=%s\n' "$LLVM_PREFIX"
-        printf 'CARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\nCARGO_TARGET_DIR=%s\n' "$build_target_dir"
+        printf 'CARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\nCARGO_TARGET_DIR=%q\n' "$build_target_dir"
         printf 'forced_host_target=%s\n' "$host_target"
         printf 'CARGO_BUILD_TARGET=unset\nCARGO_ENCODED_RUSTFLAGS=unset\n'
         printf 'working_directory=%s\n' "$ROOT_DIR"
@@ -385,13 +512,17 @@ record_build() {
         validation_status=1
         printf 'FAIL current-source mimi build exit=%s\n' "$status" > "$gate_dir/validation.txt"
     else
-        if ! python3 - "$gate_dir/stdout.bin" "$build_target_dir" "$gate_dir/mimi.path" <<'PY'
+        # This per-run CARGO_TARGET_DIR avoids Cargo artifact races with the shared target tree.
+        if ! python3 - "$gate_dir/stdout.bin" "$build_target_dir" "$host_target" "$gate_dir/mimi.path" <<'PY'
 import json
 import os
 import sys
 from pathlib import Path
 
-output, target_dir, path_file = map(Path, sys.argv[1:])
+output = Path(sys.argv[1])
+target_dir = Path(sys.argv[2])
+expected_host = sys.argv[3]
+path_file = Path(sys.argv[4])
 target_root = target_dir.resolve(strict=True)
 executables = []
 for line in output.read_text(encoding="utf-8").splitlines():
@@ -413,9 +544,11 @@ for line in output.read_text(encoding="utf-8").splitlines():
     ):
         path = Path(executable).resolve(strict=True)
         try:
-            path.relative_to(target_root)
+            relative_path = path.relative_to(target_root)
         except ValueError:
             raise SystemExit("Cargo executable path escaped the isolated target directory")
+        if not relative_path.parts or relative_path.parts[0] != expected_host:
+            raise SystemExit("Cargo executable path is not under the forced native-host target directory")
         if not path.is_file() or not os.access(path, os.X_OK):
             raise SystemExit("Cargo-reported Mimi executable is not executable")
         executables.append(path)
@@ -464,7 +597,8 @@ require_l3_memcheck_reports() {
     )
     mkdir -- "$report_dir" || {
         printf 'FAIL could not create Memcheck report directory: %s\n' "$report_dir" >&2
-        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL could not create Memcheck report directory: %s\n' "$report_dir" \
+            > "$ARTIFACT_DIR/l3-memcheck.validation.txt" || true
         return 1
     }
     for spec in "${report_specs[@]}"; do
@@ -477,8 +611,10 @@ require_l3_memcheck_reports() {
             active { print }
             END { if (found != 1) exit 3 }
         ' "$source" > "$report"; then
-            printf 'FAIL missing or duplicate Memcheck report: %s\n' "$label" \
-                > "$report_dir/$label.validation.txt"
+            if ! printf 'FAIL missing or duplicate Memcheck report: %s\n' "$label" \
+                > "$report_dir/$label.validation.txt"; then
+                printf 'FAIL could not write validation record for Memcheck report: %s\n' "$label" >&2
+            fi
             errors=$((errors + 1))
             continue
         fi
@@ -504,18 +640,26 @@ require_l3_memcheck_reports() {
             grep -F 'BTreeMap<u64, alloc::sync::Arc<mimi_runtime::runtime::actor_domain::NativeDomainRoot>>' "$normalized" >/dev/null &&
             grep -F 'mimi_mir_actor_domain_open' "$normalized" >/dev/null &&
             grep -Fqx 'ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)' "$normalized"; then
-            printf 'PASS %s: zero loss/errors; one 192-byte reachable Actor domain registry allocation\n' \
-                "$label" > "$report_dir/$label.validation.txt"
+            if ! printf 'PASS %s: zero loss/errors; one 192-byte reachable Actor domain registry allocation\n' \
+                "$label" > "$report_dir/$label.validation.txt"; then
+                printf 'FAIL could not write validation record for Memcheck report: %s\n' "$label" >&2
+                errors=$((errors + 1))
+            fi
         else
-            printf 'FAIL Memcheck report did not match the strict Actor resource-domain summary: %s\n' \
-                "$label" > "$report_dir/$label.validation.txt"
+            if ! printf 'FAIL Memcheck report did not match the strict Actor resource-domain summary: %s\n' \
+                "$label" > "$report_dir/$label.validation.txt"; then
+                printf 'FAIL could not write validation record for Memcheck report: %s\n' "$label" >&2
+            fi
             errors=$((errors + 1))
         fi
     done
     if [[ "$errors" -ne 0 ]]; then
-        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL Memcheck report validation failed: errors=%s\n' "$errors" \
+            > "$ARTIFACT_DIR/l3-memcheck.validation.txt" || true
         return 1
     fi
+    printf 'PASS all four strict Actor Memcheck reports matched the expected resource-domain summary\n' \
+        > "$ARTIFACT_DIR/l3-memcheck.validation.txt" || return 1
     return 0
 }
 
@@ -525,7 +669,7 @@ validate_full_route_census() {
     local binary_hash="$ARTIFACT_DIR/commands/current-source-mimi-build/mimi.sha256"
     local census_mimi="$ISOLATED_MIMI_PATH"
     if [[ -z "$census_mimi" ]]; then
-        census_mimi="$ROOT_DIR/target/debug/mimi"
+        census_mimi="$EFFECTIVE_TARGET_DIR/debug/mimi"
     fi
     python3 - "$report" "$validation" "$MIMI_BUILD_PASSED" "$binary_hash" "$census_mimi" <<'PY'
 import base64
@@ -571,7 +715,7 @@ records = rows(report.get("records"))
 manifest_paths = [row.get("path") for row in manifest_rows if isinstance(row, dict)]
 record_paths = [row.get("path") for row in records if isinstance(row, dict)]
 denominator = report.get("manifest", {}).get("denominator") if isinstance(report.get("manifest"), dict) else None
-if report.get("schema_version") != "0.1.11-full-route-census-v5":
+if report.get("schema_version") != "0.1.11-full-route-census-v6":
     issues.append("unexpected census schema version")
 if report.get("collection_mode") != "full_execution":
     issues.append("census did not run full_execution mode")
@@ -703,6 +847,7 @@ for field in (
 route_counts = mapping(report.get("route_counts"))
 class_counts = mapping(report.get("candidate_classification_counts"))
 gate_passed = gate.get("passed")
+census_gate_status = "passed" if gate_passed is True else "failed" if gate_passed is False else "<missing>"
 failed_global_checks = sorted(
     name for name, passed in mapping(gate.get("checks")).items() if passed is not True
 )
@@ -711,7 +856,7 @@ lines = [
     f"actor_fixture_rows={target_status}",
     f"census_global_gate_passed={gate_passed}",
     f"census_global_gate_mode={gate.get('mode', '<missing>')}",
-    f"census_global_gate_status={gate.get('status', '<missing>')}",
+    f"census_global_gate_status={census_gate_status}",
     f"denominator={denominator}",
     f"manifest_sha256={mapping(report.get('manifest')).get('sha256', '<missing>')}",
     f"source_snapshot_id={mapping(report.get('source_snapshot')).get('snapshot_id', '<missing>')}",
@@ -807,13 +952,24 @@ record_gate shadow-cli-default-explicit-l2 \
     test --test real_world_cli canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback \
     -- --exact --nocapture --test-threads=1 || true
 
+# The integrated no-Z3 verifier case checks both original fixtures under
+# default and explicit --mir, then exercises unsupported proof/FFI owners and
+# verifies owner-scoped NITS plus artifact-free --stats rows. Keep it in this
+# replay so route success cannot stand in for correct no-Z3 result ownership.
+record_gate no-z3-owner-attribution-l2 \
+    canonical_actor_cli_no_z3_keeps_infrastructure_and_owner_nits_results 1 \
+    test --test real_world_cli canonical_actor_cli_no_z3_keeps_infrastructure_and_owner_nits_results \
+    -- --exact --nocapture --test-threads=1 || true
+
 # The ignored strict integration test rebuilds both fixtures under default and
 # explicit --mir routes and runs all four native binaries under Memcheck.
 record_gate actor-strict-l3 \
     canonical_actor_original_default_and_explicit_native_bins_pass_strict_memcheck_l3 1 \
     test --test real_world_cli canonical_actor_original_default_and_explicit_native_bins_pass_strict_memcheck_l3 \
     -- --exact --ignored --nocapture --test-threads=1 || true
-require_l3_memcheck_reports || true
+if ! require_l3_memcheck_reports; then
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+fi
 
 # Build the exact binary consumed by the full current-source census. The
 # census runs without --check so it records the complete denominator and all
@@ -822,13 +978,31 @@ record_build current-source-mimi-build build --bin mimi --locked || true
 census_status=0
 census_mimi="$ISOLATED_MIMI_PATH"
 if [[ -z "$census_mimi" ]]; then
-    census_mimi="$ROOT_DIR/target/debug/mimi"
+    census_mimi="$EFFECTIVE_TARGET_DIR/debug/mimi"
 fi
+census_scratch_root="$EFFECTIVE_TARGET_DIR/route-census-scratch"
+{
+    printf 'env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR=%q python3 scripts/full_route_census.py --root %q --mimi %q --output %q --artifacts %q --scratch-root %q --jobs 8\n' \
+        "$EFFECTIVE_TARGET_DIR" "$ROOT_DIR" "$census_mimi" "$ARTIFACT_DIR/full-route-census.json" \
+        "$ARTIFACT_DIR/full-route-census.artifacts" "$census_scratch_root"
+} > "$ARTIFACT_DIR/full-route-census.command.txt"
+printf '%s\0' env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+    "CARGO_TARGET_DIR=$EFFECTIVE_TARGET_DIR" \
+    python3 scripts/full_route_census.py \
+    --root "$ROOT_DIR" \
+    --mimi "$census_mimi" \
+    --output "$ARTIFACT_DIR/full-route-census.json" \
+    --artifacts "$ARTIFACT_DIR/full-route-census.artifacts" \
+    --scratch-root "$census_scratch_root" \
+    --jobs 8 > "$ARTIFACT_DIR/full-route-census.argv.nul"
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+"CARGO_TARGET_DIR=$EFFECTIVE_TARGET_DIR" \
 python3 scripts/full_route_census.py \
     --root "$ROOT_DIR" \
     --mimi "$census_mimi" \
     --output "$ARTIFACT_DIR/full-route-census.json" \
     --artifacts "$ARTIFACT_DIR/full-route-census.artifacts" \
+    --scratch-root "$census_scratch_root" \
     --jobs 8 > "$ARTIFACT_DIR/full-route-census.stdout.bin" \
     2> "$ARTIFACT_DIR/full-route-census.stderr.bin" || census_status=$?
 printf 'exit_code=%s\n' "$census_status" > "$ARTIFACT_DIR/full-route-census.exit.txt"
