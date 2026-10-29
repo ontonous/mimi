@@ -1235,6 +1235,11 @@ func main() -> i32 {
                 crate::runtime::mimi_mir_ordinary_map_domain_own_string as *const () as usize,
             ),
             (
+                "mimi_mir_ordinary_map_domain_register_shutdown",
+                crate::runtime::mimi_mir_ordinary_map_domain_register_shutdown as *const ()
+                    as usize,
+            ),
+            (
                 "mimi_str_clone",
                 crate::runtime::mimi_str_clone as *const () as usize,
             ),
@@ -1245,6 +1250,10 @@ func main() -> i32 {
             (
                 "mimi_runtime_abort",
                 crate::runtime::mimi_runtime_abort as *const () as usize,
+            ),
+            (
+                "mimi_mir_assert_no_live_managed_any_v2_lists",
+                crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
             ),
         ] {
             let declaration = generator.module.get_function(symbol).expect(symbol);
@@ -1272,6 +1281,10 @@ func main() -> i32 {
                 .get_function::<unsafe extern "C" fn() -> i32>("main")
                 .expect("native main has the verified no-argument i32 ABI")
         };
+        crate::codegen::assert_execution_engine_linked(
+            &engine,
+            "calling ordinary Map owned-Get main",
+        );
 
         // Each failure returns the canonical Err payload through the real
         // Result match, after both roots have been dropped. Ok selects 7,
@@ -1298,6 +1311,8 @@ func main() -> i32 {
             // and its owning engine remains live throughout the failpoint call.
             let native_domain_before = crate::runtime::ordinary_map_domain_live_counts_for_test()
                 .expect("ordinary-Map ownership registries are observable in tests");
+            // SAFETY: `native` is the verified zero-argument i32 main entry;
+            // its engine remains live and this closure passes no pointers.
             let observed = with_owned_get_failure(stage, || unsafe { native.call() });
             assert_eq!(observed, 3, "native stage {stage}");
             assert_eq!(
@@ -1327,6 +1342,8 @@ func main() -> i32 {
         // failpoint is reset; this invocation passes no pointers or arguments.
         let native_domain_before = crate::runtime::ordinary_map_domain_live_counts_for_test()
             .expect("ordinary-Map ownership registries are observable in tests");
+        // SAFETY: the checked zero-argument i32 entry and its engine remain
+        // live after resetting the failpoint; the call passes no pointers.
         assert_eq!(unsafe { native.call() }, 7, "native recovery");
         assert_eq!(
             crate::runtime::ordinary_map_domain_live_counts_for_test()
