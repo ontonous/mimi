@@ -88,10 +88,13 @@ tests/stdlib_matrix_generated/
 tests/stdlib_matrix_scratch/
 mm_probe_*.txt
 
-# Reproducible native binaries emitted by gate evidence, including strict L3.
+# Native executables, object files, runtime archives, and temporary files emitted by strict L3 gates.
 # Keep raw stdout/stderr captures (*.bin), manifests, command transcripts,
-# checksums, and source snapshots visible; gate executables use the stable
-# `program` filename across profile-specific output directories.
+# checksums, and source snapshots visible; gate executables use stable names.
+evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/native-object
+evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/runtime-archive
+evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/relinked-program
+evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/native-tmp/
 # Full-route census JSON, journals, and logs preserve each run's denominator,
 # per-input results, and raw command output.
 evidence/**/program
