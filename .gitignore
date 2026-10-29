@@ -61,7 +61,13 @@ Thumbs.db
 # Internal development docs (not for public)
 AGENTS.md
 AGENTS_ANCHOR_*.md
-devdocs/
+# Keep internal devdocs ignored by default, while allowing the reproducible
+# checked-unpack acceptance evidence for this development slice to be reviewed.
+devdocs/**
+!devdocs/v0.41/
+devdocs/v0.41/**
+!devdocs/v0.41/evidence-2026-10-29-map-any-checked-unpack/
+!devdocs/v0.41/evidence-2026-10-29-map-any-checked-unpack/**
 
 # Reference projects
 references/
