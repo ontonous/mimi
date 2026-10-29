@@ -54,15 +54,20 @@ source_snapshot() {
     (
         cd -- "$repo_root"
         {
-            for directory in src tests scripts .cargo; do
-                [[ ! -d "$directory" ]] || find "$directory" -type f -print
+            for directory in src tests scripts devdocs .cargo; do
+                [[ ! -d "$directory" ]] || find "$directory" -type f -print0
             done
             find . -maxdepth 1 -type f \
                 \( -name 'Cargo*' -o -name '.gitignore' -o -name 'build.rs' \
                     -o -name 'rust-toolchain*' -o -name 'rustfmt.toml' -o -name '.rustfmt.toml' \) \
-                -print
-        } | LC_ALL=C sort -u
+                -print0
+        } | LC_ALL=C sort -zu
     )
+}
+
+hash_snapshot() {
+    local source_list="$1"
+    xargs -0 -r sha256sum -- < "$source_list"
 }
 
 status=0
@@ -72,18 +77,23 @@ finalize() {
     [[ "$shell_status" == 0 ]] || status="$shell_status"
 
     local stable=false
-    if [[ -f "$artifact_dir/source-files.before.txt" ]]; then
-        source_snapshot > "$artifact_dir/source-files.after.txt" \
+    if [[ -f "$artifact_dir/source-files.before.nul" ]]; then
+        source_snapshot > "$artifact_dir/source-files.after.nul" \
             2> "$artifact_dir/source-snapshot.after.stderr" || status=98
-        if cmp -s "$artifact_dir/source-files.before.txt" "$artifact_dir/source-files.after.txt"; then
-            while IFS= read -r file; do sha256sum -- "$file"; done \
-                < "$artifact_dir/source-files.after.txt" > "$artifact_dir/source.after.sha256"
+        tr '\0' '\n' < "$artifact_dir/source-files.after.nul" > "$artifact_dir/source-files.after.txt"
+        if cmp -s "$artifact_dir/source-files.before.nul" "$artifact_dir/source-files.after.nul"; then
+            if ! hash_snapshot "$artifact_dir/source-files.after.nul" \
+                > "$artifact_dir/source.after.sha256"; then
+                status=98
+            fi
             if cmp -s "$artifact_dir/source.before.sha256" "$artifact_dir/source.after.sha256"; then
                 stable=true
             else
                 status=98
             fi
         else
+            diff -u "$artifact_dir/source-files.before.txt" "$artifact_dir/source-files.after.txt" \
+                > "$artifact_dir/source-files.diff" || true
             status=98
         fi
     else
@@ -110,14 +120,15 @@ finalize() {
 }
 trap finalize EXIT
 
-source_snapshot > "$artifact_dir/source-files.before.txt"
-while IFS= read -r file; do sha256sum -- "$file"; done \
-    < "$artifact_dir/source-files.before.txt" > "$artifact_dir/source.before.sha256"
+source_snapshot > "$artifact_dir/source-files.before.nul"
+tr '\0' '\n' < "$artifact_dir/source-files.before.nul" > "$artifact_dir/source-files.before.txt"
+hash_snapshot "$artifact_dir/source-files.before.nul" > "$artifact_dir/source.before.sha256"
 cp -- "$fixture" "$artifact_dir/source.fixture.mimi"
 sha256sum -- "$fixture" > "$artifact_dir/source.fixture.sha256"
 {
     printf 'repo_root=%s\nrun_id=%s\nprofile=%s\ncargo_target_dir=%s\nllvm_sys_181_prefix=%s\nfixture=%s\n' \
         "$repo_root" "$run_id" "$profile" "$target_dir" "$llvm_prefix" "$fixture"
+    printf 'CARGO_PROFILE_DEV_DEBUG=0\nCARGO_INCREMENTAL=1\n'
     printf 'cargo='; cargo --version
     printf 'rustc='; rustc --version --verbose
     printf 'valgrind='; valgrind --version
@@ -149,13 +160,14 @@ for mode in default explicit-mir; do
     [[ "$mode" != explicit-mir ]] || command_args+=(--mir)
     command_args+=("$fixture" --output "$binary")
     {
-        printf 'LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 MIMI_ROUTE_CENSUS=1 MIMI_VERBOSE=1 ' "$llvm_prefix"
+        printf 'LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=1 MIMI_ROUTE_CENSUS=1 MIMI_VERBOSE=1 ' "$llvm_prefix"
         printf '%q ' cargo "${command_args[@]}"
         printf '\n'
     } > "$mode_dir/build.command.txt"
     printf '%s\0' cargo "${command_args[@]}" > "$mode_dir/build.argv.nul"
     build_status=0
     if LLVM_SYS_181_PREFIX="$llvm_prefix" CARGO_TARGET_DIR="$target_dir" CARGO_BUILD_JOBS=1 \
+        CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=1 \
         MIMI_ROUTE_CENSUS=1 MIMI_VERBOSE=1 cargo "${command_args[@]}" \
         > "$mode_dir/build.stdout" 2> "$mode_dir/build.stderr"; then
         build_status=0
