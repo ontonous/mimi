@@ -5,10 +5,9 @@
 
 // ---------------------------------------------------------------------------
 // Full audit §13: CI/test script control-flow fixes (vacuous pass checks).
-// The tests below assert *syntactic* validity of each edited script
-// (`bash -n` for shell, python compile() for the python generator); they
-// never execute the scripts. Their job is to catch future syntax breakage
-// introduced while editing script logic.
+// The tests below assert syntax and exercise isolated helper fragments with
+// temporary fixtures. They never run a full evidence gate or compile Actor
+// fixtures, so script regressions can be checked without replaying the gate.
 // ---------------------------------------------------------------------------
 
 /// `bash -n <script>` must parse cleanly (parse-only, no execution).
@@ -170,6 +169,394 @@ fn script_syntax_mms_consistency_sh() {
 }
 
 #[test]
+fn script_syntax_verify_actor_two_fixture_current_sh() {
+    // The current-source Actor replay runner must stay parseable as its gates evolve.
+    assert_bash_syntax("scripts/verify-actor-two-fixture-current.sh");
+}
+
+#[test]
+fn actor_census_gate_status_is_rendered_from_passed_boolean() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = std::fs::read_to_string(root.join("scripts/verify-actor-two-fixture-current.sh"))
+        .expect("read Actor current-source runner");
+    assert!(
+        script
+            .lines()
+            .any(|line| line.trim() == "gate_passed = gate.get(\"passed\")"),
+        "Actor census status must use the report's boolean gate.passed field"
+    );
+    assert!(
+        script.contains("f\"census_global_gate_status={census_gate_status}\""),
+        "Actor census status output must use the boolean-derived status"
+    );
+    let status_expression = script
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("census_gate_status = "))
+        .expect("find Actor census gate status mapping");
+    for (gate_value, expected) in [
+        ("True", "passed"),
+        ("False", "failed"),
+        ("None", "<missing>"),
+    ] {
+        let python =
+            format!("gate_passed = {gate_value}\n{status_expression}\nprint(census_gate_status)\n");
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(python)
+            .output()
+            .expect("run Actor census gate status mapping");
+        assert!(
+            output.status.success(),
+            "Python status mapping failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            expected,
+            "unexpected census status for gate.passed={gate_value}"
+        );
+    }
+}
+
+struct ActorRunnerTempRoot(std::path::PathBuf);
+
+impl ActorRunnerTempRoot {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT_TEMP_ROOT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "actor-current-script-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("create Actor script test temp root");
+        Self(path)
+    }
+}
+
+impl Drop for ActorRunnerTempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn extract_actor_script_region(script: &str, start: &str, end: &str) -> String {
+    let start_index = script
+        .find(start)
+        .unwrap_or_else(|| panic!("Actor runner source is missing marker: {start}"));
+    let region = &script[start_index..];
+    let end_index = region
+        .find(end)
+        .unwrap_or_else(|| panic!("Actor runner source is missing marker: {end}"));
+    region[..end_index].to_owned()
+}
+
+fn extract_actor_python_heredoc(script: &str, command_marker: &str) -> String {
+    let marker_index = script
+        .find(command_marker)
+        .unwrap_or_else(|| panic!("Actor runner source is missing command: {command_marker}"));
+    let command = &script[marker_index..];
+    let body_start = command
+        .find("<<'PY'\n")
+        .map(|index| index + "<<'PY'\n".len())
+        .expect("find Actor runner Python heredoc opener");
+    let body = &command[body_start..];
+    let body_end = body
+        .find("\nPY")
+        .expect("find Actor runner Python heredoc terminator");
+    body[..body_end].to_owned()
+}
+
+fn actor_runner_host_target() -> String {
+    let output = std::process::Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("resolve native Rust host target for Actor runner tests");
+    assert!(
+        output.status.success(),
+        "rustc -vV failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+        .expect("rustc -vV must report a host target")
+}
+
+#[test]
+fn actor_runner_cargo_artifact_path_is_bound_to_isolated_host_target() {
+    use std::path::Path;
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = std::fs::read_to_string(root.join("scripts/verify-actor-two-fixture-current.sh"))
+        .expect("read Actor current-source runner");
+    let python = extract_actor_python_heredoc(
+        &script,
+        "if ! python3 - \"$gate_dir/stdout.bin\" \"$build_target_dir\" \"$host_target\" \"$gate_dir/mimi.path\" <<'PY'\n",
+    );
+    let temp = ActorRunnerTempRoot::new();
+    let target_root = temp.0.join("isolated-target");
+    let host = actor_runner_host_target();
+    let make_executable = |path: &Path| {
+        std::fs::create_dir_all(path.parent().expect("executable has a parent"))
+            .expect("create executable directory");
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("write test executable");
+        let chmod = std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(path)
+            .output()
+            .expect("make test executable executable");
+        assert!(
+            chmod.status.success(),
+            "chmod failed for {}",
+            path.display()
+        );
+    };
+    let other_target = format!("{host}-actor-test-cross-target");
+    let host_executable = target_root.join(&host).join("debug/mimi");
+    let other_target_executable = target_root.join(&other_target).join("debug/mimi");
+    let escaped_executable = temp.0.join("shared-target/debug/mimi");
+    for path in [
+        &host_executable,
+        &other_target_executable,
+        &escaped_executable,
+    ] {
+        make_executable(path);
+    }
+    let cargo_output = temp.0.join("cargo-output.jsonl");
+    let path_file = temp.0.join("mimi.path");
+    let run_path_check = |executable: &Path| {
+        let event = serde_json::json!({
+            "reason": "compiler-artifact",
+            "target": { "name": "mimi", "kind": ["bin"] },
+            "executable": executable.to_string_lossy(),
+        });
+        std::fs::write(&cargo_output, format!("{event}\n"))
+            .expect("write fake Cargo compiler-artifact event");
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&python)
+            .arg(&cargo_output)
+            .arg(&target_root)
+            .arg(&host)
+            .arg(&path_file)
+            .output()
+            .expect("run Cargo artifact path validation")
+    };
+
+    let valid = run_path_check(&host_executable);
+    assert!(
+        valid.status.success(),
+        "native isolated Cargo artifact was rejected: {}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path_file).expect("read accepted Cargo artifact path"),
+        format!("{}\n", host_executable.canonicalize().unwrap().display())
+    );
+
+    let escaped = run_path_check(&escaped_executable);
+    assert!(
+        !escaped.status.success(),
+        "shared-target artifact was accepted"
+    );
+    assert!(String::from_utf8_lossy(&escaped.stderr).contains("escaped the isolated target"));
+
+    let wrong_target = run_path_check(&other_target_executable);
+    assert!(
+        !wrong_target.status.success(),
+        "non-host target artifact was accepted"
+    );
+    assert!(String::from_utf8_lossy(&wrong_target.stderr).contains("forced native-host target"));
+}
+
+#[test]
+fn actor_runner_target_configuration_fails_closed_for_cross_targets() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = std::fs::read_to_string(root.join("scripts/verify-actor-two-fixture-current.sh"))
+        .expect("read Actor current-source runner");
+    let function = extract_actor_script_region(
+        &script,
+        "validate_cargo_target_configuration() {\n",
+        "\nsource_snapshot \"$ARTIFACT_DIR/source.inputs.before.nul\"",
+    );
+    let temp = ActorRunnerTempRoot::new();
+    let host = actor_runner_host_target();
+    let cross_target = format!("{host}-actor-test-cross-target");
+    let run_configuration_check =
+        |case: &str, env_target: Option<&str>, config_target: Option<(&str, bool)>| {
+            let project = temp.0.join(case);
+            let cargo_home = temp.0.join(format!("{case}-cargo-home"));
+            std::fs::create_dir_all(&project).expect("create Cargo config test project");
+            std::fs::create_dir_all(&cargo_home).expect("create isolated Cargo home");
+            if let Some((target, in_cargo_home)) = config_target {
+                let config_path = if in_cargo_home {
+                    cargo_home.join("config.toml")
+                } else {
+                    let config_dir = project.join(".cargo");
+                    std::fs::create_dir_all(&config_dir)
+                        .expect("create project Cargo config directory");
+                    config_dir.join("config.toml")
+                };
+                std::fs::write(config_path, format!("[build]\ntarget = {target:?}\n"))
+                    .expect("write project Cargo target config");
+            }
+            let report = temp.0.join(format!("{case}.report"));
+            let mut command = std::process::Command::new("bash");
+            command
+            .arg("-c")
+            .arg(format!(
+                "set -euo pipefail\n{function}\nvalidate_cargo_target_configuration \"$ACTOR_TEST_HOST\" \"$ACTOR_TEST_REPORT\"\n"
+            ))
+            .env("ROOT_DIR", &project)
+            .env("CARGO_HOME", &cargo_home)
+            .env("ACTOR_TEST_HOST", &host)
+            .env("ACTOR_TEST_REPORT", &report)
+            .env_remove("CARGO_BUILD_TARGET");
+            if let Some(target) = env_target {
+                command.env("CARGO_BUILD_TARGET", target);
+            }
+            command
+                .output()
+                .expect("run Cargo target configuration check")
+        };
+
+    let native = run_configuration_check("native", None, None);
+    assert!(
+        native.status.success(),
+        "unset target settings should select the native host: {}",
+        String::from_utf8_lossy(&native.stderr)
+    );
+
+    let environment_cross = run_configuration_check("environment-cross", Some(&cross_target), None);
+    assert!(
+        !environment_cross.status.success(),
+        "cross-target CARGO_BUILD_TARGET was accepted"
+    );
+    assert!(
+        std::fs::read_to_string(temp.0.join("environment-cross.report"))
+            .expect("read environment-target rejection report")
+            .contains("CARGO_BUILD_TARGET selects")
+    );
+
+    let config_cross = run_configuration_check("config-cross", None, Some((&cross_target, false)));
+    assert!(
+        !config_cross.status.success(),
+        "cross-target .cargo/config.toml build.target was accepted"
+    );
+    assert!(std::fs::read_to_string(temp.0.join("config-cross.report"))
+        .expect("read config-target rejection report")
+        .contains("expected native host"));
+
+    let cargo_home_config_cross =
+        run_configuration_check("cargo-home-config-cross", None, Some((&cross_target, true)));
+    assert!(
+        !cargo_home_config_cross.status.success(),
+        "cross-target CARGO_HOME/config.toml build.target was accepted"
+    );
+    assert!(
+        std::fs::read_to_string(temp.0.join("cargo-home-config-cross.report"))
+            .expect("read Cargo-home target rejection report")
+            .contains("expected native host")
+    );
+}
+
+#[test]
+fn actor_runner_memcheck_mkdir_failure_counts_as_gate_failure() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = std::fs::read_to_string(root.join("scripts/verify-actor-two-fixture-current.sh"))
+        .expect("read Actor current-source runner");
+    let function = extract_actor_script_region(
+        &script,
+        "require_l3_memcheck_reports() {\n",
+        "\nvalidate_full_route_census() {",
+    );
+    let callsite_start = script
+        .find("if ! require_l3_memcheck_reports; then\n")
+        .expect("find Memcheck report gate callsite");
+    let callsite_tail = &script[callsite_start..];
+    let callsite_end = callsite_tail
+        .find("\nfi")
+        .map(|index| index + "\nfi".len())
+        .expect("find Memcheck report gate callsite end");
+    let callsite = &callsite_tail[..callsite_end];
+    assert!(
+        callsite.contains("GATE_FAILURES=$((GATE_FAILURES + 1))"),
+        "Memcheck report failures must increment the gate failure count"
+    );
+
+    let temp = ActorRunnerTempRoot::new();
+    let artifact_dir = temp.0.join("artifact");
+    std::fs::create_dir_all(&artifact_dir).expect("create Memcheck artifact root");
+    std::fs::write(
+        artifact_dir.join("l3-memcheck"),
+        b"block directory creation",
+    )
+    .expect("create path obstruction for Memcheck report directory");
+    let harness = format!(
+        "set -uo pipefail\nARTIFACT_DIR=\"$ACTOR_TEST_ARTIFACT_DIR\"\nGATE_FAILURES=0\n{function}\n{callsite}\nprintf 'GATE_FAILURES=%s\\n' \"$GATE_FAILURES\"\n"
+    );
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("ACTOR_TEST_ARTIFACT_DIR", &artifact_dir)
+        .output()
+        .expect("run extracted Memcheck gate");
+    assert!(
+        output.status.success(),
+        "Memcheck failure harness exited unexpectedly: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "GATE_FAILURES=1",
+        "a failed Memcheck report directory setup must count against the gate"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("could not create Memcheck report directory"));
+}
+
+#[test]
+fn actor_runner_census_schema_v6_is_required() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = std::fs::read_to_string(root.join("scripts/verify-actor-two-fixture-current.sh"))
+        .expect("read Actor current-source runner");
+    let schema_check = extract_actor_script_region(
+        &script,
+        "if report.get(\"schema_version\") != \"0.1.11-full-route-census-v6\":\n",
+        "\nif report.get(\"collection_mode\")",
+    );
+    for (schema, expected) in [
+        ("0.1.11-full-route-census-v6", ""),
+        (
+            "0.1.11-full-route-census-v5",
+            "unexpected census schema version",
+        ),
+    ] {
+        let report_schema = serde_json::to_string(schema).expect("encode test census schema");
+        let python = format!(
+            "report = {{\"schema_version\": {report_schema}}}\nissues = []\n{schema_check}\nprint('\\n'.join(issues))\n"
+        );
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(python)
+            .output()
+            .expect("run census schema validation fragment");
+        assert!(
+            output.status.success(),
+            "schema validation fragment failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            expected,
+            "unexpected census schema v6 decision for {schema}"
+        );
+    }
+}
+
+#[test]
 fn legacy_owner_condition_fingerprint_is_executable_and_repeatable() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("scripts/audit-mir-legacy-owners.sh");
@@ -202,8 +589,8 @@ fn legacy_owner_condition_fingerprint_is_executable_and_repeatable() {
     let first_fingerprints = fingerprints(&first);
     assert_eq!(
         first_fingerprints.len(),
-        5,
-        "legacy owner audit must expose four owner digests and one set digest"
+        3,
+        "legacy owner audit must expose two owner digests and one set digest"
     );
     assert_eq!(
         first_fingerprints,
@@ -240,25 +627,11 @@ fn legacy_owner_reachability_report_stays_conservative() {
             "src/codegen/compile.rs::pub fn compile_checked(",
         ),
         (
-            "FlowVerifierCompatibility",
-            "flow-body-compatibility",
-            "test_legacy_body_access().is_empty()",
-            "verify_closed_mir_program",
-            "src/verifier/mod.rs::pub fn verify_checked(",
-        ),
-        (
             "FfiVerifierCompatibility",
             "ffi-declaration-compatibility",
             "Vec::<crate::core::LegacyBodyConsumer>::new()",
             "scalar_ffi_admission",
             "src/verifier/mod.rs::pub fn verify_ffi_checked_with_source_hash(",
-        ),
-        (
-            "DualVerifierCompatibility",
-            "secondary-flow-vir-compatibility",
-            "test_legacy_body_access().is_empty()",
-            "verify_closed_mir_program",
-            "src/verifier/mod.rs::pub fn verify_checked_dual(",
         ),
     ] {
         let evidence_prefix = format!("owner={owner} evidence_scope=");
@@ -305,6 +678,19 @@ fn legacy_owner_reachability_report_stays_conservative() {
             );
         }
     }
+    let retired_flow_dual = "retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence=flow_scalar_migration_keeps_mir_and_dual_verdicts+flow_transition_invariant_and_field_projection_owner_parity+canonical_mir_transition_preserves_contract_kinds";
+    assert!(
+        stdout.lines().any(|line| line == retired_flow_dual),
+        "Flow and Dual verifier owners must be physically retired with MIR semantic evidence"
+    );
+    for retired_owner in ["FlowVerifierCompatibility", "DualVerifierCompatibility"] {
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.starts_with(&format!("owner={retired_owner} "))),
+            "retired owner {retired_owner} must not remain in the active census"
+        );
+    }
     for expected in [
         "generic_trait_default_route_stdout_marker=\"33\\n22\\n11\\n\"",
         "closed_scalar_zero_owner_evidence=",
@@ -314,7 +700,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
         "closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call",
         "test_only_legacy_body_adapter_context=core::CheckedProgram::legacy_body_file+codegen::tests",
-        "test_only_ast_verifier_modules=expr,flow,func,helpers,vir;func::ExternBlock->verify_extern_func;ctx::verify_file;helpers::mock_verify_file",
+        "test_only_ast_verifier_modules=expr,func,helpers,vir;flow-owner+batch+transition-adapters=deleted",
         "codegen_legacy_consumer_boundary=llvm_compile_file_cfg_test;native_build_no_bytecode_legacy;run-test-disasm_explicit_legacy_route",
         "closed_codegen_route_tripwire=dynamic-trait test=compile_checked_rejects_dynamic_protocol_method_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
         "closed_codegen_route_tripwire=flow-transition test=compile_checked_routes_multi_transition_flow_through_canonical_mir markers=test_legacy_body_access().is_empty(),canonical multi-transition Flow must emit main",
@@ -350,8 +736,9 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "verifier_semantic_receipt_required=explicit-reference consumer=src/verifier/mir.rs::verify_program_inner+verify_ffi_program_inner(",
         "verifier_default_entry_receipt_handoff=single-wrapper-witness consumer=src/verifier/mod.rs::verify_mir+verify_ffi_mir_with_source_hash(",
         "verifier_default_entry_receipt_profile_order=map-empty-root-root-queries-v1->zero-miss-i32->observer-v1->direct-print->computed-key-get->mixed-snapshot-remove->mixed-snapshot->snapshot-replacement->field-move->ordinary-map-owner-v2->default consumer=src/verifier/mod.rs::pub fn verify_mir(",
-        "bytecode_ordinary_map_owned_any_v2_route_binding=11-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(",
+        "bytecode_ordinary_map_owned_any_v2_route_binding=15-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(",
         "bytecode_map_empty_root_root_queries_v1_route_binding=1-dedicated-adapter->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_with_empty_root_root_queries_v1_route(",
+        "values_crosscall_string_caller_route_binding=V1-index0+V2-index1->distinct-ordered-selector+exact-bytecode-token+Checker-MIR-verifier+CLI-profile-dispatch consumer=src/main/canonical_dispatch.rs+src/interp/bytecode/mir.rs+src/verifier/mod.rs+src/main/verify.rs",
         "observer_v1_exact_route_binding=CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1->ordinary-map-owner-lifecycle-observer-v1->ordered-default-selector+materialization-receipt-equality+checker-MIR-bytecode-native-verifier-preflight+same-bytecode-and-native-receipt-adapters consumer=src/main/canonical_dispatch.rs+src/main/build.rs+src/interp/bytecode/mir.rs+src/codegen/mir/eligibility.rs",
         "verifier_unbound_helper=test-only consumer=src/verifier/mir.rs::pub(crate) fn verify_program(",
         "consumer_receipt_provenance_binding=native-direct-v1 graph=canonical provenance=canonical-mir-graph consumer=src/codegen/compile.rs::pub fn compile_checked(",
@@ -373,7 +760,7 @@ fn legacy_owner_reachability_report_stays_conservative() {
         "mir_cli_error_boundary_binding=shared-format-cli-error consumer=src/main.rs",
         "mir_cli_disasm_route_binding=shared-format-cli-error consumer=src/main/disasm_cmd.rs",
         "mir_cli_route_formatter_provenance_binding=registry-code+mir.route-origin consumer=src/main.rs",
-        "owner_count=4",
+        "owner_count=2",
         "audit_status=ok",
     ] {
         assert!(
@@ -1250,17 +1637,45 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     );
     assert!(
         stdout.contains(
-            "bytecode_ordinary_map_owned_any_v2_route_binding=11-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner("
+            "bytecode_ordinary_map_owned_any_v2_route_binding=15-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner("
         ) && audit_source.contains(
             r#"    bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_values_producer_caller_route \
-        pub\ fn\ compile_mir_program_with_computed_key_get_route\( \
+        pub\ fn\ compile_mir_program_with_values_crosscall_string_caller_route\( \
         validate_ordinary_map_owned_any_v2_values_producer_caller_route \
         ORDINARY_MAP_OWNED_ANY_V2_VALUES_PRODUCER_CALLER_PROFILE \
         ValuesProducerCaller \
         checker-validator"#
         ),
         "legacy owner audit must pin ValuesProducerCaller's typed route token and exact adapter boundary"
+    );
+    let crosscall_adapter_binding = r#"    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_values_crosscall_string_caller_route \
+        pub\ fn\ compile_mir_program_with_values_crosscall_string_caller_index1_route\( \
+        validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route \
+        ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE \
+        ValuesCrosscallStringCaller \
+        checker-validator"#;
+    assert!(
+        audit_source.contains(crosscall_adapter_binding),
+        "legacy owner audit must pin ValuesCrosscallStringCaller's exact bounded adapter check"
+    );
+    let crosscall_index1_adapter_binding = r#"    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_values_crosscall_string_caller_index1_route \
+        pub\ fn\ compile_mir_program_with_map_root_producer_caller_route\( \
+        validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route \
+        ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_V2_PROFILE \
+        ValuesCrosscallStringCallerIndex1 \
+        checker-validator"#;
+    assert!(
+        audit_source.contains(crosscall_index1_adapter_binding),
+        "legacy owner audit must pin ValuesCrosscallStringCaller Index1's distinct V2 adapter and profile"
+    );
+    assert!(
+        stdout.contains(
+            "values_crosscall_string_caller_route_binding=V1-index0+V2-index1->distinct-ordered-selector+exact-bytecode-token+Checker-MIR-verifier+CLI-profile-dispatch consumer=src/main/canonical_dispatch.rs+src/interp/bytecode/mir.rs+src/verifier/mod.rs+src/main/verify.rs"
+        ),
+        "legacy owner audit must pin index-zero V1 and index-one V2 selector, bytecode, and verifier bindings"
     );
     assert!(
         stdout.contains(
@@ -1341,6 +1756,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         "verifier/mod.rs",
         "interp/bytecode/mir.rs",
         "main/canonical_dispatch.rs",
+        "codegen/mir/eligibility.rs",
     ];
     mirror_source_tree_except(
         &root.join("src"),
@@ -1364,6 +1780,9 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
     let bytecode_path = temp_root.join("src/interp/bytecode/mir.rs");
     std::fs::copy(root.join("src/interp/bytecode/mir.rs"), &bytecode_path)
         .expect("copy bytecode adapter source before route mutations");
+    let native_path = temp_root.join("src/codegen/mir/eligibility.rs");
+    std::fs::copy(root.join("src/codegen/mir/eligibility.rs"), &native_path)
+        .expect("copy native adapter source before route mutations");
 
     let dispatcher_path = temp_root.join("src/main/canonical_dispatch.rs");
     std::fs::copy(
@@ -1373,6 +1792,21 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
     .expect("copy default dispatcher source for Observer V1 route mutation");
     let dispatcher_source =
         std::fs::read_to_string(&dispatcher_path).expect("read copied default dispatcher source");
+    let baseline_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run legacy owner audit against the clean source snapshot");
+    assert!(
+        baseline_output.status.success(),
+        "the unmodified legacy owner audit must pass before route mutations:\n{}\n{}",
+        String::from_utf8_lossy(&baseline_output.stdout),
+        String::from_utf8_lossy(&baseline_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&baseline_output.stdout).contains("audit_status=ok"),
+        "the clean-source audit must report an explicit PASS marker"
+    );
     let wrong_observer_profile = dispatcher_source.replacen(
         "mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE",
         "mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND",
@@ -1403,22 +1837,69 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
     std::fs::write(&dispatcher_path, &dispatcher_source)
         .expect("restore dispatcher source after Observer V1 profile mutation");
 
+    let swapped_values_crosscall_index1_profile = dispatcher_source.replacen(
+        "                                        OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\n                                        .as_str(),",
+        "                                        OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\n                                        .as_str(),",
+        1,
+    );
+    assert_ne!(
+        dispatcher_source, swapped_values_crosscall_index1_profile,
+        "Values Index1 mutation fixture must replace the default selector's exact V2 profile"
+    );
+    std::fs::write(&dispatcher_path, swapped_values_crosscall_index1_profile)
+        .expect("write dispatcher source with V1 profile on the index-one route");
+    let swapped_values_crosscall_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a V1 profile on the index-one route");
+    assert!(
+        !swapped_values_crosscall_output.status.success(),
+        "the default selector must not authorize the index-one Values route with the V1 profile:\n{}",
+        String::from_utf8_lossy(&swapped_values_crosscall_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&swapped_values_crosscall_output.stderr)
+            .contains("owner_audit_error=values_crosscall_string_caller_selector_binding_missing="),
+        "Values Index1 profile drift omitted the exact-route diagnostic:\n{}",
+        String::from_utf8_lossy(&swapped_values_crosscall_output.stderr)
+    );
+    std::fs::write(&dispatcher_path, &dispatcher_source)
+        .expect("restore dispatcher source after Values Index1 profile mutation");
+
     let zero_miss_route = "    if admission.ordinary_map_owned_any_v2_zero_miss_i32() {\n        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\n    }\n";
+    let keys_snapshot_route = "    if admission.ordinary_map_owned_any_v2\n        == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::KeysSnapshot\n    {\n        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE;\n    }\n";
     let values_producer_caller_route = "    if admission.ordinary_map_owned_any_v2_values_producer_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesProducerCaller\n            .as_str();\n    }\n";
+    let values_crosscall_string_caller_index1_route = "    if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\n            .as_str();\n    }\n";
+    let values_crosscall_string_caller_route = "    if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\n            .as_str();\n    }\n";
+    let map_root_get_any_caller_route = "    if admission.ordinary_map_owned_any_v2_map_root_get_any_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller\n            .as_str();\n    }\n";
     let map_root_producer_caller_route = "    if admission.ordinary_map_owned_any_v2_map_root_producer_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2MapRootProducerCaller\n            .as_str();\n    }\n";
-    let early_route_order =
-        format!("{zero_miss_route}{values_producer_caller_route}{map_root_producer_caller_route}");
+    let early_route_order = format!(
+        "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
+    );
     let early_route_reorders = [
         (
             "zero-miss and ValuesProducerCaller",
             format!(
-                "{values_producer_caller_route}{zero_miss_route}{map_root_producer_caller_route}"
+                "{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{zero_miss_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
             ),
         ),
         (
-            "ValuesProducerCaller and MapRootProducerCaller",
+            "ValuesCrosscallStringCallerIndex1 and ValuesCrosscallStringCaller",
             format!(
-                "{zero_miss_route}{map_root_producer_caller_route}{values_producer_caller_route}"
+                "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_route}{values_crosscall_string_caller_index1_route}{values_producer_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
+            ),
+        ),
+        (
+            "ValuesCrosscallStringCaller and ValuesProducerCaller",
+            format!(
+                "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_producer_caller_route}{values_crosscall_string_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
+            ),
+        ),
+        (
+            "MapRootGetAnyCaller and MapRootProducerCaller",
+            format!(
+                "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{map_root_producer_caller_route}{map_root_get_any_caller_route}"
             ),
         ),
     ];
@@ -1773,6 +2254,37 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         String::from_utf8_lossy(&is_empty_token_output.stderr)
     );
 
+    let wrong_get_or_default_token = bytecode_source.replacen(
+        "Some(ValidatedOrdinaryMapOwnedAnyV2Route::GetOrDefaultI32(\n            receipt,\n        )),",
+        "Some(ValidatedOrdinaryMapOwnedAnyV2Route::ZeroMissI32(&receipt)),",
+        1,
+    );
+    assert_ne!(
+        bytecode_source, wrong_get_or_default_token,
+        "GetOrDefaultI32 mutation fixture must replace its exact typed route token"
+    );
+    std::fs::write(&bytecode_path, wrong_get_or_default_token)
+        .expect("write GetOrDefaultI32 adapter source with a ZeroMissI32 route token");
+    let get_or_default_token_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a mismatched GetOrDefaultI32 route token");
+    let get_or_default_token_stderr = String::from_utf8_lossy(&get_or_default_token_output.stderr);
+    assert!(
+        !get_or_default_token_output.status.success()
+            && get_or_default_token_stderr
+                .contains("owner_audit_error=bytecode_narrow_map_any_adapter_token_missing=")
+            && get_or_default_token_stderr.contains(
+                "compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_i32_route"
+            ),
+        "a GetOrDefaultI32 adapter with another route token must fail closed:\n{}\n{}",
+        String::from_utf8_lossy(&get_or_default_token_output.stdout),
+        get_or_default_token_stderr
+    );
+    std::fs::write(&bytecode_path, &bytecode_source)
+        .expect("restore bytecode adapter source after GetOrDefaultI32 token mutation");
+
     for (variant, adapter, token_source) in [
         (
             "ZeroMissI32",
@@ -1882,6 +2394,36 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
             .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
         "Observer V1 receipt-transfer drift omitted the exact-route diagnostic:\n{}",
         String::from_utf8_lossy(&observer_handoff_output.stderr)
+    );
+
+    let native_source =
+        std::fs::read_to_string(&native_path).expect("read copied native adapter source");
+    let dropped_native_receipt = native_source.replacen(
+        "let result = self.compile_mir_native_with_route_receipt_inner(\n            program,\n            receipt,\n            native_checker_authorized_route,\n        );",
+        "let result = self.compile_mir_native_with_route_receipt_inner(\n            program,\n            canonical_receipt,\n            native_checker_authorized_route,\n        );",
+        1,
+    );
+    assert_ne!(
+        native_source, dropped_native_receipt,
+        "Observer V1 native mutation fixture must replace the exact receipt handoff"
+    );
+    std::fs::write(&native_path, dropped_native_receipt)
+        .expect("write native adapter source with a mismatched route receipt handoff");
+    let native_handoff_output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(&temp_root)
+        .output()
+        .expect("run audit against a mismatched Observer V1 native receipt handoff");
+    assert!(
+        !native_handoff_output.status.success(),
+        "a native adapter that forwards another receipt must fail closed:\n{}",
+        String::from_utf8_lossy(&native_handoff_output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&native_handoff_output.stderr)
+            .contains("owner_audit_error=observer_v1_exact_route_binding_missing="),
+        "Observer V1 native receipt-transfer drift omitted the exact-route diagnostic:\n{}",
+        String::from_utf8_lossy(&native_handoff_output.stderr)
     );
     drop(cleanup);
 }

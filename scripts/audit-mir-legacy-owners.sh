@@ -23,10 +23,8 @@ readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
 # digest beside each prose condition so scope changes are detected by the
 # gate and reviewed together with the migration that changes the condition.
 readonly EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST=fc5d620ce5d0ca2182f85bcc629ab0729cd0f162b511cfccd0b6bf9bb682a7b3
-readonly EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST=93de03d733aaa6989cb3af9cd425e27565babd99ad64cbc4cddca27fdae345ee
 readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=aa3f8f0d35d38b92bcc71fde640abfa53989bfa506c43d8964c70e4c5a211d95
-readonly EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST=2f2b0eb8778541ec328a7af98c4cee4fdaf116863ab8769ae3f2d6d569495740
-readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=03642eb5fc55f7f92049368c6a950738e654a5189c675c3dffbe41b9f6c5c594
+readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=76abec5ddfe605f4a2bd791b1871b748ca3f42cb4b7a1bd7ab23020df60988f3
 audit_failed=0
 closed_scalar_marker_sequence=()
 
@@ -75,55 +73,98 @@ owner_evidence \
     'generic ignored-bool binding uses canonical MIR without any legacy owner' \
     'test_legacy_codegen_function_calls().is_empty()'
 owner_evidence \
-    FlowVerifierCompatibility \
-    src/verifier/tests.rs \
-    public_checked_verifier_routes_recoverable_cross_state_flow_to_mir \
-    'recoverable cross-state Flow uses canonical MIR for single and dual verification without legacy access' \
-    'test_legacy_body_access().is_empty()'
-owner_evidence \
     FfiVerifierCompatibility \
     src/verifier/tests.rs \
     typed_ffi_symbolic_string_contexts_defer_without_legacy_access \
     'typed String FFI context reports checker-owned coverage without any legacy owner' \
     'Vec::<crate::core::LegacyBodyConsumer>::new()'
 owner_evidence \
-    DualVerifierCompatibility \
+    FfiVerifierCompatibility \
     src/verifier/tests.rs \
-    canonical_mir_bool_result_postconditions_keep_flow_verdicts_through_dual \
-    'Flow verdicts and their MIR artifacts agree through the dual verifier without legacy access' \
-    'test_legacy_body_access().is_empty()'
+    typed_ffi_string_record_ensures_use_checker_receipt_and_fresh_result \
+    'checked verifier-only owner slice proves Ready repr(C) String-field Ensures' \
+    'Some("verifier-ffi-owner-slice-v1")'
+owner_evidence \
+    FfiVerifierCompatibility \
+    src/verifier/tests.rs \
+    typed_ffi_ready_unsupported_record_ensures_preserves_requires_proof \
+    'unsupported Ready Ensures stays call-local without discarding Requires proof' \
+    'result.artifact.is_none()'
+owner_evidence \
+    FfiVerifierCompatibility \
+    src/verifier/tests.rs \
+    typed_ffi_aggregate_nested_string_fields_preserve_nul_unicode_and_length \
+    'nested repr(C) String fields preserve exact caller identity through MIR' \
+    'Some("verifier-ffi-owner-slice-v1")'
+retired_flow_dual_owner_evidence() {
+    local verifier_dir="$SRC_DIR/verifier"
+    local parity_tests="$verifier_dir/flow_retirement_tests.rs"
+    local scalar transition kinds body test_name
 
-# Keep the independent surface-AST engines alive as test oracles for the
-# scalar contract slice.  This evidence is deliberately separate from the
-# zero-access production route above: a passing AST oracle proves parity, not
-# deletion readiness for FlowVerifierCompatibility or DualVerifierCompatibility.
-test_only_ast_oracle_evidence() {
-    local test_path="$ROOT_DIR/src/verifier/flow_retirement_tests.rs"
-    local test_name='flow_scalar_migration_keeps_ast_engines_as_test_oracles'
-    local body
-    body="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" "$test_path")"
-    if [ -z "$body" ]; then
-        printf 'owner_audit_error=missing_test_only_ast_oracle_evidence test=%s::%s\n' \
-            "${test_path#$ROOT_DIR/}" "$test_name" >&2
+    if [ -e "$verifier_dir/flow.rs" ]; then
+        printf 'owner_audit_error=retired_flow_ast_owner_file_still_exists\n' >&2
         audit_failed=1
         return
     fi
     for marker in \
-        'super::flow::flow_verify_file_with_hashes' \
-        'dual_ast.verify_file(&file)' \
-        'assert_public_routes_match_exact_mir'; do
-        if ! printf '%s\n' "$body" | rg -F "$marker" >/dev/null; then
-            printf 'owner_audit_error=test_only_ast_oracle_marker_missing test=%s marker=%s\n' \
-                "$test_name" "$marker" >&2
+        'FlowVerifierCompatibility' \
+        'DualVerifierCompatibility' \
+        'flow_verify_file_with_hashes' \
+        'pub(crate) fn verify_file(' \
+        'verify_transition_vir(' \
+        'lower_transition_to_vir(' \
+        'synthesize_transition_func(' \
+        'TypestateAxioms' \
+        'typestate_context'; do
+        if rg -n -F --glob '*.rs' "$marker" "$SRC_DIR/verifier" "$SRC_DIR/core/resolved" >/dev/null; then
+            printf 'owner_audit_error=retired_flow_dual_symbol_remains marker=%s\n' "$marker" >&2
             audit_failed=1
             return
         fi
     done
-    printf 'test_only_ast_semantic_oracle=flow+secondary-ast status-parity=asserted production-access=separately-checked test=%s::%s\n' \
-        "${test_path#$ROOT_DIR/}" "$test_name"
+
+    scalar='flow_scalar_migration_keeps_mir_and_dual_verdicts'
+    transition='flow_transition_invariant_and_field_projection_owner_parity'
+    kinds='canonical_mir_transition_preserves_contract_kinds'
+    for test_name in "$scalar" "$transition" "$kinds"; do
+        body="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" "$parity_tests")"
+        if [ -z "$body" ]; then
+            printf 'owner_audit_error=missing_mir_native_flow_parity_test test=%s\n' "$test_name" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    body="$(sed -n "/^[[:space:]]*fn ${scalar}(/,/^[[:space:]]*#\\[test\\]/p" "$parity_tests")"
+    for marker in 'VerifStatus::Proven' 'VerifStatus::Disproven' 'assert_public_routes_match_exact_mir'; do
+        if ! printf '%s\n' "$body" | rg -F "$marker" >/dev/null; then
+            printf 'owner_audit_error=flow_scalar_mir_dual_evidence_missing test=%s marker=%s\n' \
+                "$scalar" "$marker" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    body="$(sed -n "/^[[:space:]]*fn ${transition}(/,/^[[:space:]]*#\\[test\\]/p" "$parity_tests")"
+    for marker in 'VerifStatus::Proven' 'VerifStatus::Disproven' 'assert_resolved_primary_matches_exact_mir' 'assert_public_routes_match_exact_mir'; do
+        if ! printf '%s\n' "$body" | rg -F "$marker" >/dev/null; then
+            printf 'owner_audit_error=flow_transition_mir_dual_evidence_missing test=%s marker=%s\n' \
+                "$transition" "$marker" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    body="$(sed -n "/^[[:space:]]*fn ${kinds}(/,/^[[:space:]]*#\\[test\\]/p" "$parity_tests")"
+    for marker in 'MirContractKind::Requires' 'MirContractKind::Ensures' 'MirContractKind::Invariant'; do
+        if ! printf '%s\n' "$body" | rg -F "$marker" >/dev/null; then
+            printf 'owner_audit_error=flow_transition_mir_contract_kind_evidence_missing marker=%s\n' "$marker" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence=%s+%s+%s\n' \
+        "$scalar" "$transition" "$kinds"
 }
 
-test_only_ast_oracle_evidence
+retired_flow_dual_owner_evidence
 
 # Generic trait specialization tests must exercise the checker-owned impl
 # catalog and canonical MIR consumers.  The old compatibility fixture for
@@ -310,15 +351,12 @@ route_receipt_profile_binding() {
 
 test_only_legacy_body_adapter_context
 
-# The former Flow/VIR/FFI verifier implementations consume the retained
-# surface AST. They remain compiled for the in-crate equivalence tests, where
-# the old engine is an oracle, but no production library build may expose the
-# modules or their AST entry points. Keep the cfg(test) boundary explicit so a
-# future re-export cannot silently reopen one of the three retired verifier
-# owners (Flow, FFI, or the secondary dual engine).
+# Generic surface-AST verifier helpers remain test-only for the still-active
+# FFI audit. The Flow state-machine engine, file batch adapter, and transition
+# VIR adapter have been physically removed; keep those deletions explicit.
 test_only_ast_verifier_modules() {
     local module
-    for module in expr flow func helpers vir; do
+    for module in expr func helpers vir; do
         if ! rg -U -q "#\[cfg\(test\)\]\n(?:pub[[:space:]]+)?mod ${module};" \
             "$ROOT_DIR/src/verifier/mod.rs"; then
             printf 'owner_audit_error=verifier_ast_module_not_cfg_test module=%s\n' "$module" >&2
@@ -326,29 +364,28 @@ test_only_ast_verifier_modules() {
             return
         fi
     done
-    local ffi_context
-    ffi_context="$(sed -n '/fn verify_items_collect(/,/pub(crate) fn preseed_func_status(/p' \
-        "$ROOT_DIR/src/verifier/func.rs")"
-    if ! printf '%s\n' "$ffi_context" | rg -F 'Item::ExternBlock(block) =>' >/dev/null \
-        || ! printf '%s\n' "$ffi_context" | rg -F 'self.verify_extern_func(session, func)' >/dev/null \
-        || ! rg -Fq 'pub(crate) fn verify_extern_func(' "$ROOT_DIR/src/verifier/func.rs"; then
-        printf 'owner_audit_error=verifier_ast_ffi_entry_missing=func::ExternBlock->verify_extern_func\n' >&2
+    if rg -U -q '#\[cfg\(test\)\]\n(?:pub[[:space:]]+)?mod flow;' \
+        "$ROOT_DIR/src/verifier/mod.rs" \
+        || [ -e "$ROOT_DIR/src/verifier/flow.rs" ]; then
+        printf 'owner_audit_error=retired_flow_ast_module_reintroduced\n' >&2
         audit_failed=1
         return
     fi
-    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn verify_file\(' \
-        "$ROOT_DIR/src/verifier/ctx.rs"; then
-        printf 'owner_audit_error=verifier_ast_file_entry_not_cfg_test\n' >&2
+    if rg -Fq 'pub(crate) fn verify_file(' "$ROOT_DIR/src/verifier/ctx.rs" \
+        || rg -Fq 'pub(crate) fn verify_items(' "$ROOT_DIR/src/verifier/func.rs" \
+        || rg -Fq 'pub(crate) fn verify_transition(' "$ROOT_DIR/src/verifier/func.rs" \
+        || rg -Fq 'pub(crate) fn verify_transition_vir(' "$ROOT_DIR/src/verifier/func.rs" \
+        || rg -Fq 'pub fn lower_transition_to_vir(' "$ROOT_DIR/src/verifier/vir.rs"; then
+        printf 'owner_audit_error=retired_flow_or_batch_verifier_adapter_reintroduced\n' >&2
         audit_failed=1
         return
     fi
-    if ! rg -U -q '#\[cfg\(test\)\]\n(?:[[:space:]]*)pub\(crate\) fn mock_verify_file\(' \
-        "$ROOT_DIR/src/verifier/helpers.rs"; then
-        printf 'owner_audit_error=verifier_ast_mock_entry_not_cfg_test\n' >&2
+    if rg -Fq 'pub(crate) fn mock_verify_file(' "$ROOT_DIR/src/verifier/helpers.rs"; then
+        printf 'owner_audit_error=retired_ast_mock_file_adapter_reintroduced\n' >&2
         audit_failed=1
         return
     fi
-    printf 'test_only_ast_verifier_modules=expr,flow,func,helpers,vir;func::ExternBlock->verify_extern_func;ctx::verify_file;helpers::mock_verify_file\n'
+    printf 'test_only_ast_verifier_modules=expr,func,helpers,vir;flow-owner+batch+transition-adapters=deleted\n'
 }
 
 test_only_ast_verifier_modules
@@ -394,26 +431,12 @@ owner_closed_route_guard \
     try_compile_exact_migrated_mir_island \
     'if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)?'
 owner_closed_route_guard \
-    FlowVerifierCompatibility \
-    src/verifier/mod.rs \
-    'pub fn verify_checked(' \
-    'pub fn verify_ffi_source(' \
-    verify_closed_mir_program \
-    'match verify_closed_mir_program(program, source_hash.clone())'
-owner_closed_route_guard \
     FfiVerifierCompatibility \
     src/verifier/mod.rs \
     'pub fn verify_ffi_checked_with_source_hash(' \
     'fn ffi_infrastructure_error(' \
     scalar_ffi_admission \
     'if profile.is_admitted(admission)'
-owner_closed_route_guard \
-    DualVerifierCompatibility \
-    src/verifier/mod.rs \
-    'pub fn verify_checked_dual(' \
-    'fn verify_closed_mir_program(' \
-    verify_closed_mir_program \
-    'match verify_closed_mir_program(program, source_hash.clone())'
 
 # Direct CodeGenerator callers must enforce the same called-extern boundary
 # as CLI dispatch before the migrated-island probe can return a compatibility
@@ -1021,14 +1044,21 @@ consumer_receipt_profile_binding \
     ScalarFfi
 
 # The verifier-only singleton-For exception is a separate owner receipt and
-# cannot acquire ScalarFfi execution authority. Keep its profile and Requires-
-# only adapter paired explicitly in the audit.
+# cannot acquire ScalarFfi execution authority. Ready Ensures are eligible
+# only after the independent checked-source census and phase-aware call-site
+# identity join; the MIR consumer still keeps foreign Requires independent.
 owner_slice_ffi_receipt_binding() {
     local context
-    context="$(sed -n '/^fn verify_isolated_ffi_callers(/,/^fn order_ffi_requires_sites_by_identity(/p' "$ROOT_DIR/src/verifier/mod.rs")"
+    context="$(sed -n '/^fn verify_isolated_ffi_callers(/,/^fn order_ffi_contract_sites_by_identity(/p' "$ROOT_DIR/src/verifier/mod.rs")"
     for pattern in \
         'canonical.route_receipt("verifier-ffi-owner-slice-v1")' \
-        'verify_ffi_mir_requires_with_route_receipt(&canonical, &receipt, source_hash.clone())'; do
+        'canonical.validate_ffi_source_census()' \
+        'ResolvedFfiContractRoot::Ready { node_id }' \
+        'contract.ensures_root.as_ref() == Some(node_id)' \
+        'selected_ensures.insert(instruction.clone())' \
+        'order_ffi_contract_sites_by_identity(' \
+        'verify_ffi_mir_with_selected_ensures_route_receipt(' \
+        'modeled_ensures_sites.extend(selected_ensures_sites)'; do
         if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=owner_slice_ffi_receipt_binding_missing=src/verifier/mod.rs pattern=%s\n' \
                 "$pattern" >&2
@@ -1036,7 +1066,7 @@ owner_slice_ffi_receipt_binding() {
             return
         fi
     done
-    printf 'owner_slice_ffi_receipt_binding=verifier-ffi-owner-slice-v1+Requires-only consumer=src/verifier/mod.rs::verify_isolated_ffi_callers(\n'
+    printf 'owner_slice_ffi_receipt_binding=verifier-ffi-owner-slice-v1+Requires+selected-Ready-Ensures+phase-identity+checked-source-census consumer=src/verifier/mod.rs::verify_isolated_ffi_callers(\n'
 }
 
 owner_slice_ffi_receipt_binding
@@ -1171,6 +1201,8 @@ bytecode_narrow_map_any_route_adapter() {
     fi
     if [ "$receipt_source" = "checker-validator" ]; then
         profile_receipt_pattern="let\\s+receipt\\s*=\\s*crate::core::mir::${validator}\\(\\s*checked,\\s*program,?\\s*\\)"
+    elif [ "$receipt_source" = "checker-argument" ]; then
+        profile_receipt_pattern="let\\s+expected\\s*=\\s*crate::core::mir::${validator}\\(\\s*checked,\\s*program,?\\s*\\)"
     else
         profile_receipt_pattern="program\\s*\\.route_receipt\\(\\s*crate::core::mir::${profile},?\\s*\\)"
     fi
@@ -1188,7 +1220,21 @@ bytecode_narrow_map_any_route_adapter() {
         audit_failed=1
         return
     fi
-    handoff_pattern="compile_mir_program_inner\\(\\s*program,\\s*Some\\(&receipt\\),\\s*Some\\(ValidatedOrdinaryMapOwnedAnyV2Route::${variant}\\(\\s*&receipt\\s*,?\\s*\\)\\)\\s*,?\\s*\\)"
+    if [ "$receipt_source" = "checker-argument" ] \
+        && { ! printf '%s\n' "$adapter_context" | rg -U 'if\s+expected\s*!=\s*\*receipt' >/dev/null \
+            || ! printf '%s\n' "$adapter_context" | rg -U 'receipt\s*\.validate_against_program\(program\)' >/dev/null \
+            || ! printf '%s\n' "$adapter_context" | rg -U 'let\s+replayed\s*=\s*receipt\.manifest_round_trip\(\)' >/dev/null \
+            || ! printf '%s\n' "$adapter_context" | rg -U 'if\s+replayed\s*!=\s*\*receipt' >/dev/null; }; then
+        printf 'owner_audit_error=bytecode_narrow_map_any_checker_argument_receipt_unbound=src/interp/bytecode/mir.rs::%s expected=exact-checker-receipt+MIR-binding+manifest-replay\n' \
+            "$adapter" >&2
+        audit_failed=1
+        return
+    fi
+    if [ "$receipt_source" = "checker-argument" ]; then
+        handoff_pattern="compile_mir_program_inner\\(\\s*program,\\s*Some\\(receipt\\),\\s*Some\\(ValidatedOrdinaryMapOwnedAnyV2Route::${variant}\\(\\s*receipt\\s*,?\\s*\\)\\)\\s*,?\\s*\\)"
+    else
+        handoff_pattern="compile_mir_program_inner\\(\\s*program,\\s*Some\\(&receipt\\),\\s*Some\\(ValidatedOrdinaryMapOwnedAnyV2Route::${variant}\\(\\s*&receipt\\s*,?\\s*\\)\\)\\s*,?\\s*\\)"
+    fi
     inner_call_count="$(printf '%s\n' "$adapter_context" | rg -o -F 'compile_mir_program_inner(' | wc -l | tr -d '[:space:]')"
     if [ "$inner_call_count" -ne 1 ] || ! printf '%s\n' "$adapter_context" | rg -U "$handoff_pattern" >/dev/null; then
         printf 'owner_audit_error=bytecode_narrow_map_any_adapter_token_missing=src/interp/bytecode/mir.rs::%s expected=sole-compile_mir_program_inner-call-third-argument=ValidatedOrdinaryMapOwnedAnyV2Route::%s\n' \
@@ -1244,7 +1290,7 @@ bytecode_narrow_map_any_route_binding() {
         ValuesSnapshotReplacement
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_values_mixed_snapshot_route \
-        pub\ fn\ compile_mir_program_with_values_mixed_snapshot_remove_route\( \
+        pub\ fn\ compile_mir_program_with_values_local_index_i32_route\( \
         validate_ordinary_map_owned_any_v2_values_mixed_snapshot_route \
         ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE \
         ValuesMixedSnapshot
@@ -1256,10 +1302,24 @@ bytecode_narrow_map_any_route_binding() {
         ValuesMixedSnapshotRemove
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_values_producer_caller_route \
-        pub\ fn\ compile_mir_program_with_computed_key_get_route\( \
+        pub\ fn\ compile_mir_program_with_values_crosscall_string_caller_route\( \
         validate_ordinary_map_owned_any_v2_values_producer_caller_route \
         ORDINARY_MAP_OWNED_ANY_V2_VALUES_PRODUCER_CALLER_PROFILE \
         ValuesProducerCaller \
+        checker-validator
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_values_crosscall_string_caller_route \
+        pub\ fn\ compile_mir_program_with_values_crosscall_string_caller_index1_route\( \
+        validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route \
+        ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE \
+        ValuesCrosscallStringCaller \
+        checker-validator
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_values_crosscall_string_caller_index1_route \
+        pub\ fn\ compile_mir_program_with_map_root_producer_caller_route\( \
+        validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route \
+        ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_V2_PROFILE \
+        ValuesCrosscallStringCallerIndex1 \
         checker-validator
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_computed_key_get_route \
@@ -1269,10 +1329,23 @@ bytecode_narrow_map_any_route_binding() {
         ComputedKeyGet
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_ordinary_map_owned_any_v2_zero_miss_i32_route \
-        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_is_empty_route\( \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_i32_route\( \
         validate_ordinary_map_owned_any_v2_zero_miss_i32_route \
         ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE \
         ZeroMissI32
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_i32_route \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_removed_key_checked_miss_route\( \
+        validate_ordinary_map_owned_any_v2_get_or_default_i32_route \
+        ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE \
+        GetOrDefaultI32 \
+        checker-argument
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_ordinary_map_owned_any_v2_removed_key_checked_miss_route \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_is_empty_route\( \
+        validate_ordinary_map_owned_any_v2_removed_key_checked_miss_route \
+        ORDINARY_MAP_OWNED_ANY_V2_REMOVED_KEY_CHECKED_MISS_PROFILE \
+        RemovedKeyCheckedMiss
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_ordinary_map_owned_any_v2_is_empty_route \
         pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route\( \
@@ -1304,7 +1377,7 @@ bytecode_narrow_map_any_route_binding() {
         MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE \
         EmptyRootRootQueriesV1
 
-    printf 'bytecode_ordinary_map_owned_any_v2_route_binding=11-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(\n'
+    printf 'bytecode_ordinary_map_owned_any_v2_route_binding=15-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(\n'
     printf 'bytecode_map_empty_root_root_queries_v1_route_binding=1-dedicated-adapter->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_with_empty_root_root_queries_v1_route(\n'
 }
 
@@ -1340,8 +1413,14 @@ bytecode_observer_v1_route_receipt_binding() {
     profile_pattern='const ORDINARY_MAP_OWNER_OBSERVER_V1_PROFILE:\s*&str\s*=\s*crate::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnerLifecycleObserverV1\s*\.as_str\(\);'
     observer_pattern='let ordinary_map_owner_observer_v1_receipts = match route_receipt \{\s*Some\(receipt\) if receipt\.profile == ORDINARY_MAP_OWNER_OBSERVER_V1_PROFILE => \{[\s\S]*?receipt\.validate_against_program\(program\)[\s\S]*?validate_ordinary_map_owner_lifecycle_observer_v1_mir_route\(\s*program,?\s*\)[\s\S]*?Some\(receipts\)\s*\}\s*_ if has_observer_mir_nodes => \{[\s\S]*?instructions require the exact route receipt[\s\S]*?\}\s*_\s*=> None,\s*\};'
     anchor_pattern='bind_ordinary_map_owner_observer_v1_route_anchor\(\s*entry,\s*&functions,\s*&builtin_names,\s*route_receipt,\s*checker_receipts\.clone\(\),\s*observer_bindings,'
-    main_profile_pattern='let admission\s*=\s*mimi::core::mir::classify_canonical_mir_route_admission\(checked\);\s*if admission\.ordinary_map_owned_any_v2_zero_miss_i32\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\s*\}'
+    main_profile_pattern='let admission\s*=\s*mimi::core::mir::classify_canonical_mir_route_admission\(checked\);\s*if admission\.ordinary_map_owned_any_v2_get_or_default_i32\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE;\s*\}'
+    main_profile_pattern+="\\s*if admission\\.ordinary_map_owned_any_v2_removed_key_checked_miss\\(\\)\\s*\\{\\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_REMOVED_KEY_CHECKED_MISS_PROFILE;\\s*\\}"
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_zero_miss_i32\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\s*\}'
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::KeysSnapshot\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE;\s*\}'
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\);\s*\}'
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_values_producer_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesProducerCaller\s*\.as_str\(\);\s*\}'
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_map_root_get_any_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_map_root_producer_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2MapRootProducerCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapEmptyRootRootQueriesV1\s*\{\s*return mimi::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::IsEmpty\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY_PROFILE;\s*\}'
@@ -1353,6 +1432,7 @@ bytecode_observer_v1_route_receipt_binding() {
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\.is_checked_get\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\.is_computed_key_get\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\.is_values_field_move\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE\s*\}'
+    main_profile_pattern+='\s*else if admission\s*\.ordinary_map_owned_any_v2\s*\.is_values_local_index_i32\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesMixedSnapshotRemove\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesSnapshotReplacement\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\s*\.ordinary_map_owned_any_v2\s*\.is_values_mixed_snapshot\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE\s*\}'
@@ -1363,7 +1443,11 @@ bytecode_observer_v1_route_receipt_binding() {
     main_profile_pattern+='\s*else if admission\.map_root_complete\(\)\s*\{\s*mimi::core::mir::MAP_ROOT_ISLAND\s*\}\s*else\s*\{\s*default_profile\s*\}'
     main_route_pattern='let observer_admission = admission\.ordinary_map_owner_lifecycle_observer_v1;[\s\S]*?if observer_admission\.has_profile_signal\(\) && !observer_admission\.is_complete\(\)[\s\S]*?if observer_admission\.is_complete\(\)\s*\{\s*return match materialize_canonical_route\(checked, merged_file\)\s*\{\s*Ok\(route\)\s*if ordinary_map_owner_lifecycle_observer_v1_materialization_is_exact\(&route\)\s*=>\s*\{\s*select_ordinary_map_owner_lifecycle_observer_v1_route\(checked, route\.program\)'
     local selector_profile_count
-    selector_profile_count="$(printf '%s\n' "$main_profile_context" | { rg -o 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesProducerCaller|OrdinaryMapOwnedAnyV2MapRootProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(ZERO_MISS_I32_PROFILE|IS_EMPTY_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || true; } | wc -l | tr -d '[:space:]')"
+    selector_profile_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller([^[:alnum:]_])|OrdinaryMapOwnedAnyV2ValuesProducerCaller|OrdinaryMapOwnedAnyV2MapRootGetAnyCaller|OrdinaryMapOwnedAnyV2MapRootProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(GET_OR_DEFAULT_I32_PROFILE|REMOVED_KEY_CHECKED_MISS_PROFILE|ZERO_MISS_I32_PROFILE|KEYS_SNAPSHOT_PROFILE|IS_EMPTY_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_LOCAL_INDEX_I32_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || printf '0')"
+    local values_crosscall_v1_selector_count
+    local values_crosscall_v2_selector_count
+    values_crosscall_v1_selector_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\)' || printf '0')"
+    values_crosscall_v2_selector_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\)' || printf '0')"
     if ! printf '%s\n' "$inner_context" | rg -U "$profile_pattern" >/dev/null \
         || ! printf '%s\n' "$profile_context" | rg -U 'Self::OrdinaryMapOwnerLifecycleObserverV1\s*=>\s*\{\s*ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE\s*\}' >/dev/null \
         || ! rg -U 'pub use super::receipt::\{\s*[^}]*ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE[^}]*\};' "$route_source" >/dev/null \
@@ -1373,7 +1457,9 @@ bytecode_observer_v1_route_receipt_binding() {
         || ! printf '%s\n' "$observer_nodes_context" | rg -U 'OrdinaryMapOwnerLifecycleObserverToJson\s*\{\s*\.\.\s*\}\s*\|\s*MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln\s*\{\s*\.\.\s*\}' >/dev/null \
         || ! printf '%s\n' "$observer_anchor_context" | rg -F 'ordinary_map_owner_observer_v1_receipts.as_ref()' >/dev/null \
         || ! printf '%s\n' "$observer_anchor_context" | rg -U "$anchor_pattern" >/dev/null \
-        || [ "$selector_profile_count" -ne 16 ] \
+        || [ "$selector_profile_count" -ne 23 ] \
+        || [ "$values_crosscall_v1_selector_count" -ne 1 ] \
+        || [ "$values_crosscall_v2_selector_count" -ne 1 ] \
         || ! printf '%s\n' "$main_profile_context" | rg -U "$main_profile_pattern" >/dev/null \
         || ! printf '%s\n' "$main_route_context" | rg -U "$main_route_pattern" >/dev/null \
         || ! printf '%s\n' "$materialization_context" | rg -F 'route.materialized_ordinary_map_owner_lifecycle_observer_v1_candidate' >/dev/null \
@@ -1390,7 +1476,7 @@ bytecode_observer_v1_route_receipt_binding() {
         || [ "$(printf '%s\n' "$native_context" | { rg -o 'MirInstructionKind::OrdinaryMapOwnerLifecycleObserver(ToJson|Println)' || true; } | wc -l | tr -d '[:space:]')" -ne 2 ] \
         || ! printf '%s\n' "$native_context" | rg -U 'let observer_profile\s*=\s*crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1\s*\.as_str\(\);[\s\S]*?if observer_instruction_count > 0\s*\|\| route_receipt\.is_some_and\(\|receipt\| receipt\.profile == observer_profile\)[\s\S]*?let Some\(receipt\) = route_receipt else \{[\s\S]*?if receipt\.profile != observer_profile[\s\S]*?receipt\.validate_against_program\(program\)[\s\S]*?validate_ordinary_map_owner_lifecycle_observer_v1_mir_route\(\s*program,[\s\S]*?observer_projection\.is_empty\(\)\s*\|\| observer_projection\.len\(\) != observer_instruction_count' >/dev/null \
         || ! printf '%s\n' "$native_receipt_adapter" | rg -U 'pub fn compile_mir_native_with_route_receipt\([\s\S]*?self\.compile_mir_native_with_route_receipt_inner\(program, receipt, None\)' >/dev/null \
-        || ! printf '%s\n' "$checked_native_receipt_adapter" | rg -U 'pub fn compile_checked_mir_native_with_route_receipt\([\s\S]*?self\.compile_mir_native_with_route_receipt_inner\(\s*program,\s*receipt,\s*checker_authorized_route,?\s*\)' >/dev/null \
+        || ! printf '%s\n' "$checked_native_receipt_adapter" | rg -U 'pub fn compile_checked_mir_native_with_route_receipt\([\s\S]*?let native_checker_authorized_route = match checker_authorized_route \{\s*Some\(CheckedOrdinaryMapOwnedAnyV2Route::CheckedGet\)\s*=>\s*None,\s*route\s*=>\s*route,\s*\};\s*let result = self\.compile_mir_native_with_route_receipt_inner\(\s*program,\s*receipt,\s*native_checker_authorized_route,?\s*\);' >/dev/null \
         || [ "$(printf '%s\n' "$build_route_context" | { rg -o 'route_receipt_profile_for_checked\(' || true; } | wc -l | tr -d '[:space:]')" -ne 3 ] \
         || [ "$(printf '%s\n' "$build_route_context" | { rg -o 'canonical\.route_receipt\(receipt_profile\)' || true; } | wc -l | tr -d '[:space:]')" -ne 3 ] \
         || [ "$(printf '%s\n' "$build_route_context" | { rg -o 'compile_checked_mir_native_for_route\(' || true; } | wc -l | tr -d '[:space:]')" -ne 3 ] \
@@ -1402,6 +1488,109 @@ bytecode_observer_v1_route_receipt_binding() {
     printf 'observer_v1_exact_route_binding=CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1->ordinary-map-owner-lifecycle-observer-v1->ordered-default-selector+materialization-receipt-equality+checker-MIR-bytecode-native-verifier-preflight+same-bytecode-and-native-receipt-adapters consumer=src/main/canonical_dispatch.rs+src/main/build.rs+src/interp/bytecode/mir.rs+src/codegen/mir/eligibility.rs\n'
 }
 bytecode_observer_v1_route_receipt_binding
+
+# The Values cross-call String route has two intentionally separate profiles:
+# V1 selects literal index zero, while V2 selects literal index one. Keep each
+# selector, bytecode adapter, and verifier paired with its own exact profile;
+# the V2 enum name has the V1 spelling as a prefix, so counts below use full
+# token boundaries and function-local checks rather than substring totals.
+values_crosscall_string_caller_v1_v2_route_binding() {
+    local dispatcher="$ROOT_DIR/src/main/canonical_dispatch.rs"
+    local verifier_source="$ROOT_DIR/src/verifier/mod.rs"
+    local verify_cli_source="$ROOT_DIR/src/main/verify.rs"
+    local route_profile_context default_selector_context v1_default_route_context v2_default_route_context
+    local v1_preflight_context v2_preflight_context
+    local v1_verifier_context v2_verifier_context
+    local verify_cli_context
+    local v1_profile_count v2_profile_count
+
+    route_profile_context="$(sed -n '/^pub(crate) fn route_receipt_profile_for_checked(/,/^}/p' "$dispatcher")"
+    default_selector_context="$(sed -n '/^fn select_default_route_inner(/,/^fn select_scalar_actor_route(/p' "$dispatcher")"
+    v2_default_route_context="$(printf '%s\n' "$default_selector_context" | sed -n '/if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1()/,/if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1()/p')"
+    v1_default_route_context="$(printf '%s\n' "$default_selector_context" | sed -n '/if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1()/,/if admission\.ordinary_map_owned_any_v2_values_producer_caller()/p')"
+    v2_preflight_context="$(sed -n '/^pub(crate) fn preflight_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1(/,/^fn select_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(/p' "$dispatcher")"
+    v1_preflight_context="$(sed -n '/^pub(crate) fn preflight_ordinary_map_owned_any_v2_values_crosscall_string_caller(/,/^fn select_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(/p' "$dispatcher")"
+    v1_verifier_context="$(sed -n '/^pub fn verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(/,/^\/\/\/ Verify the separately versioned Values cross-call/p' "$verifier_source")"
+    v2_verifier_context="$(sed -n '/^pub fn verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(/,/^\/\/\/ Verify the exact Map-root producer/p' "$verifier_source")"
+    verify_cli_context="$(sed -n '/^pub(crate) fn verify(/,/^    let mut results = if let Some(canonical) = canonical/p' "$verify_cli_source")$(sed -n '/^    let mut results = if let Some(canonical) = canonical/,$p' "$verify_cli_source")"
+    v1_profile_count="$(printf '%s\n' "$route_profile_context" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\)' || printf '0')"
+    v2_profile_count="$(printf '%s\n' "$route_profile_context" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\)' || printf '0')"
+
+    if [ "$v1_profile_count" -ne 1 ] || [ "$v2_profile_count" -ne 1 ] \
+        || ! printf '%s\n' "$route_profile_context" | rg -U 'ordinary_map_owned_any_v2_values_crosscall_string_caller_index1\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\);\s*\}\s*if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\);' >/dev/null \
+        || ! printf '%s\n' "$v2_default_route_context" | rg -U 'ordinary_map_owned_any_v2_values_crosscall_string_caller_index1\(\)[\s\S]*?OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\)[\s\S]*?select_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route\(' >/dev/null \
+        || printf '%s\n' "$v2_default_route_context" | rg -U 'CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(' >/dev/null \
+        || ! printf '%s\n' "$v1_default_route_context" | rg -U 'ordinary_map_owned_any_v2_values_crosscall_string_caller_v1\(\)[\s\S]*?OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\)[\s\S]*?select_ordinary_map_owned_any_v2_values_crosscall_string_caller_route\(' >/dev/null \
+        || printf '%s\n' "$v1_default_route_context" | rg -U 'CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(' >/dev/null; then
+        printf 'owner_audit_error=values_crosscall_string_caller_selector_binding_missing=V1-index0+V2-index1 expected=separate-ordered-selector-profiles-and-default-route-adapters\n' >&2
+        audit_failed=1
+        return
+    fi
+
+    for pattern in \
+        'let profile =' \
+        'ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE' \
+        'if receipt.profile != profile' \
+        'validate_against_program(program)' \
+        'if &expected != receipt' \
+        'validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(' \
+        'verify_program_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route('; do
+        if ! printf '%s\n' "$v1_verifier_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=values_crosscall_string_caller_verifier_binding_missing=V1-index0 pattern=%s\n' "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    for pattern in \
+        'let profile =' \
+        'ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_V2_PROFILE' \
+        'if receipt.profile != profile' \
+        'validate_against_program(program)' \
+        'if &expected != receipt' \
+        'validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(' \
+        'verify_program_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route('; do
+        if ! printf '%s\n' "$v2_verifier_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=values_crosscall_string_caller_verifier_binding_missing=V2-index1 pattern=%s\n' "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    for pattern in \
+        'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1' \
+        'validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(' \
+        'compile_mir_program_with_values_crosscall_string_caller_index1_route(' \
+        'validate_checked_mir_native_values_crosscall_string_caller_index1_route(' \
+        'validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(' \
+        'verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route('; do
+        if ! printf '%s\n' "$v2_preflight_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=values_crosscall_string_caller_preflight_binding_missing=V2-index1 pattern=%s\n' "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    for pattern in \
+        'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller' \
+        'validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(' \
+        'compile_mir_program_with_values_crosscall_string_caller_route(' \
+        'validate_checked_mir_native_values_crosscall_string_caller_route(' \
+        'validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(' \
+        'verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route('; do
+        if ! printf '%s\n' "$v1_preflight_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=values_crosscall_string_caller_preflight_binding_missing=V1-index0 pattern=%s\n' "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    if ! printf '%s\n' "$verify_cli_context" | rg -U 'canonical_receipt_profile\s*==\s*mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\)\s*\{\s*mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route\(' >/dev/null \
+        || ! printf '%s\n' "$verify_cli_context" | rg -U 'canonical_receipt_profile\s*==\s*mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\)\s*\{\s*mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route\(' >/dev/null; then
+        printf 'owner_audit_error=values_crosscall_string_caller_verifier_dispatch_missing=main-verify expected=V1-index0+V2-index1-exact-profile-pairs\n' >&2
+        audit_failed=1
+        return
+    fi
+    printf 'values_crosscall_string_caller_route_binding=V1-index0+V2-index1->distinct-ordered-selector+exact-bytecode-token+Checker-MIR-verifier+CLI-profile-dispatch consumer=src/main/canonical_dispatch.rs+src/interp/bytecode/mir.rs+src/verifier/mod.rs+src/main/verify.rs\n'
+}
+
+values_crosscall_string_caller_v1_v2_route_binding
 
 bytecode_route_receipt_binding \
     src/interp/bytecode/mir.rs \
@@ -2163,9 +2352,7 @@ owner_count=0
 condition_inventory=''
 for owner in \
     CodegenLegacyRemainder \
-    FlowVerifierCompatibility \
-    FfiVerifierCompatibility \
-    DualVerifierCompatibility; do
+    FfiVerifierCompatibility; do
     owner_count=$((owner_count + 1))
     matches="$(rg -n \
         --glob '*.rs' \
@@ -2192,20 +2379,10 @@ for owner in \
             deletion_blocker='cfg(test) compatibility adapters and the surface body compiler remain retained'
             condition='delete after cfg(test) legacy codegen adapters and the surface body compiler are removed; the production owner is already closed'
             ;;
-        FlowVerifierCompatibility)
-            dependency_class='flow-body-compatibility'
-            deletion_blocker='cfg(test) legacy verifier adapter and AST body walker remain retained'
-            condition='delete after cfg(test) legacy verifier adapters and the AST body walker are removed after canonical MIR covers all obligations'
-            ;;
         FfiVerifierCompatibility)
             dependency_class='ffi-declaration-compatibility'
             deletion_blocker='canonical MIR proofs remain limited to admitted ScalarFfi and verifier-only owner slices; uncovered declarations and call-site contexts remain, with test-only AST oracles retained'
             condition='retire test oracles after canonical MIR receipts and proofs cover every FFI declaration and call-site obligation'
-            ;;
-        DualVerifierCompatibility)
-            dependency_class='secondary-flow-vir-compatibility'
-            deletion_blocker='cfg(test) dual verifier adapter and secondary Flow/VIR engine remain retained'
-            condition='delete after cfg(test) dual verifier adapters and the secondary Flow/VIR engine are retired or MIR-native'
             ;;
     esac
     if [ "$count" -eq 0 ]; then
@@ -2225,14 +2402,8 @@ for owner in \
         CodegenLegacyRemainder)
             expected_condition_digest="$EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST"
             ;;
-        FlowVerifierCompatibility)
-            expected_condition_digest="$EXPECTED_FLOW_VERIFIER_OWNER_CONDITION_DIGEST"
-            ;;
         FfiVerifierCompatibility)
             expected_condition_digest="$EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST"
-            ;;
-        DualVerifierCompatibility)
-            expected_condition_digest="$EXPECTED_DUAL_VERIFIER_OWNER_CONDITION_DIGEST"
             ;;
     esac
     printf 'owner=%s owner_deletion_condition_digest=%s\n' "$owner" "$condition_digest"
