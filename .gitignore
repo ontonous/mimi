@@ -110,6 +110,7 @@ evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/native-tmp/
 # Full-route census JSON, journals, and logs preserve each run's denominator,
 # per-input results, and raw command output.
 evidence/**/program
+evidence/**/program.tmp*
 evidence/**/source*.tmp
 evidence/**/files.sha256.tmp
 evidence/**/consumer-evidence/**/native-false
