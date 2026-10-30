@@ -107,6 +107,12 @@ evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/native-obj
 evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/runtime-archive
 evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/relinked-program
 evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/native-tmp/
+# GetOrDefault<String> L3 uses the same strict native lifecycle; retain its
+# reports and source snapshots while ignoring only generated native files.
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-string-l3-*/**/native-object
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-string-l3-*/**/runtime-archive
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-string-l3-*/**/relinked-program
+evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-string-l3-*/native-tmp/
 # The Actor capture/shadow gate retains source inventories, census JSON/journals,
 # raw command captures, and Memcheck reports. Ignore only generated native
 # executables and object/archive files if a replay stores them under evidence.
