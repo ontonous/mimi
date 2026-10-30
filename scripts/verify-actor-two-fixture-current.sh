@@ -608,6 +608,8 @@ require_l3_memcheck_reports() {
         if ! awk -v marker="$marker" '
             index($0, marker) { active = 1; found++; next }
             active && /^Memcheck actor_nested_func_/ { active = 0 }
+            active && /^Actor L3 route-binding / { active = 0 }
+            active && /^test result:/ { active = 0 }
             active { print }
             END { if (found != 1) exit 3 }
         ' "$source" > "$report"; then
