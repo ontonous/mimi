@@ -166,6 +166,52 @@ RETIRED_LEGACY_OWNER_NAMES = (
     "DualVerifierCompatibility",
 )
 LEGACY_OWNER_NAMES = ACTIVE_LEGACY_OWNER_NAMES + RETIRED_LEGACY_OWNER_NAMES
+LEGACY_OWNER_AUDIT_SCHEMA = "canonical-mir-legacy-owner-audit-v1"
+EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES = 0
+LEGACY_OWNER_EVIDENCE_TUPLES = (
+    (
+        "CodegenLegacyRemainder",
+        "generic ignored-bool binding uses canonical MIR without any legacy owner",
+        "src/codegen/tests.rs::compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access",
+        "test_legacy_codegen_function_calls().is_empty()",
+    ),
+    (
+        "FfiVerifierCompatibility",
+        "typed String FFI context reports checker-owned coverage without any legacy owner",
+        "src/verifier/tests.rs::typed_ffi_symbolic_string_contexts_defer_without_legacy_access",
+        "Vec::<crate::core::LegacyBodyConsumer>::new()",
+    ),
+    (
+        "FfiVerifierCompatibility",
+        "checked verifier-only owner slice proves Ready repr(C) String-field Ensures",
+        "src/verifier/tests.rs::typed_ffi_string_record_ensures_use_checker_receipt_and_fresh_result",
+        'Some("verifier-ffi-owner-slice-v1")',
+    ),
+    (
+        "FfiVerifierCompatibility",
+        "unsupported Ready Ensures stays call-local without discarding Requires proof",
+        "src/verifier/tests.rs::typed_ffi_ready_unsupported_record_ensures_preserves_requires_proof",
+        "result.artifact.is_none()",
+    ),
+    (
+        "FfiVerifierCompatibility",
+        "nested repr(C) String fields preserve exact caller identity through MIR",
+        "src/verifier/tests.rs::typed_ffi_aggregate_nested_string_fields_preserve_nul_unicode_and_length",
+        'Some("verifier-ffi-owner-slice-v1")',
+    ),
+)
+LEGACY_OWNER_CLOSED_ROUTE_GUARD_TUPLES = (
+    (
+        "CodegenLegacyRemainder",
+        "try_compile_exact_migrated_mir_island",
+        "src/codegen/compile.rs::pub fn compile_checked(",
+    ),
+    (
+        "FfiVerifierCompatibility",
+        "scalar_ffi_admission",
+        "src/verifier/mod.rs::pub fn verify_ffi_checked_with_source_hash(",
+    ),
+)
 RETIRED_FLOW_DUAL_PARITY_TESTS = (
     "flow_scalar_migration_keeps_mir_and_dual_verdicts",
     "flow_transition_invariant_and_field_projection_owner_parity",
@@ -180,6 +226,11 @@ EXCLUDED_DIRS = {
     "node_modules",
     "target",
 }
+# The repository's generated build directory may itself be redirected to an
+# external cache. Keep the link in evidence, but do not treat it as an active
+# Mimi source when its path is already excluded from traversal.
+SCOPE_LIMITED_DIRECTORY_SYMLINK_PATHS = {"target"}
+SCOPE_LIMITED_DIRECTORY_SYMLINK_KIND = "excluded_directory_symlink_scope_limited"
 ENTRY_RE = re.compile(r"(?m)^[ \t]*(?:pub[ \t]+)?func[ \t]+main[ \t]*\(")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ROUTE_RE = re.compile(
@@ -653,7 +704,7 @@ def enumerate_sources(
 
 
 def source_symlink_exclusions(root: Path) -> list[dict[str, str]]:
-    """List source symlinks excluded from the regular-file denominator."""
+    """List symlinks, distinguishing generated excluded directories from blockers."""
     excluded: list[dict[str, str]] = []
     for directory, dirnames, filenames in os.walk(root, followlinks=False):
         current = Path(directory)
@@ -664,7 +715,11 @@ def source_symlink_exclusions(root: Path) -> list[dict[str, str]]:
                 target_bytes = os.fsencode(os.readlink(path))
                 excluded.append({
                     "path": relative_path(path, root),
-                    "kind": "directory_symlink_not_traversed",
+                    "kind": (
+                        SCOPE_LIMITED_DIRECTORY_SYMLINK_KIND
+                        if relative_path(path, root) in SCOPE_LIMITED_DIRECTORY_SYMLINK_PATHS
+                        else "directory_symlink_not_traversed"
+                    ),
                     "symlink_target": os.fsdecode(target_bytes),
                     "symlink_target_sha256": sha256_bytes(target_bytes),
                 })
@@ -684,6 +739,17 @@ def source_symlink_exclusions(root: Path) -> list[dict[str, str]]:
                     "symlink_target_sha256": sha256_bytes(target_bytes),
                 })
     return sorted(excluded, key=lambda item: (item["path"], item["kind"]))
+
+
+def blocking_source_symlinks(
+    symlinks: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Return symlink evidence that must block the strict census gate."""
+    return [
+        item
+        for item in symlinks
+        if item.get("kind") != SCOPE_LIMITED_DIRECTORY_SYMLINK_KIND
+    ]
 
 
 def tracked_symlink_parent_blockers(
@@ -3816,6 +3882,8 @@ def _canonical_mir_function_observations(
     def emission_phase(observation: Mapping[str, Any]) -> str:
         if route_boundary is None or observation["source_stream"] != route_boundary["stream"]:
             return "unclassified"
+        if observation["source_line_index"] == route_boundary["line_index"]:
+            return "route_marker_line"
         return (
             "pre_route"
             if observation["source_line_index"] < route_boundary["line_index"]
@@ -3900,6 +3968,13 @@ def _canonical_mir_function_observations(
         and all(event["emission_phase"] in phase_names for event in events)
         and all(summary["emission_phase"] in phase_names for summary in summaries)
     )
+    canonical_mir_telemetry_is_post_route = (
+        route_boundary_unique
+        and bool(phase_events["post_route"])
+        and len(phase_summaries["post_route"]) == 1
+        and all(event["emission_phase"] == "post_route" for event in events)
+        and all(summary["emission_phase"] == "post_route" for summary in summaries)
+    )
     phases_have_one_summary = bool(observed_phases) and all(
         len(phase_summaries[phase]) == 1 for phase in observed_phases
     )
@@ -3938,6 +4013,7 @@ def _canonical_mir_function_observations(
     consistency: dict[str, bool | None] = {
         "mir_route_phase_boundary_is_unique": route_boundary_unique,
         "mir_emission_events_have_known_phases": all_telemetry_is_classified,
+        "mir_canonical_roster_and_summary_are_post_route": canonical_mir_telemetry_is_post_route,
         "mir_telemetry_lines_are_well_formed": not malformed_telemetry_lines,
         "mir_summary_is_unique": phases_have_one_summary,
         "mir_owner_events_are_unique": owner_events_unique_per_phase,
@@ -4033,9 +4109,10 @@ def _canonical_mir_function_observations(
         "has_fallback": fallback_count > 0 or no_fallback is False,
         "limitation": None if roster_complete else (
             "Canonical MIR owner events or summaries are absent, unclassified, duplicated within "
-            "an emission phase, malformed or duplicated on a source line, or inconsistent across "
-            "phases with the MIR graph count/digest or route identity; resolved dispatch stats do "
-            "not describe this emitter. --check fails closed."
+            "an emission phase, emitted before or on the canonical route marker, malformed or "
+            "duplicated on a source line, or inconsistent across phases with the MIR graph "
+            "count/digest or route identity; resolved dispatch stats do not describe this emitter. "
+            "--check fails closed."
         ),
     }
 
@@ -4784,20 +4861,68 @@ def _actor_fallback_evidence(
     }
 
 
+def _owner_rows_match_expected_tuples(
+    rows_by_owner: Any,
+    expected_rows: Sequence[tuple[str, ...]],
+    fields: Sequence[str],
+) -> bool:
+    """Require each active owner to have exactly its declared evidence tuples."""
+    if not isinstance(rows_by_owner, Mapping):
+        return False
+    expected_by_owner: dict[str, set[tuple[str, ...]]] = {
+        name: set() for name in ACTIVE_LEGACY_OWNER_NAMES
+    }
+    for expected_row in expected_rows:
+        owner_name, *values = expected_row
+        if owner_name not in expected_by_owner or len(values) != len(fields):
+            return False
+        expected_by_owner[owner_name].add(tuple(values))
+    if set(rows_by_owner) != set(ACTIVE_LEGACY_OWNER_NAMES):
+        return False
+    for owner_name in ACTIVE_LEGACY_OWNER_NAMES:
+        rows = rows_by_owner.get(owner_name)
+        if not isinstance(rows, list):
+            return False
+        actual_rows: list[tuple[str, ...]] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                return False
+            values = tuple(row.get(field) for field in fields)
+            if not all(isinstance(value, str) for value in values):
+                return False
+            actual_rows.append(values)
+        if (
+            len(actual_rows) != len(expected_by_owner[owner_name])
+            or set(actual_rows) != expected_by_owner[owner_name]
+        ):
+            return False
+    return True
+
+
 def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
     owners: dict[str, dict[str, Any]] = {}
     owner_field_counts: Counter[tuple[str, str]] = Counter()
     duplicate_owner_fields: list[str] = []
+    duplicate_owner_rows: list[str] = []
     unknown_owner_names: set[str] = set()
     malformed_condition_rows: list[str] = []
     malformed_owner_rows: list[str] = []
+    malformed_retirement_rows: list[str] = []
+    malformed_global_rows: list[str] = []
+    malformed_global_keys: list[str] = []
     pending_condition_owner: str | None = None
     retired_summaries: list[re.Match[str]] = []
     retired_summary_count = 0
+    owner_names_in_rows: set[str] = set()
+    owner_evidence_rows: dict[str, list[dict[str, str]]] = {}
+    owner_evidence_keys: set[tuple[str, str]] = set()
+    owner_closed_route_guards: dict[str, list[dict[str, str]]] = {}
+    owner_closed_route_guard_keys: set[tuple[str, str]] = set()
 
     def assign_owner_field(name: str, field: str, value: Any) -> None:
         if name not in ACTIVE_LEGACY_OWNER_NAMES:
-            unknown_owner_names.add(name)
+            if name not in RETIRED_LEGACY_OWNER_NAMES:
+                unknown_owner_names.add(name)
             return
         owner_field_counts[(name, field)] += 1
         if owner_field_counts[(name, field)] > 1:
@@ -4805,49 +4930,188 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
             return
         owners.setdefault(name, {})[field] = value
 
+    def accept_active_owner_row(name: str, line: str) -> bool:
+        owner_names_in_rows.add(name)
+        if name in ACTIVE_LEGACY_OWNER_NAMES:
+            return True
+        if name not in RETIRED_LEGACY_OWNER_NAMES:
+            unknown_owner_names.add(name)
+        malformed_owner_rows.append(line)
+        return False
+
     retirement_pattern = re.compile(
-        r"retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;"
-        r"transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence="
-        r"([^+]+)\+([^+]+)\+([^+]+)$"
+        r"retired_flow_dual_owners=(?P<physical_status>[^;]+);"
+        r"ast-owner=(?P<ast_owner_status>[^;]+);"
+        r"file-adapter=(?P<file_adapter_status>[^;]+);"
+        r"transition-vir-adapter=(?P<transition_vir_adapter_status>[^;]+);"
+        r"MIR-positive-negative-single-dual-evidence="
+        r"(?P<test_1>[^+]+)\+(?P<test_2>[^+]+)\+(?P<test_3>[^+]+)"
+    )
+    global_key_scan_re = re.compile(
+        r"(?<![A-Za-z0-9_])(?P<key>schema|owner_count|dynamic_probe_status|audit_status|"
+        r"owner_deletion_condition_set_digest|retired_flow_dual_owners)\b"
+    )
+    global_row_patterns = {
+        "schema": re.compile(r"schema=[^\r\n]+"),
+        "owner_count": re.compile(r"owner_count=[0-9]+"),
+        "dynamic_probe_status": re.compile(r"dynamic_probe_status=[^\r\n]*"),
+        "audit_status": re.compile(r"audit_status=[^\r\n]*"),
+        "owner_deletion_condition_set_digest": re.compile(
+            r"owner_deletion_condition_set_digest=[^\r\n]*"
+        ),
+        "retired_flow_dual_owners": retirement_pattern,
+    }
+    owner_assignment_scan_re = re.compile(r"(?<![A-Za-z0-9_-])owner[ \t]*=")
+    owner_assignment_name_re = re.compile(
+        r"(?<![A-Za-z0-9_-])owner[ \t]*=[ \t]*([^ \t]+)"
     )
     for line in stdout.splitlines():
-        owner_prefix = re.match(r"owner=([^ ]+)", line)
-        if owner_prefix and owner_prefix.group(1) not in LEGACY_OWNER_NAMES:
-            unknown_owner_names.add(owner_prefix.group(1))
+        normalized_line = _strip_ansi(line).replace("\ufeff", "")
+        for global_key in global_key_scan_re.finditer(normalized_line):
+            key = global_key.group("key")
+            if not global_row_patterns[key].fullmatch(line):
+                malformed_global_rows.append(line)
+                malformed_global_keys.append(key)
+
+        # Owner rows are plain ASCII records. Detect their presence after
+        # removing terminal escapes and BOMs so decorated or prefixed copies
+        # cannot disappear from the roster scan.
+        owner_assignment = owner_assignment_scan_re.search(normalized_line)
+        if owner_assignment is not None and (
+            line != normalized_line or owner_assignment.start() != 0
+        ):
+            malformed_owner_rows.append(line)
+            candidate = owner_assignment_name_re.search(normalized_line)
+            if candidate is not None:
+                name = candidate.group(1)
+                owner_names_in_rows.add(name)
+                if name not in LEGACY_OWNER_NAMES:
+                    unknown_owner_names.add(name)
+
+    owner_like_re = re.compile(r"^[ \t]*owner\b")
+    owner_name_re = re.compile(r"^[ \t]*owner[ \t]*=[ \t]*([^ \t]+)")
+    condition_row_key_re = re.compile(r"^[ \t]*owner_deletion_condition\b")
+    evidence_row_re = re.compile(
+        r"owner=(?P<name>[^ \t]+) evidence_scope=(?P<scope>.+?) "
+        r"evidence_test=(?P<test>\S+) evidence_marker=(?P<marker>.+)"
+    )
+    closed_route_guard_re = re.compile(
+        r"owner=(?P<name>[^ \t]+) closed_route_guard=(?P<guard>\S+) "
+        r"context=(?P<context>.+)"
+    )
+    accessor_count_re = re.compile(
+        r"owner=(?P<name>[^ \t]+) production_accessor_call_sites=(?P<count>[0-9]+)"
+    )
+    condition_digest_re = re.compile(
+        r"owner=(?P<name>[^ \t]+) owner_deletion_condition_digest=(?P<digest>[0-9a-f]{64})"
+    )
+    access_status_re = re.compile(
+        r"owner=(?P<name>[^ \t]+) production_access_status=(?P<status>[^ \t]+) "
+        r"dependency_class=(?P<dependency_class>[^ \t]+) "
+        r"owner_deletion_ready=(?P<ready>[01]) owner_deletion_blocker=(?P<blocker>.*)"
+    )
+    schema_values: list[str] = []
+    for line in stdout.splitlines():
         if line.startswith("retired_flow_dual_owners="):
             retired_summary_count += 1
             match = retirement_pattern.fullmatch(line)
             if match is not None:
                 retired_summaries.append(match)
+            else:
+                malformed_retirement_rows.append(line)
             continue
-        match = re.match(r"owner=([^ ]+) production_accessor_call_sites=(\d+)$", line)
-        if match:
-            assign_owner_field(
-                match.group(1), "production_accessor_call_sites", int(match.group(2))
-            )
+
+        if owner_like_re.match(line):
+            owner_name = owner_name_re.match(line)
+            if owner_name:
+                candidate_name = owner_name.group(1)
+                owner_names_in_rows.add(candidate_name)
+                if candidate_name not in LEGACY_OWNER_NAMES:
+                    unknown_owner_names.add(candidate_name)
+
+            match = evidence_row_re.fullmatch(line)
+            if match is not None:
+                name = match.group("name")
+                if not accept_active_owner_row(name, line):
+                    continue
+                row = {
+                    "scope": match.group("scope"),
+                    "test": match.group("test"),
+                    "marker": match.group("marker"),
+                }
+                key = (name, row["test"])
+                if key in owner_evidence_keys:
+                    duplicate_owner_rows.append(f"{name}.evidence_test={row['test']}")
+                else:
+                    owner_evidence_keys.add(key)
+                    owner_evidence_rows.setdefault(name, []).append(row)
+                continue
+
+            match = closed_route_guard_re.fullmatch(line)
+            if match is not None:
+                name = match.group("name")
+                if not accept_active_owner_row(name, line):
+                    continue
+                row = {
+                    "guard": match.group("guard"),
+                    "context": match.group("context"),
+                }
+                key = (name, row["guard"])
+                if key in owner_closed_route_guard_keys:
+                    duplicate_owner_rows.append(f"{name}.closed_route_guard={row['guard']}")
+                else:
+                    owner_closed_route_guard_keys.add(key)
+                    owner_closed_route_guards.setdefault(name, []).append(row)
+                continue
+
+            match = accessor_count_re.fullmatch(line)
+            if match is not None:
+                name = match.group("name")
+                if not accept_active_owner_row(name, line):
+                    continue
+                assign_owner_field(
+                    name, "production_accessor_call_sites", int(match.group("count"))
+                )
+                continue
+
+            match = condition_digest_re.fullmatch(line)
+            if match is not None:
+                name = match.group("name")
+                if not accept_active_owner_row(name, line):
+                    continue
+                if pending_condition_owner is not None:
+                    malformed_condition_rows.append("condition digest before prior condition text")
+                assign_owner_field(name, "deletion_condition_sha256", match.group("digest"))
+                pending_condition_owner = name
+                continue
+
+            match = access_status_re.fullmatch(line)
+            if match is not None:
+                name = match.group("name")
+                if not accept_active_owner_row(name, line):
+                    continue
+                assign_owner_field(name, "production_access_status", match.group("status"))
+                assign_owner_field(name, "dependency_class", match.group("dependency_class"))
+                assign_owner_field(name, "owner_deletion_ready", match.group("ready") == "1")
+                assign_owner_field(name, "owner_deletion_blocker", match.group("blocker"))
+                continue
+
+            malformed_owner_rows.append(line)
             continue
-        match = re.match(
-            r"owner=([^ ]+) production_access_status=([^ ]+) dependency_class=([^ ]+) "
-            r"owner_deletion_ready=([01]) owner_deletion_blocker=(.*)",
-            line,
-        )
+
+        match = re.fullmatch(r"schema=([^\r\n]+)", line)
         if match:
-            name = match.group(1)
-            assign_owner_field(name, "production_access_status", match.group(2))
-            assign_owner_field(name, "dependency_class", match.group(3))
-            assign_owner_field(name, "owner_deletion_ready", match.group(4) == "1")
-            assign_owner_field(name, "owner_deletion_blocker", match.group(5))
+            schema_values.append(match.group(1))
             continue
-        match = re.match(r"owner=([^ ]+) owner_deletion_condition_digest=([0-9a-f]{64})$", line)
-        if match:
-            if pending_condition_owner is not None:
-                malformed_condition_rows.append("condition digest before prior condition text")
-            name = match.group(1)
-            assign_owner_field(name, "deletion_condition_sha256", match.group(2))
-            pending_condition_owner = name
+
+        if line.startswith("schema="):
+            schema_values.append("")
             continue
-        match = re.match(r"owner_deletion_condition=(.*)$", line)
-        if match:
+        if condition_row_key_re.match(line):
+            match = re.fullmatch(r"owner_deletion_condition=(.*)", line)
+            if match is None:
+                malformed_condition_rows.append(line)
+                continue
             if pending_condition_owner is None:
                 malformed_condition_rows.append("condition text without a preceding owner digest")
             else:
@@ -4856,29 +5120,11 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
                 )
                 pending_condition_owner = None
             continue
-        if owner_prefix:
-            name = owner_prefix.group(1)
-            is_known_context_row = (
-                name in ACTIVE_LEGACY_OWNER_NAMES
-                and (
-                    re.fullmatch(
-                        r"owner=[^ ]+ evidence_scope=.+ evidence_test=\S+ evidence_marker=.+",
-                        line,
-                    )
-                    is not None
-                    or re.fullmatch(
-                        r"owner=[^ ]+ closed_route_guard=\S+ context=.+",
-                        line,
-                    )
-                    is not None
-                )
-            )
-            if name in LEGACY_OWNER_NAMES and not is_known_context_row:
-                malformed_owner_rows.append(line)
+
     if pending_condition_owner is not None:
         malformed_condition_rows.append("owner digest without condition text")
     parsed = [
-        {"name": name, **owners.get(name, {})}
+        {"name": name, "status": "active", **owners.get(name, {})}
         for name in ACTIVE_LEGACY_OWNER_NAMES
     ]
     actual_condition_set = "".join(
@@ -4899,7 +5145,9 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
         reported_set_digest == sha256_bytes(actual_condition_set.encode("utf-8"))
     )
     owner_rows_complete = all(
-        isinstance(owner.get("production_accessor_call_sites"), int)
+        type(owner.get("production_accessor_call_sites")) is int
+        and owner.get("production_accessor_call_sites")
+        == EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES
         and owner.get("production_access_status") in {"sealed", "open"}
         and isinstance(owner.get("dependency_class"), str)
         and isinstance(owner.get("owner_deletion_ready"), bool)
@@ -4909,44 +5157,102 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
         and isinstance(owner.get("deletion_condition_sha256"), str)
         for owner in parsed
     )
-    owner_count_values = re.findall(r"(?m)^owner_count=(\d+)$", stdout)
+    owner_count_values = re.findall(r"(?m)^owner_count=([0-9]+)$", stdout)
     owner_count_reported = int(owner_count_values[0]) if len(owner_count_values) == 1 else None
     dynamic_probe_values = re.findall(r"(?m)^dynamic_probe_status=([^\r\n]*)$", stdout)
     dynamic_probe_status = dynamic_probe_values[0] if len(dynamic_probe_values) == 1 else None
     audit_status_values = re.findall(r"(?m)^audit_status=([^\r\n]*)$", stdout)
     audit_status = audit_status_values[0] if len(audit_status_values) == 1 else None
-    retired_test_names = (
-        list(retired_summaries[0].groups()) if len(retired_summaries) == 1 else []
+    retirement_evidence_fields = (
+        {
+            "physical_status": retired_summaries[0].group("physical_status"),
+            "ast_owner_status": retired_summaries[0].group("ast_owner_status"),
+            "file_adapter_status": retired_summaries[0].group("file_adapter_status"),
+            "transition_vir_adapter_status": retired_summaries[0].group(
+                "transition_vir_adapter_status"
+            ),
+            "declared_parity_test_names": [
+                retired_summaries[0].group("test_1"),
+                retired_summaries[0].group("test_2"),
+                retired_summaries[0].group("test_3"),
+            ],
+        }
+        if len(retired_summaries) == 1
+        else {}
     )
+    retired_test_names = retirement_evidence_fields.get("declared_parity_test_names", [])
     retired_owner_evidence_complete = (
         retired_summary_count == 1
         and len(retired_summaries) == 1
+        and retirement_evidence_fields.get("physical_status") == "physical"
+        and retirement_evidence_fields.get("ast_owner_status") == "deleted"
+        and retirement_evidence_fields.get("file_adapter_status") == "deleted"
+        and retirement_evidence_fields.get("transition_vir_adapter_status") == "deleted"
         and tuple(retired_test_names) == RETIRED_FLOW_DUAL_PARITY_TESTS
         and dynamic_probe_status == "not_run"
+        and len(dynamic_probe_values) == 1
+        and not any(
+            key in {"dynamic_probe_status", "retired_flow_dual_owners"}
+            for key in malformed_global_keys
+        )
     )
-    retired_owners = [
+    retired_owner_rows = [
         {
             "name": name,
             "status": "physically_retired" if retired_owner_evidence_complete else "unverified",
             "retirement_evidence_kind": "audit_script_source_checks",
             "retirement_evidence_complete": retired_owner_evidence_complete,
-            "declared_parity_test_names": retired_test_names,
+            "retirement_evidence": dict(retirement_evidence_fields),
+            "declared_parity_test_names": list(retired_test_names),
             "dynamic_probe_status": dynamic_probe_status,
         }
         for name in RETIRED_LEGACY_OWNER_NAMES
     ]
+    retired_owners = retired_owner_rows
+    owner_evidence_complete = (
+        _owner_rows_match_expected_tuples(
+            owner_evidence_rows,
+            LEGACY_OWNER_EVIDENCE_TUPLES,
+            ("scope", "test", "marker"),
+        )
+        and not duplicate_owner_rows
+    )
+    owner_closed_route_guards_complete = (
+        _owner_rows_match_expected_tuples(
+            owner_closed_route_guards,
+            LEGACY_OWNER_CLOSED_ROUTE_GUARD_TUPLES,
+            ("guard", "context"),
+        )
+        and not duplicate_owner_rows
+    )
+    owner_roster_overlap = sorted(
+        owner_names_in_rows.intersection(RETIRED_LEGACY_OWNER_NAMES)
+    )
+    owner_roster_disjoint = (
+        set(ACTIVE_LEGACY_OWNER_NAMES).isdisjoint(RETIRED_LEGACY_OWNER_NAMES)
+        and not owner_roster_overlap
+    )
     owner_set_complete = (
-        {owner["name"] for owner in parsed} == set(ACTIVE_LEGACY_OWNER_NAMES)
+        schema_values == [LEGACY_OWNER_AUDIT_SCHEMA]
+        and {owner["name"] for owner in parsed} == set(ACTIVE_LEGACY_OWNER_NAMES)
+        and set(name for name in owner_names_in_rows if name in ACTIVE_LEGACY_OWNER_NAMES)
+        == set(ACTIVE_LEGACY_OWNER_NAMES)
         and len(parsed) == len(ACTIVE_LEGACY_OWNER_NAMES)
         and owner_count_reported == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and owner_roster_disjoint
         and not unknown_owner_names
         and not duplicate_owner_fields
+        and not duplicate_owner_rows
         and not malformed_condition_rows
         and not malformed_owner_rows
+        and not malformed_retirement_rows
+        and not malformed_global_rows
         and len(condition_set_values) == 1
         and len(owner_count_values) == 1
         and audit_status == "ok"
         and len(audit_status_values) == 1
+        and owner_evidence_complete
+        and owner_closed_route_guards_complete
     )
     complete = (
         owner_set_complete
@@ -4958,6 +5264,8 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
     return {
         "owners": parsed,
         "retired_owners": retired_owners,
+        "active_owner_names": list(ACTIVE_LEGACY_OWNER_NAMES),
+        "retired_owner_names": list(RETIRED_LEGACY_OWNER_NAMES),
         "owner_count_reported": owner_count_reported,
         "owner_deletion_condition_set_sha256": reported_set_digest,
         "deletion_condition_digests_match_text": condition_digests_match,
@@ -4965,11 +5273,23 @@ def _parse_legacy_owner_audit(stdout: str) -> dict[str, Any]:
         "retired_owner_evidence_complete": retired_owner_evidence_complete,
         "retired_owner_evidence_status": "complete" if retired_owner_evidence_complete else "incomplete",
         "retired_owner_parity_tests_declared": retired_test_names,
+        "retirement_evidence_fields": retirement_evidence_fields,
+        "legacy_owner_audit_schema": schema_values[0] if len(schema_values) == 1 else None,
+        "owner_evidence_rows": owner_evidence_rows,
+        "owner_evidence_complete": owner_evidence_complete,
+        "owner_closed_route_guards": owner_closed_route_guards,
+        "owner_closed_route_guards_complete": owner_closed_route_guards_complete,
+        "owner_roster_disjoint": owner_roster_disjoint,
+        "owner_roster_overlap": owner_roster_overlap,
+        "owner_names_in_rows": sorted(owner_names_in_rows),
         "dynamic_probe_status": dynamic_probe_status,
         "unknown_owner_names": sorted(unknown_owner_names),
         "duplicate_owner_fields": duplicate_owner_fields,
+        "duplicate_owner_rows": duplicate_owner_rows,
         "malformed_condition_rows": malformed_condition_rows,
         "malformed_owner_rows": malformed_owner_rows,
+        "malformed_retirement_rows": malformed_retirement_rows,
+        "malformed_global_rows": malformed_global_rows,
         "parsed_owner_set_complete": complete,
     }
 
@@ -6862,6 +7182,11 @@ def _gate_report(
         item for item in excluded_symlinks
         if item.get("kind") == "tracked_mimi_path_parent_symlink_not_followed"
     ]
+    blocking_symlinks = blocking_source_symlinks(excluded_symlinks)
+    symlink_scope_limitations = [
+        item for item in excluded_symlinks
+        if item.get("kind") == SCOPE_LIMITED_DIRECTORY_SYMLINK_KIND
+    ]
     owner_rows = legacy_owner_audit.get("owners", [])
     owner_names = {
         str(owner.get("name")) for owner in owner_rows if isinstance(owner, Mapping)
@@ -6875,15 +7200,37 @@ def _gate_report(
     owner_rows_complete = (
         owner_names == set(ACTIVE_LEGACY_OWNER_NAMES)
         and len(owner_rows) == len(ACTIVE_LEGACY_OWNER_NAMES)
+        and legacy_owner_audit.get("active_owner_names") == list(ACTIVE_LEGACY_OWNER_NAMES)
         and legacy_owner_audit.get("owner_count_reported") == len(ACTIVE_LEGACY_OWNER_NAMES)
         and retired_owner_names == set(RETIRED_LEGACY_OWNER_NAMES)
         and len(retired_owner_rows) == len(RETIRED_LEGACY_OWNER_NAMES)
+        and legacy_owner_audit.get("retired_owner_names") == list(RETIRED_LEGACY_OWNER_NAMES)
         and legacy_owner_audit.get("retired_owner_evidence_complete") is True
         and legacy_owner_audit.get("parsed_owner_set_complete") is True
+        and legacy_owner_audit.get("owner_evidence_complete") is True
+        and _owner_rows_match_expected_tuples(
+            legacy_owner_audit.get("owner_evidence_rows"),
+            LEGACY_OWNER_EVIDENCE_TUPLES,
+            ("scope", "test", "marker"),
+        )
+        and legacy_owner_audit.get("owner_closed_route_guards_complete") is True
+        and _owner_rows_match_expected_tuples(
+            legacy_owner_audit.get("owner_closed_route_guards"),
+            LEGACY_OWNER_CLOSED_ROUTE_GUARD_TUPLES,
+            ("guard", "context"),
+        )
+        and legacy_owner_audit.get("owner_roster_disjoint") is True
+        and not legacy_owner_audit.get("owner_roster_overlap")
         and legacy_owner_audit.get("deletion_condition_digests_match_text") is True
         and not legacy_owner_audit.get("unknown_owner_names")
         and not legacy_owner_audit.get("duplicate_owner_fields")
+        and not legacy_owner_audit.get("duplicate_owner_rows")
         and not legacy_owner_audit.get("malformed_condition_rows")
+        and not legacy_owner_audit.get("malformed_owner_rows")
+        and not legacy_owner_audit.get("malformed_retirement_rows")
+        and not legacy_owner_audit.get("malformed_global_rows")
+        and legacy_owner_audit.get("legacy_owner_audit_schema") == LEGACY_OWNER_AUDIT_SCHEMA
+        and legacy_owner_audit.get("dynamic_probe_status") == "not_run"
         and bool(
             re.fullmatch(
                 r"[0-9a-f]{64}",
@@ -6892,7 +7239,10 @@ def _gate_report(
         )
         and all(
             isinstance(owner, Mapping)
-            and isinstance(owner.get("production_accessor_call_sites"), int)
+            and owner.get("status") == "active"
+            and type(owner.get("production_accessor_call_sites")) is int
+            and owner.get("production_accessor_call_sites")
+            == EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES
             and owner.get("production_access_status") in {"sealed", "open"}
             and isinstance(owner.get("dependency_class"), str)
             and isinstance(owner.get("owner_deletion_ready"), bool)
@@ -6906,6 +7256,12 @@ def _gate_report(
             and owner.get("status") == "physically_retired"
             and owner.get("retirement_evidence_kind") == "audit_script_source_checks"
             and owner.get("retirement_evidence_complete") is True
+            and isinstance(owner.get("retirement_evidence"), Mapping)
+            and owner.get("retirement_evidence") == legacy_owner_audit.get("retirement_evidence_fields")
+            and owner.get("retirement_evidence", {}).get("physical_status") == "physical"
+            and owner.get("retirement_evidence", {}).get("ast_owner_status") == "deleted"
+            and owner.get("retirement_evidence", {}).get("file_adapter_status") == "deleted"
+            and owner.get("retirement_evidence", {}).get("transition_vir_adapter_status") == "deleted"
             and owner.get("declared_parity_test_names") == list(RETIRED_FLOW_DUAL_PARITY_TESTS)
             and owner.get("dynamic_probe_status") == "not_run"
             for owner in retired_owner_rows
@@ -6968,7 +7324,7 @@ def _gate_report(
             bool(legacy_owner_audit.get("accepted_as_complete_inventory")) and owner_rows_complete
         ),
         "no_missing_tracked_inputs": not missing_manifest_inputs,
-        "no_unfollowed_mimi_symlinks": not excluded_symlinks,
+        "no_unfollowed_mimi_symlinks": not blocking_symlinks,
         "no_tracked_mimi_paths_through_symlinked_parents": not tracked_symlink_parent_blockers,
         "all_routes_are_canonical_or_authorized_rejections": not unauthorized_noncanonical_routes,
         "all_canonical_expectations_are_proven": canonical_expectation_paths <= canonical_success_set,
@@ -7030,6 +7386,16 @@ def _gate_report(
         ],
         "legacy_owner_rows_complete": owner_rows_complete,
         "unfollowed_mimi_symlinks": [item["path"] for item in excluded_symlinks],
+        "blocking_mimi_symlink_paths": [item["path"] for item in blocking_symlinks],
+        "symlink_scope_limitations": [
+            {
+                "path": item["path"],
+                "kind": item["kind"],
+                "symlink_target": item.get("symlink_target"),
+                "symlink_target_sha256": item.get("symlink_target_sha256"),
+            }
+            for item in symlink_scope_limitations
+        ],
         "tracked_symlink_parent_blockers": tracked_symlink_parent_blockers,
         "noncanonical_route_inputs": noncanonical_routes,
         "unauthorized_noncanonical_route_inputs": unauthorized_noncanonical_routes,
@@ -7097,7 +7463,7 @@ def _write_inventory_artifacts(
             "included": "all active Git-indexed *.mimi paths (including tracked paths missing from disk) plus every present regular or symlink *.mimi outside root-level archival roots devdocs/ and evidence/ and named generated/vendor exclusions",
             "archival_exclusions": "all tracked or present Mimi paths below root-level devdocs/ and evidence/ are retained in scope_exclusions with hashes and reasons, but are not route candidates",
             "excluded_directory_names": sorted(EXCLUDED_DIRS),
-            "symlinks": "directory and file symlinks are not followed; every observed source symlink is listed and blocks --check",
+            "symlinks": "directory and file symlinks are not followed; active Mimi file symlinks, non-excluded source directory symlinks, and tracked Mimi paths beneath symlinked parents block --check; the root target symlink remains recorded as a generated-directory scope limitation and is outside the active denominator",
         },
     }
     _write_json_exclusive(artifact_root / "inventory.json", inventory)
@@ -7263,7 +7629,7 @@ def collect(args: argparse.Namespace) -> int:
             "per_function_requirement": "route-specific named emitter disposition for every canonical executable owner; canonical MIR events reconcile with the MIR function count and route digest after module verification, while resolved-native events reconcile with MIMI_STAT and their emitter summary",
             "failure_classes": ["capability", "library_target", "environment", "unknown", "none"],
             "build_skip_rule": "a validated explicit interpreter_only expectation skips invocation and records a reason; this row is never canonical",
-        "strict_check": "requires an exact active candidate inventory and source-scope ledger, one route classification per candidate, valid source-bound expectations, a canonical build for required_compile inputs, or a source-bound expected rejection whose active Cargo test target compiled and passed by exact test ID under the recorded absolute Cargo/rustc/rustup dispatch paths and stable before/after executable hashes; Cargo/rustc must resolve through the same native rustup proxy, and inherited compiler, wrapper, bootstrap, toolchain-home, cfg, target, linker, runner, alias, and Rust flag overrides or relevant Cargo config overrides fail closed; no compatibility/function fallback, complete named per-function rosters for canonical builds, classified failures, and a stable source fingerprint",
+        "strict_check": "requires an exact active candidate inventory and source-scope ledger, one route classification per candidate, valid source-bound expectations, a canonical build for required_compile inputs whose exact-source active Cargo test authority was compiled and passed by exact test ID under the recorded absolute Cargo/rustc/rustup dispatch paths and stable before/after executable hashes, or a source-bound expected rejection whose active Cargo test target compiled and passed by exact test ID under the same authority; Cargo/rustc must resolve through the same native rustup proxy, and inherited compiler, wrapper, bootstrap, toolchain-home, cfg, target, linker, runner, alias, and Rust flag overrides or relevant Cargo config overrides fail closed; no compatibility/function fallback, complete named per-function rosters for canonical builds, classified failures, and a stable source fingerprint",
             "no_production_route_changes": True,
         },
     }
@@ -7465,7 +7831,7 @@ def collect(args: argparse.Namespace) -> int:
         ],
         "classification",
     )
-    blocking_symlinks = [
+    gate_symlink_evidence = [
         item for item in excluded_symlinks
         if not _is_archival_source_path(str(item.get("path", "")))
     ]
@@ -7473,7 +7839,7 @@ def collect(args: argparse.Namespace) -> int:
         records,
         sources,
         snapshot_stable,
-        blocking_symlinks,
+        gate_symlink_evidence,
         tracked_inventory,
         base["actor_fallback_cases"],
         legacy_owner_audit,

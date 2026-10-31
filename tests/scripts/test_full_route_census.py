@@ -91,6 +91,78 @@ class InventoryTests(unittest.TestCase):
             {"directory_symlink_not_traversed", "mimi_file_symlink_not_followed"},
         )
 
+    def test_generated_excluded_directory_symlink_is_a_scope_limitation_not_a_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
+            root = Path(temporary)
+            external = Path(outside)
+            (root / "tests").mkdir()
+            (root / "tests/active.mimi").write_text(
+                "func main() { println(1) }\n", encoding="utf-8"
+            )
+            (external / "generated.mimi").write_text(
+                "func main() { println(2) }\n", encoding="utf-8"
+            )
+            (root / "target").symlink_to(external, target_is_directory=True)
+
+            sources, _scope_exclusions, scope = census.enumerate_source_scope(root, [])
+            manifest_sha256 = census._manifest_digest(sources)
+            symlinks = census.source_symlink_exclusions(root)
+            gate = StrictGateTests._gate(
+                ["tests/active.mimi"],
+                [StrictGateTests._record("tests/active.mimi")],
+                excluded_symlinks=tuple(symlinks),
+                source_scope=scope,
+            )
+            (root / "target").unlink()
+            sources_without_target, _exclusions, scope_without_target = (
+                census.enumerate_source_scope(root, [])
+            )
+            manifest_sha256_without_target = census._manifest_digest(
+                sources_without_target
+            )
+
+        self.assertEqual([source["path"] for source in sources], ["tests/active.mimi"])
+        self.assertEqual(scope["candidate_count"], 1)
+        self.assertTrue(scope["exactly_once"])
+        self.assertEqual(
+            symlinks[0]["kind"], census.SCOPE_LIMITED_DIRECTORY_SYMLINK_KIND
+        )
+        self.assertTrue(gate["checks"]["no_unfollowed_mimi_symlinks"])
+        self.assertEqual(gate["blocking_mimi_symlink_paths"], [])
+        self.assertEqual(gate["symlink_scope_limitations"][0]["path"], "target")
+        self.assertEqual(
+            manifest_sha256_without_target, manifest_sha256
+        )
+        self.assertEqual(scope_without_target["candidate_count"], scope["candidate_count"])
+
+    def test_active_mimi_file_symlink_still_blocks_the_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tests").mkdir()
+            source = root / "tests/active.mimi"
+            source.write_text("func main() { println(1) }\n", encoding="utf-8")
+            alias = root / "tests/alias.mimi"
+            try:
+                alias.symlink_to(source.name)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            sources, _scope_exclusions, scope = census.enumerate_source_scope(root, [])
+            symlinks = census.source_symlink_exclusions(root)
+            gate = StrictGateTests._gate(
+                [source["path"] for source in sources],
+                [StrictGateTests._record(source["path"]) for source in sources],
+                excluded_symlinks=tuple(symlinks),
+                source_scope=scope,
+            )
+
+        self.assertEqual(
+            {source["path"] for source in sources},
+            {"tests/active.mimi", "tests/alias.mimi"},
+        )
+        self.assertFalse(gate["checks"]["no_unfollowed_mimi_symlinks"])
+        self.assertEqual(gate["blocking_mimi_symlink_paths"], ["tests/alias.mimi"])
+
     def test_git_inventory_records_exact_tracked_path_list(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -203,13 +275,14 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(scope["exactly_once"])
         self.assertEqual(len(exclusions), 0)
         self.assertIn(
-            ("target", "directory_symlink_not_traversed"),
+            ("target", census.SCOPE_LIMITED_DIRECTORY_SYMLINK_KIND),
             {(item["path"], item["kind"]) for item in symlink_exclusions},
         )
         self.assertEqual(blockers[0]["kind"], "tracked_mimi_path_parent_symlink_not_followed")
         self.assertFalse(
             gate["checks"]["no_tracked_mimi_paths_through_symlinked_parents"]
         )
+        self.assertFalse(gate["checks"]["no_unfollowed_mimi_symlinks"])
         self.assertEqual(
             gate["tracked_symlink_parent_blockers"][0]["tracked_paths"],
             ["target/foo.mimi"],
@@ -893,25 +966,66 @@ class PerFunctionEligibilityTests(unittest.TestCase):
             0,
             "completed",
         )
-        details = census._function_observations(
-            "",
-            "info: canonical MIR native emitted owner='function:Counter::bump'\n"
-            "info: canonical MIR native emitted owner='function:main'\n"
-            "info: canonical MIR native compiled 2/2 function(s), 0 fell back; mir_digest="
-            + digest
-            + "\n"
-            + self._canonical_route_line(digest),
-            None,
-            route,
+        output = "\n".join(
+            [
+                self._canonical_route_line(digest),
+                "info: canonical MIR native emitted owner='function:Counter::bump'",
+                "info: canonical MIR native emitted owner='function:main'",
+                "info: canonical MIR native compiled 2/2 function(s), 0 fell back; mir_digest="
+                + digest,
+            ]
         )
+        details = census._function_observations("", output, None, route)
         self.assertEqual(details["status"], "complete_named")
         self.assertTrue(details["named_roster_complete"])
         self.assertTrue(details["consistency"]["mir_route_phase_boundary_is_unique"])
+        self.assertTrue(
+            details["consistency"]["mir_canonical_roster_and_summary_are_post_route"]
+        )
         self.assertEqual(details["counts"]["total_functions"], 2)
         self.assertEqual(details["route_mir_digest"], digest)
         self.assertEqual(
             [event["owner"] for event in details["functions"]],
             ["function:Counter::bump", "function:main"],
+        )
+        self.assertTrue(
+            all(event["emission_phase"] == "post_route" for event in details["functions"])
+        )
+
+    def test_canonical_mir_pre_route_only_or_route_line_telemetry_fails_closed(self) -> None:
+        digest = "a" * 64
+        route_line = self._canonical_route_line(digest)
+        route = census._route_observation("", route_line, 0, "completed")
+        owner = "info: canonical MIR native emitted owner='function:main'"
+        summary = (
+            "info: canonical MIR native compiled 1/1 function(s), 0 fell back; mir_digest="
+            + digest
+        )
+
+        pre_route_only = census._function_observations(
+            "", "\n".join([owner, summary, route_line]), None, route
+        )
+        self.assertFalse(pre_route_only["named_roster_complete"])
+        self.assertFalse(
+            pre_route_only["consistency"][
+                "mir_canonical_roster_and_summary_are_post_route"
+            ]
+        )
+
+        owner_on_route_line = census._function_observations(
+            "", "\n".join([route_line + " " + owner, summary]), None, route
+        )
+        self.assertFalse(owner_on_route_line["named_roster_complete"])
+        self.assertFalse(
+            owner_on_route_line["consistency"]["mir_telemetry_lines_are_well_formed"]
+        )
+
+        summary_on_route_line = census._function_observations(
+            "", "\n".join([owner, route_line + " " + summary]), None, route
+        )
+        self.assertFalse(summary_on_route_line["named_roster_complete"])
+        self.assertFalse(
+            summary_on_route_line["consistency"]["mir_telemetry_lines_are_well_formed"]
         )
 
     def test_canonical_mir_missing_duplicate_and_digest_mismatch_fail_closed(self) -> None:
@@ -947,7 +1061,7 @@ class PerFunctionEligibilityTests(unittest.TestCase):
                 )
                 self.assertFalse(details["named_roster_complete"])
 
-    def test_canonical_mir_same_owner_events_reconcile_across_distinct_phases(self) -> None:
+    def test_canonical_mir_pre_route_telemetry_cannot_be_counted_as_complete(self) -> None:
         digest = "e" * 64
         route = census._route_observation(
             "",
@@ -969,7 +1083,10 @@ class PerFunctionEligibilityTests(unittest.TestCase):
 
         details = census._function_observations("", output, None, route)
 
-        self.assertTrue(details["named_roster_complete"])
+        self.assertFalse(details["named_roster_complete"])
+        self.assertFalse(
+            details["consistency"]["mir_canonical_roster_and_summary_are_post_route"]
+        )
         self.assertEqual(details["counts"]["named_emission_successes"], 4)
         self.assertEqual(details["counts"]["unique_named_functions"], 2)
         self.assertEqual(
@@ -1505,8 +1622,9 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
     def _audit_text(
         *,
         missing_active: tuple[str, ...] = (),
+        missing_evidence: tuple[str, ...] = (),
         retirement_line: str | None = None,
-        dynamic_probe_status: str = "not_run",
+        dynamic_probe_status: str | None = "not_run",
         extra_lines: tuple[str, ...] = (),
     ) -> str:
         condition_by_name = {
@@ -1517,7 +1635,17 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
             name: census.sha256_bytes(condition.encode("utf-8"))
             for name, condition in condition_by_name.items()
         }
-        lines = ["schema=canonical-mir-legacy-owner-audit-v1"]
+        lines = [f"schema={census.LEGACY_OWNER_AUDIT_SCHEMA}"]
+        for name, scope, test, marker in census.LEGACY_OWNER_EVIDENCE_TUPLES:
+            if name not in missing_evidence:
+                lines.append(
+                    f"owner={name} evidence_scope={scope} evidence_test={test} "
+                    f"evidence_marker={marker}"
+                )
+        for name, guard, context in census.LEGACY_OWNER_CLOSED_ROUTE_GUARD_TUPLES:
+            lines.append(
+                f"owner={name} closed_route_guard={guard} context={context}"
+            )
         for name in census.ACTIVE_LEGACY_OWNER_NAMES:
             if name in missing_active:
                 continue
@@ -1542,10 +1670,10 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
             retirement_line if retirement_line is not None else default_retirement_line,
             f"owner_deletion_condition_set_digest={census.sha256_bytes(set_digest.encode('utf-8'))}",
             f"owner_count={len(census.ACTIVE_LEGACY_OWNER_NAMES)}",
-            f"dynamic_probe_status={dynamic_probe_status}",
-            "audit_status=ok",
-            *extra_lines,
         ])
+        if dynamic_probe_status is not None:
+            lines.append(f"dynamic_probe_status={dynamic_probe_status}")
+        lines.extend(["audit_status=ok", *extra_lines])
         return "\n".join(lines) + "\n"
 
     def test_active_and_physically_retired_rosters_are_separate(self) -> None:
@@ -1561,6 +1689,21 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
             list(census.RETIRED_LEGACY_OWNER_NAMES),
         )
         self.assertTrue(all(owner["retirement_evidence_complete"] for owner in parsed["retired_owners"]))
+        self.assertTrue(parsed["owner_roster_disjoint"])
+        self.assertEqual(parsed["owner_roster_overlap"], [])
+        self.assertEqual(
+            parsed["retirement_evidence_fields"]["physical_status"], "physical"
+        )
+        self.assertEqual(
+            parsed["retirement_evidence_fields"]["ast_owner_status"], "deleted"
+        )
+        self.assertEqual(
+            parsed["retirement_evidence_fields"]["file_adapter_status"], "deleted"
+        )
+        self.assertEqual(
+            parsed["retirement_evidence_fields"]["transition_vir_adapter_status"],
+            "deleted",
+        )
         self.assertEqual(parsed["dynamic_probe_status"], "not_run")
 
     def test_repository_audit_script_output_matches_the_parser_contract(self) -> None:
@@ -1576,6 +1719,91 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
             result.stdout.decode("utf-8", errors="replace")
         )
         self.assertTrue(parsed["parsed_owner_set_complete"])
+        self.assertEqual(parsed["legacy_owner_audit_schema"], census.LEGACY_OWNER_AUDIT_SCHEMA)
+        self.assertEqual(
+            [owner["name"] for owner in parsed["owners"]],
+            list(census.ACTIVE_LEGACY_OWNER_NAMES),
+        )
+        self.assertEqual(
+            [owner["name"] for owner in parsed["retired_owners"]],
+            list(census.RETIRED_LEGACY_OWNER_NAMES),
+        )
+        self.assertEqual(
+            {name: len(rows) for name, rows in parsed["owner_evidence_rows"].items()},
+            {"CodegenLegacyRemainder": 1, "FfiVerifierCompatibility": 4},
+        )
+        self.assertEqual(
+            {
+                owner: {
+                    (row["scope"], row["test"], row["marker"])
+                    for row in rows
+                }
+                for owner, rows in parsed["owner_evidence_rows"].items()
+            },
+            {
+                "CodegenLegacyRemainder": {
+                    (
+                        "generic ignored-bool binding uses canonical MIR without any legacy owner",
+                        "src/codegen/tests.rs::compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access",
+                        "test_legacy_codegen_function_calls().is_empty()",
+                    ),
+                },
+                "FfiVerifierCompatibility": {
+                    (
+                        "typed String FFI context reports checker-owned coverage without any legacy owner",
+                        "src/verifier/tests.rs::typed_ffi_symbolic_string_contexts_defer_without_legacy_access",
+                        "Vec::<crate::core::LegacyBodyConsumer>::new()",
+                    ),
+                    (
+                        "checked verifier-only owner slice proves Ready repr(C) String-field Ensures",
+                        "src/verifier/tests.rs::typed_ffi_string_record_ensures_use_checker_receipt_and_fresh_result",
+                        'Some("verifier-ffi-owner-slice-v1")',
+                    ),
+                    (
+                        "unsupported Ready Ensures stays call-local without discarding Requires proof",
+                        "src/verifier/tests.rs::typed_ffi_ready_unsupported_record_ensures_preserves_requires_proof",
+                        "result.artifact.is_none()",
+                    ),
+                    (
+                        "nested repr(C) String fields preserve exact caller identity through MIR",
+                        "src/verifier/tests.rs::typed_ffi_aggregate_nested_string_fields_preserve_nul_unicode_and_length",
+                        'Some("verifier-ffi-owner-slice-v1")',
+                    ),
+                },
+            },
+        )
+        self.assertTrue(parsed["owner_closed_route_guards_complete"])
+        self.assertEqual(
+            {
+                owner: [(row["guard"], row["context"]) for row in rows]
+                for owner, rows in parsed["owner_closed_route_guards"].items()
+            },
+            {
+                "CodegenLegacyRemainder": [
+                    (
+                        "try_compile_exact_migrated_mir_island",
+                        "src/codegen/compile.rs::pub fn compile_checked(",
+                    ),
+                ],
+                "FfiVerifierCompatibility": [
+                    (
+                        "scalar_ffi_admission",
+                        "src/verifier/mod.rs::pub fn verify_ffi_checked_with_source_hash(",
+                    ),
+                ],
+            },
+        )
+        self.assertTrue(parsed["retired_owner_evidence_complete"])
+        self.assertEqual(
+            parsed["retirement_evidence_fields"],
+            {
+                "physical_status": "physical",
+                "ast_owner_status": "deleted",
+                "file_adapter_status": "deleted",
+                "transition_vir_adapter_status": "deleted",
+                "declared_parity_test_names": list(census.RETIRED_FLOW_DUAL_PARITY_TESTS),
+            },
+        )
         self.assertEqual(parsed["dynamic_probe_status"], "not_run")
 
     def test_each_missing_active_owner_fails_even_with_retirement_evidence(self) -> None:
@@ -1592,8 +1820,15 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
             "transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence="
             + "+".join(census.RETIRED_FLOW_DUAL_PARITY_TESTS)
         )
-        for line in ("", valid.replace("file-adapter=deleted", "file-adapter=retained"),
-                     valid.replace(census.RETIRED_FLOW_DUAL_PARITY_TESTS[1], "unknown_test")):
+        for line in (
+            "",
+            valid.replace("physical;", "present;"),
+            valid.replace("ast-owner=deleted", "ast-owner=present"),
+            valid.replace("file-adapter=deleted", "file-adapter=present"),
+            valid.replace("transition-vir-adapter=deleted", "transition-vir-adapter=present"),
+            valid.replace(census.RETIRED_FLOW_DUAL_PARITY_TESTS[1], "unknown_test"),
+            valid.replace("+" + census.RETIRED_FLOW_DUAL_PARITY_TESTS[2], ""),
+        ):
             with self.subTest(retirement_line=line):
                 parsed = census._parse_legacy_owner_audit(
                     self._audit_text(retirement_line=line)
@@ -1605,6 +1840,10 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
             self._audit_text(dynamic_probe_status="passed")
         )
         self.assertFalse(dynamic["retired_owner_evidence_complete"])
+        absent_dynamic_status = census._parse_legacy_owner_audit(
+            self._audit_text(dynamic_probe_status=None)
+        )
+        self.assertFalse(absent_dynamic_status["retired_owner_evidence_complete"])
 
     def test_duplicate_fields_summaries_and_unknown_owners_fail_closed(self) -> None:
         base = self._audit_text()
@@ -1617,7 +1856,9 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
         self.assertTrue(duplicate_field["duplicate_owner_fields"])
         self.assertFalse(duplicate_field["parsed_owner_set_complete"])
 
-        retirement = base.splitlines()[1 + 4 * len(census.ACTIVE_LEGACY_OWNER_NAMES)]
+        retirement = next(
+            line for line in base.splitlines() if line.startswith("retired_flow_dual_owners=")
+        )
         duplicate_summary = census._parse_legacy_owner_audit(
             self._audit_text(extra_lines=(retirement,))
         )
@@ -1629,11 +1870,193 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
         self.assertIn("UnexpectedOwner", unknown["unknown_owner_names"])
         self.assertFalse(unknown["parsed_owner_set_complete"])
 
+        repeated_evidence = census._parse_legacy_owner_audit(
+            self._audit_text(
+                extra_lines=(
+                    next(
+                        line for line in base.splitlines()
+                        if line.startswith("owner=CodegenLegacyRemainder evidence_scope=")
+                    ),
+                )
+            )
+        )
+        self.assertTrue(repeated_evidence["duplicate_owner_rows"])
+        self.assertFalse(repeated_evidence["parsed_owner_set_complete"])
+
+        duplicate_dynamic = census._parse_legacy_owner_audit(
+            self._audit_text(extra_lines=("dynamic_probe_status=not_run",))
+        )
+        self.assertFalse(duplicate_dynamic["retired_owner_evidence_complete"])
+
+    def test_malformed_or_whitespace_global_rows_fail_closed(self) -> None:
+        base = self._audit_text()
+        retirement = next(
+            line for line in base.splitlines()
+            if line.startswith("retired_flow_dual_owners=")
+        )
+        condition_digest = next(
+            line for line in base.splitlines()
+            if line.startswith("owner_deletion_condition_set_digest=")
+        )
+        malformed_rows = (
+            "owner_count=not-a-number",
+            " schema=" + census.LEGACY_OWNER_AUDIT_SCHEMA,
+            " " + retirement,
+            "dynamic_probe_status =not_run",
+            " audit_status=ok",
+            " " + condition_digest,
+        )
+        for line in malformed_rows:
+            with self.subTest(line=line):
+                parsed = census._parse_legacy_owner_audit(
+                    self._audit_text(extra_lines=(line,))
+                )
+                self.assertIn(line, parsed["malformed_global_rows"])
+                self.assertFalse(parsed["parsed_owner_set_complete"])
+                if line.lstrip().startswith(
+                    ("retired_flow_dual_owners=", "dynamic_probe_status")
+                ):
+                    self.assertFalse(parsed["retired_owner_evidence_complete"])
+
+    def test_ansi_and_prefixed_global_or_owner_rows_fail_closed(self) -> None:
+        cases = (
+            (
+                "ansi duplicate global key",
+                "\x1b[31mowner_count=999\x1b[0m",
+                "global",
+            ),
+            (
+                "ansi duplicate schema",
+                "\x1b[31mschema=attacker\x1b[0m",
+                "global",
+            ),
+            (
+                "prefixed audit status",
+                "unexpected-prefix audit_status=failed",
+                "global",
+            ),
+            (
+                "bom retired owner row",
+                "\ufeffowner=FlowVerifierCompatibility production_accessor_call_sites=0",
+                "owner",
+            ),
+            (
+                "ansi active owner row",
+                "\x1b[31mowner=FfiVerifierCompatibility production_accessor_call_sites=0\x1b[0m",
+                "owner",
+            ),
+        )
+        for label, line, kind in cases:
+            with self.subTest(row=label):
+                parsed = census._parse_legacy_owner_audit(
+                    self._audit_text(extra_lines=(line,))
+                )
+                self.assertFalse(parsed["parsed_owner_set_complete"])
+                if kind == "global":
+                    self.assertTrue(parsed["malformed_global_rows"])
+                else:
+                    self.assertTrue(parsed["malformed_owner_rows"])
+                if label == "bom retired owner row":
+                    self.assertIn(
+                        "FlowVerifierCompatibility", parsed["owner_roster_overlap"]
+                    )
+
+    def test_owner_count_requires_ascii_digits(self) -> None:
+        malformed = self._audit_text().replace("owner_count=2\n", "owner_count=٢\n")
+        parsed = census._parse_legacy_owner_audit(malformed)
+        self.assertIsNone(parsed["owner_count_reported"])
+        self.assertIn("owner_count=٢", parsed["malformed_global_rows"])
+        self.assertFalse(parsed["parsed_owner_set_complete"])
+
+    def test_production_accessor_call_sites_must_be_zero(self) -> None:
+        owner = census.ACTIVE_LEGACY_OWNER_NAMES[0]
+        positive_count = self._audit_text().replace(
+            f"owner={owner} production_accessor_call_sites=0",
+            f"owner={owner} production_accessor_call_sites=7",
+            1,
+        )
+        parsed = census._parse_legacy_owner_audit(positive_count)
+        self.assertEqual(
+            next(row["production_accessor_call_sites"] for row in parsed["owners"] if row["name"] == owner),
+            7,
+        )
+        self.assertFalse(parsed["parsed_owner_set_complete"])
+
+    def test_missing_active_owner_evidence_and_merged_rosters_fail_closed(self) -> None:
+        for missing in census.ACTIVE_LEGACY_OWNER_NAMES:
+            with self.subTest(missing_evidence=missing):
+                parsed = census._parse_legacy_owner_audit(
+                    self._audit_text(missing_evidence=(missing,))
+                )
+                self.assertFalse(parsed["owner_evidence_complete"])
+                self.assertFalse(parsed["parsed_owner_set_complete"])
+
+        reintroduced = census._parse_legacy_owner_audit(
+            self._audit_text(
+                extra_lines=(
+                    f"owner={census.RETIRED_LEGACY_OWNER_NAMES[0]} "
+                    "production_accessor_call_sites=0",
+                )
+            )
+        )
+        self.assertIn(census.RETIRED_LEGACY_OWNER_NAMES[0], reintroduced["owner_roster_overlap"])
+        self.assertFalse(reintroduced["owner_roster_disjoint"])
+        self.assertFalse(reintroduced["parsed_owner_set_complete"])
+
+    def test_owner_evidence_and_guards_require_exact_expected_tuples(self) -> None:
+        base_lines = self._audit_text().splitlines()
+        ffi_evidence = [
+            line for line in base_lines
+            if line.startswith("owner=FfiVerifierCompatibility evidence_scope=")
+        ]
+        self.assertEqual(len(ffi_evidence), 4)
+        codegen_evidence = next(
+            line for line in base_lines
+            if line.startswith("owner=CodegenLegacyRemainder evidence_scope=")
+        )
+        forged_ffi = (
+            "owner=FfiVerifierCompatibility evidence_scope=forged scope "
+            "evidence_test=missing::test evidence_marker=no assertion"
+        )
+        shortened = [
+            line for line in base_lines
+            if not line.startswith("owner=FfiVerifierCompatibility evidence_scope=")
+        ]
+        shortened.insert(shortened.index(codegen_evidence) + 1, forged_ffi)
+        parsed_shortened = census._parse_legacy_owner_audit("\n".join(shortened) + "\n")
+        self.assertFalse(parsed_shortened["owner_evidence_complete"])
+        self.assertFalse(parsed_shortened["parsed_owner_set_complete"])
+
+        forged_guard_lines = [
+            line.replace(
+                "closed_route_guard=try_compile_exact_migrated_mir_island "
+                "context=src/codegen/compile.rs::pub fn compile_checked(",
+                "closed_route_guard=bogus_guard context=missing::entry",
+            )
+            for line in base_lines
+        ]
+        parsed_guard = census._parse_legacy_owner_audit(
+            "\n".join(forged_guard_lines) + "\n"
+        )
+        self.assertFalse(parsed_guard["owner_closed_route_guards_complete"])
+        self.assertFalse(parsed_guard["parsed_owner_set_complete"])
+
+        forged_ffi_row = census._parse_legacy_owner_audit(
+            "\n".join(
+                line.replace(ffi_evidence[0], forged_ffi) if line == ffi_evidence[0] else line
+                for line in base_lines
+            ) + "\n"
+        )
+        self.assertFalse(forged_ffi_row["owner_evidence_complete"])
+        self.assertFalse(forged_ffi_row["parsed_owner_set_complete"])
+
     def test_malformed_active_and_reintroduced_retired_owner_rows_fail_closed(self) -> None:
         malformed_rows = (
             f"owner={census.ACTIVE_LEGACY_OWNER_NAMES[0]} "
             "production_accessor_call_sites=not-a-number",
             f"owner={census.ACTIVE_LEGACY_OWNER_NAMES[0]} garbage",
+            f" owner={census.ACTIVE_LEGACY_OWNER_NAMES[0]} production_accessor_call_sites=0",
+            f"owner = {census.ACTIVE_LEGACY_OWNER_NAMES[0]} production_accessor_call_sites=0",
         )
         for row in malformed_rows:
             with self.subTest(row=row):
@@ -1660,6 +2083,7 @@ class StrictGateTests(unittest.TestCase):
             condition = f"remove {name} after its remaining scope is migrated"
             owners.append({
                 "name": name,
+                "status": "active",
                 "production_accessor_call_sites": 0,
                 "production_access_status": "sealed",
                 "dependency_class": "fixture-dependency",
@@ -1668,12 +2092,20 @@ class StrictGateTests(unittest.TestCase):
                 "deletion_condition": condition,
                 "deletion_condition_sha256": census.sha256_bytes(condition.encode("utf-8")),
             })
+        retirement_evidence = {
+            "physical_status": "physical",
+            "ast_owner_status": "deleted",
+            "file_adapter_status": "deleted",
+            "transition_vir_adapter_status": "deleted",
+            "declared_parity_test_names": list(census.RETIRED_FLOW_DUAL_PARITY_TESTS),
+        }
         retired_owners = [
             {
                 "name": name,
                 "status": "physically_retired",
                 "retirement_evidence_kind": "audit_script_source_checks",
                 "retirement_evidence_complete": True,
+                "retirement_evidence": dict(retirement_evidence),
                 "declared_parity_test_names": list(census.RETIRED_FLOW_DUAL_PARITY_TESTS),
                 "dynamic_probe_status": "not_run",
             }
@@ -1682,15 +2114,44 @@ class StrictGateTests(unittest.TestCase):
         return {
             "accepted_as_complete_inventory": True,
             "owner_count_reported": len(owners),
+            "active_owner_names": list(census.ACTIVE_LEGACY_OWNER_NAMES),
+            "retired_owner_names": list(census.RETIRED_LEGACY_OWNER_NAMES),
             "owner_deletion_condition_set_sha256": "e" * 64,
             "deletion_condition_digests_match_text": True,
             "parsed_owner_set_complete": True,
             "retired_owner_evidence_complete": True,
+            "retirement_evidence_fields": retirement_evidence,
+            "legacy_owner_audit_schema": census.LEGACY_OWNER_AUDIT_SCHEMA,
+            "owner_evidence_complete": True,
+            "owner_evidence_rows": {
+                name: [
+                    {"scope": scope, "test": test, "marker": marker}
+                    for owner_name, scope, test, marker
+                    in census.LEGACY_OWNER_EVIDENCE_TUPLES
+                    if owner_name == name
+                ]
+                for name in census.ACTIVE_LEGACY_OWNER_NAMES
+            },
+            "owner_closed_route_guards_complete": True,
+            "owner_closed_route_guards": {
+                name: [
+                    {"guard": guard, "context": context}
+                    for owner_name, guard, context
+                    in census.LEGACY_OWNER_CLOSED_ROUTE_GUARD_TUPLES
+                    if owner_name == name
+                ]
+                for name in census.ACTIVE_LEGACY_OWNER_NAMES
+            },
+            "owner_roster_disjoint": True,
+            "owner_roster_overlap": [],
             "dynamic_probe_status": "not_run",
             "unknown_owner_names": [],
             "duplicate_owner_fields": [],
+            "duplicate_owner_rows": [],
             "malformed_condition_rows": [],
             "malformed_owner_rows": [],
+            "malformed_retirement_rows": [],
+            "malformed_global_rows": [],
             "owners": owners,
             "retired_owners": retired_owners,
         }
@@ -1728,6 +2189,8 @@ class StrictGateTests(unittest.TestCase):
                 "source_hash_matches": True,
                 "authority_status": "valid",
                 "authority_valid": True,
+                "test_contract_valid": True,
+                "actor_specific_authority": path in census.ACTOR_FALLBACK_INPUTS,
             },
             "per_function": {"named_roster_complete": True, "has_fallback": fallback},
             "output_artifact": {"sha256": "a" * 64, "bytes": 6},
@@ -1765,6 +2228,7 @@ class StrictGateTests(unittest.TestCase):
         source_scope: dict | None = None,
         sidecar_overrides: dict[str, bytes | None | str] | None = None,
         sidecar_root_symlink: bool = False,
+        owner_audit: dict | None = None,
         root: Path | None = None,
     ) -> dict:
         actor_manifest = [
@@ -1894,7 +2358,7 @@ class StrictGateTests(unittest.TestCase):
         owner_stderr = census._raw_capture(
             b"", "legacy-owner-audit.stderr.bin"
         )
-        owner_audit = cls._owner_audit()
+        owner_audit = owner_audit if owner_audit is not None else cls._owner_audit()
         owner_audit["stdout_raw"] = owner_stdout
         owner_audit["stderr_raw"] = owner_stderr
         with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
@@ -1969,8 +2433,40 @@ class StrictGateTests(unittest.TestCase):
             )
 
     def test_gate_can_pass_only_for_exact_canonical_zero_fallback_roster(self) -> None:
-        gate = self._gate(["tests/a.mimi"], [self._record("tests/a.mimi")])
+        gate = self._gate([], [])
         self.assertTrue(gate["passed"])
+        self.assertEqual(
+            gate["canonical_success_inputs"], sorted(census.ACTOR_FALLBACK_INPUTS)
+        )
+
+    def test_gate_revalidates_owner_tuples_and_zero_accessor_count(self) -> None:
+        forged_evidence = self._owner_audit()
+        forged_evidence["owner_evidence_rows"]["FfiVerifierCompatibility"] = [
+            {
+                "scope": "forged scope",
+                "test": "missing::test",
+                "marker": "no assertion",
+            }
+        ]
+        forged_guard = self._owner_audit()
+        forged_guard["owner_closed_route_guards"]["CodegenLegacyRemainder"] = [
+            {"guard": "bogus_guard", "context": "missing::entry"}
+        ]
+        positive_accessor_count = self._owner_audit()
+        positive_accessor_count["owners"][0]["production_accessor_call_sites"] = 7
+
+        for label, owner_audit in (
+            ("forged evidence", forged_evidence),
+            ("forged guard", forged_guard),
+            ("positive accessor count", positive_accessor_count),
+        ):
+            with self.subTest(owner_audit=label):
+                gate = self._gate([], [], owner_audit=owner_audit)
+                self.assertFalse(
+                    gate["checks"][
+                        "two_active_owners_audited_and_two_retired_owners_statically_verified"
+                    ]
+                )
 
     def test_canonical_disposition_without_observed_route_telemetry_fails(self) -> None:
         record = self._record("tests/a.mimi")
@@ -2221,6 +2717,23 @@ class StrictGateTests(unittest.TestCase):
             ]
         )
 
+        malformed_owner_audit = self._owner_audit()
+        malformed_owner_audit["malformed_global_rows"] = ["owner_count=invalid"]
+        malformed_gate = census._gate_report(
+            records,
+            manifest,
+            True,
+            [],
+            {"status": "available", "path_count": 0, "paths_sha256": census._manifest_paths_hash([])},
+            actors,
+            malformed_owner_audit,
+        )
+        self.assertFalse(
+            malformed_gate["checks"][
+                "two_active_owners_audited_and_two_retired_owners_statically_verified"
+            ]
+        )
+
 
 class ExpectationContractTests(unittest.TestCase):
     @staticmethod
@@ -2234,11 +2747,13 @@ class ExpectationContractTests(unittest.TestCase):
     ) -> dict:
         is_rejection = expectation_class == "expected_build_rejection"
         assertion_relative_path = (
-            "tests/route_contract.rs" if is_rejection else "tests/route_contract.py"
+            "tests/route_contract.rs"
+            if expectation_class in {"required_compile", "expected_build_rejection"}
+            else "tests/route_contract.py"
         )
         assertion_path = root / assertion_relative_path
         assertion_path.parent.mkdir(parents=True, exist_ok=True)
-        if is_rejection and not (root / "Cargo.toml").exists():
+        if expectation_class in {"required_compile", "expected_build_rejection"} and not (root / "Cargo.toml").exists():
             (root / "Cargo.toml").write_text(
                 '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
                 encoding="utf-8",
@@ -2270,6 +2785,39 @@ class ExpectationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             assertion_line = 14
+        elif expectation_class == "required_compile":
+            fixture_path = "".join(
+                f'.join({json.dumps(part)})' for part in Path(source_path).parts
+            )
+            source = (
+                "#[test]\n"
+                f"fn {test_id}() {{\n"
+                "    let fixture = ::std::path::Path::new(::std::env!(\"CARGO_MANIFEST_DIR\"))"
+                f"{fixture_path};\n"
+                "    let result = ::std::process::Command::new(::std::env!(\"CARGO_BIN_EXE_mimi\"))\n"
+                "        .current_dir(::std::env!(\"CARGO_MANIFEST_DIR\"))\n"
+                '        .arg("build")\n'
+                "        .arg(&fixture)\n"
+                '        .arg("-o")\n'
+                '        .arg("target/required-compile-route-contract.out")\n'
+                '        .env("MIMI_ROUTE_CENSUS", "1")\n'
+                "        .output()\n"
+                '        .expect("failed to execute exact fixture build");\n'
+                "    ::std::assert!(result.status.success());\n"
+                "    let stderr = ::std::string::String::from_utf8_lossy(&result.stderr);\n"
+                '    ::std::assert!(stderr.contains("canonical route disposition: canonical ("));\n'
+                '    ::std::assert!(!stderr.contains("canonical route disposition: legacy"));\n'
+                '    ::std::assert!(!stderr.contains("canonical route disposition: compatibility"));\n'
+                '    ::std::assert!(!stderr.contains("fallback"));\n'
+                '    ::std::assert!(!stderr.contains("compatibility"));\n'
+                '    ::std::assert!(stderr.contains("MIMI_ROUTE_CENSUS route-admission consumer=build mode=default "));\n'
+                '    ::std::assert!(stderr.contains("MIMI_ROUTE_CENSUS canonical-native-build consumer=build "));\n'
+                '    ::std::assert!(stderr.contains("mir_digest="));\n'
+                '    ::std::assert!(stderr.contains("receipt_identity_digest="));\n'
+                "}\n"
+            )
+            assertion_path.write_text(source, encoding="utf-8")
+            assertion_line = 15
         else:
             assertion_path.write_text(
                 f"def {test_id}():\n    assert compile_fixture()\n", encoding="utf-8"
@@ -2863,7 +3411,7 @@ class ExpectationContractTests(unittest.TestCase):
             source_path.write_text("func main() { }\n", encoding="utf-8")
             source = census.source_record(source_path, root)
             entry = self._entry(root, "case.mimi", source["sha256"])
-            (root / "tests/route_contract.py").write_text(
+            (root / "tests/route_contract.rs").write_text(
                 "assert changed_fixture()\n", encoding="utf-8"
             )
             bound, coverage = self._load_and_bind(root, {"case.mimi": entry}, [source])
@@ -2876,7 +3424,7 @@ class ExpectationContractTests(unittest.TestCase):
             )
 
         self.assertEqual(coverage["invalid_authority_paths"], ["case.mimi"])
-        self.assertEqual(result["authority_status"], "source_location_or_hash_mismatch")
+        self.assertEqual(result["authority_status"], "required_compile_test_contract_mismatch")
         self.assertEqual(result["status"], "invalid_evidence")
         self.assertFalse(result["matched"])
 
