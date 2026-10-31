@@ -104,6 +104,7 @@ mm_probe_*.txt
 # visible for review.
 evidence/0.1.11-dev/gates/full-route-census-*/full-route-census.artifacts/logs/*.bin
 evidence/0.1.11-dev/gates/full-route-census-*.artifacts/logs/*.bin
+evidence/0.1.11-dev/gates/actor-two-fixture-current-*/full-route-census.artifacts/logs/*.bin
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/native-object
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/runtime-archive
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/relinked-program
