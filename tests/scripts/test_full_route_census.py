@@ -878,11 +878,18 @@ class WholeProgramRouteTests(unittest.TestCase):
 
 
 class PerFunctionEligibilityTests(unittest.TestCase):
+    @staticmethod
+    def _canonical_route_line(digest: str) -> str:
+        return (
+            "canonical route disposition: canonical (scalar-actor-domain-v1) "
+            "mir_digest=" + digest
+        )
+
     def test_canonical_mir_named_roster_reconciles_owner_count_and_route_digest(self) -> None:
         digest = "a" * 64
         route = census._route_observation(
             "",
-            "canonical route disposition: canonical (scalar-actor-domain-v1) mir_digest=" + digest,
+            self._canonical_route_line(digest),
             0,
             "completed",
         )
@@ -891,12 +898,15 @@ class PerFunctionEligibilityTests(unittest.TestCase):
             "info: canonical MIR native emitted owner='function:Counter::bump'\n"
             "info: canonical MIR native emitted owner='function:main'\n"
             "info: canonical MIR native compiled 2/2 function(s), 0 fell back; mir_digest="
-            + digest,
+            + digest
+            + "\n"
+            + self._canonical_route_line(digest),
             None,
             route,
         )
         self.assertEqual(details["status"], "complete_named")
         self.assertTrue(details["named_roster_complete"])
+        self.assertTrue(details["consistency"]["mir_route_phase_boundary_is_unique"])
         self.assertEqual(details["counts"]["total_functions"], 2)
         self.assertEqual(details["route_mir_digest"], digest)
         self.assertEqual(
@@ -932,14 +942,324 @@ class PerFunctionEligibilityTests(unittest.TestCase):
         }
         for reason, output in cases.items():
             with self.subTest(reason=reason):
-                details = census._function_observations("", output, None, route)
+                details = census._function_observations(
+                    "", output + "\n" + self._canonical_route_line(digest), None, route
+                )
                 self.assertFalse(details["named_roster_complete"])
+
+    def test_canonical_mir_same_owner_events_reconcile_across_distinct_phases(self) -> None:
+        digest = "e" * 64
+        route = census._route_observation(
+            "",
+            self._canonical_route_line(digest),
+            0,
+            "completed",
+        )
+        owners = ["function:Counter::bump", "function:main"]
+        owner_lines = "\n".join(
+            f"info: canonical MIR native emitted owner='{owner}'" for owner in owners
+        )
+        summary = (
+            "info: canonical MIR native compiled 2/2 function(s), 0 fell back; mir_digest="
+            + digest
+        )
+        output = "\n".join(
+            [owner_lines, summary, self._canonical_route_line(digest), owner_lines, summary]
+        )
+
+        details = census._function_observations("", output, None, route)
+
+        self.assertTrue(details["named_roster_complete"])
+        self.assertEqual(details["counts"]["named_emission_successes"], 4)
+        self.assertEqual(details["counts"]["unique_named_functions"], 2)
+        self.assertEqual(
+            [event["emission_phase"] for event in details["functions"]],
+            ["pre_route", "pre_route", "post_route", "post_route"],
+        )
+        self.assertEqual(
+            [event["source_line_index"] for event in details["functions"]],
+            [0, 1, 4, 5],
+        )
+        self.assertTrue(all(event["source_stream"] == "stderr" for event in details["functions"]))
+        self.assertEqual(
+            details["emission_phase_rosters"],
+            {"pre_route": owners, "post_route": owners},
+        )
+        self.assertEqual(
+            [summary["emission_phase"] for summary in details["emitter_summaries"]],
+            ["pre_route", "post_route"],
+        )
+        self.assertEqual(
+            [summary["source_line_index"] for summary in details["emitter_summaries"]],
+            [2, 6],
+        )
+        self.assertTrue(
+            all(summary["source_stream"] == "stderr" for summary in details["emitter_summaries"])
+        )
+        self.assertEqual(details["duplicate_function_names"], [])
+        self.assertEqual(details["cross_phase_repeated_owners"], owners)
+
+    def test_canonical_mir_same_phase_duplicate_and_phase_roster_mismatch_fail_closed(self) -> None:
+        digest = "f" * 64
+        route = census._route_observation(
+            "",
+            self._canonical_route_line(digest),
+            0,
+            "completed",
+        )
+        same_phase_duplicate = "\n".join(
+            [
+                "info: canonical MIR native emitted owner='function:main'",
+                "info: canonical MIR native emitted owner='function:main'",
+                "info: canonical MIR native compiled 1/1 function(s), 0 fell back; mir_digest="
+                + digest,
+                self._canonical_route_line(digest),
+            ]
+        )
+        duplicate_details = census._function_observations(
+            "", same_phase_duplicate, None, route
+        )
+        self.assertFalse(duplicate_details["named_roster_complete"])
+        self.assertFalse(duplicate_details["consistency"]["mir_owner_events_are_unique"])
+        self.assertEqual(duplicate_details["duplicate_function_names"], ["function:main"])
+
+        count_mismatch = census._function_observations(
+            "",
+            "\n".join(
+                [
+                    "info: canonical MIR native emitted owner='function:main'",
+                    "info: canonical MIR native compiled 2/2 function(s), 0 fell back; mir_digest="
+                    + digest,
+                    self._canonical_route_line(digest),
+                ]
+            ),
+            None,
+            route,
+        )
+        self.assertFalse(count_mismatch["named_roster_complete"])
+        self.assertFalse(
+            count_mismatch["consistency"]["mir_named_owner_count_matches_total"]
+        )
+        self.assertFalse(count_mismatch["consistency"]["mir_emitter_counts_reconcile"])
+
+        changed_roster = "\n".join(
+            [
+                "info: canonical MIR native emitted owner='function:main'",
+                "info: canonical MIR native compiled 1/1 function(s), 0 fell back; mir_digest="
+                + digest,
+                self._canonical_route_line(digest),
+                "info: canonical MIR native emitted owner='function:helper'",
+                "info: canonical MIR native compiled 1/1 function(s), 0 fell back; mir_digest="
+                + digest,
+            ]
+        )
+        roster_details = census._function_observations("", changed_roster, None, route)
+        self.assertFalse(roster_details["named_roster_complete"])
+        self.assertFalse(roster_details["consistency"]["mir_phase_rosters_match"])
+
+    def test_canonical_mir_missing_summary_fails_closed(self) -> None:
+        digest = "c" * 64
+        route = census._route_observation(
+            "", self._canonical_route_line(digest), 0, "completed"
+        )
+        output = "\n".join(
+            [
+                "info: canonical MIR native emitted owner='function:main'",
+                self._canonical_route_line(digest),
+            ]
+        )
+
+        details = census._function_observations("", output, None, route)
+
+        self.assertFalse(details["named_roster_complete"])
+        self.assertFalse(details["consistency"]["mir_summary_is_unique"])
+        self.assertEqual(details["emitter_summaries"], [])
+
+    def test_canonical_mir_extra_route_marker_and_cross_stream_order_fail_closed(self) -> None:
+        digest = "7" * 64
+        route_line = self._canonical_route_line(digest)
+        route = census._route_observation("", route_line, 0, "completed")
+        owner = "info: canonical MIR native emitted owner='function:main'"
+        summary = (
+            "info: canonical MIR native compiled 1/1 function(s), 0 fell back; mir_digest="
+            + digest
+        )
+
+        extra_route = census._function_observations(
+            "",
+            "\n".join([owner, summary, route_line, route_line]),
+            None,
+            route,
+        )
+        self.assertFalse(extra_route["named_roster_complete"])
+        self.assertFalse(extra_route["consistency"]["mir_route_phase_boundary_is_unique"])
+        self.assertEqual(extra_route["functions"][0]["emission_phase"], "unclassified")
+
+        cross_stream_owner = census._function_observations(
+            owner,
+            "\n".join([summary, route_line]),
+            None,
+            route,
+        )
+        self.assertFalse(cross_stream_owner["named_roster_complete"])
+        self.assertFalse(
+            cross_stream_owner["consistency"]["mir_emission_events_have_known_phases"]
+        )
+        self.assertEqual(
+            cross_stream_owner["functions"][0]["emission_phase"], "unclassified"
+        )
+        self.assertEqual(cross_stream_owner["functions"][0]["source_stream"], "stdout")
+
+        cross_stream_summary = census._function_observations(
+            summary,
+            "\n".join([owner, route_line]),
+            None,
+            route,
+        )
+        self.assertFalse(cross_stream_summary["named_roster_complete"])
+        self.assertFalse(
+            cross_stream_summary["consistency"]["mir_emission_events_have_known_phases"]
+        )
+        self.assertEqual(
+            cross_stream_summary["emitter_summaries"][0]["emission_phase"], "unclassified"
+        )
+
+    def test_canonical_mir_same_line_duplicate_route_owner_and_summary_prefixes_fail_closed(self) -> None:
+        digest = "8" * 64
+        route_line = self._canonical_route_line(digest)
+        owner = "info: canonical MIR native emitted owner='function:main'"
+        helper_owner = "info: canonical MIR native emitted owner='function:helper'"
+        summary = (
+            "info: canonical MIR native compiled 1/1 function(s), 0 fell back; mir_digest="
+            + digest
+        )
+
+        doubled_route_line = route_line + " " + route_line
+        doubled_route = census._route_observation(
+            "", doubled_route_line, 0, "completed"
+        )
+        self.assertEqual(doubled_route["disposition"], "unobserved")
+        self.assertEqual(doubled_route["classification_status"], "multiple_route_markers")
+        self.assertEqual(doubled_route["route_marker_count"], 2)
+        route_details = census._function_observations(
+            "", "\n".join([owner, summary, doubled_route_line]), None, doubled_route
+        )
+        self.assertFalse(route_details["named_roster_complete"])
+        self.assertFalse(
+            route_details["consistency"]["mir_route_phase_boundary_is_unique"]
+        )
+        self.assertEqual(len(route_details["functions"]), 1)
+        self.assertEqual(len(route_details["emitter_summaries"]), 1)
+        self.assertEqual(len(route_details["route_markers"]), 2)
+
+        doubled_owner_line = owner + " " + helper_owner
+        owner_details = census._function_observations(
+            "",
+            "\n".join([doubled_owner_line, owner, summary, route_line]),
+            None,
+            census._route_observation("", route_line, 0, "completed"),
+        )
+        self.assertFalse(owner_details["named_roster_complete"])
+        self.assertFalse(
+            owner_details["consistency"]["mir_telemetry_lines_are_well_formed"]
+        )
+        self.assertEqual(len(owner_details["functions"]), 1)
+        self.assertEqual(len(owner_details["malformed_telemetry_lines"]), 1)
+        malformed_owner = owner_details["malformed_telemetry_lines"][0]
+        self.assertEqual(malformed_owner["source_stream"], "stderr")
+        self.assertEqual(malformed_owner["source_line_index"], 0)
+        self.assertEqual(malformed_owner["source_line"], doubled_owner_line)
+        self.assertEqual(malformed_owner["event_prefix_count"], 2)
+
+        invalid_owner_line = "info: canonical MIR native emitted owner='function:main extra'"
+        invalid_owner_details = census._function_observations(
+            "",
+            "\n".join([invalid_owner_line, owner, summary, route_line]),
+            None,
+            census._route_observation("", route_line, 0, "completed"),
+        )
+        self.assertFalse(invalid_owner_details["named_roster_complete"])
+        self.assertFalse(
+            invalid_owner_details["consistency"]["mir_telemetry_lines_are_well_formed"]
+        )
+        self.assertEqual(len(invalid_owner_details["functions"]), 1)
+        self.assertEqual(
+            invalid_owner_details["malformed_telemetry_lines"][0]["source_line"],
+            invalid_owner_line,
+        )
+
+        doubled_summary_line = summary + " " + summary
+        summary_details = census._function_observations(
+            "",
+            "\n".join([owner, doubled_summary_line, summary, route_line]),
+            None,
+            census._route_observation("", route_line, 0, "completed"),
+        )
+        self.assertFalse(summary_details["named_roster_complete"])
+        self.assertFalse(
+            summary_details["consistency"]["mir_telemetry_lines_are_well_formed"]
+        )
+        self.assertEqual(len(summary_details["emitter_summaries"]), 1)
+        self.assertEqual(len(summary_details["malformed_telemetry_lines"]), 1)
+        malformed_summary = summary_details["malformed_telemetry_lines"][0]
+        self.assertEqual(malformed_summary["source_stream"], "stderr")
+        self.assertEqual(malformed_summary["source_line_index"], 1)
+        self.assertEqual(malformed_summary["source_line"], doubled_summary_line)
+        self.assertEqual(malformed_summary["summary_prefix_count"], 2)
+
+        invalid_summary_line = summary + " trailing"
+        invalid_summary_details = census._function_observations(
+            "",
+            "\n".join([owner, invalid_summary_line, summary, route_line]),
+            None,
+            census._route_observation("", route_line, 0, "completed"),
+        )
+        self.assertFalse(invalid_summary_details["named_roster_complete"])
+        self.assertFalse(
+            invalid_summary_details["consistency"]["mir_telemetry_lines_are_well_formed"]
+        )
+        self.assertEqual(len(invalid_summary_details["emitter_summaries"]), 1)
+        self.assertEqual(
+            invalid_summary_details["malformed_telemetry_lines"][0]["source_line"],
+            invalid_summary_line,
+        )
+
+    def test_canonical_mir_each_phase_digest_and_summary_cardinality_fail_closed(self) -> None:
+        digest = "9" * 64
+        route = census._route_observation(
+            "",
+            self._canonical_route_line(digest),
+            0,
+            "completed",
+        )
+        owner = "info: canonical MIR native emitted owner='function:main'"
+        summary = (
+            "info: canonical MIR native compiled 1/1 function(s), 0 fell back; mir_digest="
+            + digest
+        )
+        wrong_second_digest = "\n".join(
+            [owner, summary, self._canonical_route_line(digest), owner, summary[:-64] + "8" * 64]
+        )
+        digest_details = census._function_observations(
+            "", wrong_second_digest, None, route
+        )
+        self.assertFalse(digest_details["named_roster_complete"])
+        self.assertFalse(digest_details["consistency"]["mir_graph_digest_matches_route"])
+
+        duplicate_summary = "\n".join(
+            [owner, summary, summary, self._canonical_route_line(digest)]
+        )
+        summary_details = census._function_observations(
+            "", duplicate_summary, None, route
+        )
+        self.assertFalse(summary_details["named_roster_complete"])
+        self.assertFalse(summary_details["consistency"]["mir_summary_is_unique"])
 
     def test_canonical_mir_fallback_count_or_resolved_stats_is_not_accepted(self) -> None:
         digest = "d" * 64
         route = census._route_observation(
             "",
-            "canonical route disposition: canonical (scalar-actor-domain-v1) mir_digest=" + digest,
+            self._canonical_route_line(digest),
             0,
             "completed",
         )
@@ -947,7 +1267,9 @@ class PerFunctionEligibilityTests(unittest.TestCase):
             "",
             "info: canonical MIR native emitted owner='function:main'\n"
             "info: canonical MIR native compiled 1/1 function(s), 1 fell back; mir_digest="
-            + digest,
+            + digest
+            + "\n"
+            + self._canonical_route_line(digest),
             {"program": "unexpected-resolved-stats"},
             route,
         )

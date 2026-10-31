@@ -118,7 +118,7 @@ except ImportError:  # pragma: no cover - older Python fails closed on Cargo con
     tomllib = None
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = "0.1.11-full-route-census-v5"
+SCHEMA_VERSION = "0.1.11-full-route-census-v6"
 EXPECTATION_SCHEMA_VERSION = 4
 EXPECTATION_CLASSES = {
     "required_compile",
@@ -258,9 +258,22 @@ EMIT_SUCCESS_RE = re.compile(r"^info: resolved emitter emitted '(.+)'$")
 EMIT_SUMMARY_RE = re.compile(
     r"^info: resolved emitter compiled (\d+)/(\d+) function\(s\), (\d+) fell back to legacy$"
 )
-MIR_EMIT_SUCCESS_RE = re.compile(r"^info: canonical MIR native emitted owner='(.+)'$")
+MIR_EMIT_SUCCESS_PREFIX_RE = re.compile(
+    r"info: canonical MIR native emitted owner="
+)
+MIR_EMIT_SUMMARY_PREFIX_RE = re.compile(
+    r"info: canonical MIR native compiled "
+)
+MIR_OWNER_TOKEN_RE = re.compile(
+    r"(?:function|transition):[A-Za-z0-9_.$:/<>-]+"
+)
+MIR_EMIT_SUCCESS_RE = re.compile(
+    r"info: canonical MIR native emitted owner='(?P<owner>"
+    + MIR_OWNER_TOKEN_RE.pattern
+    + r")'"
+)
 MIR_EMIT_SUMMARY_RE = re.compile(
-    r"^info: canonical MIR native compiled (\d+)/(\d+) function\(s\), "
+    r"info: canonical MIR native compiled (\d+)/(\d+) function\(s\), "
     r"(\d+) fell back; mir_digest=([0-9a-f]{64})$"
 )
 
@@ -3608,9 +3621,12 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
     captured = stderr + "\n" + stdout
     diagnostic_text = _strip_ansi(captured)
     observations: list[dict[str, Any]] = []
+    route_marker_count = 0
     for line in captured.splitlines():
-        match = ROUTE_RE.search(_strip_ansi(line))
-        if match:
+        plain_line = _strip_ansi(line)
+        route_matches = list(ROUTE_RE.finditer(plain_line))
+        route_marker_count += len(route_matches)
+        for marker_index, match in enumerate(route_matches):
             raw = match.group(1)
             observations.append({
                 "disposition": "canonical" if raw == "canonical" else "compatibility",
@@ -3618,9 +3634,8 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
                 "reason": match.group(2),
                 "mir_digest": match.group(3),
                 "line": line,
+                "route_marker_index": marker_index,
             })
-            continue
-        plain_line = _strip_ansi(line)
         rejected = REJECT_RE.search(plain_line) or EXPLICIT_REJECT_RE.search(plain_line)
         if rejected:
             observations.append({
@@ -3630,6 +3645,15 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
                 "mir_digest": None,
                 "line": line,
             })
+    if route_marker_count > 1:
+        return {
+            "disposition": "unobserved",
+            "classification_status": "multiple_route_markers",
+            "observations": observations,
+            "route_marker_count": route_marker_count,
+            "reason": "multiple canonical route markers were emitted; route selection is ambiguous",
+            "mir_digest": None,
+        }
     classes = {item["disposition"] for item in observations}
     route_identities = {
         (item["disposition"], item["reason"], item["mir_digest"])
@@ -3640,6 +3664,7 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
             "disposition": next(iter(classes)),
             "classification_status": "observed",
             "observations": observations,
+            "route_marker_count": route_marker_count,
             "reason": observations[0]["reason"] if len(observations) == 1 else None,
             "mir_digest": observations[0]["mir_digest"] if len(observations) == 1 else None,
         }
@@ -3648,6 +3673,7 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
             "disposition": "unobserved",
             "classification_status": "conflicting_observations",
             "observations": observations,
+            "route_marker_count": route_marker_count,
             "reason": "conflicting whole-program route identities or dispositions were emitted",
             "mir_digest": None,
         }
@@ -3656,6 +3682,7 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
             "disposition": "unobserved",
             "classification_status": run_status,
             "observations": [],
+            "route_marker_count": 0,
             "reason": "route selection could not be observed because process did not complete",
             "mir_digest": None,
         }
@@ -3664,6 +3691,7 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
             "disposition": "rejected",
             "classification_status": "inferred_pre_route_rejection",
             "observations": [],
+            "route_marker_count": 0,
             "reason": "compiler emitted a failure diagnostic before any route telemetry",
             "mir_digest": None,
         }
@@ -3671,6 +3699,7 @@ def _route_observation(stdout: str, stderr: str, exit_code: int | None, run_stat
         "disposition": "unobserved",
         "classification_status": "missing_route_telemetry",
         "observations": [],
+        "route_marker_count": 0,
         "reason": "no whole-program route disposition was emitted",
         "mir_digest": None,
     }
@@ -3694,51 +3723,208 @@ def _canonical_mir_function_observations(
     stats: Mapping[str, Any] | None,
     route: Mapping[str, Any],
 ) -> dict[str, Any]:
-    events: list[dict[str, Any]] = []
-    summaries: list[dict[str, Any]] = []
-    for line in (stderr + "\n" + stdout).splitlines():
-        match_line = _strip_ansi(line)
-        match = MIR_EMIT_SUCCESS_RE.match(match_line)
-        if match:
-            events.append({
-                "function": match.group(1),
-                "owner": match.group(1),
-                "eligibility": "canonical_mir_owner",
-                "emission": "canonical_mir_native",
-                "fallback": False,
-                "status": "emission_success",
-                "source_line": line,
-            })
-            continue
-        match = MIR_EMIT_SUMMARY_RE.match(match_line)
-        if match:
-            summaries.append({
-                "compiled": int(match.group(1)),
-                "total_mir_functions": int(match.group(2)),
-                "fell_back": int(match.group(3)),
-                "mir_digest": match.group(4),
-            })
+    phase_names = ("pre_route", "post_route")
+    raw_events: list[dict[str, Any]] = []
+    raw_summaries: list[dict[str, Any]] = []
+    route_markers: list[dict[str, Any]] = []
+    malformed_telemetry_lines: list[dict[str, Any]] = []
 
-    summary = summaries[0] if len(summaries) == 1 else None
-    owners = [event["owner"] for event in events]
-    duplicate_owners = sorted({owner for owner in owners if owners.count(owner) > 1})
-    total = summary["total_mir_functions"] if summary else None
-    compiled = summary["compiled"] if summary else None
-    fell_back = summary["fell_back"] if summary else None
+    # stdout and stderr are captured separately, so their relative ordering is
+    # not evidence. A route marker can define phases only for telemetry from
+    # that same stream.
+    for stream_name, stream_text in (("stderr", stderr), ("stdout", stdout)):
+        for line_index, line in enumerate(stream_text.splitlines()):
+            match_line = _strip_ansi(line)
+            route_matches = list(ROUTE_RE.finditer(match_line))
+            for marker_index, route_match in enumerate(route_matches):
+                route_markers.append({
+                    "stream": stream_name,
+                    "line_index": line_index,
+                    "marker_index": marker_index,
+                    "disposition": route_match.group(1),
+                    "mir_digest": route_match.group(3),
+                    "source_line": line,
+                })
+
+            event_prefixes = list(MIR_EMIT_SUCCESS_PREFIX_RE.finditer(match_line))
+            summary_prefixes = list(MIR_EMIT_SUMMARY_PREFIX_RE.finditer(match_line))
+            telemetry_prefix_count = len(event_prefixes) + len(summary_prefixes)
+            if telemetry_prefix_count > 1:
+                malformed_telemetry_lines.append({
+                    "source_stream": stream_name,
+                    "source_line_index": line_index,
+                    "source_line": line,
+                    "prefix_count": telemetry_prefix_count,
+                    "event_prefix_count": len(event_prefixes),
+                    "summary_prefix_count": len(summary_prefixes),
+                    "reason": "multiple canonical MIR telemetry prefixes occur on one line",
+                })
+                continue
+            if len(event_prefixes) == 1:
+                match = MIR_EMIT_SUCCESS_RE.fullmatch(match_line)
+                if match is None:
+                    malformed_telemetry_lines.append({
+                        "source_stream": stream_name,
+                        "source_line_index": line_index,
+                        "source_line": line,
+                        "prefix_count": 1,
+                        "event_prefix_count": 1,
+                        "summary_prefix_count": 0,
+                        "reason": "canonical MIR owner record is malformed or owner is not one structured token",
+                    })
+                    continue
+                raw_events.append({
+                    "function": match.group("owner"),
+                    "owner": match.group("owner"),
+                    "eligibility": "canonical_mir_owner",
+                    "emission": "canonical_mir_native",
+                    "fallback": False,
+                    "status": "emission_success",
+                    "source_stream": stream_name,
+                    "source_line_index": line_index,
+                    "source_line": line,
+                })
+                continue
+            if len(summary_prefixes) == 1:
+                match = MIR_EMIT_SUMMARY_RE.fullmatch(match_line)
+                if match is None:
+                    malformed_telemetry_lines.append({
+                        "source_stream": stream_name,
+                        "source_line_index": line_index,
+                        "source_line": line,
+                        "prefix_count": 1,
+                        "event_prefix_count": 0,
+                        "summary_prefix_count": 1,
+                        "reason": "canonical MIR summary record is malformed",
+                    })
+                    continue
+                raw_summaries.append({
+                    "compiled": int(match.group(1)),
+                    "total_mir_functions": int(match.group(2)),
+                    "fell_back": int(match.group(3)),
+                    "mir_digest": match.group(4),
+                    "source_stream": stream_name,
+                    "source_line_index": line_index,
+                    "source_line": line,
+                })
+
+    route_boundary_unique = (
+        len(route_markers) == 1 and route_markers[0]["disposition"] == "canonical"
+    )
+    route_boundary = route_markers[0] if route_boundary_unique else None
+
+    def emission_phase(observation: Mapping[str, Any]) -> str:
+        if route_boundary is None or observation["source_stream"] != route_boundary["stream"]:
+            return "unclassified"
+        return (
+            "pre_route"
+            if observation["source_line_index"] < route_boundary["line_index"]
+            else "post_route"
+        )
+
+    events = [
+        {**event, "emission_phase": emission_phase(event)}
+        for event in raw_events
+    ]
+    summaries = [
+        {**summary, "emission_phase": emission_phase(summary)}
+        for summary in raw_summaries
+    ]
+    phase_events = {
+        phase: [event for event in events if event["emission_phase"] == phase]
+        for phase in phase_names
+    }
+    phase_summaries = {
+        phase: [summary for summary in summaries if summary["emission_phase"] == phase]
+        for phase in phase_names
+    }
+    observed_phases = [
+        phase
+        for phase in phase_names
+        if phase_events[phase] or phase_summaries[phase]
+    ]
+    phase_rosters = {
+        phase: [event["owner"] for event in phase_events[phase]]
+        for phase in observed_phases
+    }
+    duplicate_owners_by_phase = {
+        phase: sorted({
+            owner
+            for owner in phase_rosters[phase]
+            if phase_rosters[phase].count(owner) > 1
+        })
+        for phase in observed_phases
+    }
+    duplicate_owners = sorted({
+        owner
+        for names in duplicate_owners_by_phase.values()
+        for owner in names
+    })
+    phase_rosters_match = bool(observed_phases) and all(
+        phase_rosters[phase] == phase_rosters[observed_phases[0]]
+        for phase in observed_phases[1:]
+    )
+
+    per_phase_reconciliations: dict[str, dict[str, Any]] = {}
+    for phase in observed_phases:
+        phase_owner_events = phase_events[phase]
+        phase_summary_rows = phase_summaries[phase]
+        phase_summary = phase_summary_rows[0] if len(phase_summary_rows) == 1 else None
+        per_phase_reconciliations[phase] = {
+            "owner_roster": list(phase_rosters[phase]),
+            "owner_event_count": len(phase_owner_events),
+            "summary_count": len(phase_summary_rows),
+            "summary": phase_summary,
+            "owner_events_are_unique": not duplicate_owners_by_phase[phase],
+            "named_owner_count_matches_total": (
+                phase_summary is not None
+                and len(phase_rosters[phase]) == phase_summary["total_mir_functions"]
+            ),
+            "emitter_counts_reconcile": (
+                phase_summary is not None
+                and phase_summary["compiled"] == len(phase_owner_events)
+                and phase_summary["compiled"] + phase_summary["fell_back"]
+                == phase_summary["total_mir_functions"]
+            ),
+            "graph_digest_matches_route": (
+                phase_summary is not None
+                and phase_summary["mir_digest"] == route.get("mir_digest")
+            ),
+            "route_has_no_fallback": (
+                phase_summary is not None and phase_summary["fell_back"] == 0
+            ),
+        }
+
+    all_telemetry_is_classified = (
+        route_boundary_unique
+        and all(event["emission_phase"] in phase_names for event in events)
+        and all(summary["emission_phase"] in phase_names for summary in summaries)
+    )
+    phases_have_one_summary = bool(observed_phases) and all(
+        len(phase_summaries[phase]) == 1 for phase in observed_phases
+    )
+    owner_events_unique_per_phase = bool(observed_phases) and all(
+        not duplicate_owners_by_phase[phase] for phase in observed_phases
+    )
+    named_count_matches_total = bool(observed_phases) and all(
+        per_phase_reconciliations[phase]["named_owner_count_matches_total"]
+        for phase in observed_phases
+    )
+    summary_counts_reconcile = bool(observed_phases) and all(
+        per_phase_reconciliations[phase]["emitter_counts_reconcile"]
+        for phase in observed_phases
+    )
     route_digest = route.get("mir_digest")
-    summary_digest = summary["mir_digest"] if summary else None
     digest_matches_route = (
-        isinstance(route_digest, str)
+        bool(summaries)
+        and isinstance(route_digest, str)
         and bool(re.fullmatch(r"[0-9a-f]{64}", route_digest))
-        and summary_digest == route_digest
+        and all(
+            summary["mir_digest"] == route_digest
+            for summary in summaries
+        )
     )
-    named_count_matches_total = total == len(owners) if total is not None else None
-    summary_counts_reconcile = (
-        compiled == len(owners) and compiled + fell_back == total
-        if summary is not None
-        else None
-    )
-    no_fallback = fell_back == 0 if fell_back is not None else None
+    no_fallback = bool(summaries) and all(summary["fell_back"] == 0 for summary in summaries)
     stats_status = (
         stats.get("status")
         if isinstance(stats, Mapping) and "status" in stats and "parsed" in stats
@@ -3750,16 +3936,36 @@ def _canonical_mir_function_observations(
         else stats
     )
     consistency: dict[str, bool | None] = {
-        "mir_summary_is_unique": len(summaries) == 1,
-        "mir_owner_events_are_unique": not duplicate_owners,
+        "mir_route_phase_boundary_is_unique": route_boundary_unique,
+        "mir_emission_events_have_known_phases": all_telemetry_is_classified,
+        "mir_telemetry_lines_are_well_formed": not malformed_telemetry_lines,
+        "mir_summary_is_unique": phases_have_one_summary,
+        "mir_owner_events_are_unique": owner_events_unique_per_phase,
         "mir_named_owner_count_matches_total": named_count_matches_total,
         "mir_emitter_counts_reconcile": summary_counts_reconcile,
         "mir_graph_digest_matches_route": digest_matches_route,
         "mir_route_has_no_fallback": no_fallback,
+        "mir_phase_rosters_match": phase_rosters_match,
         "resolved_dispatch_stats_absent": stats_status == "not_emitted",
     }
     roster_complete = all(value is True for value in consistency.values())
-    missing_owner_count = max(0, total - len(set(owners))) if total is not None else None
+
+    def consistent_summary_value(field: str) -> int | None:
+        values = {summary[field] for summary in summaries}
+        return next(iter(values)) if summaries and len(values) == 1 else None
+
+    total = consistent_summary_value("total_mir_functions")
+    compiled = consistent_summary_value("compiled")
+    fell_back_values = [summary["fell_back"] for summary in summaries]
+    fell_back = consistent_summary_value("fell_back")
+    owners = [event["owner"] for event in events]
+    unique_owner_count = len(set(owners))
+    phase_missing_owner_counts = [
+        max(0, phase_reconciliations["summary"]["total_mir_functions"] - len(set(phase_reconciliations["owner_roster"])))
+        for phase_reconciliations in per_phase_reconciliations.values()
+        if phase_reconciliations["summary"] is not None
+    ]
+    missing_owner_count = max(phase_missing_owner_counts) if phase_missing_owner_counts else None
     anonymous_slots = [
         {
             "slot": f"unattributed-mir-owner-{ordinal:06d}",
@@ -3771,12 +3977,29 @@ def _canonical_mir_function_observations(
         }
         for ordinal in range(1, (missing_owner_count or 0) + 1)
     ]
-    fallback_count = fell_back if fell_back is not None else 0
+    fallback_count = max(fell_back_values, default=0)
+    phase_success_counts = {
+        phase: len(phase_events[phase]) for phase in observed_phases
+    }
+    phase_unique_owner_counts = {
+        phase: len(set(phase_rosters[phase])) for phase in observed_phases
+    }
+    phase_fallback_counts = {
+        phase: per_phase_reconciliations[phase]["summary"]["fell_back"]
+        if per_phase_reconciliations[phase]["summary"] is not None
+        else None
+        for phase in observed_phases
+    }
+    cross_phase_repeated_owners = sorted(
+        set.intersection(*(
+            set(phase_rosters[phase]) for phase in observed_phases
+        ))
+    ) if len(observed_phases) > 1 else []
     return {
         "status": "complete_named" if roster_complete else (
             "partial" if events or summaries or stats_status != "not_emitted" else "unavailable"
         ),
-        "source": "canonical MIR native owner events plus post-module-verification summary",
+        "source": "canonical MIR native owner events and summaries partitioned at the unique canonical route disposition",
         "dispatch_stats": dict(stats_payload) if isinstance(stats_payload, Mapping) else None,
         "dispatch_stats_status": stats_status,
         "counts": {
@@ -3784,22 +4007,35 @@ def _canonical_mir_function_observations(
             "compiled_canonical_mir": compiled,
             "canonical_mir_fallback": fell_back,
             "named_emission_successes": len(events),
-            "unique_named_functions": len(set(owners)),
+            "unique_named_functions": unique_owner_count,
             "unattributed_function_count": missing_owner_count,
             "fallback_total_observed_or_counted": fallback_count,
+            "emission_phase_count": len(observed_phases),
+            "named_emission_successes_by_phase": phase_success_counts,
+            "unique_named_functions_by_phase": phase_unique_owner_counts,
+            "canonical_mir_fallback_by_phase": phase_fallback_counts,
         },
         "functions": events,
         "unattributed_function_slots": anonymous_slots,
-        "emitter_summary": summary,
+        "emitter_summary": summaries[0] if len(summaries) == 1 else None,
+        "emitter_summaries": summaries,
+        "malformed_telemetry_lines": malformed_telemetry_lines,
+        "emission_phase_rosters": phase_rosters,
+        "emission_phase_reconciliations": per_phase_reconciliations,
+        "route_markers": route_markers,
+        "route_marker_count": len(route_markers),
         "route_mir_digest": route_digest,
         "consistency": consistency,
         "duplicate_function_names": duplicate_owners,
+        "duplicate_function_names_by_phase": duplicate_owners_by_phase,
+        "cross_phase_repeated_owners": cross_phase_repeated_owners,
         "named_roster_complete": roster_complete,
         "has_fallback": fallback_count > 0 or no_fallback is False,
         "limitation": None if roster_complete else (
-            "Canonical MIR owner events and their summary are absent, duplicated, or inconsistent "
-            "with the MIR graph count/digest or route identity; resolved dispatch stats do not "
-            "describe this emitter. --check fails closed."
+            "Canonical MIR owner events or summaries are absent, unclassified, duplicated within "
+            "an emission phase, malformed or duplicated on a source line, or inconsistent across "
+            "phases with the MIR graph count/digest or route identity; resolved dispatch stats do "
+            "not describe this emitter. --check fails closed."
         ),
     }
 
@@ -3810,10 +4046,19 @@ def _function_observations(
     stats: Mapping[str, Any] | None,
     route: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if (
-        route is not None
-        and route.get("disposition") == "canonical"
-    ):
+    route_observations = route.get("observations", []) if isinstance(route, Mapping) else []
+    has_canonical_route_marker = (
+        isinstance(route, Mapping)
+        and (
+            route.get("disposition") == "canonical"
+            or any(
+                isinstance(observation, Mapping)
+                and observation.get("raw_disposition") == "canonical"
+                for observation in route_observations
+            )
+        )
+    )
+    if has_canonical_route_marker:
         return _canonical_mir_function_observations(stdout, stderr, stats, route)
 
     events: list[dict[str, Any]] = []
