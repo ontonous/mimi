@@ -163,6 +163,7 @@ source_input_inventory() {
         build.rs
         "$SCRIPT_RELATIVE"
         scripts/full_route_census.py
+        scripts/audit-mir-legacy-owners.sh
         AGENTS.md
         devdocs/v0.41/actor-closure-0.1.11.md
         'devdocs/V0.2/09-0.1.11交接门禁.md'
