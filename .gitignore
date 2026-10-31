@@ -97,6 +97,13 @@ mm_probe_*.txt
 # Native executables, object files, runtime archives, and temporary files emitted by strict L3 gates.
 # Keep raw stdout/stderr captures (*.bin), manifests, command transcripts,
 # checksums, and source snapshots visible; gate executables use stable names.
+# Full-route census emits a raw stdout/stderr pair for every input row. Keep
+# those large per-row captures on disk (the census manifests retain their paths
+# and hashes), but exclude this generated high-volume subtree from Git's source
+# inventory. Aggregate results, run manifests, and all other gate captures stay
+# visible for review.
+evidence/0.1.11-dev/gates/full-route-census-*/full-route-census.artifacts/logs/*.bin
+evidence/0.1.11-dev/gates/full-route-census-*.artifacts/logs/*.bin
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/native-object
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/runtime-archive
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/relinked-program
