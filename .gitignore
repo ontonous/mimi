@@ -64,6 +64,10 @@ AGENTS_ANCHOR_*.md
 # Keep internal devdocs ignored by default, while allowing the reproducible
 # checked-unpack acceptance evidence for this development slice to be reviewed.
 devdocs/**
+!devdocs/V0.2/
+!devdocs/V0.2/**
+devdocs/V0.2/**/__pycache__/
+devdocs/V0.2/**/*.py[cod]
 !devdocs/v0.41/
 devdocs/v0.41/**
 !devdocs/v0.41/evidence-2026-10-29-map-any-checked-unpack/

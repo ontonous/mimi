@@ -1,0 +1,856 @@
+# Local planning state only; no compiler capability is accepted by this file.
+schema_version = 1
+updated = "2026-09-29"
+task_definitions = "02-阶段与任务.md"
+decision_definitions = "05-待裁决问题.md"
+
+[[decisions]]
+id = "D-01"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-02"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-03"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-04"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-05"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-06"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-07"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-08"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-09"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-10"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-11"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-12"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-13"
+status = "待裁决"
+evidence = []
+
+[[decisions]]
+id = "D-14"
+status = "待裁决"
+evidence = []
+
+[[tasks]]
+id = "B-01"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = []
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-02"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = []
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-03"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = ["B-01", "B-02"]
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-04"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = ["B-01", "B-02"]
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-05"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = ["B-01"]
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-06"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = ["B-02", "B-03"]
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-07"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = ["B-03", "B-04", "B-05", "B-06", "B-09"]
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-08"
+phase = "P0"
+required = true
+status = "未开始"
+depends_on = ["B-04", "B-05"]
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "B-09"
+phase = "P0"
+required = true
+status = "设计中"
+depends_on = []
+decision_dependencies = []
+goals = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-01"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["B-03"]
+decision_dependencies = ["D-01"]
+goals = ["G1"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-02"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-01"]
+decision_dependencies = ["D-02", "D-03"]
+goals = ["G1", "G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-03"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-02"]
+decision_dependencies = []
+goals = ["G1", "G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-04"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["B-05", "V-02"]
+decision_dependencies = []
+goals = ["G1", "G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-05"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-04"]
+decision_dependencies = []
+goals = ["G1", "G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-06"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-01", "V-04"]
+decision_dependencies = []
+goals = ["G1", "G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-07"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-05"]
+decision_dependencies = ["D-02"]
+goals = ["G1", "G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-08"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-03", "V-04", "V-05", "V-06", "V-07", "V-10", "V-11", "V-12"]
+decision_dependencies = []
+goals = ["G1", "G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-09"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-07"]
+decision_dependencies = []
+goals = ["G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-10"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-04"]
+decision_dependencies = ["D-02"]
+goals = ["G2"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-11"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["B-05", "V-02", "V-03", "V-04", "V-05", "V-06", "V-10"]
+decision_dependencies = ["D-03"]
+goals = ["G1", "G2", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "V-12"
+phase = "P1"
+required = true
+status = "未开始"
+depends_on = ["V-02", "V-04", "V-06", "V-10"]
+decision_dependencies = ["D-13"]
+goals = ["G1", "G2", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-01"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = []
+decision_dependencies = ["D-05"]
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-02"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["M-01"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-03"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["M-01", "V-02"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-04"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["M-03"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-05"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["M-02", "M-03"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-06"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["M-02", "M-03", "M-04", "M-05"]
+decision_dependencies = []
+goals = ["G1", "G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-07"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["M-01", "M-03"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-08"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["M-03", "M-05"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "M-09"
+phase = "P2"
+required = true
+status = "未开始"
+depends_on = ["E-03", "M-08", "V-04"]
+decision_dependencies = []
+goals = ["G4", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-01"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["V-02", "V-04", "V-10"]
+decision_dependencies = ["D-11"]
+goals = ["G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-02"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["V-04"]
+decision_dependencies = ["D-04"]
+goals = ["G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-03"
+phase = "P3"
+required = false
+status = "未开始"
+depends_on = ["F-02"]
+decision_dependencies = ["D-09"]
+goals = ["G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-04"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["V-02"]
+decision_dependencies = ["D-08"]
+goals = ["G2", "G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-05"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["F-01", "F-04", "F-10"]
+decision_dependencies = []
+goals = ["G2", "G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-06"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["F-05"]
+decision_dependencies = []
+goals = ["G2", "G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-07"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["F-02", "F-06"]
+decision_dependencies = []
+goals = ["G2", "G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-08"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["F-06"]
+decision_dependencies = []
+goals = ["G2", "G3"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-09"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["E-03", "F-05", "F-06"]
+decision_dependencies = []
+goals = ["G2", "G3", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "F-10"
+phase = "P3"
+required = true
+status = "未开始"
+depends_on = ["F-04", "V-02", "V-04"]
+decision_dependencies = ["D-14"]
+goals = ["G2", "G3", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "E-01"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["M-03"]
+decision_dependencies = ["D-06"]
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "E-02"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["E-01"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "E-03"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["E-02", "F-10"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "E-04"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["E-03"]
+decision_dependencies = ["D-12"]
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "E-05"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["E-04", "M-03"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "E-06"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["E-04", "E-05", "F-05", "M-09"]
+decision_dependencies = []
+goals = ["G4", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "C-01"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["V-02"]
+decision_dependencies = ["D-07"]
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "C-02"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["C-01", "E-03"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "C-03"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["C-02", "M-08"]
+decision_dependencies = []
+goals = ["G4"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "K-01"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["V-04"]
+decision_dependencies = ["D-10"]
+goals = ["G5"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "K-02"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["E-02", "K-01"]
+decision_dependencies = []
+goals = ["G5"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "K-03"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["K-02", "K-05"]
+decision_dependencies = []
+goals = ["G5"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "K-04"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["K-01", "K-02", "K-03"]
+decision_dependencies = []
+goals = ["G5"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "K-05"
+phase = "P4"
+required = true
+status = "未开始"
+depends_on = ["K-02"]
+decision_dependencies = ["D-10"]
+goals = ["G5"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "Q-01"
+phase = "P5"
+required = true
+status = "未开始"
+depends_on = ["M-03"]
+decision_dependencies = []
+goals = ["G6"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "Q-02"
+phase = "P5"
+required = true
+status = "未开始"
+depends_on = ["E-02", "F-05", "Q-01"]
+decision_dependencies = []
+goals = ["G6"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "Q-03"
+phase = "P5"
+required = true
+status = "未开始"
+depends_on = ["K-04", "M-04", "Q-01"]
+decision_dependencies = []
+goals = ["G6"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "Q-04"
+phase = "P5"
+required = true
+status = "未开始"
+depends_on = ["Q-02", "Q-03"]
+decision_dependencies = []
+goals = ["G6"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "Q-05"
+phase = "P5"
+required = true
+status = "未开始"
+depends_on = ["Q-01", "Q-02", "Q-03", "Q-04"]
+decision_dependencies = []
+goals = ["G6"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "Q-06"
+phase = "P5"
+required = false
+status = "未开始"
+depends_on = ["Q-02"]
+decision_dependencies = []
+goals = ["G6"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-01"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["C-03", "E-03", "M-06", "M-07", "V-11"]
+decision_dependencies = []
+goals = ["G1"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-02"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["F-07", "F-08", "F-09", "V-06", "V-10", "V-12"]
+decision_dependencies = []
+goals = ["G1"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-03"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["K-03", "K-05", "V-12"]
+decision_dependencies = []
+goals = ["G1"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-09"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["C-03", "E-03", "F-08", "M-08", "M-09"]
+decision_dependencies = []
+goals = ["G1", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-04"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["A-01", "A-02", "A-03", "A-09", "A-10", "Q-05"]
+decision_dependencies = []
+goals = ["G6"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-05"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["A-01", "A-02", "A-03", "A-09", "B-05", "E-06", "F-09", "M-09", "V-11"]
+decision_dependencies = []
+goals = ["G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-06"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["A-05", "A-10", "A-11", "C-03", "E-05", "E-06", "V-08"]
+decision_dependencies = []
+goals = ["G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-07"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["A-04", "A-05", "A-06", "V-09"]
+decision_dependencies = []
+goals = ["G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-08"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["A-01", "A-02", "A-03", "A-04", "A-05", "A-06", "A-07", "A-09", "B-07", "B-08"]
+decision_dependencies = []
+goals = ["G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-10"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["A-02", "A-09", "B-02", "Q-05"]
+decision_dependencies = []
+goals = ["G1", "G6", "G7"]
+evidence = []
+blocked_reason = ""
+
+[[tasks]]
+id = "A-11"
+phase = "P6"
+required = true
+status = "未开始"
+depends_on = ["A-01", "A-02", "A-03", "A-09", "F-09", "F-10", "M-09", "V-11"]
+decision_dependencies = []
+goals = ["G7"]
+evidence = []
+blocked_reason = ""
