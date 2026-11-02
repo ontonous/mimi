@@ -99,13 +99,11 @@ tests/stdlib_matrix_scratch/
 mm_probe_*.txt
 
 # Native executables, object files, runtime archives, and temporary files emitted by strict L3 gates.
-# Keep raw stdout/stderr captures (*.bin), manifests, command transcripts,
-# checksums, and source snapshots visible; gate executables use stable names.
-# Full-route census emits a raw stdout/stderr pair for every input row. Keep
-# those large per-row captures on disk (the census manifests retain their paths
-# and hashes), but exclude this generated high-volume subtree from Git's source
-# inventory. Aggregate results, run manifests, and all other gate captures stay
-# visible for review.
+# The high-volume full-route census sidecars below are retained locally but not
+# included by default; validators require those bytes, so such a run is not a
+# self-contained checked-in evidence bundle unless its exact run is opted in.
+# Keep aggregate results, run manifests, command transcripts, checksums, and
+# source snapshots visible for review.
 evidence/0.1.11-dev/gates/full-route-census-*/full-route-census.artifacts/logs/*.bin
 evidence/0.1.11-dev/gates/full-route-census-*.artifacts/logs/*.bin
 evidence/0.1.11-dev/gates/actor-two-fixture-current-*/full-route-census.artifacts/logs/*.bin
@@ -148,6 +146,11 @@ evidence/**/native-l3-*/*/callbacks.o
 evidence/**/test-artifacts/strict-memcheck/native-default
 evidence/**/test-artifacts/strict-memcheck/native-explicit-mir
 evidence/**/callback-test
+# The 2026-11-02 CheckedGet-only L1/L2 and strict L3 records include executable
+# hashes in their root manifests. Keep those exact historical run bundles
+# complete for checksum review; they are not current-source signoff.
+!evidence/0.1.11-dev/gates/checked-get-current-20261102-r3-l1l2/**/program
+!evidence/0.1.11-dev/gates/checked-get-current-20261102-r1-l3/**/program
 evidence/**/strict-l3/*-native
 evidence/**/raw-memcheck/*-native
 # Observer V1 manual L3 gates emit profile-specific native executables.
