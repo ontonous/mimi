@@ -4711,6 +4711,56 @@ def bind_expectations_to_inventory(
     }
 
 
+RUNTIME_AUTHORITY_EXPECTATION_CLASSES = frozenset(
+    {
+        "required_compile",
+        "expected_build_rejection",
+        "expected_source_diagnostic",
+    }
+)
+
+
+def expectation_source_contract_valid_for_preflight(
+    expectation: Mapping[str, Any],
+) -> bool:
+    """Check source-bound authority before tests that prove runtime authority run.
+
+    Generic compile/rejection/diagnostic rows intentionally leave
+    ``authority_valid`` false until the exact Cargo-backed test has executed.
+    An Actor-specific required-compile row can carry a predeclared
+    ``authority_valid`` value from its separately pinned helper contract, but
+    that value does not replace the Actor runtime test. The runner's preflight
+    only checks the source/test contract and never mutates the expectation.
+    """
+    if expectation.get("source_hash_matches") is not True:
+        return False
+    if expectation.get("class") in {
+        "required_compile",
+        "expected_build_rejection",
+        "expected_source_diagnostic",
+    }:
+        return (
+            expectation.get("test_contract_valid") is True
+            and expectation.get("source_authority_valid") is True
+        )
+    return expectation.get("authority_valid") is True
+
+
+def expectation_paths_requiring_runtime_authority(
+    expectations: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """List all rows whose authority still requires runtime test execution.
+
+    This is a pre-execution inventory, so Actor-specific compile rows remain
+    listed even when their static helper authority has already been checked.
+    """
+    return sorted(
+        path
+        for path, expectation in expectations.items()
+        if expectation.get("class") in RUNTIME_AUTHORITY_EXPECTATION_CLASSES
+    )
+
+
 def add_actor_default_expectations(
     expectations: Mapping[str, Mapping[str, Any]],
     sources: Sequence[Mapping[str, Any]],

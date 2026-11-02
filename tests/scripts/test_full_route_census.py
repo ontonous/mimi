@@ -3610,6 +3610,80 @@ class StrictGateTests(unittest.TestCase):
 
 
 class ExpectationContractTests(unittest.TestCase):
+    def test_preflight_accepts_source_contract_before_runtime_authority_exists(self) -> None:
+        pending_classes = (
+            "required_compile",
+            "expected_build_rejection",
+            "expected_source_diagnostic",
+        )
+        for expectation_class in pending_classes:
+            with self.subTest(expectation_class=expectation_class):
+                expectation = {
+                    "class": expectation_class,
+                    "source_hash_matches": True,
+                    "test_contract_valid": True,
+                    "source_authority_valid": True,
+                    "authority_valid": False,
+                }
+                self.assertTrue(
+                    census.expectation_source_contract_valid_for_preflight(expectation)
+                )
+                self.assertIs(
+                    expectation["authority_valid"],
+                    False,
+                    "preflight must not manufacture runtime authority",
+                )
+
+    def test_preflight_rejects_stale_or_invalid_source_contracts(self) -> None:
+        pending = {
+            "class": "expected_source_diagnostic",
+            "source_hash_matches": True,
+            "test_contract_valid": True,
+            "source_authority_valid": True,
+            "authority_valid": False,
+        }
+        for field in ("source_hash_matches", "test_contract_valid", "source_authority_valid"):
+            with self.subTest(field=field):
+                invalid = dict(pending)
+                invalid[field] = False
+                self.assertFalse(
+                    census.expectation_source_contract_valid_for_preflight(invalid)
+                )
+
+        self.assertFalse(
+            census.expectation_source_contract_valid_for_preflight(
+                {"class": "unmapped", "source_hash_matches": True, "authority_valid": False}
+            )
+        )
+
+    def test_preflight_keeps_other_classes_on_final_authority_validity(self) -> None:
+        accepted = {
+            "class": "canonical",
+            "source_hash_matches": True,
+            "authority_valid": True,
+        }
+        rejected = {**accepted, "authority_valid": False}
+        self.assertTrue(census.expectation_source_contract_valid_for_preflight(accepted))
+        self.assertFalse(census.expectation_source_contract_valid_for_preflight(rejected))
+
+    def test_preflight_reports_all_runtime_tests_even_with_static_actor_authority(self) -> None:
+        bound = {
+            "actor.mimi": {
+                "class": "required_compile",
+                "authority_valid": True,
+                "actor_specific_authority": True,
+            },
+            "canonical.mimi": {"class": "canonical", "authority_valid": True},
+            "diagnostic.mimi": {"class": "expected_source_diagnostic", "authority_valid": False},
+            "rejected.mimi": {"class": "expected_build_rejection", "authority_valid": False},
+            "generic.mimi": {"class": "required_compile", "authority_valid": False},
+        }
+        self.assertEqual(
+            census.expectation_paths_requiring_runtime_authority(bound),
+            ["actor.mimi", "diagnostic.mimi", "generic.mimi", "rejected.mimi"],
+        )
+        self.assertIs(bound["actor.mimi"]["authority_valid"], True)
+
     @staticmethod
     def _mimi_identity(root: Path) -> tuple[str, str]:
         mimi = root / "target" / "debug" / "mimi"

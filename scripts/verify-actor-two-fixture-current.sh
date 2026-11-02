@@ -233,13 +233,14 @@ try:
     bound, coverage = census.bind_expectations_to_inventory(declared, sources, root)
     invalid = sorted(
         path for path, expectation in bound.items()
-        if expectation.get("authority_valid") is not True
+        if not census.expectation_source_contract_valid_for_preflight(expectation)
     )
     if invalid:
         raise ValueError(
-            "independent expectations contain invalid source-bound test authority "
+            "independent expectations contain invalid source-bound test contract "
             f"({len(invalid)} first={invalid[:5]})"
         )
+    runtime_pending = census.expectation_paths_requiring_runtime_authority(bound)
     print(json.dumps({
         "status": "validated_independent_v4_manifest",
         "path": str(manifest_path),
@@ -248,7 +249,9 @@ try:
         "manifest_sha256": census._manifest_digest(sources),
         "source_scope_exactly_once": scope.get("exactly_once"),
         "expectation_coverage_exact_bijection": coverage.get("exact_bijection"),
-        "authority_invalid_paths": [],
+        "source_contract_invalid_paths": [],
+        "runtime_authority_pending_count": len(runtime_pending),
+        "runtime_authority_pending_first": runtime_pending[:5],
     }, sort_keys=True))
 except (OSError, ValueError, json.JSONDecodeError) as error:
     print(f"expectations preflight refused: {error}", file=sys.stderr)
