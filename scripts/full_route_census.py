@@ -7849,6 +7849,7 @@ def collect(args: argparse.Namespace) -> int:
         logs_root,
         root,
         cargo_authority=cargo_authority,
+        mimi_identity=base["authority_mimi_identity"],
     )
     base["gate"]["requested"] = bool(args.check)
     base["gate"]["mode"] = "strict_check" if args.check else "evidence_collection_only"
