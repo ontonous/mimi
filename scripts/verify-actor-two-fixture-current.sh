@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 # Narrow current-source gate for the two original Actor nested-helper fixtures.
-# The full route census is retained as-is; only its two Actor rows determine
-# this script's fixture-specific closure status. Its global gate and all other
-# candidate classifications/failures are written to census-status.txt.
+# The full route census is retained as a source-bound collect/generate/strict
+# replay; its strict global gate and the two exact Actor rows are both checked.
 # This does not run or alter the broad FFI test gate; the full census retains
-# all candidate outcomes and reports its global status without filtering rows.
+# all candidate outcomes and retains them without filtering rows.
 set -uo pipefail
 set -o noclobber
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_RELATIVE="scripts/verify-actor-two-fixture-current.sh"
+# The portable contract is defined by the versioned runner, census/helper, and
+# Python contract tests listed below. AGENTS.md and the two hand-off documents
+# are non-contract review context: record them when present, but never require
+# them or include them in source identity for clean-checkout replay.
+LOCAL_CONTEXT_PATHS=(
+    AGENTS.md
+    devdocs/v0.41/actor-closure-0.1.11.md
+    'devdocs/V0.2/09-0.1.11交接门禁.md'
+)
 LLVM_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}"
 export LLVM_SYS_181_PREFIX="$LLVM_PREFIX"
+# The production CLI uses the host's primary thread, which has the normal
+# 8 MiB Linux stack here. Rust's test harness creates smaller worker threads
+# by default; keep route-construction tests on the same stack budget.
+TEST_THREAD_STACK_BYTES=8388608
 ARTIFACT_REQUESTED="${MIMI_ACTOR_TWO_FIXTURE_ARTIFACT_DIR:-}"
+EXPECTATIONS_REQUESTED="${MIMI_ACTOR_TWO_FIXTURE_EXPECTATIONS:-}"
 GATE_FAILURES=0
 SNAPSHOT_FAILURE=0
 ACTOR_CENSUS_CLOSED=0
@@ -26,7 +39,7 @@ fail_early() {
     exit 2
 }
 
-for required_tool in cargo rustc python3 sha256sum sort find xargs cmp awk grep realpath date git uname env; do
+for required_tool in cargo rustc rustup python3 sha256sum sort find xargs cmp awk grep realpath date git uname env; do
     command -v "$required_tool" >/dev/null 2>&1 || fail_early "Actor two-fixture replay requires $required_tool"
 done
 NATIVE_HOST_TARGET="$(rustc -vV | awk '$1 == "host:" { print $2; exit }')"
@@ -102,6 +115,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 capture_environment() {
+    local context_path
     {
         printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         printf 'repository=%s\n' "$ROOT_DIR"
@@ -110,6 +124,7 @@ capture_environment() {
         printf 'host=%s\n' "$(uname -a)"
         printf 'native_host_target=%s\n' "$NATIVE_HOST_TARGET"
         printf 'LLVM_SYS_181_PREFIX=%q\n' "$LLVM_PREFIX"
+        printf 'effective.RUST_MIN_STACK=%s\n' "$TEST_THREAD_STACK_BYTES"
         if [[ -e "$LLVM_PREFIX" ]]; then
             printf 'LLVM_SYS_181_PREFIX_realpath=%s\n' "$(realpath -- "$LLVM_PREFIX")"
         else
@@ -118,21 +133,34 @@ capture_environment() {
         printf 'effective.CARGO_BUILD_JOBS=1\n'
         printf 'effective.CARGO_TERM_COLOR=never\n'
         printf 'effective.CARGO_TARGET_DIR=%q\n' "$EFFECTIVE_TARGET_DIR"
-        for name in CARGO_HOME CARGO_TARGET_DIR CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET \
+        printf 'local_context_policy=optional_review_context_excluded_from_portable_source_identity\n'
+        for context_path in "${LOCAL_CONTEXT_PATHS[@]}"; do
+            if [[ -L "$context_path" ]]; then
+                printf 'local_context.%s=symlink_excluded\n' "$context_path"
+            elif [[ -f "$context_path" ]]; then
+                printf 'local_context.%s=present_sha256=' "$context_path"
+                sha256sum -- "$context_path" | awk '{ print $1 }'
+            else
+                printf 'local_context.%s=absent\n' "$context_path"
+            fi
+        done
+        for name in CARGO_HOME CARGO_TARGET_DIR CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET RUST_MIN_STACK \
             CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_NET_OFFLINE CARGO_TERM_COLOR \
             CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL \
             CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG \
             RUSTFLAGS RUSTDOCFLAGS RUSTUP_TOOLCHAIN RUSTC RUSTC_WRAPPER \
             RUSTC_WORKSPACE_WRAPPER RUSTDOC CC CFLAGS CXX CXXFLAGS AR LD \
             LIBCLANG_PATH LLVM_CONFIG_PATH PKG_CONFIG_PATH PKG_CONFIG_LIBDIR \
-            LD_LIBRARY_PATH MIMI_ROUTE_CENSUS MIMI_REACHABLE_DISPATCH PATH HOME; do
+            LD_LIBRARY_PATH MIMI_ROUTE_CENSUS MIMI_ROUTE_CENSUS_MIMI \
+            MIMI_ROUTE_CENSUS_MIMI_SHA256 MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE \
+            MIMI_ACTOR_TWO_FIXTURE_EXPECTATIONS \
+            MIMI_REACHABLE_DISPATCH PATH HOME; do
             if [[ ${!name+x} ]]; then
                 printf 'env.%s=%q\n' "$name" "${!name}"
             else
                 printf 'env.%s=<unset>\n' "$name"
             fi
         done
-        cargo --version
         rustc --version --verbose
         python3 --version
         if command -v valgrind >/dev/null 2>&1; then
@@ -155,6 +183,89 @@ capture_environment || {
     exit 1
 }
 
+# Require a caller-reviewed expectation contract before any Cargo invocation
+# (including the version probe) or Mimi build. Observations from the first census can validate this manifest;
+# they cannot supply or auto-approve its expected classes.
+if [[ -z "$EXPECTATIONS_REQUESTED" ]]; then
+    fail_early "MIMI_ACTOR_TWO_FIXTURE_EXPECTATIONS must name an independent schema-v4 expectations manifest; refusing raw-observation authority generation"
+fi
+case "$EXPECTATIONS_REQUESTED" in
+    /*) expectations_candidate="$EXPECTATIONS_REQUESTED" ;;
+    *) expectations_candidate="$ROOT_DIR/$EXPECTATIONS_REQUESTED" ;;
+esac
+if [[ -L "$expectations_candidate" || ! -f "$expectations_candidate" ]]; then
+    fail_early "independent expectations manifest must be a regular non-symlink file: $expectations_candidate"
+fi
+CENSUS_EXPECTATIONS_PATH="$(realpath -e -- "$expectations_candidate")" || \
+    fail_early "could not resolve independent expectations manifest: $expectations_candidate"
+CENSUS_EXPECTATIONS_SHA256="$(sha256sum -- "$CENSUS_EXPECTATIONS_PATH" | awk 'NR == 1 { print $1 }')"
+[[ "$CENSUS_EXPECTATIONS_SHA256" =~ ^[0-9a-f]{64}$ ]] || \
+    fail_early "could not hash independent expectations manifest"
+if ! python3 - "$ROOT_DIR" "$CENSUS_EXPECTATIONS_PATH" <<'PY' > "$ARTIFACT_DIR/expectations-preflight.json"; then
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(strict=True)
+manifest_path = Path(sys.argv[2]).resolve(strict=True)
+sys.path.insert(0, str(root / "scripts"))
+import full_route_census as census
+
+try:
+    declared, identity = census.load_expectations(manifest_path, root)
+    tracked, _tracked_identity = census.tracked_mimi_paths(root)
+    sources, _exclusions, scope = census.enumerate_source_scope(root, tracked)
+    source_paths = {str(row["path"]) for row in sources}
+    if set(declared) != source_paths:
+        missing = sorted(source_paths - set(declared))
+        extra = sorted(set(declared) - source_paths)
+        raise ValueError(
+            "schema-v4 expectations must cover the exact current denominator "
+            f"(missing={len(missing)} first={missing[:3]}, extra={len(extra)} first={extra[:3]})"
+        )
+    for source in sources:
+        path = str(source["path"])
+        expectation = declared[path]
+        if expectation.get("class") == "unmapped":
+            raise ValueError(f"independent expectations cannot leave a candidate unmapped: {path}")
+        if expectation.get("source_sha256") != source.get("sha256"):
+            raise ValueError(f"independent expectation source hash is stale: {path}")
+    bound, coverage = census.bind_expectations_to_inventory(declared, sources, root)
+    invalid = sorted(
+        path for path, expectation in bound.items()
+        if expectation.get("authority_valid") is not True
+    )
+    if invalid:
+        raise ValueError(
+            "independent expectations contain invalid source-bound test authority "
+            f"({len(invalid)} first={invalid[:5]})"
+        )
+    print(json.dumps({
+        "status": "validated_independent_v4_manifest",
+        "path": str(manifest_path),
+        "sha256": identity["sha256"],
+        "candidate_count": len(sources),
+        "manifest_sha256": census._manifest_digest(sources),
+        "source_scope_exactly_once": scope.get("exactly_once"),
+        "expectation_coverage_exact_bijection": coverage.get("exact_bijection"),
+        "authority_invalid_paths": [],
+    }, sort_keys=True))
+except (OSError, ValueError, json.JSONDecodeError) as error:
+    print(f"expectations preflight refused: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+    fail_early "independent schema-v4 expectations preflight failed; census and authority generator were not run"
+fi
+cargo --version >> "$ARTIFACT_DIR/replay-environment.txt" 2>&1 || {
+    write_failure_state "could not capture Cargo version after expectations preflight"
+    exit 1
+}
+{
+    printf 'path=%s\nsha256=%s\n' "$CENSUS_EXPECTATIONS_PATH" "$CENSUS_EXPECTATIONS_SHA256"
+} > "$ARTIFACT_DIR/expectations-manifest.identity.txt"
+printf 'PASS independent schema-v4 expectations validated before Cargo tests and census\n' \
+    > "$ARTIFACT_DIR/expectations-manifest.validation.txt"
+
 source_input_inventory() {
     local root source_path required_path optional_path
     local -a required_sources=(
@@ -163,16 +274,18 @@ source_input_inventory() {
         build.rs
         "$SCRIPT_RELATIVE"
         scripts/full_route_census.py
+        scripts/actor_census_build_receipt.py
+        scripts/generate_route_census_authority.py
         scripts/audit-mir-legacy-owners.sh
-        AGENTS.md
-        devdocs/v0.41/actor-closure-0.1.11.md
-        'devdocs/V0.2/09-0.1.11交接门禁.md'
         src/core/mir/actor_tests.rs
         src/core/mir/route.rs
         src/core/resolved/tests.rs
         src/main/canonical_dispatch.rs
         src/tests/dual_backend.rs
         tests/real_world_cli.rs
+        tests/scripts/test_full_route_census.py
+        tests/scripts/test_actor_census_build_receipt.py
+        tests/scripts/test_actor_two_fixture_runner_contract.py
         tests/real_world/actor_nested_func_capture.mimi
         tests/real_world/actor_nested_func_shadow.mimi
     )
@@ -383,21 +496,39 @@ record_gate() {
         GATE_FAILURES=$((GATE_FAILURES + 1))
         return 1
     }
-    cargo_path="$(command -v cargo)"
+    cargo_path="$(rustup which cargo)" || {
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL rustup could not resolve Cargo for the selected toolchain\n' \
+            > "$gate_dir/validation.txt"
+        return 1
+    }
+    cargo_path="$(realpath -e -- "$cargo_path")" || {
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL selected rustup Cargo path is unavailable\n' > "$gate_dir/validation.txt"
+        return 1
+    }
+    if [[ "${cargo_path##*/}" != cargo || ! -f "$cargo_path" || ! -x "$cargo_path" ]]; then
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL selected rustup Cargo is not a canonical executable named cargo\n' \
+            > "$gate_dir/validation.txt"
+        return 1
+    fi
     {
-        printf 'LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never CARGO_TARGET_DIR=%q %q ' \
-            "$LLVM_PREFIX" "$EFFECTIVE_TARGET_DIR" "$cargo_path"
+        printf 'RUST_MIN_STACK=%q LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never CARGO_TARGET_DIR=%q %q ' \
+            "$TEST_THREAD_STACK_BYTES" "$LLVM_PREFIX" "$EFFECTIVE_TARGET_DIR" "$cargo_path"
         printf '%q ' "${cargo_args[@]}"
         printf '\n'
     } > "$gate_dir/command.txt"
     printf '%s\0' "$cargo_path" "${cargo_args[@]}" > "$gate_dir/argv.nul"
     {
-        printf 'LLVM_SYS_181_PREFIX=%s\n' "$LLVM_PREFIX"
+        printf 'RUST_MIN_STACK=%s\nLLVM_SYS_181_PREFIX=%s\n' \
+            "$TEST_THREAD_STACK_BYTES" "$LLVM_PREFIX"
         printf 'CARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\nCARGO_TARGET_DIR=%q\n' "$EFFECTIVE_TARGET_DIR"
         printf 'working_directory=%s\n' "$ROOT_DIR"
         printf 'expected_test_id=%s\nexpected_passed=%s\n' "$expected_test" "$expected_passed"
     } > "$gate_dir/environment.txt"
-    if env LLVM_SYS_181_PREFIX="$LLVM_PREFIX" CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never \
+    if env RUST_MIN_STACK="$TEST_THREAD_STACK_BYTES" LLVM_SYS_181_PREFIX="$LLVM_PREFIX" \
+        CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never \
         CARGO_TARGET_DIR="$EFFECTIVE_TARGET_DIR" \
         "$cargo_path" "${cargo_args[@]}" > "$gate_dir/stdout.bin" 2> "$gate_dir/stderr.bin"; then
         status=0
@@ -448,61 +579,170 @@ record_build() {
     local label="$1"
     shift
     local gate_dir="$ARTIFACT_DIR/commands/$label"
-    local cargo_path status validation_status=0
+    local cargo_path python_path helper_path status receipt_status validation_status=0
     local build_target_dir host_target
     local -a cargo_args=("$@")
+    local -a cargo_env cargo_argv receipt_command
     mkdir -- "$gate_dir" || {
         printf 'FAIL could not create command evidence directory: %s\n' "$gate_dir" >&2
         GATE_FAILURES=$((GATE_FAILURES + 1))
         return 1
     }
-    cargo_path="$(command -v cargo)"
+    cargo_path="$(rustup which cargo)" || {
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL rustup could not resolve Cargo for the selected toolchain\n' \
+            > "$gate_dir/validation.txt"
+        return 1
+    }
+    cargo_path="$(realpath -e -- "$cargo_path")" || {
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL selected rustup Cargo path is unavailable\n' \
+            > "$gate_dir/validation.txt"
+        return 1
+    }
+    if [[ "${cargo_path##*/}" != cargo || ! -f "$cargo_path" || ! -x "$cargo_path" ]]; then
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL selected rustup Cargo is not a canonical executable named cargo\n' \
+            > "$gate_dir/validation.txt"
+        return 1
+    fi
     build_target_dir="$EFFECTIVE_TARGET_DIR/actor-two-fixture-current-cargo-${BASHPID:-$$}"
     if [[ "${cargo_args[0]:-}" != "build" ]]; then
         GATE_FAILURES=$((GATE_FAILURES + 1))
         printf 'FAIL current-source binary recorder requires a cargo build command\n' \
-            > "$gate_dir/validation.txt"
+            >> "$gate_dir/validation.txt"
         return 1
     fi
     host_target="$NATIVE_HOST_TARGET"
     if ! validate_cargo_target_configuration "$host_target" "$gate_dir/cargo-target-configuration.txt"; then
         GATE_FAILURES=$((GATE_FAILURES + 1))
         printf 'FAIL Cargo target configuration changed or no longer selects the native host\n' \
-            > "$gate_dir/validation.txt"
+            >> "$gate_dir/validation.txt"
         return 1
     fi
     if [[ -e "$build_target_dir" || -L "$build_target_dir" ]] ||
         ! mkdir -- "$build_target_dir"; then
         GATE_FAILURES=$((GATE_FAILURES + 1))
         printf 'FAIL could not reserve a fresh isolated Cargo target directory: %s\n' \
-            "$build_target_dir" > "$gate_dir/validation.txt"
+            "$build_target_dir" >> "$gate_dir/validation.txt"
         return 1
     fi
+    build_target_dir="$(realpath -- "$build_target_dir")" || {
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+        printf 'FAIL could not canonicalize fresh Cargo target directory\n' \
+            >> "$gate_dir/validation.txt"
+        return 1
+    }
+    printf 'target_path=%s\ndirectory_existed_before=%s\ncreated_exclusively=true\n' \
+        "$build_target_dir" false \
+        > "$gate_dir/fresh-target.txt"
     cargo_args+=(--target "$host_target" --message-format=json-render-diagnostics)
+    cargo_argv=("$cargo_path" "${cargo_args[@]}")
+    python_path="$(command -v python3)"
+    helper_path="$ROOT_DIR/scripts/actor_census_build_receipt.py"
+    cargo_env=(
+        env
+        -u CARGO_BUILD_TARGET
+        -u CARGO_ENCODED_RUSTFLAGS
+        -u _
+        "LLVM_SYS_181_PREFIX=$LLVM_PREFIX"
+        CARGO_BUILD_JOBS=1
+        CARGO_TERM_COLOR=never
+        "CARGO_TARGET_DIR=$build_target_dir"
+    )
     {
         printf 'LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never CARGO_TARGET_DIR=%q ' \
             "$LLVM_PREFIX" "$build_target_dir"
-        printf 'env -u CARGO_BUILD_TARGET -u CARGO_ENCODED_RUSTFLAGS %q ' "$cargo_path"
+        printf 'env -u CARGO_BUILD_TARGET -u CARGO_ENCODED_RUSTFLAGS -u _ %q ' "$cargo_path"
         printf '%q ' "${cargo_args[@]}"
         printf '\n'
     } > "$gate_dir/command.txt"
-    printf '%s\0' "$cargo_path" "${cargo_args[@]}" > "$gate_dir/argv.nul"
-    {
-        printf 'LLVM_SYS_181_PREFIX=%s\n' "$LLVM_PREFIX"
-        printf 'CARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\nCARGO_TARGET_DIR=%q\n' "$build_target_dir"
-        printf 'forced_host_target=%s\n' "$host_target"
-        printf 'CARGO_BUILD_TARGET=unset\nCARGO_ENCODED_RUSTFLAGS=unset\n'
-        printf 'working_directory=%s\n' "$ROOT_DIR"
-    } > "$gate_dir/environment.txt"
-    if env -u CARGO_BUILD_TARGET -u CARGO_ENCODED_RUSTFLAGS \
-        LLVM_SYS_181_PREFIX="$LLVM_PREFIX" CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never \
-        CARGO_TARGET_DIR="$build_target_dir" \
-        "$cargo_path" "${cargo_args[@]}" > "$gate_dir/stdout.bin" 2> "$gate_dir/stderr.bin"; then
-        status=0
+    printf '%s\0' "${cargo_argv[@]}" > "$gate_dir/argv.nul"
+
+    record_build_helper() {
+        local evidence_name="$1"
+        shift
+        local helper_status
+        printf '%s\0' "$@" > "$gate_dir/$evidence_name.argv.nul"
+        {
+            printf '%q ' "$@"
+            printf '> %q 2> %q\n' \
+                "$gate_dir/$evidence_name.stdout.bin" "$gate_dir/$evidence_name.stderr.bin"
+        } > "$gate_dir/$evidence_name.command.txt"
+        if "$@" > "$gate_dir/$evidence_name.stdout.bin" \
+            2> "$gate_dir/$evidence_name.stderr.bin"; then
+            helper_status=0
+        else
+            helper_status=$?
+        fi
+        printf 'exit_code=%s\n' "$helper_status" > "$gate_dir/$evidence_name.exit.txt"
+        return "$helper_status"
+    }
+
+    if ! record_build_helper environment-capture \
+        "${cargo_env[@]}" "$python_path" "$helper_path" capture-environment \
+        --output "$gate_dir/cargo-environment.json"; then
+        validation_status=1
+        printf 'FAIL could not capture the effective Cargo environment\n' \
+            >> "$gate_dir/validation.txt"
+    fi
+    if [[ "$validation_status" -eq 0 ]] && ! record_build_helper source-before-capture \
+        "${cargo_env[@]}" "$python_path" "$helper_path" capture-source-snapshot \
+        --root "$ROOT_DIR" --output "$gate_dir/source.before.json"; then
+        validation_status=1
+        printf 'FAIL could not capture the full-route source snapshot before Cargo\n' \
+            >> "$gate_dir/validation.txt"
+    fi
+    if [[ "$validation_status" -eq 0 ]] && ! record_build_helper cargo-identity-before-capture \
+        "${cargo_env[@]}" "$python_path" "$helper_path" capture-cargo-identity \
+        --root "$ROOT_DIR" --cargo "$cargo_path" --output "$gate_dir/cargo-identity.before.json"; then
+        validation_status=1
+        printf 'FAIL could not capture selected rustup Cargo identity before build\n' \
+            >> "$gate_dir/validation.txt"
+    fi
+    if [[ "$validation_status" -eq 0 ]] && ! record_build_helper cargo-config-before-capture \
+        "${cargo_env[@]}" "$python_path" "$helper_path" capture-cargo-config \
+        --root "$ROOT_DIR" --output "$gate_dir/cargo-config.before.json"; then
+        validation_status=1
+        printf 'FAIL could not capture effective Cargo config files before build\n' \
+            >> "$gate_dir/validation.txt"
+    fi
+    if [[ "$validation_status" -eq 0 ]]; then
+        if "${cargo_env[@]}" "$cargo_path" "${cargo_args[@]}" \
+            > "$gate_dir/stdout.bin" 2> "$gate_dir/stderr.bin"; then
+            status=0
+        else
+            status=$?
+        fi
     else
-        status=$?
+        status=125
+        : > "$gate_dir/stdout.bin"
+        : > "$gate_dir/stderr.bin"
     fi
     printf 'exit_code=%s\n' "$status" > "$gate_dir/exit.txt"
+    if [[ "$status" -ne 125 ]]; then
+        if ! record_build_helper source-after-capture \
+            "${cargo_env[@]}" "$python_path" "$helper_path" capture-source-snapshot \
+            --root "$ROOT_DIR" --output "$gate_dir/source.after.json"; then
+            validation_status=1
+            printf 'FAIL could not capture the full-route source snapshot after Cargo\n' \
+                > "$gate_dir/source-after-capture.validation.txt"
+        fi
+        if ! record_build_helper cargo-identity-after-capture \
+            "${cargo_env[@]}" "$python_path" "$helper_path" capture-cargo-identity \
+            --root "$ROOT_DIR" --cargo "$cargo_path" --output "$gate_dir/cargo-identity.after.json"; then
+            validation_status=1
+            printf 'FAIL could not capture selected rustup Cargo identity after build\n' \
+                > "$gate_dir/cargo-identity-after-capture.validation.txt"
+        fi
+        if ! record_build_helper cargo-config-after-capture \
+            "${cargo_env[@]}" "$python_path" "$helper_path" capture-cargo-config \
+            --root "$ROOT_DIR" --output "$gate_dir/cargo-config.after.json"; then
+            validation_status=1
+            printf 'FAIL could not capture effective Cargo config files after build\n' \
+                > "$gate_dir/cargo-config-after-capture.validation.txt"
+        fi
+    fi
     {
         printf '===== stdout =====\n'
         cat "$gate_dir/stdout.bin"
@@ -511,70 +751,56 @@ record_build() {
     } > "$gate_dir/combined.log"
     if [[ "$status" -ne 0 ]]; then
         validation_status=1
-        printf 'FAIL current-source mimi build exit=%s\n' "$status" > "$gate_dir/validation.txt"
-    else
-        # This per-run CARGO_TARGET_DIR avoids Cargo artifact races with the shared target tree.
-        if ! python3 - "$gate_dir/stdout.bin" "$build_target_dir" "$host_target" "$gate_dir/mimi.path" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-
-output = Path(sys.argv[1])
-target_dir = Path(sys.argv[2])
-expected_host = sys.argv[3]
-path_file = Path(sys.argv[4])
-target_root = target_dir.resolve(strict=True)
-executables = []
-for line in output.read_text(encoding="utf-8").splitlines():
-    try:
-        event = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if not isinstance(event, dict):
-        continue
-    target = event.get("target")
-    executable = event.get("executable")
-    if (
-        event.get("reason") == "compiler-artifact"
-        and isinstance(target, dict)
-        and target.get("name") == "mimi"
-        and isinstance(target.get("kind"), list)
-        and "bin" in target.get("kind", [])
-        and isinstance(executable, str)
-    ):
-        path = Path(executable).resolve(strict=True)
-        try:
-            relative_path = path.relative_to(target_root)
-        except ValueError:
-            raise SystemExit("Cargo executable path escaped the isolated target directory")
-        if not relative_path.parts or relative_path.parts[0] != expected_host:
-            raise SystemExit("Cargo executable path is not under the forced native-host target directory")
-        if not path.is_file() or not os.access(path, os.X_OK):
-            raise SystemExit("Cargo-reported Mimi executable is not executable")
-        executables.append(path)
-if len(executables) != 1:
-    raise SystemExit(f"expected exactly one Cargo-reported Mimi executable, observed {len(executables)}")
-path_file.write_text(f"{executables[0]}\n", encoding="utf-8")
-PY
-        then
-            validation_status=1
-            printf 'FAIL Cargo did not identify one executable inside the isolated target directory\n' \
-                > "$gate_dir/validation.txt"
+        printf 'FAIL current-source mimi build exit=%s\n' "$status" >> "$gate_dir/validation.txt"
+    fi
+    if [[ "$status" -ne 125 && -f "$gate_dir/source.before.json" &&
+        -f "$gate_dir/source.after.json" && -f "$gate_dir/cargo-environment.json" &&
+        -f "$gate_dir/cargo-identity.before.json" && -f "$gate_dir/cargo-identity.after.json" &&
+        -f "$gate_dir/cargo-config.before.json" && -f "$gate_dir/cargo-config.after.json" ]]; then
+        receipt_command=(
+            "$python_path" "$helper_path" create
+            --artifact-root "$ARTIFACT_DIR"
+            --gate-dir "$gate_dir"
+            --target-dir "$build_target_dir"
+            --host-target "$host_target"
+            --root "$ROOT_DIR"
+            --receipt "$gate_dir/build-receipt.json"
+        )
+        printf '%s\0' "${receipt_command[@]}" > "$gate_dir/receipt-create.argv.nul"
+        {
+            printf '%q ' "${receipt_command[@]}"
+            printf '> %q 2> %q\n' "$gate_dir/receipt-create.stdout.bin" \
+                "$gate_dir/receipt-create.stderr.bin"
+        } > "$gate_dir/receipt-create.command.txt"
+        if "${receipt_command[@]}" > "$gate_dir/receipt-create.stdout.bin" \
+            2> "$gate_dir/receipt-create.stderr.bin"; then
+            receipt_status=0
         else
+            receipt_status=$?
+            validation_status=1
+        fi
+        printf 'exit_code=%s\n' "$receipt_status" > "$gate_dir/receipt-create.exit.txt"
+        if [[ "$receipt_status" -eq 0 && -f "$gate_dir/mimi.path" && -f "$gate_dir/mimi.sha256" ]]; then
             ISOLATED_MIMI_DIR="$build_target_dir"
             ISOLATED_MIMI_PATH="$(<"$gate_dir/mimi.path")"
-            if [[ ! -x "$ISOLATED_MIMI_PATH" ]] ||
-                ! sha256sum -- "$ISOLATED_MIMI_PATH" | awk 'NR == 1 { print $1 }' > "$gate_dir/mimi.sha256"; then
-                validation_status=1
-                printf 'FAIL Cargo-reported Mimi executable disappeared or could not be hashed\n' \
-                    > "$gate_dir/validation.txt"
-            else
-                printf 'PASS Cargo identified an executable inside the isolated host-target directory\n' \
-                    > "$gate_dir/validation.txt"
+            if [[ -x "$ISOLATED_MIMI_PATH" ]]; then
+                printf 'PASS Cargo receipt binds raw invocation, environment, source snapshots, and Mimi artifact\n' \
+                    >> "$gate_dir/validation.txt"
                 MIMI_BUILD_PASSED=1
+            else
+                validation_status=1
+                printf 'FAIL receipt Cargo-reported Mimi executable is not executable\n' \
+                    >> "$gate_dir/validation.txt"
             fi
+        else
+            validation_status=1
+            printf 'FAIL source-bound Mimi build receipt did not validate\n' \
+                >> "$gate_dir/validation.txt"
         fi
+    else
+        validation_status=1
+        printf 'FAIL build did not produce all raw inputs needed for a reproducible receipt\n' \
+            >> "$gate_dir/validation.txt"
     fi
     cat "$gate_dir/stdout.bin"
     cat "$gate_dir/stderr.bin" >&2
@@ -583,6 +809,74 @@ PY
         return 1
     fi
     return 0
+}
+
+record_python_step() {
+    local label="$1" run_allowed="$2" skip_reason="$3"
+    shift 3
+    local step_dir="$ARTIFACT_DIR/commands/$label"
+    local python_path status
+    local -a invocation
+
+    mkdir -- "$step_dir" || {
+        printf 'FAIL could not create route-census evidence directory: %s\n' "$step_dir" >&2
+        return 1
+    }
+    python_path="$(command -v python3)"
+    invocation=(
+        env
+        -u RUSTFLAGS
+        -u CARGO_ENCODED_RUSTFLAGS
+        -u MIMI_ROUTE_CENSUS
+        -u MIMI_ROUTE_CENSUS_MIMI
+        -u MIMI_ROUTE_CENSUS_MIMI_SHA256
+        -u MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE
+        "CARGO_TARGET_DIR=$EFFECTIVE_TARGET_DIR"
+        "$python_path"
+        "$@"
+    )
+    {
+        printf 'working_directory=%q\n' "$ROOT_DIR"
+        printf '%q ' "${invocation[@]}"
+        printf '> %q 2> %q\n' "$step_dir/stdout.bin" "$step_dir/stderr.bin"
+    } > "$step_dir/command.txt"
+    printf '%s\0' "${invocation[@]}" > "$step_dir/argv.nul"
+    {
+        printf 'working_directory=%s\n' "$ROOT_DIR"
+        printf 'CARGO_TARGET_DIR=%q\n' "$EFFECTIVE_TARGET_DIR"
+        printf 'unset_environment=MIMI_ROUTE_CENSUS,MIMI_ROUTE_CENSUS_MIMI,MIMI_ROUTE_CENSUS_MIMI_SHA256,MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE,RUSTFLAGS,CARGO_ENCODED_RUSTFLAGS\n'
+        printf 'collector_injects_authority_environment=true\n'
+    } > "$step_dir/environment.txt"
+
+    if [[ "$run_allowed" != 1 ]]; then
+        : > "$step_dir/stdout.bin"
+        printf 'SKIPPED: %s\n' "$skip_reason" > "$step_dir/stderr.bin"
+        printf 'SKIPPED: %s\n' "$skip_reason" > "$step_dir/combined.log"
+        printf 'exit_code=not_run\n' > "$step_dir/exit.txt"
+        printf 'SKIPPED: %s\n' "$skip_reason" > "$step_dir/validation.txt"
+        return 1
+    fi
+
+    if "${invocation[@]}" > "$step_dir/stdout.bin" 2> "$step_dir/stderr.bin"; then
+        status=0
+    else
+        status=$?
+    fi
+    printf 'exit_code=%s\n' "$status" > "$step_dir/exit.txt"
+    {
+        printf '===== stdout =====\n'
+        cat "$step_dir/stdout.bin"
+        printf '\n===== stderr =====\n'
+        cat "$step_dir/stderr.bin"
+    } > "$step_dir/combined.log"
+    if [[ "$status" -eq 0 ]]; then
+        printf 'PASS command exit=0\n' > "$step_dir/validation.txt"
+    else
+        printf 'FAIL command exit=%s\n' "$status" > "$step_dir/validation.txt"
+    fi
+    cat "$step_dir/stdout.bin"
+    cat "$step_dir/stderr.bin" >&2
+    [[ "$status" -eq 0 ]]
 }
 
 require_l3_memcheck_reports() {
@@ -667,25 +961,54 @@ require_l3_memcheck_reports() {
 }
 
 validate_full_route_census() {
-    local report="$ARTIFACT_DIR/full-route-census.json"
+    local report="$ARTIFACT_DIR/full-route-census.strict.json"
+    local initial_report="$ARTIFACT_DIR/full-route-census.initial.json"
     local validation="$ARTIFACT_DIR/census-status.txt"
     local binary_hash="$ARTIFACT_DIR/commands/current-source-mimi-build/mimi.sha256"
-    local census_mimi="$ISOLATED_MIMI_PATH"
-    if [[ -z "$census_mimi" ]]; then
-        census_mimi="$EFFECTIVE_TARGET_DIR/debug/mimi"
-    fi
-    python3 - "$report" "$validation" "$MIMI_BUILD_PASSED" "$binary_hash" "$census_mimi" <<'PY'
+    local census_mimi="${ISOLATED_MIMI_PATH:-}"
+    python3 - "$report" "$initial_report" "$validation" "$MIMI_BUILD_PASSED" \
+        "$binary_hash" "$census_mimi" \
+        "$ARTIFACT_DIR/commands/census-initial/exit.txt" \
+        "$ARTIFACT_DIR/commands/census-authority-generator/exit.txt" \
+        "$ARTIFACT_DIR/commands/census-strict/exit.txt" \
+        "$ARTIFACT_DIR/route-census-authority-bundle" \
+        "$ARTIFACT_DIR/commands/current-source-mimi-build/build-receipt.json" \
+        "$ROOT_DIR" \
+        "$ARTIFACT_DIR/source.inputs.before.nul" \
+        "$ARTIFACT_DIR/source.before.sha256" \
+        "$ARTIFACT_DIR/source.inputs.after.nul" \
+        "$ARTIFACT_DIR/source.after.sha256" \
+        "$ARTIFACT_DIR/source-scope-reconciliation.json" \
+        "$CENSUS_EXPECTATIONS_PATH" "$CENSUS_EXPECTATIONS_SHA256" <<'PY'
 import base64
+import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
 report_path = Path(sys.argv[1])
-status_path = Path(sys.argv[2])
-binary_build_passed = sys.argv[3] == "1"
-binary_hash_path = Path(sys.argv[4])
-expected_binary_path = Path(sys.argv[5])
+initial_report_path = Path(sys.argv[2])
+status_path = Path(sys.argv[3])
+binary_build_passed = sys.argv[4] == "1"
+binary_hash_path = Path(sys.argv[5])
+expected_binary_path = Path(sys.argv[6])
+initial_exit_path = Path(sys.argv[7])
+generator_exit_path = Path(sys.argv[8])
+strict_exit_path = Path(sys.argv[9])
+expected_bundle_path = Path(sys.argv[10])
+build_receipt_path = Path(sys.argv[11])
+repository_root = Path(sys.argv[12]).resolve()
+outer_before_inventory = Path(sys.argv[13])
+outer_before_hashes = Path(sys.argv[14])
+outer_after_inventory = Path(sys.argv[15])
+outer_after_hashes = Path(sys.argv[16])
+reconciliation_path = Path(sys.argv[17])
+expectations_path = str(Path(sys.argv[18]).resolve(strict=True))
+expectations_sha256 = sys.argv[19]
+sys.path.insert(0, str(repository_root / "scripts"))
+import actor_census_build_receipt as build_receipt
+import full_route_census as route_census
 expected = {
     "tests/real_world/actor_nested_func_capture.mimi": (
         "canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback",
@@ -697,14 +1020,6 @@ expected = {
     ),
 }
 issues = []
-try:
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-except (OSError, UnicodeError, json.JSONDecodeError) as error:
-    status_path.write_text(
-        f"actor_fixture_rows=NOT_CLOSED\nfull_census_report=unavailable\nerror={error}\n",
-        encoding="utf-8",
-    )
-    raise SystemExit(1)
 
 def mapping(value):
     return value if isinstance(value, dict) else {}
@@ -712,26 +1027,165 @@ def mapping(value):
 def rows(value):
     return value if isinstance(value, list) else []
 
-inventory = mapping(report.get("input_inventory"))
-manifest_rows = rows(inventory.get("inputs"))
-records = rows(report.get("records"))
-manifest_paths = [row.get("path") for row in manifest_rows if isinstance(row, dict)]
-record_paths = [row.get("path") for row in records if isinstance(row, dict)]
-denominator = report.get("manifest", {}).get("denominator") if isinstance(report.get("manifest"), dict) else None
-if report.get("schema_version") != "0.1.11-full-route-census-v6":
-    issues.append("unexpected census schema version")
-if report.get("collection_mode") != "full_execution":
-    issues.append("census did not run full_execution mode")
-if not isinstance(denominator, int) or denominator != len(manifest_rows) or len(records) != denominator:
-    issues.append("full census records do not preserve the complete denominator")
-if len(manifest_paths) != len(set(manifest_paths)) or len(record_paths) != len(set(record_paths)):
-    issues.append("duplicate paths in census inventory or records")
-if set(record_paths) != set(manifest_paths):
-    issues.append("census records do not exactly cover the inventory inputs")
-if report.get("source_snapshot_stable") is not True:
-    issues.append("full census source snapshot is not stable")
-if not isinstance(report.get("source_snapshot"), dict) or not report["source_snapshot"].get("snapshot_id"):
-    issues.append("full census source identity is absent")
+def load_json(path, label):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        issues.append(f"{label} is unavailable or invalid: {error}")
+        return {}
+    if not isinstance(value, dict):
+        issues.append(f"{label} is not a JSON object")
+        return {}
+    return value
+
+def read_exit(path, label):
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as error:
+        issues.append(f"{label} exit record is unavailable: {error}")
+        return None
+    match = re.fullmatch(r"exit_code=(\d+)", value)
+    if match is None:
+        issues.append(f"{label} did not execute successfully: {value or '<empty>'}")
+        return None
+    return int(match.group(1))
+
+report = load_json(report_path, "strict full census report")
+initial_report = load_json(initial_report_path, "initial full census report")
+receipt = load_json(build_receipt_path, "source-bound Mimi Cargo build receipt")
+
+def validate_complete_report(value, label, *, strict):
+    inventory_value = mapping(value.get("input_inventory"))
+    manifest_rows_value = rows(inventory_value.get("inputs"))
+    records_value = rows(value.get("records"))
+    manifest_paths_value = [row.get("path") for row in manifest_rows_value if isinstance(row, dict)]
+    record_paths_value = [row.get("path") for row in records_value if isinstance(row, dict)]
+    manifest_value = mapping(value.get("manifest"))
+    denominator_value = manifest_value.get("denominator")
+    if value.get("schema_version") != "0.1.11-full-route-census-v7":
+        issues.append(f"{label} has an unexpected census schema version")
+    if value.get("collection_mode") != "full_execution":
+        issues.append(f"{label} did not run full_execution mode")
+    if not isinstance(denominator_value, int) or denominator_value != len(manifest_rows_value) or len(records_value) != denominator_value:
+        issues.append(f"{label} records do not preserve the complete denominator")
+    if inventory_value.get("count") != denominator_value:
+        issues.append(f"{label} input inventory count differs from its denominator")
+    if manifest_value.get("sha256") != inventory_value.get("manifest_sha256"):
+        issues.append(f"{label} source manifest identity is inconsistent")
+    if len(manifest_paths_value) != len(set(manifest_paths_value)) or len(record_paths_value) != len(set(record_paths_value)):
+        issues.append(f"{label} has duplicate paths in the inventory or records")
+    if set(record_paths_value) != set(manifest_paths_value):
+        issues.append(f"{label} records do not exactly cover the inventory inputs")
+    if value.get("source_snapshot_stable") is not True:
+        issues.append(f"{label} source snapshot is not stable")
+    snapshot_start = mapping(value.get("source_snapshot"))
+    snapshot_end = mapping(value.get("source_snapshot_end"))
+    if not snapshot_start.get("snapshot_id"):
+        issues.append(f"{label} source identity is absent")
+    if strict and snapshot_end.get("snapshot_id") != snapshot_start.get("snapshot_id"):
+        issues.append(f"{label} source snapshot start/end identities differ")
+    gate_value = mapping(value.get("gate"))
+    if strict:
+        if gate_value.get("requested") is not True or gate_value.get("mode") != "strict_check":
+            issues.append("strict census report was not produced by --check")
+        if gate_value.get("passed") is not True:
+            issues.append("strict full census gate did not pass")
+    elif gate_value.get("requested") is not False or gate_value.get("mode") != "evidence_collection_only":
+        issues.append("initial census report was not an unchecked evidence collection")
+    return inventory_value, manifest_rows_value, records_value, manifest_value, denominator_value, manifest_paths_value, record_paths_value
+
+initial_inventory, initial_manifest_rows, initial_records, initial_manifest, initial_denominator, initial_manifest_paths, initial_record_paths = validate_complete_report(
+    initial_report, "initial census", strict=False
+)
+inventory, manifest_rows, records, manifest, denominator, manifest_paths, record_paths = validate_complete_report(
+    report, "strict census", strict=True
+)
+if initial_manifest.get("sha256") != manifest.get("sha256"):
+    issues.append("initial and strict census source manifest hashes differ")
+if initial_denominator != denominator or set(initial_manifest_paths) != set(manifest_paths):
+    issues.append("initial and strict census denominator identities differ")
+for label, value in (("initial", initial_report), ("strict", report)):
+    if not route_census._provided_expectations_identity_matches(
+        value,
+        expected_path=expectations_path,
+        expected_sha256=expectations_sha256,
+    ):
+        issues.append(f"{label} census did not use the runner's exact independent expectations manifest")
+
+required_build_runner_paths = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "scripts/full_route_census.py",
+    "scripts/actor_census_build_receipt.py",
+    "scripts/verify-actor-two-fixture-current.sh",
+    "scripts/generate_route_census_authority.py",
+    "scripts/audit-mir-legacy-owners.sh",
+    "tests/scripts/test_full_route_census.py",
+    "tests/scripts/test_actor_census_build_receipt.py",
+    "tests/scripts/test_actor_two_fixture_runner_contract.py",
+    "src/main/canonical_dispatch.rs",
+    "tests/real_world_cli.rs",
+    "tests/real_world/actor_nested_func_capture.mimi",
+    "tests/real_world/actor_nested_func_shadow.mimi",
+)
+outer_before = {}
+outer_after = {}
+try:
+    outer_before = build_receipt.manifest_from_snapshot_files(
+        outer_before_inventory, outer_before_hashes
+    )["files"]
+    outer_after = build_receipt.manifest_from_snapshot_files(
+        outer_after_inventory, outer_after_hashes
+    )["files"]
+except (OSError, ValueError) as error:
+    issues.append(f"runner curated source snapshots could not be recomputed: {error}")
+build_source = mapping(receipt.get("build_source"))
+build_source_manifest = mapping(build_source.get("manifest"))
+build_source_files = mapping(build_source_manifest.get("files"))
+reconciliation, reconciliation_issues = build_receipt.reconcile_source_manifests(
+    outer_before,
+    outer_after,
+    build_source_files,
+    required_build_runner_paths,
+)
+issues.extend(f"source scope reconciliation: {item}" for item in reconciliation_issues)
+try:
+    with reconciliation_path.open("x", encoding="utf-8") as stream:
+        json.dump(reconciliation, stream, ensure_ascii=False, sort_keys=True, indent=2)
+        stream.write("\n")
+except OSError as error:
+    issues.append(f"could not save source-scope reconciliation evidence: {error}")
+
+report_snapshots = {
+    "initial.source_snapshot": initial_report.get("source_snapshot"),
+    "initial.source_snapshot_end": initial_report.get("source_snapshot_end"),
+    "strict.source_snapshot": report.get("source_snapshot"),
+    "strict.source_snapshot_end": report.get("source_snapshot_end"),
+}
+receipt_issues = build_receipt.validate_receipt(
+    receipt,
+    receipt_path=build_receipt_path,
+    root=repository_root,
+    mimi_path=expected_binary_path,
+    report_snapshots=report_snapshots,
+    outer_source_manifest=outer_before,
+)
+issues.extend(f"source-bound Mimi build receipt: {item}" for item in receipt_issues)
+try:
+    receipt_sha256 = hashlib.sha256(build_receipt_path.read_bytes()).hexdigest()
+    receipt_resolved_path = str(build_receipt_path.resolve(strict=True))
+except OSError:
+    receipt_sha256 = None
+    receipt_resolved_path = None
+for label, value in (("initial", initial_report), ("strict", report)):
+    provenance = mapping(value.get("build_provenance"))
+    if provenance.get("status") != "verified" or provenance.get("current_source_attested") is not True:
+        issues.append(f"{label} full census report does not carry verified source-bound build provenance")
+    if provenance.get("receipt_path") != receipt_resolved_path or provenance.get("receipt_sha256") != receipt_sha256:
+        issues.append(f"{label} full census report is not bound to the runner build receipt")
+if mapping(mapping(report.get("gate")).get("checks")).get("source_bound_mimi_build_receipt") is not True:
+    issues.append("strict full census gate did not enforce the source-bound Mimi build receipt")
 
 manifest_by_path = {
     str(row.get("path")): row for row in manifest_rows if isinstance(row, dict)
@@ -749,6 +1203,13 @@ if not fallback_paths:
 gate = mapping(report.get("gate"))
 if not binary_build_passed:
     issues.append("the current-source mimi binary build did not pass")
+for exit_path, label in (
+    (initial_exit_path, "initial census"),
+    (generator_exit_path, "authority generator"),
+    (strict_exit_path, "strict census"),
+):
+    if read_exit(exit_path, label) != 0:
+        issues.append(f"{label} command did not exit successfully")
 try:
     # sha256sum includes the absolute file path, which can contain non-ASCII
     # characters in local workspaces. Decode the path as UTF-8, then validate
@@ -757,6 +1218,7 @@ try:
 except (OSError, UnicodeError, IndexError):
     built_binary_hash = None
 census_binary = mapping(mapping(report.get("toolchain")).get("mimi"))
+initial_binary = mapping(mapping(initial_report.get("toolchain")).get("mimi"))
 if not isinstance(built_binary_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", built_binary_hash):
     issues.append("the successfully built mimi binary SHA-256 is missing")
 try:
@@ -764,9 +1226,47 @@ try:
 except OSError:
     resolved_binary_path = None
 if census_binary.get("path") != resolved_binary_path:
-    issues.append("full census used a different mimi executable path")
+    issues.append("strict census used a different mimi executable path")
 if census_binary.get("sha256") != built_binary_hash:
-    issues.append("full census mimi executable hash differs from the current-source Cargo build")
+    issues.append("strict census mimi executable hash differs from the current-source Cargo build")
+if initial_binary.get("path") != resolved_binary_path or initial_binary.get("sha256") != built_binary_hash:
+    issues.append("initial census did not use the exact current-source Mimi path and hash")
+try:
+    current_binary_hash = hashlib.sha256(expected_binary_path.read_bytes()).hexdigest()
+except OSError:
+    current_binary_hash = None
+if current_binary_hash != built_binary_hash:
+    issues.append("current-source Mimi executable changed after its recorded build hash")
+
+authority_identity = mapping(report.get("authority_mimi_identity"))
+if authority_identity.get("path") != resolved_binary_path or authority_identity.get("sha256") != built_binary_hash:
+    issues.append("strict authority identity differs from the current-source Mimi executable")
+for observation_name in ("before_authority_tests", "after_collection"):
+    observation = mapping(authority_identity.get(observation_name))
+    if observation.get("resolved_path") != resolved_binary_path or observation.get("sha256") != built_binary_hash:
+        issues.append(f"strict authority Mimi identity changed at {observation_name}")
+
+bundle = mapping(report.get("generated_authority_bundle"))
+bundle_execution = mapping(report.get("generated_authority_bundle_execution"))
+expectations = mapping(report.get("expectations"))
+try:
+    resolved_bundle_path = str(expected_bundle_path.resolve(strict=True))
+except OSError:
+    resolved_bundle_path = None
+if bundle.get("path") != resolved_bundle_path or bundle.get("status") != "validated":
+    issues.append("strict census did not validate the newly generated authority bundle")
+if bundle.get("generation_mode") != "strict_authority":
+    issues.append("Actor gate rejects bootstrap_observation authority bundles")
+if bundle.get("mimi_path") != resolved_binary_path or bundle.get("mimi_sha256") != built_binary_hash:
+    issues.append("authority bundle is not bound to the current-source Mimi path and hash")
+if bundle_execution.get("status") != "stable":
+    issues.append("generated authority bundle was not stable throughout strict replay")
+if bundle_execution.get("stable_after_authority_tests") is not True or bundle_execution.get("stable_after_collection") is not True:
+    issues.append("authority bundle stability observations did not both pass")
+if expectations.get("authority_bundle_stable") is not True:
+    issues.append("strict expectations do not prove authority bundle stability")
+if rows(expectations.get("invalid_authority_paths")):
+    issues.append("strict census reports invalid source-bound authorities")
 for path, (test_id, expected_stdout) in expected.items():
     source = manifest_by_path.get(path)
     record = record_by_path.get(path)
@@ -864,6 +1364,8 @@ lines = [
     f"manifest_sha256={mapping(report.get('manifest')).get('sha256', '<missing>')}",
     f"source_snapshot_id={mapping(report.get('source_snapshot')).get('snapshot_id', '<missing>')}",
     f"source_snapshot_stable={report.get('source_snapshot_stable')}",
+    f"authority_bundle_status={bundle_execution.get('status', '<missing>')}",
+    f"authority_bundle_stable={expectations.get('authority_bundle_stable', '<missing>')}",
     f"mimi_binary_path={census_binary.get('path', '<missing>')}",
     f"mimi_binary_sha256={census_binary.get('sha256', '<missing>')}",
     f"route_counts={json.dumps(route_counts, sort_keys=True)}",
@@ -974,56 +1476,130 @@ if ! require_l3_memcheck_reports; then
     GATE_FAILURES=$((GATE_FAILURES + 1))
 fi
 
-# Build the exact binary consumed by the full current-source census. The
-# census runs without --check so it records the complete denominator and all
-# current route outcomes; global failures remain visible in the report.
+# Build exactly one Mimi executable for both full-census passes. A failed or
+# missing isolated build is recorded as a skipped census chain; never fall
+# back to a possibly stale target/debug/mimi.
 record_build current-source-mimi-build build --bin mimi --locked || true
-census_status=0
-census_mimi="$ISOLATED_MIMI_PATH"
-if [[ -z "$census_mimi" ]]; then
-    census_mimi="$EFFECTIVE_TARGET_DIR/debug/mimi"
-fi
 census_scratch_root="$EFFECTIVE_TARGET_DIR/route-census-scratch"
-{
-    printf 'env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_DIR=%q python3 scripts/full_route_census.py --root %q --mimi %q --output %q --artifacts %q --scratch-root %q --jobs 8\n' \
-        "$EFFECTIVE_TARGET_DIR" "$ROOT_DIR" "$census_mimi" "$ARTIFACT_DIR/full-route-census.json" \
-        "$ARTIFACT_DIR/full-route-census.artifacts" "$census_scratch_root"
-} > "$ARTIFACT_DIR/full-route-census.command.txt"
-printf '%s\0' env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-    "CARGO_TARGET_DIR=$EFFECTIVE_TARGET_DIR" \
-    python3 scripts/full_route_census.py \
-    --root "$ROOT_DIR" \
-    --mimi "$census_mimi" \
-    --output "$ARTIFACT_DIR/full-route-census.json" \
-    --artifacts "$ARTIFACT_DIR/full-route-census.artifacts" \
-    --scratch-root "$census_scratch_root" \
-    --jobs 8 > "$ARTIFACT_DIR/full-route-census.argv.nul"
-env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
-"CARGO_TARGET_DIR=$EFFECTIVE_TARGET_DIR" \
-python3 scripts/full_route_census.py \
-    --root "$ROOT_DIR" \
-    --mimi "$census_mimi" \
-    --output "$ARTIFACT_DIR/full-route-census.json" \
-    --artifacts "$ARTIFACT_DIR/full-route-census.artifacts" \
-    --scratch-root "$census_scratch_root" \
-    --jobs 8 > "$ARTIFACT_DIR/full-route-census.stdout.bin" \
-    2> "$ARTIFACT_DIR/full-route-census.stderr.bin" || census_status=$?
-printf 'exit_code=%s\n' "$census_status" > "$ARTIFACT_DIR/full-route-census.exit.txt"
-if [[ "$census_status" -ne 0 ]]; then
-    GATE_FAILURES=$((GATE_FAILURES + 1))
-    printf 'FAIL full route census command exit=%s; see retained report/artifacts if produced\n' \
-        "$census_status" > "$ARTIFACT_DIR/census-status.txt"
-else
-    if validate_full_route_census; then
-        if grep -qx 'actor_fixture_rows=CLOSED' "$ARTIFACT_DIR/census-status.txt"; then
-            ACTOR_CENSUS_CLOSED=1
-        else
-            GATE_FAILURES=$((GATE_FAILURES + 1))
+census_mimi=""
+census_mimi_sha256=""
+census_mimi_ready=0
+census_mimi_build_hash=""
+if [[ "$MIMI_BUILD_PASSED" -eq 1 && -n "$ISOLATED_MIMI_PATH" && -x "$ISOLATED_MIMI_PATH" ]]; then
+    if census_mimi="$(realpath -- "$ISOLATED_MIMI_PATH")"; then
+        census_mimi_build_hash="$(awk 'NR == 1 { print $1 }' \
+            "$ARTIFACT_DIR/commands/current-source-mimi-build/mimi.sha256")"
+        census_mimi_sha256="$(sha256sum -- "$census_mimi" | awk 'NR == 1 { print $1 }')"
+        if [[ -n "$census_mimi" && "$census_mimi" == /* && -x "$census_mimi" &&
+            "$census_mimi_sha256" =~ ^[0-9a-f]{64}$ &&
+            "$census_mimi_sha256" == "$census_mimi_build_hash" ]]; then
+            ISOLATED_MIMI_PATH="$census_mimi"
+            census_mimi_ready=1
         fi
-    else
-        GATE_FAILURES=$((GATE_FAILURES + 1))
-        ACTOR_CENSUS_CLOSED=0
     fi
+fi
+{
+    printf 'isolated_build_passed=%s\n' "$MIMI_BUILD_PASSED"
+    printf 'mimi_path=%s\n' "${census_mimi:-<missing>}"
+    printf 'build_sha256=%s\n' "${census_mimi_build_hash:-<missing>}"
+    printf 'current_sha256=%s\n' "${census_mimi_sha256:-<missing>}"
+    if [[ "$census_mimi_ready" -eq 1 ]]; then
+        printf 'PASS isolated Mimi path and current SHA-256 are fixed\n'
+    else
+        printf 'FAIL no verified isolated Mimi executable; census stages must not run\n'
+    fi
+} > "$ARTIFACT_DIR/census-mimi-identity.txt"
+if [[ "$census_mimi_ready" -ne 1 ]]; then
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+fi
+
+initial_census_args=(
+    scripts/full_route_census.py
+    --root "$ROOT_DIR"
+    --mimi "$census_mimi"
+    --build-receipt "$ARTIFACT_DIR/commands/current-source-mimi-build/build-receipt.json"
+    --expectations "$CENSUS_EXPECTATIONS_PATH"
+    --output "$ARTIFACT_DIR/full-route-census.initial.json"
+    --artifacts "$ARTIFACT_DIR/full-route-census.initial.artifacts"
+    --scratch-root "$census_scratch_root"
+    --jobs 8
+)
+generator_args=(
+    scripts/generate_route_census_authority.py
+    --root "$ROOT_DIR"
+    --report "$ARTIFACT_DIR/full-route-census.initial.json"
+    --output-dir "$ARTIFACT_DIR/route-census-authority-bundle"
+)
+strict_census_args=(
+    scripts/full_route_census.py
+    --root "$ROOT_DIR"
+    --mimi "$census_mimi"
+    --build-receipt "$ARTIFACT_DIR/commands/current-source-mimi-build/build-receipt.json"
+    --expectations "$CENSUS_EXPECTATIONS_PATH"
+    --authority-bundle "$ARTIFACT_DIR/route-census-authority-bundle"
+    --output "$ARTIFACT_DIR/full-route-census.strict.json"
+    --artifacts "$ARTIFACT_DIR/full-route-census.strict.artifacts"
+    --scratch-root "$census_scratch_root"
+    --jobs 8
+    --check
+)
+
+initial_census_ok=0
+if record_python_step census-initial "$census_mimi_ready" \
+    "current-source isolated Mimi build/path/hash was not verified" "${initial_census_args[@]}"; then
+    initial_census_ok=1
+else
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+fi
+expectations_after_initial="$(sha256sum -- "$CENSUS_EXPECTATIONS_PATH" | awk 'NR == 1 { print $1 }')"
+if [[ "$expectations_after_initial" != "$CENSUS_EXPECTATIONS_SHA256" ]]; then
+    printf 'FAIL independent expectations manifest changed during initial census\n' \
+        > "$ARTIFACT_DIR/expectations-manifest.validation.txt"
+    initial_census_ok=0
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+fi
+
+generator_ok=0
+if record_python_step census-authority-generator "$initial_census_ok" \
+    "initial full census did not complete successfully" "${generator_args[@]}"; then
+    generator_ok=1
+elif [[ "$initial_census_ok" -eq 1 ]]; then
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+fi
+
+strict_allowed=0
+if [[ "$generator_ok" -eq 1 && "$census_mimi_ready" -eq 1 ]]; then
+    census_mimi_pre_strict_sha256="$(sha256sum -- "$census_mimi" | awk 'NR == 1 { print $1 }')"
+    if [[ "$census_mimi_pre_strict_sha256" == "$census_mimi_sha256" ]]; then
+        strict_allowed=1
+    else
+        printf 'FAIL Mimi executable changed between initial census and strict replay\n' \
+            > "$ARTIFACT_DIR/census-mimi-stability.txt"
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+    fi
+fi
+if record_python_step census-strict "$strict_allowed" \
+    "authority generation failed or the fixed Mimi binary hash changed" "${strict_census_args[@]}"; then
+    census_mimi_post_strict_sha256="$(sha256sum -- "$census_mimi" | awk 'NR == 1 { print $1 }')"
+    if [[ "$census_mimi_post_strict_sha256" == "$census_mimi_sha256" ]]; then
+        printf 'PASS same Mimi binary SHA-256 before and after strict replay: %s\n' \
+            "$census_mimi_sha256" > "$ARTIFACT_DIR/census-mimi-stability.txt"
+    else
+        printf 'FAIL Mimi executable changed during strict replay: expected=%s observed=%s\n' \
+            "$census_mimi_sha256" "$census_mimi_post_strict_sha256" \
+            > "$ARTIFACT_DIR/census-mimi-stability.txt"
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+    fi
+else
+    if [[ "$strict_allowed" -eq 1 ]]; then
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+    fi
+fi
+expectations_after_strict="$(sha256sum -- "$CENSUS_EXPECTATIONS_PATH" | awk 'NR == 1 { print $1 }')"
+if [[ "$expectations_after_strict" != "$CENSUS_EXPECTATIONS_SHA256" ]]; then
+    printf 'FAIL independent expectations manifest changed during strict census\n' \
+        > "$ARTIFACT_DIR/expectations-manifest.validation.txt"
+    GATE_FAILURES=$((GATE_FAILURES + 1))
 fi
 
 source_snapshot "$ARTIFACT_DIR/source.inputs.after.nul" "$ARTIFACT_DIR/source.after.sha256" || {
@@ -1050,8 +1626,19 @@ if [[ "$SNAPSHOT_FAILURE" -eq 0 ]]; then
     fi
 fi
 
+if validate_full_route_census; then
+    if grep -qx 'actor_fixture_rows=CLOSED' "$ARTIFACT_DIR/census-status.txt"; then
+        ACTOR_CENSUS_CLOSED=1
+    else
+        GATE_FAILURES=$((GATE_FAILURES + 1))
+    fi
+else
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+    ACTOR_CENSUS_CLOSED=0
+fi
+
 if [[ "$GATE_FAILURES" -eq 0 && "$SNAPSHOT_FAILURE" -eq 0 && "$ACTOR_CENSUS_CLOSED" -eq 1 ]]; then
-    printf 'PASS narrow Actor capture/shadow current-source L1/L2/L3 evidence; actor fixture rows closed. The complete census global gate and every non-Actor route result remain recorded separately in census-status.txt and full-route-census.json.\n' \
+    printf 'PASS narrow Actor capture/shadow current-source L1/L2/L3 evidence; actor fixture rows closed. The strict full-census gate passed; all route rows remain recorded in full-route-census.strict.json and census-status.txt.\n' \
         > "$ARTIFACT_DIR/result.txt"
     RUN_STATUS=0
 else

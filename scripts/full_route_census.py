@@ -12,6 +12,24 @@ Typical evidence collection (does not enforce a zero-fallback result):
       --mimi target/debug/mimi \\
       --output evidence/route-census-0.1.11-dev.json
 
+After a full evidence report has been reviewed, generate the exact-source
+authority bundle and use it for a fresh collector run:
+
+    python3 scripts/generate_route_census_authority.py \\
+      --root . --report evidence/route-census-0.1.11-dev.json \\
+      --output-dir /tmp/mimi-route-authorities
+    python3 scripts/full_route_census.py \\
+      --root . --mimi target/debug/mimi \\
+      --authority-bundle /tmp/mimi-route-authorities \\
+      --output evidence/route-census-authorized.json --check
+
+The collector re-runs the generator from the bundle's source report and
+requires byte-for-byte agreement before using the bundle. It passes the
+absolute generated source path to Cargo through
+``MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE``; the registered feature target is an
+immutable include wrapper and fails compilation when invoked without that
+validated source.
+
 Use ``--inventory-only`` to write the denominator and source/toolchain identity
 without invoking Mimi or Cargo. A full run executes the two exact Actor Rust
 authority tests, then uses a bounded worker pool and commits its journal and
@@ -99,6 +117,7 @@ import base64
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -118,11 +137,13 @@ except ImportError:  # pragma: no cover - older Python fails closed on Cargo con
     tomllib = None
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = "0.1.11-full-route-census-v6"
+SCHEMA_VERSION = "0.1.11-full-route-census-v7"
 EXPECTATION_SCHEMA_VERSION = 4
+_CARGO_METADATA_MISSING = object()
 EXPECTATION_CLASSES = {
     "required_compile",
     "expected_build_rejection",
+    "expected_source_diagnostic",
     "interpreter_only",
     "known_gap",
     "unmapped",
@@ -136,6 +157,7 @@ ROUTE_CANDIDATE_CLASSIFICATIONS = {
     "canonical",
     "compatibility",
     "intentional_reject",
+    "source_diagnostic",
     "unmapped",
     "unknown",
 }
@@ -151,12 +173,44 @@ ACTOR_EXPECTED_STDOUT = {
     ACTOR_FALLBACK_INPUTS[0]: b"15\n",
     ACTOR_FALLBACK_INPUTS[1]: b"42\n101\n",
 }
+ROUTE_CENSUS_AUTHORITY_TARGET_NAME = "route-census-authorities"
+ROUTE_CENSUS_AUTHORITY_FEATURE = "route-census-authorities"
+ROUTE_CENSUS_AUTHORITY_SOURCE_PATH = "tests/route-census/authorities.rs"
+ROUTE_CENSUS_AUTHORITY_WRAPPER_SOURCE = (
+    "// The collector supplies the exact generated bundle source only after it has been\n"
+    "// validated the generation manifest, expectations, source hashes, and target.\n"
+    "// Direct Cargo use with this feature and no validated bundle fails at compile\n"
+    "// time because the environment variable is intentionally absent.\n"
+    'include!(env!("MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE"));\n'
+)
+ROUTE_CENSUS_AUTHORITY_SOURCE_ENV = "MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE"
+ROUTE_CENSUS_MIMI_PATH_ENV = "MIMI_ROUTE_CENSUS_MIMI"
+ROUTE_CENSUS_MIMI_SHA256_ENV = "MIMI_ROUTE_CENSUS_MIMI_SHA256"
+ROUTE_CENSUS_MIMI_MODE_ENV = "MIMI_ROUTE_CENSUS"
+ROUTE_CENSUS_MIMI_MARKER = "MIMI_ROUTE_CENSUS_AUTHORITY_BINARY"
+ROUTE_CENSUS_MIMI_HELPER_SOURCE = (
+    "fn route_census_mimi_path() -> ::std::path::PathBuf {\n"
+    f"    let census_mode = ::std::env::var({json.dumps(ROUTE_CENSUS_MIMI_MODE_ENV)}).expect(\"collector must enable strict route census authority mode\");\n"
+    "    ::std::assert_eq!(census_mode, \"1\", \"route census authority mode must be exact\");\n"
+    f"    let path = ::std::env::var({json.dumps(ROUTE_CENSUS_MIMI_PATH_ENV)}).expect(\"collector must provide validated Mimi path\");\n"
+    f"    let sha256 = ::std::env::var({json.dumps(ROUTE_CENSUS_MIMI_SHA256_ENV)}).expect(\"collector must provide validated Mimi SHA-256\");\n"
+    "    ::std::assert!(::std::path::Path::new(&path).is_absolute(), \"validated Mimi path must be absolute\");\n"
+    "    ::std::assert_eq!(::std::path::Path::new(&path).canonicalize().expect(\"validated Mimi path must exist\"), ::std::path::PathBuf::from(&path), \"validated Mimi path must be canonical and symlink-free\");\n"
+    "    ::std::assert!(sha256.len() == 64 && sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)), \"validated Mimi SHA-256 must be lowercase hexadecimal\");\n"
+    f"    ::std::println!(\"{ROUTE_CENSUS_MIMI_MARKER} path={{}} sha256={{}}\", path, sha256);\n"
+    "    ::std::path::PathBuf::from(path)\n"
+    "}\n"
+)
+ROUTE_CENSUS_AUTHORITY_GENERATOR_PATH = "scripts/generate_route_census_authority.py"
+ROUTE_CENSUS_AUTHORITY_EXPECTATIONS_FILENAME = "route-census-expectations.json"
+ROUTE_CENSUS_AUTHORITY_MANIFEST_FILENAME = "route-census-generation-manifest.json"
 ACTOR_HELPER_TEST_PATH = "tests/real_world_cli.rs"
 ACTOR_HELPER_NAME = "assert_original_actor_cli_routes"
+ACTOR_IDENTITY_HELPER_NAME = "route_census_mimi_path"
 # The Actor callsite tests exercise a substantial helper rather than issuing
 # CLI assertions themselves. Pin its active implementation so changing it to
 # a no-op cannot preserve authority merely by retaining the two callsites.
-ACTOR_HELPER_SHA256 = "ff9ac0114e27da92f68d3b02a35c823e00a2a4ba91f4613d9dce0c01c90b24cc"
+ACTOR_HELPER_SHA256 = "9cce6c96edfe1bbe3f44933a9809b10b5387f65836b08093f4985140846c6acb"
 ACTIVE_LEGACY_OWNER_NAMES = (
     "CodegenLegacyRemainder",
     "FfiVerifierCompatibility",
@@ -378,6 +432,11 @@ def _source_diagnostic_lines(text: str) -> list[str]:
         for line in text.splitlines()
         if SOURCE_DIAGNOSTIC_RE.search(_strip_ansi(line))
     ]
+
+
+def _source_diagnostic_authority_output_path(source_path: str, source_sha256: str) -> str:
+    identity = f"{source_path}\0{source_sha256}".encode("utf-8")
+    return f"target/route-census-source-diagnostic-{sha256_bytes(identity)[:20]}.out"
 
 
 def sha256_file(path: Path) -> str:
@@ -793,7 +852,12 @@ def _compiler_snapshot_files(root: Path) -> list[Path]:
         root / "Cargo.lock",
         root / "build.rs",
         root / "scripts" / "full_route_census.py",
+        root / "scripts" / "actor_census_build_receipt.py",
+        root / "scripts" / "verify-actor-two-fixture-current.sh",
+        root / "scripts" / "generate_route_census_authority.py",
         root / "tests" / "scripts" / "test_full_route_census.py",
+        root / "tests" / "scripts" / "test_actor_census_build_receipt.py",
+        root / "tests" / "scripts" / "test_actor_two_fixture_runner_contract.py",
         root / "scripts" / "audit-mir-legacy-owners.sh",
         root / "rust-toolchain",
         root / "rust-toolchain.toml",
@@ -1194,6 +1258,10 @@ _BLOCKED_CARGO_AUTHORITY_ENV = {
     "CXX",
     "AR",
     "LD",
+    ROUTE_CENSUS_MIMI_MODE_ENV,
+    ROUTE_CENSUS_MIMI_PATH_ENV,
+    ROUTE_CENSUS_MIMI_SHA256_ENV,
+    ROUTE_CENSUS_AUTHORITY_SOURCE_ENV,
 }
 
 
@@ -1591,6 +1659,7 @@ def toolchain_manifest(
         "MIMI_STAT": "1",
         "MIMI_VERBOSE": "1",
         "MIMI_ROUTE_CENSUS": "1",
+        "NO_COLOR": "1",
         "MIMI_REACHABLE_DISPATCH": "unset (all non-comptime functions in stats)",
         "MIMI_RESOLVED_MODULE_BODIES": "unset (production default eligibility)",
         "MIMI_STAT_OUT": "unique per-input scratch directory",
@@ -2089,9 +2158,8 @@ def _actor_helper_has_required_contract(source_text: str, span: tuple[int, int])
             ("punct", "::"), ("ident", "std"), ("punct", "::"),
             ("ident", "process"), ("punct", "::"), ("ident", "Command"),
             ("punct", "::"), ("ident", "new"), ("punct", "("),
-            ("punct", "::"), ("ident", "std"), ("punct", "::"),
-            ("ident", "env"), ("punct", "!"), ("punct", "("),
-            ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+            ("ident", "route_census_mimi_path"), ("punct", "("),
+            ("punct", ")"), ("punct", ")"),
             ("punct", "."),
             ("ident", "arg"), ("punct", "("), ("string", "mir"),
             ("punct", ")"), ("punct", "."), ("ident", "arg"),
@@ -2167,9 +2235,8 @@ def _actor_helper_has_required_contract(source_text: str, span: tuple[int, int])
             ("punct", "::"), ("ident", "std"), ("punct", "::"),
             ("ident", "process"), ("punct", "::"), ("ident", "Command"),
             ("punct", "::"), ("ident", "new"), ("punct", "("),
-            ("punct", "::"), ("ident", "std"), ("punct", "::"),
-            ("ident", "env"), ("punct", "!"), ("punct", "("),
-            ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+            ("ident", "route_census_mimi_path"), ("punct", "("),
+            ("punct", ")"), ("punct", ")"),
             ("punct", "."),
             ("ident", "env"), ("punct", "("),
             ("string", "MIMI_ROUTE_CENSUS"), ("punct", ","),
@@ -2206,13 +2273,19 @@ def actor_fixture_test_contracts(root: Path) -> dict[str, dict[str, Any]]:
     helper_span = _rust_named_function_span(
         authority_text, ACTOR_HELPER_NAME
     )
-    helper_digest = (
-        sha256_bytes(authority_text[helper_span[0] : helper_span[1]].encode("utf-8"))
-        if helper_span is not None
-        else None
+    identity_helper_span = _rust_named_function_span(
+        authority_text, ACTOR_IDENTITY_HELPER_NAME
     )
+    helper_digest = None
+    if helper_span is not None and identity_helper_span is not None:
+        identity_source = authority_text[
+            identity_helper_span[0] : identity_helper_span[1]
+        ].encode("utf-8")
+        helper_source = authority_text[helper_span[0] : helper_span[1]].encode("utf-8")
+        helper_digest = sha256_bytes(identity_source + b"\0" + helper_source)
     helper_valid = bool(
         helper_span is not None
+        and identity_helper_span is not None
         and helper_digest == ACTOR_HELPER_SHA256
         and _actor_helper_has_required_contract(authority_text, helper_span)
     )
@@ -2336,6 +2409,71 @@ def _actor_test_pass_output(stdout: bytes, test_id: str) -> bool:
     )
 
 
+def _authority_mimi_identity_marker(
+    mimi_path: str | None, mimi_sha256: str | None
+) -> str | None:
+    if (
+        not isinstance(mimi_path, str)
+        or not Path(mimi_path).is_absolute()
+        or not isinstance(mimi_sha256, str)
+        or not _is_sha256(mimi_sha256)
+    ):
+        return None
+    try:
+        if Path(mimi_path).resolve(strict=True) != Path(mimi_path):
+            return None
+    except OSError:
+        return None
+    return f"{ROUTE_CENSUS_MIMI_MARKER} path={mimi_path} sha256={mimi_sha256}"
+
+
+def _authority_mimi_identity_output_valid(stdout: bytes, expected_marker: str) -> bool:
+    try:
+        lines = stdout.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return False
+    markers = [line for line in lines if line.startswith(f"{ROUTE_CENSUS_MIMI_MARKER} ")]
+    return bool(markers) and all(line == expected_marker for line in markers)
+
+
+def _expected_mimi_environment_observation(
+    mimi_path: str | None, mimi_sha256: str | None
+) -> dict[str, dict[str, Any]] | None:
+    if _authority_mimi_identity_marker(mimi_path, mimi_sha256) is None:
+        return None
+    return {
+        ROUTE_CENSUS_MIMI_MODE_ENV: {"value": "1"},
+        ROUTE_CENSUS_MIMI_PATH_ENV: {
+            "path": mimi_path,
+            "resolved_path": mimi_path,
+            "sha256_before": mimi_sha256,
+            "sha256_after": mimi_sha256,
+        },
+        ROUTE_CENSUS_MIMI_SHA256_ENV: {"value": mimi_sha256},
+    }
+
+
+def _authority_mimi_identity_proof(
+    mimi_path: str | None,
+    mimi_sha256: str | None,
+    build_record: Mapping[str, Any],
+    run_record: Mapping[str, Any],
+) -> dict[str, Any]:
+    def observed(record: Mapping[str, Any], edge: str) -> Any:
+        overrides = record.get("environment_overrides")
+        identity = overrides.get(ROUTE_CENSUS_MIMI_PATH_ENV) if isinstance(overrides, Mapping) else None
+        return identity.get(edge) if isinstance(identity, Mapping) else None
+
+    return {
+        "path": mimi_path,
+        "sha256_expected": mimi_sha256,
+        "build_sha256_before": observed(build_record, "sha256_before"),
+        "build_sha256_after": observed(build_record, "sha256_after"),
+        "test_sha256_before": observed(run_record, "sha256_before"),
+        "test_sha256_after": observed(run_record, "sha256_after"),
+    }
+
+
 def _actor_test_execution_valid(
     result: Any,
     source_path: str,
@@ -2345,6 +2483,8 @@ def _actor_test_execution_valid(
     root: Path,
     logs_root: Path | None = None,
     cargo_authority: Mapping[str, Any] | None = None,
+    mimi_path: str | None = None,
+    mimi_sha256: str | None = None,
 ) -> bool:
     """Validate one exact Cargo test result against its fixture and authority hashes."""
     if source_path not in ACTOR_AUTHORITY_TEST_IDS or not isinstance(result, Mapping):
@@ -2356,8 +2496,12 @@ def _actor_test_execution_valid(
     expected_test_hash = assertion.get("sha256") if isinstance(assertion, Mapping) else None
     cargo_path = cargo_authority.get("cargo", {}).get("path") if isinstance(cargo_authority, Mapping) else None
     expected_command = [
-        cargo_path, "test", "--test", "real_world_cli", test_id, "--", "--exact"
+        cargo_path, "test", "--test", "real_world_cli", test_id, "--", "--exact", "--nocapture"
     ]
+    expected_identity_marker = _authority_mimi_identity_marker(mimi_path, mimi_sha256)
+    expected_mimi_environment = _expected_mimi_environment_observation(
+        mimi_path, mimi_sha256
+    )
     stdout = _captured_bytes(result.get("stdout_raw"))
     stderr = _captured_bytes(result.get("stderr_raw"))
     if logs_root is not None and not all(
@@ -2389,6 +2533,13 @@ def _actor_test_execution_valid(
         and result.get("test_id") == test_id
         and result.get("authority_path") == "tests/real_world_cli.rs"
         and result.get("command") == expected_command
+        and result.get("mimi_executable_identity") == {
+            "path": mimi_path,
+            "sha256": mimi_sha256,
+            "sha256_before": mimi_sha256,
+            "sha256_after": mimi_sha256,
+        }
+        and result.get("mimi_environment_overrides") == expected_mimi_environment
         and _cargo_execution_evidence_valid(
             result.get("cargo_execution"), cargo_authority, root=root
         )
@@ -2404,6 +2555,8 @@ def _actor_test_execution_valid(
         and stdout is not None
         and stderr is not None
         and _actor_test_pass_output(stdout, test_id)
+        and expected_identity_marker is not None
+        and _authority_mimi_identity_output_valid(stdout, expected_identity_marker)
     )
 
 
@@ -2414,6 +2567,8 @@ def _run_actor_authority_tests(
     actor_contracts: Mapping[str, Mapping[str, Any]],
     timeout: float,
     cargo_authority: Mapping[str, Any] | None = None,
+    mimi_path: str | None = None,
+    mimi_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Run only the two named Actor tests and retain hash-bound raw logs."""
     source_by_path = {str(source.get("path")): source for source in sources}
@@ -2431,7 +2586,7 @@ def _run_actor_authority_tests(
         test_before = _regular_file_sha256(authority_file)
         cargo_path = cargo_authority.get("cargo", {}).get("path")
         command = [
-            cargo_path, "test", "--test", "real_world_cli", test_id, "--", "--exact"
+            cargo_path, "test", "--test", "real_world_cli", test_id, "--", "--exact", "--nocapture"
         ]
         run_status = "completed"
         exit_code: int | None
@@ -2444,7 +2599,14 @@ def _run_actor_authority_tests(
             stderr = b"Cargo.toml is absent; exact Actor integration tests were not run\n"
         else:
             execution = _run_cargo_authority_command(
-                command, root, timeout, cargo_authority
+                command,
+                root,
+                timeout,
+                cargo_authority,
+                environment_overrides=_authority_mimi_environment(mimi_path, mimi_sha256),
+                require_mimi_identity=True,
+                expected_mimi_path=mimi_path,
+                expected_mimi_sha256=mimi_sha256,
             )
             run_status = str(execution["run_status"])
             exit_code = execution["exit_code"]
@@ -2480,6 +2642,25 @@ def _run_actor_authority_tests(
             "helper_sha256_observed": contract.get("helper_sha256")
             if isinstance(contract, Mapping)
             else None,
+            "mimi_executable_identity": {
+                "path": mimi_path,
+                "sha256": mimi_sha256,
+                "sha256_before": (
+                    execution.get("environment_overrides", {})
+                    .get(ROUTE_CENSUS_MIMI_PATH_ENV, {})
+                    .get("sha256_before")
+                    if execution is not None else None
+                ),
+                "sha256_after": (
+                    execution.get("environment_overrides", {})
+                    .get(ROUTE_CENSUS_MIMI_PATH_ENV, {})
+                    .get("sha256_after")
+                    if execution is not None else None
+                ),
+            },
+            "mimi_environment_overrides": (
+                execution.get("environment_overrides") if execution is not None else None
+            ),
             "stdout": _decode(stdout),
             "stderr": _decode(stderr),
             "stdout_raw": stdout_raw,
@@ -2493,6 +2674,8 @@ def _run_actor_authority_tests(
             root=root,
             logs_root=logs_root,
             cargo_authority=cargo_authority,
+            mimi_path=mimi_path,
+            mimi_sha256=mimi_sha256,
         )
         results.append(result)
     expected_pairs = {
@@ -2513,7 +2696,7 @@ def _run_actor_authority_tests(
             for path in ACTOR_FALLBACK_INPUTS
         ],
         "command_template": [
-            "<cargo-absolute-path>", "test", "--test", "real_world_cli", "<exact-test-id>", "--", "--exact"
+            "<cargo-absolute-path>", "test", "--test", "real_world_cli", "<exact-test-id>", "--", "--exact", "--nocapture"
         ],
         "cases": results,
     }
@@ -2752,9 +2935,8 @@ def _expected_rejection_test_authority_is_valid(
         ("punct", "::"), ("ident", "std"), ("punct", "::"),
         ("ident", "process"), ("punct", "::"), ("ident", "Command"),
         ("punct", "::"), ("ident", "new"), ("punct", "("),
-        ("punct", "::"), ("ident", "std"), ("punct", "::"),
-        ("ident", "env"), ("punct", "!"), ("punct", "("),
-        ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+        ("ident", "route_census_mimi_path"), ("punct", "("), ("punct", ")"),
+        ("punct", ")"),
         ("punct", "."), ("ident", "current_dir"), ("punct", "("),
         ("punct", "::"), ("ident", "std"), ("punct", "::"),
         ("ident", "env"), ("punct", "!"), ("punct", "("),
@@ -2782,13 +2964,16 @@ def _expected_rejection_test_authority_is_valid(
         ("string", "-o"), ("punct", ")"),
         ("punct", "."), ("ident", "arg"), ("punct", "("),
         ("string", None), ("punct", ")"),
+        ("punct", "."), ("ident", "env"), ("punct", "("),
+        ("string", "MIMI_ROUTE_CENSUS"), ("punct", ","),
+        ("string", "1"), ("punct", ")"),
         ("punct", "."), ("ident", "output"), ("punct", "("),
         ("punct", ")"), ("punct", "."), ("ident", "expect"),
         ("punct", "("), ("string", None), ("punct", ")"),
     ]
     if not _token_pattern_matches(command_statement[cursor:], command_suffix):
         return False
-    if not command_statement[cursor + 14][1] or not command_statement[cursor + 23][1]:
+    if not command_statement[cursor + 14][1] or not command_statement[cursor + 31][1]:
         return False
 
     status_pattern = [
@@ -2867,6 +3052,229 @@ def _expected_rejection_test_authority_is_valid(
         required_literals.issubset(asserted_literals)
         and route_lines.intersection(asserted_literals)
         and cited_line_is_diagnostic_assertion
+    )
+
+
+SOURCE_DIAGNOSTIC_FORBIDDEN_TEXT = (
+    "canonical route disposition:",
+    "default Canonical MIR route rejected:",
+    "canonical MIR build rejected:",
+    "MIMI_ROUTE_CENSUS route-admission",
+    "MIMI_ROUTE_CENSUS canonical-native-build",
+    "fallback",
+    "legacy",
+    "compatibility",
+)
+
+
+def _source_diagnostic_text_is_well_formed(
+    text: str, *, source_path: str | None = None, root: Path | None = None
+) -> bool:
+    """Accept only exact source diagnostics with no route or fallback signal."""
+    if not isinstance(text, str) or not text or "\x00" in text or "\r" in text:
+        return False
+    if any(marker in text.lower() for marker in SOURCE_DIAGNOSTIC_FORBIDDEN_TEXT):
+        return False
+    if ROUTE_RE.search(text) or REJECT_RE.search(text) or EXPLICIT_REJECT_RE.search(text):
+        return False
+    if "mimi_route_census" in text.lower():
+        return False
+    source_lines = _source_diagnostic_lines(text)
+    plain_lines = [line for line in text.splitlines() if line.strip()]
+    summary_lines = [
+        line for line in plain_lines
+        if re.fullmatch(r"(?i)[ \t]*error:[ \t]*type checking failed[ \t]*", line)
+    ]
+    if (
+        not source_lines
+        or len(summary_lines) > 1
+        or len(plain_lines) != len(source_lines) + len(summary_lines)
+        or any(line not in source_lines and line not in summary_lines for line in plain_lines)
+    ):
+        return False
+    if any("\x1b" in line for line in text.splitlines()):
+        return False
+    if source_path is not None:
+        if root is None:
+            return False
+        absolute_source = str((root / source_path).resolve())
+        if any(absolute_source not in line for line in source_lines):
+            return False
+    return True
+
+
+def _render_expected_source_diagnostic_test(
+    *,
+    test_id: str,
+    source_path: str,
+    source_sha256: str,
+    expected_exit_code: int,
+    target_kind: str,
+    output_path: str,
+    expected_diagnostic_text: str,
+    root: Path,
+) -> tuple[str, int]:
+    """Render the narrow direct-build authority for one source diagnostic."""
+    if (
+        not isinstance(test_id, str)
+        or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", test_id)
+        or Path(source_path).suffix != ".mimi"
+        or not _is_sha256(source_sha256)
+        or not isinstance(expected_exit_code, int)
+        or isinstance(expected_exit_code, bool)
+        or expected_exit_code <= 0
+        or target_kind not in {"executable", "shared_library_probe"}
+        or not _source_diagnostic_text_is_well_formed(
+            expected_diagnostic_text, source_path=source_path, root=root
+        )
+    ):
+        raise ValueError("source-diagnostic authority inputs are malformed")
+    relative_output = _repository_relative_path(
+        output_path, label="source-diagnostic authority output path"
+    )
+    if not relative_output.startswith("target/route-census-source-diagnostic-") or not relative_output.endswith(".out"):
+        raise ValueError("source-diagnostic authority output must be uniquely isolated beneath target/")
+    if relative_output != _source_diagnostic_authority_output_path(
+        source_path, source_sha256
+    ):
+        raise ValueError("source-diagnostic authority output path is not bound to the exact source identity")
+    absolute_source = str((root / source_path).resolve())
+    if absolute_source not in expected_diagnostic_text:
+        raise ValueError("source-diagnostic text does not identify the exact fixture path")
+    if "@MIMI_SOURCE_PATH@" in expected_diagnostic_text:
+        raise ValueError("source-diagnostic text contains the reserved path marker")
+    expected_template = expected_diagnostic_text.replace(
+        absolute_source, "@MIMI_SOURCE_PATH@"
+    )
+    if "@MIMI_SOURCE_PATH@" not in expected_template:
+        raise ValueError("source-diagnostic text path could not be bound to its fixture")
+    try:
+        for value in (source_path, relative_output, expected_template):
+            json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError("source-diagnostic authority text is not serializable") from error
+
+    join_chain = "".join(
+        f".join({json.dumps(part, ensure_ascii=False)})"
+        for part in Path(source_path).parts
+    )
+    output_join_chain = "".join(
+        f".join({json.dumps(part, ensure_ascii=False)})"
+        for part in Path(relative_output).parts
+    )
+    target_flag = '        .arg("--shared")\n' if target_kind == "shared_library_probe" else ""
+    lines = [
+        "#[test]",
+        f"fn {test_id}() {{",
+        "    let fixture = ::std::path::Path::new(::std::env!(\"CARGO_MANIFEST_DIR\"))"
+        + join_chain
+        + ";",
+        "    let output_path = ::std::path::Path::new(::std::env!(\"CARGO_MANIFEST_DIR\"))"
+        + output_join_chain
+        + ";",
+        "    ::std::assert_eq!(output_path.symlink_metadata().err().map(|error| error.kind()), Some(::std::io::ErrorKind::NotFound));",
+        "    let output = ::std::process::Command::new(route_census_mimi_path())",
+        "        .current_dir(::std::env!(\"CARGO_MANIFEST_DIR\"))",
+        '        .arg("build")',
+    ]
+    if target_flag:
+        lines.extend(target_flag.rstrip("\n").splitlines())
+    lines.extend([
+        "        .arg(&fixture)",
+        '        .arg("-o")',
+        "        .arg(&output_path)",
+        '        .env("MIMI_ROUTE_CENSUS", "1")',
+        '        .env("NO_COLOR", "1")',
+        "        .output()",
+        '        .expect("validated Mimi source-diagnostic build must start");',
+        "    ::std::assert!(!output.status.success());",
+        f"    ::std::assert_eq!(output.status.code(), Some({expected_exit_code}));",
+        "    ::std::assert!(output.stdout.is_empty());",
+        "    let expected_stderr = "
+        + json.dumps(expected_template, ensure_ascii=False)
+        + ".replace(\"@MIMI_SOURCE_PATH@\", &fixture.display().to_string()).into_bytes();",
+    ])
+    assertion_line = len(lines) + 1
+    lines.append(
+        "    ::std::assert_eq!(output.stderr.as_slice(), expected_stderr.as_slice());"
+    )
+    lines.append(
+        '    let stderr = ::std::str::from_utf8(&output.stderr).expect("expected source diagnostics must be UTF-8");'
+    )
+    for marker in SOURCE_DIAGNOSTIC_FORBIDDEN_TEXT:
+        lines.append(
+            "    ::std::assert!(!stderr.contains("
+            + json.dumps(marker, ensure_ascii=False)
+            + "));"
+        )
+    lines.append(
+        "    ::std::assert_eq!(output_path.symlink_metadata().err().map(|error| error.kind()), Some(::std::io::ErrorKind::NotFound));"
+    )
+    lines.append("}")
+    return "\n".join(lines) + "\n", assertion_line
+
+
+def _expected_source_diagnostic_test_authority_is_valid(
+    *,
+    test_id: Any,
+    source_path: str,
+    source_sha256: str,
+    expected_exit_code: Any,
+    target_kind: str,
+    output_path: Any,
+    expected_diagnostic_text: Any,
+    expected_diagnostic_codes: Any,
+    expected_diagnostic_lines: Any,
+    source_text: str,
+    assertion_line: Any,
+    root: Path,
+) -> bool:
+    """Require byte-for-byte generated authority code for one source diagnostic."""
+    if (
+        not isinstance(test_id, str)
+        or not isinstance(output_path, str)
+        or not _is_sha256(source_sha256)
+        or not isinstance(expected_exit_code, int)
+        or isinstance(expected_exit_code, bool)
+        or expected_exit_code <= 0
+        or not isinstance(expected_diagnostic_text, str)
+        or not isinstance(expected_diagnostic_codes, list)
+        or not isinstance(expected_diagnostic_lines, list)
+        or not isinstance(assertion_line, int)
+        or isinstance(assertion_line, bool)
+    ):
+        return False
+    try:
+        expected_source, expected_line = _render_expected_source_diagnostic_test(
+            test_id=test_id,
+            source_path=source_path,
+            source_sha256=source_sha256,
+            expected_exit_code=expected_exit_code,
+            target_kind=target_kind,
+            output_path=output_path,
+            expected_diagnostic_text=expected_diagnostic_text,
+            root=root,
+        )
+    except (TypeError, ValueError):
+        return False
+    actual_span = _rust_test_function_span(source_text, test_id)
+    expected_function = expected_source[: expected_source.rfind("}\n") + 2]
+    if actual_span is None:
+        return False
+    expected_codes = _diagnostic_codes(expected_diagnostic_text)
+    expected_lines = _source_diagnostic_lines(expected_diagnostic_text)
+    expected_function = expected_function.removeprefix("#[test]\n")
+    return bool(
+        expected_diagnostic_codes == expected_codes
+        and expected_diagnostic_lines == expected_lines
+        and source_text[actual_span[0] : actual_span[1]] == expected_function.rstrip("\n")
+        and expected_line == assertion_line
+        and _test_authority_is_structurally_valid(
+            test_id,
+            source_text,
+            source_text.splitlines(),
+            assertion_line,
+        )
     )
 
 
@@ -2956,9 +3364,8 @@ def _required_compile_test_authority_is_valid(
         ("punct", "::"), ("ident", "std"), ("punct", "::"),
         ("ident", "process"), ("punct", "::"), ("ident", "Command"),
         ("punct", "::"), ("ident", "new"), ("punct", "("),
-        ("punct", "::"), ("ident", "std"), ("punct", "::"),
-        ("ident", "env"), ("punct", "!"), ("punct", "("),
-        ("string", "CARGO_BIN_EXE_mimi"), ("punct", ")"), ("punct", ")"),
+        ("ident", "route_census_mimi_path"), ("punct", "("), ("punct", ")"),
+        ("punct", ")"),
         ("punct", "."), ("ident", "current_dir"), ("punct", "("),
         ("punct", "::"), ("ident", "std"), ("punct", "::"),
         ("ident", "env"), ("punct", "!"), ("punct", "("),
@@ -3144,6 +3551,13 @@ def _cargo_test_target_for_source(
         expected_source.relative_to(root_resolved)
     except (OSError, ValueError):
         return None
+    route_authority_source = (root_resolved / ROUTE_CENSUS_AUTHORITY_SOURCE_PATH).resolve()
+    is_route_authority_source = expected_source == route_authority_source
+    if is_route_authority_source and (
+        source_path != ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+        or expected_source != root_resolved / ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+    ):
+        return None
     matches: list[dict[str, Any]] = []
     for package in packages:
         if not isinstance(package, Mapping) or package.get("id") not in members:
@@ -3161,37 +3575,601 @@ def _cargo_test_target_for_source(
         targets = package.get("targets")
         if not isinstance(targets, list):
             continue
+        package_features = package.get("features")
         for target in targets:
             if not isinstance(target, Mapping):
                 continue
             kinds = target.get("kind")
             target_name = target.get("name")
             target_source = target.get("src_path")
+            required_features_raw = target.get(
+                "required-features", _CARGO_METADATA_MISSING
+            )
             if (
                 not isinstance(kinds, list)
                 or "test" not in kinds
                 or target.get("test") is not True
                 or not isinstance(target_name, str)
                 or not isinstance(target_source, str)
+                or required_features_raw is _CARGO_METADATA_MISSING
             ):
+                continue
+            if required_features_raw is None:
+                required_features: list[str] = []
+            elif (
+                isinstance(required_features_raw, list)
+                and all(isinstance(feature, str) and feature for feature in required_features_raw)
+                and len(set(required_features_raw)) == len(required_features_raw)
+            ):
+                required_features = list(required_features_raw)
+            else:
                 continue
             try:
                 actual_source = Path(target_source).resolve(strict=True)
             except OSError:
                 continue
             if actual_source == expected_source:
+                manifest_resolved = str(manifest_path)
+                if is_route_authority_source and not _route_census_authority_target_contract_valid(
+                    root=root_resolved,
+                    package_name=package_name,
+                    manifest_path=manifest_resolved,
+                    target_name=target_name,
+                    target_kind=kinds,
+                    target_source=actual_source,
+                    target_test=target.get("test"),
+                    required_features=required_features,
+                    package_features=package_features,
+                ):
+                    continue
                 matches.append(
                     {
                         "package_id": package_id,
                         "package_name": package_name,
-                        "manifest_path": str(manifest_path),
+                        "manifest_path": manifest_resolved,
                         "target_name": target_name,
                         "target_kind": list(kinds),
                         "src_path": str(actual_source),
                         "test": True,
+                        "required_features": required_features,
                     }
                 )
     return matches[0] if len(matches) == 1 else None
+
+
+def _route_census_authority_target_contract_valid(
+    *,
+    root: Path,
+    package_name: Any,
+    manifest_path: Any,
+    target_name: Any,
+    target_kind: Any,
+    target_source: Any,
+    target_test: Any,
+    required_features: Any,
+    package_features: Any,
+) -> bool:
+    """Accept only the isolated, non-default generated authority target."""
+    try:
+        root_resolved = root.resolve(strict=True)
+        expected_manifest = (root_resolved / "Cargo.toml").resolve(strict=True)
+        expected_source = (root_resolved / ROUTE_CENSUS_AUTHORITY_SOURCE_PATH).resolve(strict=True)
+        actual_manifest = Path(str(manifest_path)).resolve(strict=True)
+        actual_source = Path(str(target_source)).resolve(strict=True)
+        actual_manifest.relative_to(root_resolved)
+        actual_source.relative_to(root_resolved)
+    except (OSError, ValueError):
+        return False
+    if (
+        package_name != "mimi"
+        or actual_manifest != expected_manifest
+        or target_name != ROUTE_CENSUS_AUTHORITY_TARGET_NAME
+        or target_kind != ["test"]
+        or target_test is not True
+        or actual_source != expected_source
+        or required_features != [ROUTE_CENSUS_AUTHORITY_FEATURE]
+        or not isinstance(package_features, Mapping)
+    ):
+        return False
+    try:
+        wrapper_stat = actual_source.lstat()
+        wrapper_bytes = actual_source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if stat.S_ISLNK(wrapper_stat.st_mode) or not stat.S_ISREG(wrapper_stat.st_mode):
+        return False
+    if wrapper_bytes != ROUTE_CENSUS_AUTHORITY_WRAPPER_SOURCE:
+        return False
+    feature_body = package_features.get(
+        ROUTE_CENSUS_AUTHORITY_FEATURE, _CARGO_METADATA_MISSING
+    )
+    default_features = package_features.get("default", _CARGO_METADATA_MISSING)
+    if not (
+        isinstance(feature_body, list)
+        and not feature_body
+        and isinstance(default_features, list)
+        and all(isinstance(feature, str) for feature in default_features)
+    ):
+        return False
+    pending = list(default_features)
+    visited: set[str] = set()
+    while pending:
+        enabled = pending.pop()
+        if enabled == ROUTE_CENSUS_AUTHORITY_FEATURE:
+            return False
+        if enabled in visited:
+            continue
+        visited.add(enabled)
+        nested = package_features.get(enabled)
+        if nested is None:
+            continue
+        if not isinstance(nested, list) or not all(
+            isinstance(reference, str) for reference in nested
+        ):
+            return False
+        for reference in nested:
+            referenced_feature = reference.removeprefix("dep:").split("/", 1)[0].removesuffix("?")
+            if referenced_feature == ROUTE_CENSUS_AUTHORITY_FEATURE:
+                return False
+            if referenced_feature in package_features:
+                pending.append(referenced_feature)
+    return True
+
+
+def _cargo_test_target_commands(
+    root: Path,
+    cargo_path: Any,
+    target: Mapping[str, Any],
+    test_id: str,
+) -> tuple[list[str], list[str]] | None:
+    """Build the only accepted compile/run commands for an authority target."""
+    if not isinstance(cargo_path, str) or not cargo_path or not isinstance(test_id, str) or not test_id:
+        return None
+    manifest_path = target.get("manifest_path")
+    target_name = target.get("target_name")
+    if not isinstance(manifest_path, str) or not isinstance(target_name, str):
+        return None
+    command_prefix = [
+        cargo_path,
+        "test",
+        "--manifest-path",
+        manifest_path,
+        "--test",
+        target_name,
+    ]
+    target_is_route_authority = target_name == ROUTE_CENSUS_AUTHORITY_TARGET_NAME
+    if target_is_route_authority:
+        try:
+            expected_source = (root.resolve(strict=True) / ROUTE_CENSUS_AUTHORITY_SOURCE_PATH).resolve(strict=True)
+            actual_source = Path(str(target.get("src_path"))).resolve(strict=True)
+        except (OSError, ValueError):
+            return None
+        if (
+            actual_source != expected_source
+            or target.get("required_features") != [ROUTE_CENSUS_AUTHORITY_FEATURE]
+        ):
+            return None
+        command_prefix.extend(["--features", ROUTE_CENSUS_AUTHORITY_FEATURE])
+    elif target.get("src_path") == str(
+        (root.resolve() / ROUTE_CENSUS_AUTHORITY_SOURCE_PATH).resolve()
+    ):
+        return None
+    build_command = [*command_prefix, "--no-run"]
+    run_command = [
+        *command_prefix,
+        test_id,
+        "--",
+        "--exact",
+        "--nocapture",
+    ]
+    return build_command, run_command
+
+
+def _cargo_command_matches(actual: Any, expected: Sequence[str]) -> bool:
+    """Require exact argv equality; Cargo flag additions and omissions matter."""
+    return isinstance(actual, list) and actual == list(expected)
+
+
+def _load_route_authority_generator(root: Path) -> Any:
+    path = root / ROUTE_CENSUS_AUTHORITY_GENERATOR_PATH
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"route authority generator is missing or not regular: {path}")
+    spec = importlib.util.spec_from_file_location(
+        "mimi_route_census_authority_generator", path
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load route authority generator: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _strict_json_file(path: Path, *, label: str) -> tuple[Any, bytes]:
+    try:
+        raw = path.read_bytes()
+        document = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"{label} is missing or invalid strict UTF-8 JSON: {error}") from error
+    return document, raw
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    absolute = Path(os.path.abspath(path))
+    cursor = Path(absolute.anchor)
+    try:
+        for component in absolute.parts[1:]:
+            cursor /= component
+            if stat.S_ISLNK(cursor.lstat().st_mode):
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _stable_regular_file_sha256(path: Path) -> str | None:
+    if _path_has_symlink_component(path):
+        return None
+    return _regular_file_sha256(path)
+
+
+def _validate_route_authority_bundle(
+    bundle_path: Path,
+    *,
+    root: Path,
+    sources: Sequence[Mapping[str, Any]],
+    mimi_path: Path,
+) -> dict[str, Any]:
+    """Regenerate and compare the complete bundle before it can authorize Cargo."""
+    root = root.resolve(strict=True)
+    requested_bundle = bundle_path.expanduser().absolute()
+    if _path_has_symlink_component(requested_bundle):
+        raise ValueError("generated route authority bundle path cannot contain symlinks")
+    try:
+        bundle = requested_bundle.resolve(strict=True)
+        metadata = bundle.lstat()
+    except OSError as error:
+        raise ValueError(f"generated route authority bundle is missing: {bundle_path}") from error
+    if not stat.S_ISDIR(metadata.st_mode) or bundle.is_symlink():
+        raise ValueError("generated route authority bundle must be a regular directory")
+
+    generator = _load_route_authority_generator(root)
+    expected_relative = {
+        generator.EXPECTED_TEST_PATH,
+        generator.EXPECTATIONS_FILENAME,
+        generator.GENERATION_MANIFEST_FILENAME,
+    }
+    observed_files: set[str] = set()
+    for candidate in bundle.rglob("*"):
+        candidate_mode = candidate.lstat().st_mode
+        if stat.S_ISLNK(candidate_mode):
+            raise ValueError(f"generated route authority bundle contains a symlink: {candidate}")
+        if stat.S_ISREG(candidate_mode):
+            observed_files.add(candidate.relative_to(bundle).as_posix())
+        elif not stat.S_ISDIR(candidate_mode):
+            raise ValueError(f"generated route authority bundle contains a non-file artifact: {candidate}")
+    if observed_files != expected_relative:
+        raise ValueError(
+            "generated route authority bundle is incomplete or contains unexpected artifacts"
+        )
+
+    manifest_path = bundle / generator.GENERATION_MANIFEST_FILENAME
+    expectations_path = bundle / generator.EXPECTATIONS_FILENAME
+    authority_source_path = bundle / generator.EXPECTED_TEST_PATH
+    manifest, manifest_raw = _strict_json_file(
+        manifest_path, label="route authority generation manifest"
+    )
+    if not isinstance(manifest, Mapping):
+        raise ValueError("route authority generation manifest must be an object")
+    if manifest.get("schema_version") != 1 or manifest.get("status") != "generated_not_executed":
+        raise ValueError("route authority generation manifest has an unsupported schema or status")
+    generation_mode = manifest.get("generation_mode")
+    if generation_mode not in {"strict_authority", "bootstrap_observation"}:
+        raise ValueError("route authority generation manifest has an unsupported generation mode")
+    generator_record = manifest.get("generator")
+    generator_sha = sha256_file(root / ROUTE_CENSUS_AUTHORITY_GENERATOR_PATH)
+    if (
+        not isinstance(generator_record, Mapping)
+        or generator_record.get("path") != ROUTE_CENSUS_AUTHORITY_GENERATOR_PATH
+        or generator_record.get("sha256") != generator_sha
+    ):
+        raise ValueError("route authority bundle was generated by a stale or mismatched generator")
+    target_record = manifest.get("authority_target")
+    wrapper_path = root / ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+    wrapper_sha = _stable_regular_file_sha256(wrapper_path)
+    if (
+        not isinstance(target_record, Mapping)
+        or target_record.get("name") != ROUTE_CENSUS_AUTHORITY_TARGET_NAME
+        or target_record.get("feature") != ROUTE_CENSUS_AUTHORITY_FEATURE
+        or target_record.get("path") != ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+        or wrapper_sha is None
+        or target_record.get("wrapper_sha256") != wrapper_sha
+        or wrapper_path.read_text(encoding="utf-8") != generator.EXPECTED_WRAPPER_SOURCE
+    ):
+        raise ValueError("route authority bundle does not bind the exact Cargo include target")
+
+    source_bytes = authority_source_path.read_bytes()
+    if not source_bytes or b"route-census-authorities must be replaced" in source_bytes:
+        raise ValueError("generated route authority source is empty or still a placeholder")
+    try:
+        source_text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("generated route authority source is not UTF-8") from error
+    if source_text.count("#[test]") <= 0:
+        raise ValueError("generated route authority source contains no tests")
+
+    expectations, expectations_raw = _strict_json_file(
+        expectations_path, label="generated route authority expectations"
+    )
+    if not isinstance(expectations, Mapping) or expectations.get("schema_version") != 4:
+        raise ValueError("generated route authority expectations have an unsupported schema")
+    expectation_inputs = expectations.get("inputs")
+    rows = manifest.get("rows")
+    report_record = manifest.get("report")
+    if (
+        not isinstance(expectation_inputs, Mapping)
+        or not isinstance(rows, list)
+        or not isinstance(report_record, Mapping)
+        or not rows
+        or len(rows) != len(expectation_inputs)
+        or len(rows) != len(sources)
+        or len(set(str(row.get("path")) for row in rows if isinstance(row, Mapping))) != len(rows)
+    ):
+        raise ValueError("generated authority rows are empty, duplicate, or do not cover the current inventory")
+    artifact_records = manifest.get("artifacts")
+    if not isinstance(artifact_records, Mapping):
+        raise ValueError("route authority generation manifest is missing artifact identities")
+    for relative, payload in (
+        (generator.EXPECTED_TEST_PATH, source_bytes),
+        (generator.EXPECTATIONS_FILENAME, expectations_raw),
+    ):
+        artifact = artifact_records.get(relative)
+        if (
+            not isinstance(artifact, Mapping)
+            or artifact.get("sha256") != sha256_bytes(payload)
+            or artifact.get("bytes") != len(payload)
+            or len(payload) <= 0
+        ):
+            raise ValueError(f"generated route authority artifact identity is stale: {relative}")
+
+    report_path_value = report_record.get("path")
+    report_sha256 = report_record.get("sha256")
+    if (
+        not isinstance(report_path_value, str)
+        or not Path(report_path_value).is_absolute()
+        or not _is_sha256(report_sha256)
+    ):
+        raise ValueError("route authority generation manifest has no absolute source report identity")
+    report_path = Path(report_path_value)
+    if _stable_regular_file_sha256(report_path) != report_sha256:
+        raise ValueError("route authority source report is missing or stale")
+    source_report, _source_report_raw = _strict_json_file(
+        report_path, label="route authority source report"
+    )
+    if not isinstance(source_report, Mapping):
+        raise ValueError("route authority source report is not an object")
+    source_collector = source_report.get("collector")
+    collector_path = root / "scripts" / "full_route_census.py"
+    collector_sha = _stable_regular_file_sha256(collector_path)
+    if (
+        not isinstance(source_collector, Mapping)
+        or source_collector.get("path") != str(collector_path.resolve())
+        or source_collector.get("sha256") != collector_sha
+        or report_record.get("collector_sha256") != collector_sha
+    ):
+        raise ValueError("route authority bundle was generated by a stale or mismatched collector")
+    toolchain = source_report.get("toolchain")
+    reported_mimi = toolchain.get("mimi") if isinstance(toolchain, Mapping) else None
+    current_mimi = mimi_path.resolve(strict=True)
+    current_mimi_sha = _stable_regular_file_sha256(current_mimi)
+    if (
+        not isinstance(reported_mimi, Mapping)
+        or reported_mimi.get("path") != str(current_mimi)
+        or reported_mimi.get("sha256") != current_mimi_sha
+        or current_mimi_sha is None
+        or not os.access(current_mimi, os.X_OK)
+    ):
+        raise ValueError("route authority bundle was generated from a different Mimi executable")
+
+    # Re-run the deterministic generator against its report. This proves that
+    # manifest rows, every exact-source assertion, the feature target, and both
+    # output hashes still describe the same source snapshot.
+    with tempfile.TemporaryDirectory(prefix="route-authority-bundle-recheck-") as temporary_name:
+        regenerated_dir = Path(temporary_name) / "generated"
+        regenerated_manifest = generator.generate(
+            report_path,
+            root,
+            regenerated_dir,
+            bootstrap_report=generation_mode == "bootstrap_observation",
+        )
+        if regenerated_manifest != dict(manifest):
+            raise ValueError("route authority generation manifest does not match deterministic regeneration")
+        for relative in expected_relative:
+            if (regenerated_dir / relative).read_bytes() != (bundle / relative).read_bytes():
+                raise ValueError(f"generated route authority artifact does not match fresh regeneration: {relative}")
+
+    row_by_path = {
+        str(row["path"]): row for row in rows if isinstance(row, Mapping) and isinstance(row.get("path"), str)
+    }
+    if set(row_by_path) != {str(source.get("path")) for source in sources}:
+        raise ValueError("generated authority rows do not exactly match current source inventory paths")
+    current_source_by_path = {str(source.get("path")): source for source in sources}
+    for path, source in current_source_by_path.items():
+        row = row_by_path[path]
+        expectation = expectation_inputs.get(path)
+        if (
+            not isinstance(expectation, Mapping)
+            or expectation.get("source_sha256") != source.get("sha256")
+            or row.get("source_sha256") != source.get("sha256")
+        ):
+            raise ValueError(f"generated authority is missing, stale, or mismatched for {path}")
+        if expectation.get("class") == "unmapped":
+            blocker = row.get("bootstrap_blocker")
+            if (
+                generation_mode != "bootstrap_observation"
+                or row.get("class") != "unmapped"
+                or row.get("test_id") is not None
+                or expectation.get("authority") is not None
+                or not isinstance(blocker, Mapping)
+                or blocker.get("status") != "blocking"
+                or expectation.get("bootstrap_observation") != blocker
+            ):
+                raise ValueError(
+                    f"bootstrap unmapped row is missing its exact source-bound blocker: {path}"
+                )
+            continue
+        authority = expectation.get("authority")
+        assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+        if (
+            not isinstance(authority, Mapping)
+            or row.get("test_id") != authority.get("test_id")
+            or not isinstance(assertion, Mapping)
+            or assertion.get("path") != ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+            or assertion.get("sha256") != sha256_bytes(source_bytes)
+        ):
+            raise ValueError(f"generated authority is missing, stale, or mismatched for {path}")
+
+    return {
+        "path": str(bundle),
+        "status": "validated",
+        "candidate_count": len(rows),
+        "generator_path": str(root / ROUTE_CENSUS_AUTHORITY_GENERATOR_PATH),
+        "generator_sha256": generator_sha,
+        "report_path": str(report_path),
+        "report_sha256": report_sha256,
+        "mimi_path": str(current_mimi),
+        "mimi_sha256": current_mimi_sha,
+        "collector_path": str(collector_path),
+        "collector_sha256": collector_sha,
+        "expectations_path": str(expectations_path),
+        "expectations_sha256": sha256_bytes(expectations_raw),
+        "generation_manifest_path": str(manifest_path),
+        "generation_manifest_sha256": sha256_bytes(manifest_raw),
+        "authority_source_path": str(authority_source_path),
+        "authority_source_sha256": sha256_bytes(source_bytes),
+        "target_name": ROUTE_CENSUS_AUTHORITY_TARGET_NAME,
+        "feature": ROUTE_CENSUS_AUTHORITY_FEATURE,
+        "target_path": ROUTE_CENSUS_AUTHORITY_SOURCE_PATH,
+        "wrapper_path": str(wrapper_path),
+        "wrapper_sha256": wrapper_sha,
+        "generation_mode": generation_mode,
+        "bootstrap_blocker_count": sum(
+            1 for row in rows if isinstance(row, Mapping) and row.get("class") == "unmapped"
+        ),
+    }
+
+
+def _require_strict_authority_bundle_for_check(
+    binding: Mapping[str, Any] | None,
+    *,
+    check: bool,
+) -> None:
+    """Prevent observation-only bundles from being promoted by a zero-blocker replay."""
+    if (
+        check
+        and binding is not None
+        and binding.get("generation_mode") != "strict_authority"
+    ):
+        raise ValueError(
+            "strict --check requires a strict_authority bundle; "
+            "bootstrap_observation bundles are observation-only"
+        )
+
+
+def _validate_external_expectations_against_bundle(
+    external: Mapping[str, Mapping[str, Any]],
+    generated: Mapping[str, Mapping[str, Any]],
+    sources: Sequence[Mapping[str, Any]],
+) -> None:
+    """Require a caller-supplied v4 manifest to ground the generated test bundle."""
+    source_paths = {str(source.get("path")) for source in sources}
+    if set(external) != source_paths or set(generated) != source_paths:
+        raise ValueError(
+            "independent schema-v4 expectations and generated authority bundle must cover "
+            "the exact current source inventory"
+        )
+    semantic_fields = (
+        "expected_exit_code",
+        "expected_route_disposition",
+        "expected_route_classification_status",
+        "expected_route_reason",
+        "expected_failure_class",
+        "expected_diagnostic_text",
+        "expected_diagnostic_lines",
+        "expected_output_path",
+    )
+    for path in sorted(source_paths):
+        original = external[path]
+        bundled = generated[path]
+        if (
+            original.get("class") != bundled.get("class")
+            or original.get("source_sha256") != bundled.get("source_sha256")
+            or original.get("class") == "unmapped"
+        ):
+            raise ValueError(
+                f"generated authority bundle is not grounded in independent expectations for {path}"
+            )
+        for field in semantic_fields:
+            if field in original and original.get(field) != bundled.get(field):
+                raise ValueError(
+                    f"generated authority bundle changes independent expectation {field} for {path}"
+                )
+        original_codes = original.get("expected_diagnostic_codes")
+        bundled_codes = bundled.get("expected_diagnostic_codes")
+        if original_codes is not None and original_codes != bundled_codes:
+            raise ValueError(
+                f"generated authority bundle changes independent diagnostic codes for {path}"
+            )
+        original_substrings = original.get("required_output_substrings")
+        bundled_substrings = bundled.get("required_output_substrings")
+        if original_substrings is not None and (
+            not isinstance(bundled_substrings, list)
+            or not set(original_substrings).issubset(set(bundled_substrings))
+        ):
+            raise ValueError(
+                f"generated authority bundle omits independent required output text for {path}"
+            )
+
+
+def _provided_expectations_identity_matches(
+    report: Mapping[str, Any],
+    *,
+    expected_path: str,
+    expected_sha256: str,
+) -> bool:
+    expectations = report.get("expectations")
+    identity = expectations.get("identity") if isinstance(expectations, Mapping) else None
+    provided = identity.get("provided_manifest") if isinstance(identity, Mapping) else None
+    return bool(
+        isinstance(provided, Mapping)
+        and provided.get("path") == expected_path
+        and provided.get("sha256") == expected_sha256
+    )
+
+
+def _route_authority_bundle_is_stable(binding: Mapping[str, Any]) -> bool:
+    identities = (
+        ("expectations_path", "expectations_sha256"),
+        ("generation_manifest_path", "generation_manifest_sha256"),
+        ("authority_source_path", "authority_source_sha256"),
+        ("report_path", "report_sha256"),
+        ("collector_path", "collector_sha256"),
+        ("mimi_path", "mimi_sha256"),
+    )
+    return all(
+        isinstance(binding.get(path_key), str)
+        and _stable_regular_file_sha256(Path(str(binding[path_key]))) == binding.get(hash_key)
+        for path_key, hash_key in identities
+    ) and bool(
+        isinstance(binding.get("generator_path"), str)
+        and _stable_regular_file_sha256(Path(str(binding["generator_path"])))
+        == binding.get("generator_sha256")
+        and isinstance(binding.get("target_path"), str)
+        and _stable_regular_file_sha256(
+            Path(str(binding.get("wrapper_path", "")))
+        ) == binding.get("wrapper_sha256")
+    )
 
 def _repository_relative_path(value: Any, *, label: str) -> str:
     if not isinstance(value, str) or not value:
@@ -3221,6 +4199,7 @@ def load_expectations(path: Path | None, root: Path) -> tuple[dict[str, Any], di
     if not isinstance(inputs, dict):
         raise ValueError("expectations file must contain an inputs object")
     expectations: dict[str, Any] = {}
+    source_diagnostic_output_paths: set[str] = set()
     for key, value in inputs.items():
         if not isinstance(key, str) or not isinstance(value, dict):
             raise ValueError("each expectations entry must map a source path to an object")
@@ -3366,8 +4345,98 @@ def load_expectations(path: Path | None, root: Path) -> tuple[dict[str, Any], di
             expectation["expected_route_classification_status"] = expected_route_status
             expectation["expected_route_reason"] = expected_route_reason
             expectation["expected_failure_class"] = expected_failure_class
+        if expectation_class == "expected_source_diagnostic":
+            route_rejection_fields = {
+                "expected_route_disposition",
+                "expected_route_classification_status",
+                "expected_route_reason",
+                "expected_failure_class",
+                "required_output_substrings",
+            }
+            if route_rejection_fields.intersection(value):
+                raise ValueError(
+                    f"expected_source_diagnostic expectation {key!r} cannot claim observed route-rejection authority"
+                )
+            expected_exit_code = value.get("expected_exit_code")
+            if (
+                not isinstance(expected_exit_code, int)
+                or isinstance(expected_exit_code, bool)
+                or expected_exit_code <= 0
+            ):
+                raise ValueError(
+                    f"expectation {key!r} must include a positive source-diagnostic exit code"
+                )
+            diagnostic_text = value.get("expected_diagnostic_text")
+            if not isinstance(diagnostic_text, str) or not _source_diagnostic_text_is_well_formed(
+                diagnostic_text, source_path=normalized, root=root
+            ):
+                raise ValueError(
+                    f"expectation {key!r} must include complete plain-text source diagnostics bound to its exact input"
+                )
+            diagnostic_codes = value.get("expected_diagnostic_codes")
+            if (
+                not isinstance(diagnostic_codes, list)
+                or any(
+                    not isinstance(code, str)
+                    or not DIAGNOSTIC_CODE_FULL_RE.fullmatch(code)
+                    for code in diagnostic_codes
+                )
+            ):
+                raise ValueError(
+                    f"expectation {key!r} must include the complete expected_diagnostic_codes list"
+                )
+            normalized_codes = [code.upper() for code in diagnostic_codes]
+            if (
+                len(set(normalized_codes)) != len(normalized_codes)
+                or sorted(normalized_codes) != _diagnostic_codes(diagnostic_text)
+            ):
+                raise ValueError(
+                    f"expectation {key!r} diagnostic codes must exactly match its complete diagnostic text"
+                )
+            diagnostic_lines = value.get("expected_diagnostic_lines")
+            observed_diagnostic_lines = _source_diagnostic_lines(diagnostic_text)
+            if (
+                not isinstance(diagnostic_lines, list)
+                or any(not isinstance(line, str) for line in diagnostic_lines)
+                or diagnostic_lines != observed_diagnostic_lines
+            ):
+                raise ValueError(
+                    f"expectation {key!r} diagnostic lines must exactly match every source diagnostic"
+                )
+            output_path = _repository_relative_path(
+                value.get("expected_output_path"),
+                label=f"expectation {key!r} expected_output_path",
+            )
+            expected_output_path = _source_diagnostic_authority_output_path(
+                normalized, input_sha256
+            )
+            if output_path != expected_output_path:
+                raise ValueError(
+                    f"expectation {key!r} output path must be its deterministic isolated source-diagnostic path"
+                )
+            if output_path in source_diagnostic_output_paths:
+                raise ValueError(
+                    f"expectation {key!r} reuses a source-diagnostic authority output path"
+                )
+            source_diagnostic_output_paths.add(output_path)
+            expectation.update({
+                "expected_exit_code": expected_exit_code,
+                "expected_diagnostic_text": diagnostic_text,
+                "expected_diagnostic_codes": sorted(normalized_codes),
+                "expected_diagnostic_lines": observed_diagnostic_lines,
+                "expected_output_path": output_path,
+            })
         expectations[normalized] = expectation
     return expectations, {"path": str(path.resolve()), "sha256": sha256_bytes(raw), "bytes": len(raw)}
+
+
+def _authority_assertion_source_file(root: Path, assertion: Mapping[str, Any]) -> Path:
+    generated_path = assertion.get("generated_source_path")
+    if generated_path is None:
+        return root / str(assertion.get("path", ""))
+    if not isinstance(generated_path, str) or not Path(generated_path).is_absolute():
+        raise ValueError("generated authority source path must be absolute")
+    return Path(generated_path)
 
 
 def bind_expectations_to_inventory(
@@ -3427,6 +4496,13 @@ def bind_expectations_to_inventory(
             item["cargo_test_target"] = None
             item["test_execution_valid"] = False
             item["test_execution_proof"] = None
+        if item.get("class") == "expected_source_diagnostic":
+            item["test_contract_valid"] = False
+            item["source_authority_valid"] = False
+            item["cargo_target_valid"] = False
+            item["cargo_test_target"] = None
+            item["test_execution_valid"] = False
+            item["test_execution_proof"] = None
         if item.get("class") == "unmapped":
             input_hash_matches = None
             item["source_hash_status"] = "not_applicable"
@@ -3438,14 +4514,31 @@ def bind_expectations_to_inventory(
             assertion = authority.get("assertion")
             if isinstance(assertion, Mapping):
                 assertion_path = str(assertion.get("path", ""))
-                assertion_file = root / assertion_path
+                assertion_file = _authority_assertion_source_file(root, assertion)
+                target_source_file = root / assertion_path
                 try:
                     resolved = assertion_file.resolve(strict=True)
-                    resolved.relative_to(root.resolve())
+                    if assertion.get("generated_source_path") is None:
+                        resolved.relative_to(root.resolve())
                     assertion_bytes = assertion_file.read_bytes()
                     assertion_text = assertion_bytes.decode("utf-8")
                     lines = assertion_text.splitlines()
                     assertion_hash_matches = sha256_bytes(assertion_bytes) == assertion.get("sha256")
+                    source_regular = (
+                        _stable_regular_file_sha256(assertion_file)
+                        == sha256_bytes(assertion_bytes)
+                    )
+                    target_source_valid = (
+                        _stable_regular_file_sha256(target_source_file) is not None
+                        and (
+                            assertion.get("generated_source_path") is None
+                            or (
+                                assertion_path == ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+                                and _stable_regular_file_sha256(target_source_file)
+                                == assertion.get("target_source_sha256")
+                            )
+                        )
+                    )
                     test_id_present, assertion_line_valid = _test_authority_is_structurally_valid(
                         authority.get("test_id"),
                         assertion_text,
@@ -3453,8 +4546,8 @@ def bind_expectations_to_inventory(
                         assertion.get("line"),
                     )
                     base_authority_valid = (
-                        assertion_file.is_file()
-                        and not assertion_file.is_symlink()
+                        source_regular
+                        and target_source_valid
                         and assertion_hash_matches
                         and test_id_present
                         and assertion_line_valid
@@ -3477,6 +4570,28 @@ def bind_expectations_to_inventory(
                                 expected_route_reason=item.get(
                                     "expected_route_reason"
                                 ),
+                            )
+                        )
+                        item["test_execution_valid"] = False
+                        item["source_authority_valid"] = bool(
+                            base_authority_valid and item["test_contract_valid"]
+                        )
+                    elif item.get("class") == "expected_source_diagnostic":
+                        item["test_contract_valid"] = (
+                            base_authority_valid
+                            and _expected_source_diagnostic_test_authority_is_valid(
+                                test_id=authority.get("test_id"),
+                                source_path=name,
+                                source_sha256=item.get("source_sha256"),
+                                expected_exit_code=item.get("expected_exit_code"),
+                                target_kind=str(source.get("target_kind", "unknown")),
+                                output_path=item.get("expected_output_path"),
+                                expected_diagnostic_text=item.get("expected_diagnostic_text"),
+                                expected_diagnostic_codes=item.get("expected_diagnostic_codes"),
+                                expected_diagnostic_lines=item.get("expected_diagnostic_lines"),
+                                source_text=assertion_text,
+                                assertion_line=assertion.get("line"),
+                                root=root,
                             )
                         )
                         item["test_execution_valid"] = False
@@ -3518,13 +4633,17 @@ def bind_expectations_to_inventory(
                                 else "required_compile_test_contract_mismatch"
                             )
                         )
-                    regular_source_file = assertion_file.is_file() and not assertion_file.is_symlink()
+                    regular_source_file = source_regular and target_source_valid
                 except (OSError, UnicodeDecodeError, ValueError, TypeError):
                     assertion_hash_matches = False
                     test_id_present = False
                     assertion_line_valid = False
                     regular_source_file = False
                     if item.get("class") == "expected_build_rejection":
+                        item["test_contract_valid"] = False
+                        item["test_execution_valid"] = False
+                        item["source_authority_valid"] = False
+                    elif item.get("class") == "expected_source_diagnostic":
                         item["test_contract_valid"] = False
                         item["test_execution_valid"] = False
                         item["source_authority_valid"] = False
@@ -3535,7 +4654,11 @@ def bind_expectations_to_inventory(
                         item["authority_status"] = "required_compile_test_contract_mismatch"
                 authority_valid = (
                     False
-                    if item.get("class") in {"expected_build_rejection", "required_compile"}
+                    if item.get("class") in {
+                        "expected_build_rejection",
+                        "expected_source_diagnostic",
+                        "required_compile",
+                    }
                     else (
                         regular_source_file
                         and assertion_hash_matches
@@ -3545,15 +4668,22 @@ def bind_expectations_to_inventory(
                 )
                 item["authority_status"] = (
                     "requires_cargo_target_and_execution"
-                    if item.get("class") == "expected_build_rejection"
+                    if item.get("class") in {
+                        "expected_build_rejection",
+                        "expected_source_diagnostic",
+                    }
                     and item.get("source_authority_valid") is True
                     else (
                         "rejection_test_contract_mismatch"
                         if item.get("class") == "expected_build_rejection"
                         else (
-                            item.get("authority_status")
-                            if item.get("class") == "required_compile"
-                            else ("valid" if authority_valid else "source_location_or_hash_mismatch")
+                            "source_diagnostic_test_contract_mismatch"
+                            if item.get("class") == "expected_source_diagnostic"
+                            else (
+                                item.get("authority_status")
+                                if item.get("class") == "required_compile"
+                                else ("valid" if authority_valid else "source_location_or_hash_mismatch")
+                            )
                         )
                     )
                 )
@@ -3653,6 +4783,14 @@ def _route_candidate_classification(
         and expectation.get("matched") is True
     ):
         return "intentional_reject"
+    if (
+        disposition == "rejected"
+        and route.get("classification_status") == "inferred_pre_route_rejection"
+        and expectation_class == "expected_source_diagnostic"
+        and expectation is not None
+        and expectation.get("matched") is True
+    ):
+        return "source_diagnostic"
     if disposition in {None, "unobserved"}:
         if expectation_class in {None, "unmapped"}:
             return "unmapped"
@@ -4470,6 +5608,8 @@ def _expectation_result(
     run_status: str = "completed",
     failure_classification: Mapping[str, Any] | None = None,
     captured_output: bytes | str = b"",
+    captured_stdout: bytes | str | None = None,
+    captured_stderr: bytes | str | None = None,
     output_artifact: Mapping[str, Any] | None = None,
     executable_run: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -4498,7 +5638,11 @@ def _expectation_result(
                     expectation_class == "required_compile"
                     and expectation.get("actor_specific_authority") is True
                 )
-                or expectation_class not in {"required_compile", "expected_build_rejection"}
+                or expectation_class not in {
+                    "required_compile",
+                    "expected_build_rejection",
+                    "expected_source_diagnostic",
+                }
                 or (
                     expectation.get("test_execution_valid") is True
                     and isinstance(expectation.get("test_execution_proof"), Mapping)
@@ -4670,6 +5814,124 @@ def _expectation_result(
             and required_substrings_match
             and no_output_artifact
         )
+    elif expectation_class == "expected_source_diagnostic":
+        expected_code = expectation.get("expected_exit_code")
+        expected_text = expectation.get("expected_diagnostic_text")
+        expected_codes = expectation.get("expected_diagnostic_codes")
+        expected_lines = expectation.get("expected_diagnostic_lines")
+        expected_output_path = expectation.get("expected_output_path")
+        source_bound_text = (
+            isinstance(expected_text, str)
+            and _source_diagnostic_text_is_well_formed(
+                expected_text
+            )
+        )
+        expected_exit_valid = (
+            isinstance(expected_code, int)
+            and not isinstance(expected_code, bool)
+            and expected_code > 0
+        )
+        expected_codes_valid = (
+            isinstance(expected_codes, list)
+            and all(
+                isinstance(code, str) and DIAGNOSTIC_CODE_FULL_RE.fullmatch(code)
+                for code in expected_codes
+            )
+            and sorted(set(code.upper() for code in expected_codes))
+            == _diagnostic_codes(expected_text if isinstance(expected_text, str) else "")
+        )
+        expected_lines_valid = (
+            isinstance(expected_lines, list)
+            and expected_lines
+            and all(isinstance(line, str) for line in expected_lines)
+            and expected_lines
+            == _source_diagnostic_lines(expected_text if isinstance(expected_text, str) else "")
+        )
+        stdout_text = (
+            _decode(captured_stdout)
+            if isinstance(captured_stdout, (bytes, bytearray, str))
+            else ""
+        )
+        stderr_text = (
+            _decode(captured_stderr)
+            if isinstance(captured_stderr, (bytes, bytearray, str))
+            else decoded_output
+        )
+        exact_text_match = (
+            source_bound_text
+            and stderr_text == expected_text
+            and stdout_text == ""
+        )
+        actual_source_lines = _source_diagnostic_lines(stderr_text)
+        route_contract_valid = (
+            route.get("disposition") == "rejected"
+            and route.get("classification_status") == "inferred_pre_route_rejection"
+            and route.get("observations") == []
+            and route.get("route_marker_count") == 0
+        )
+        failure_contract_valid = (
+            failure.get("class") == "source_diagnostic"
+            and failure.get("status") == "classified"
+        )
+        diagnostic_contract = {
+            "valid": bool(
+                expected_exit_valid
+                and source_bound_text
+                and expected_codes_valid
+                and expected_lines_valid
+            ),
+            "expected_exit_code_valid": expected_exit_valid,
+            "expected_diagnostic_codes": expected_codes if expected_codes_valid else [],
+            "actual_diagnostic_codes": actual_diagnostic_codes,
+            "diagnostic_codes_match_exactly": (
+                expected_codes_valid and actual_diagnostic_codes == expected_codes
+            ),
+            "expected_diagnostic_lines": expected_lines if expected_lines_valid else [],
+            "actual_diagnostic_lines": actual_source_lines,
+            "diagnostic_lines_match_exactly": (
+                expected_lines_valid and actual_source_lines == expected_lines
+            ),
+            "expected_diagnostic_text": expected_text,
+            "actual_diagnostic_text": stderr_text,
+            "diagnostic_text_matches_exactly": exact_text_match,
+            "stdout_empty": stdout_text == "",
+            "unknown_or_extra_diagnostics_absent": exact_text_match,
+            "route_telemetry_absent": route_contract_valid,
+            "fallback_markers_absent": (
+                not any(marker in stderr_text.lower() for marker in SOURCE_DIAGNOSTIC_FORBIDDEN_TEXT)
+            ),
+            "output_artifact_absent": output_artifact is None,
+            "expected_output_path": expected_output_path,
+        }
+        expected_outcome = {
+            "build": "completed",
+            "exit_code": expected_code,
+            "source_diagnostic": {
+                "text": expected_text,
+                "codes": expected_codes,
+                "lines": expected_lines,
+            },
+            "route": {
+                "disposition": "rejected",
+                "classification_status": "inferred_pre_route_rejection",
+                "observations": [],
+            },
+            "failure_class": "source_diagnostic",
+            "output_artifact": "absent",
+        }
+        outcome_match = bool(
+            run_status == "completed"
+            and expected_exit_valid
+            and exit_code == expected_code
+            and route_contract_valid
+            and failure_contract_valid
+            and expected_codes_valid
+            and expected_lines_valid
+            and actual_diagnostic_codes == expected_codes
+            and actual_source_lines == expected_lines
+            and exact_text_match
+            and output_artifact is None
+        )
     elif expectation_class == "environment_failure":
         expected_code = expectation.get("expected_exit_code")
         expected_outcome = {
@@ -4729,6 +5991,19 @@ def _expectation_result(
         "cargo_test_target": expectation.get("cargo_test_target"),
         "test_execution_valid": expectation.get("test_execution_valid"),
         "test_execution_proof": expectation.get("test_execution_proof"),
+        "authority_mimi_identity": expectation.get("authority_mimi_identity"),
+        "expected_source_diagnostic_text": expectation.get("expected_diagnostic_text"),
+        "expected_source_diagnostic_lines": expectation.get("expected_diagnostic_lines"),
+        "expected_source_diagnostic_output_path": expectation.get("expected_output_path"),
+        "expected_exit_code": (
+            expectation.get("expected_exit_code")
+            if expectation_class == "expected_source_diagnostic"
+            else None
+        ),
+        "expected_diagnostic_text": expectation.get("expected_diagnostic_text"),
+        "expected_diagnostic_lines": expectation.get("expected_diagnostic_lines"),
+        "expected_output_path": expectation.get("expected_output_path"),
+        "expected_diagnostic_codes": expectation.get("expected_diagnostic_codes"),
         "path": source_path,
         "run_status": run_status,
         "actual_exit_code": exit_code,
@@ -4755,6 +6030,7 @@ def _actor_fallback_evidence(
     actor_test_execution: Mapping[str, Any] | None = None,
     root: Path = ROOT,
     cargo_authority: Mapping[str, Any] | None = None,
+    mimi_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     by_path = {str(record.get("path")): record for record in records}
     manifest_by_path = {str(record.get("path")): record for record in manifest}
@@ -4821,6 +6097,18 @@ def _actor_fallback_evidence(
                     contract,
                     root=root,
                     cargo_authority=cargo_authority,
+                    mimi_path=(
+                        mimi_identity.get("path")
+                        if isinstance(mimi_identity, Mapping)
+                        and isinstance(mimi_identity.get("path"), str)
+                        else None
+                    ),
+                    mimi_sha256=(
+                        mimi_identity.get("sha256")
+                        if isinstance(mimi_identity, Mapping)
+                        and isinstance(mimi_identity.get("sha256"), str)
+                        else None
+                    ),
                 )
                 if rust_test_execution is not None
                 else False
@@ -5427,6 +6715,131 @@ def _output_artifact_observation(path: Path) -> dict[str, Any] | None:
         return {"status": "unreadable", "error": str(error)}
 
 
+def _mimi_output_argument(command: Any) -> str | None:
+    """Parse one explicit `-o`/`--output` path from a Mimi build argv."""
+    if not isinstance(command, list) or not command or not all(
+        isinstance(argument, str) for argument in command
+    ):
+        return None
+    outputs: list[str] = []
+    index = 0
+    while index < len(command):
+        argument = command[index]
+        if argument in {"-o", "--output"}:
+            if index + 1 >= len(command) or not command[index + 1]:
+                return None
+            outputs.append(command[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--output="):
+            output = argument[len("--output=") :]
+            if not output:
+                return None
+            outputs.append(output)
+        index += 1
+    return outputs[0] if len(outputs) == 1 else None
+
+
+def _output_path_observation(path: Path, observation: Any) -> dict[str, Any]:
+    """Bind a before/after filesystem observation to its exact output path."""
+    exists = observation is not None
+    digest = observation.get("sha256") if isinstance(observation, Mapping) else None
+    return {"path": str(path), "exists": exists, "sha256": digest}
+
+
+def _rejection_artifact_evidence_valid(
+    evidence: Any,
+    *,
+    command: Any,
+    input_index: Any,
+    target_kind: Any,
+    mimi_identity: Any = None,
+) -> bool:
+    """Verify a fresh per-row scratch path and absent output before/after build."""
+    if (
+        not isinstance(evidence, Mapping)
+        or evidence.get("schema_version") != 2
+        or not isinstance(command, list)
+        or len(command) < 4
+        or command[1] != "build"
+        or not isinstance(input_index, int)
+        or isinstance(input_index, bool)
+        or input_index < 1
+        or target_kind not in {"executable", "shared_library_probe"}
+    ):
+        return False
+    scratch = evidence.get("scratch")
+    observed_identity = evidence.get("mimi_executable_identity")
+    output_path = evidence.get("output_path")
+    command_output_path = evidence.get("command_output_path")
+    before = evidence.get("before")
+    after = evidence.get("after")
+    if (
+        not isinstance(scratch, Mapping)
+        or set(scratch) != {
+            "path", "input_index", "existed_before", "created_exclusively",
+            "output_absent_before_build",
+        }
+        or set(evidence) != {
+            "schema_version", "scratch", "output_path", "command_output_path",
+            "before", "after", "mimi_executable_identity",
+        }
+        or not isinstance(mimi_identity, Mapping)
+        or not isinstance(observed_identity, Mapping)
+        or dict(observed_identity) != dict(mimi_identity)
+        or not isinstance(output_path, str)
+        or not output_path
+        or not isinstance(command_output_path, str)
+        or not isinstance(before, Mapping)
+        or not isinstance(after, Mapping)
+    ):
+        return False
+    scratch_path = scratch.get("path")
+    if (
+        not isinstance(scratch_path, str)
+        or not scratch_path
+        or not Path(scratch_path).is_absolute()
+        or str(Path(scratch_path)) != scratch_path
+        or scratch.get("input_index") != input_index
+        or scratch.get("existed_before") is not False
+        or scratch.get("created_exclusively") is not True
+        or scratch.get("output_absent_before_build") is not True
+        or not Path(output_path).is_absolute()
+        or str(Path(output_path)) != output_path
+        or Path(output_path).parent != Path(scratch_path)
+        or Path(scratch_path).name != f"input-{input_index:06d}"
+        or Path(output_path).name != (
+            "out.so" if target_kind == "shared_library_probe" else "out"
+        )
+    ):
+        return False
+    parsed_output_path = _mimi_output_argument(command)
+    expected_mimi_path = mimi_identity.get("path") if isinstance(mimi_identity, Mapping) else None
+    expected_mimi_sha = mimi_identity.get("sha256_expected") if isinstance(mimi_identity, Mapping) else None
+    identity_before = mimi_identity.get("before") if isinstance(mimi_identity, Mapping) else None
+    identity_after = mimi_identity.get("after") if isinstance(mimi_identity, Mapping) else None
+    if (
+        parsed_output_path != output_path
+        or command_output_path != parsed_output_path
+        or not isinstance(expected_mimi_path, str)
+        or not Path(expected_mimi_path).is_absolute()
+        or command[0] != expected_mimi_path
+        or not _is_sha256(expected_mimi_sha)
+        or mimi_identity.get("matches_expected") is not True
+        or not isinstance(identity_before, Mapping)
+        or not isinstance(identity_after, Mapping)
+        or identity_before.get("path") != expected_mimi_path
+        or identity_before.get("resolved_path") != expected_mimi_path
+        or identity_before.get("sha256") != expected_mimi_sha
+        or identity_after.get("path") != expected_mimi_path
+        or identity_after.get("resolved_path") != expected_mimi_path
+        or identity_after.get("sha256") != expected_mimi_sha
+    ):
+        return False
+    expected_absence = {"path": output_path, "exists": False, "sha256": None}
+    return bool(dict(before) == expected_absence and dict(after) == expected_absence)
+
+
 def _raw_sidecar_matches(logs_root: Path | None, capture: Any) -> bool:
     """Require a regular non-symlink sidecar whose bytes equal its inline capture."""
     if logs_root is None or not isinstance(capture, Mapping):
@@ -5504,6 +6917,11 @@ def _run_cargo_authority_command(
     root: Path,
     timeout: float,
     cargo_authority: Mapping[str, Any],
+    *,
+    environment_overrides: Mapping[str, str] | None = None,
+    require_mimi_identity: bool = False,
+    expected_mimi_path: str | None = None,
+    expected_mimi_sha256: str | None = None,
 ) -> dict[str, Any]:
     cargo_identity = cargo_authority.get("cargo", {})
     rustc_identity = cargo_authority.get("rustc", {})
@@ -5522,8 +6940,82 @@ def _run_cargo_authority_command(
     exit_code: int | None
     stdout = b""
     stderr = b""
+    requested_overrides = dict(environment_overrides or {})
+
+    def observe_overrides() -> dict[str, dict[str, Any]]:
+        observations: dict[str, dict[str, Any]] = {}
+        for name, value in requested_overrides.items():
+            if name == ROUTE_CENSUS_AUTHORITY_SOURCE_ENV:
+                observations[name] = {
+                    "path": value,
+                    "sha256": _stable_regular_file_sha256(Path(value)),
+                }
+            elif name == ROUTE_CENSUS_MIMI_PATH_ENV:
+                observations[name] = _executable_observation(value)
+            elif name == ROUTE_CENSUS_MIMI_SHA256_ENV:
+                observations[name] = {"value": value}
+            elif name == ROUTE_CENSUS_MIMI_MODE_ENV:
+                observations[name] = {"value": value}
+            else:
+                observations[name] = {"unrecognized": value}
+        return observations
+
+    override_before = observe_overrides()
+    override_names = set(requested_overrides)
+    mimi_identity_names = {ROUTE_CENSUS_MIMI_PATH_ENV, ROUTE_CENSUS_MIMI_SHA256_ENV}
+    has_complete_mimi_identity = mimi_identity_names.issubset(override_names)
+    mimi_path_value = requested_overrides.get(ROUTE_CENSUS_MIMI_PATH_ENV)
+    mimi_sha256_value = requested_overrides.get(ROUTE_CENSUS_MIMI_SHA256_ENV)
+    mimi_mode_value = requested_overrides.get(ROUTE_CENSUS_MIMI_MODE_ENV)
+    mimi_observation = override_before.get(ROUTE_CENSUS_MIMI_PATH_ENV, {})
+    expected_mimi_identity_valid = bool(
+        isinstance(expected_mimi_path, str)
+        and Path(expected_mimi_path).is_absolute()
+        and _is_sha256(expected_mimi_sha256)
+        and mimi_path_value == expected_mimi_path
+        and mimi_sha256_value == expected_mimi_sha256
+        and mimi_mode_value == "1"
+    )
+    overrides_valid = bool(
+        override_names.issubset(
+            {ROUTE_CENSUS_AUTHORITY_SOURCE_ENV, *mimi_identity_names, ROUTE_CENSUS_MIMI_MODE_ENV}
+        )
+        and (
+            not require_mimi_identity
+            or (has_complete_mimi_identity and expected_mimi_identity_valid)
+        )
+        and ((ROUTE_CENSUS_MIMI_PATH_ENV in override_names) == (ROUTE_CENSUS_MIMI_SHA256_ENV in override_names))
+        and (
+            ROUTE_CENSUS_AUTHORITY_SOURCE_ENV not in override_names
+            or (
+                isinstance(requested_overrides.get(ROUTE_CENSUS_AUTHORITY_SOURCE_ENV), str)
+                and Path(requested_overrides[ROUTE_CENSUS_AUTHORITY_SOURCE_ENV]).is_absolute()
+                and _is_sha256(override_before.get(ROUTE_CENSUS_AUTHORITY_SOURCE_ENV, {}).get("sha256"))
+                and not _path_has_symlink_component(
+                    Path(requested_overrides[ROUTE_CENSUS_AUTHORITY_SOURCE_ENV])
+                )
+            )
+        )
+        and (
+            not has_complete_mimi_identity
+            or (
+                isinstance(mimi_path_value, str)
+                and Path(mimi_path_value).is_absolute()
+                and not _path_has_symlink_component(Path(mimi_path_value))
+                and _is_sha256(mimi_sha256_value)
+                and mimi_observation.get("path") == mimi_path_value
+                and mimi_observation.get("resolved_path") == mimi_path_value
+                and mimi_observation.get("sha256") == mimi_sha256_value
+            )
+        )
+        and (
+            ROUTE_CENSUS_MIMI_MODE_ENV not in override_names
+            or mimi_mode_value == "1"
+        )
+    )
     authority_before_valid = (
         bool(command)
+        and overrides_valid
         and command[0] == cargo_identity.get("path")
         and _cargo_toolchain_identity_valid(
             cargo_authority,
@@ -5550,7 +7042,9 @@ def _run_cargo_authority_command(
     if not authority_before_valid:
         run_status = "cargo_toolchain_authority_invalid_before_run"
         exit_code = None
-        stderr = b"Cargo/rustc identity, environment, or Cargo config failed the frozen authority policy\n"
+        stderr = (
+            b"Cargo/rustc identity, environment, Cargo config, or generated authority source failed the frozen authority policy\n"
+        )
     else:
         child_environment = os.environ.copy()
         # Cargo always invokes the already-identified compiler. An inherited
@@ -5563,6 +7057,7 @@ def _run_cargo_authority_command(
         for name in list(child_environment):
             if re.fullmatch(r"CARGO_TARGET_.+_(?:RUNNER|LINKER|RUSTFLAGS)", name):
                 child_environment.pop(name, None)
+        child_environment.update(requested_overrides)
         try:
             process = subprocess.run(
                 command,
@@ -5593,6 +7088,7 @@ def _run_cargo_authority_command(
         expected_active_toolchain=rustup_toolchain_expected,
     )
     rustup_toolchain_after = current_authority_after.get("rustup_toolchain", {})
+    override_after = observe_overrides()
     authority_after_valid = _cargo_toolchain_identity_valid(
         cargo_authority,
         root=root,
@@ -5607,6 +7103,7 @@ def _run_cargo_authority_command(
         and rustup_after == rustup_before
         and rustup_toolchain_before == rustup_toolchain_expected
         and rustup_toolchain_after == rustup_toolchain_expected
+        and override_before == override_after
     )
     cargo_execution = _cargo_execution_evidence(
         cargo_authority,
@@ -5630,6 +7127,27 @@ def _run_cargo_authority_command(
         "exit_code": exit_code,
         "stdout_bytes": stdout,
         "stderr_bytes": stderr,
+        "environment_overrides": {
+            name: (
+                {
+                    "path": before.get("path"),
+                    "sha256_before": before.get("sha256"),
+                    "sha256_after": override_after.get(name, {}).get("sha256"),
+                }
+                if name == ROUTE_CENSUS_AUTHORITY_SOURCE_ENV
+                else (
+                    {
+                        "path": before.get("path"),
+                        "resolved_path": before.get("resolved_path"),
+                        "sha256_before": before.get("sha256"),
+                        "sha256_after": override_after.get(name, {}).get("sha256"),
+                    }
+                    if name == ROUTE_CENSUS_MIMI_PATH_ENV
+                    else {"value": before.get("value")}
+                )
+            )
+            for name, before in override_before.items()
+        },
         "cargo_execution": cargo_execution,
     }
 
@@ -5654,6 +7172,7 @@ def _authority_command_record(
         "stderr_raw": _write_raw_artifact(
             logs_root / f"{stem}.stderr.bin", stderr_bytes
         ),
+        "environment_overrides": dict(result.get("environment_overrides", {})),
     }
 
 
@@ -5697,6 +7216,54 @@ def _expected_rejection_execution_proof_is_valid(
     ):
         return False
 
+    assertion_source_path = _authority_assertion_source_file(root, assertion)
+    authority_source_path = str(assertion_source_path.resolve())
+    authority_bundle = authority.get("bundle")
+    expected_authority_source_hash = expected_authority_hash
+    target_source_hash = assertion.get("target_source_sha256", expected_authority_hash)
+    if (
+        proof.get("authority_source_path") != authority_source_path
+        or proof.get("authority_bundle") != authority_bundle
+        or not _is_sha256(expected_authority_source_hash)
+        or not _is_sha256(target_source_hash)
+    ):
+        return False
+    expected_mimi_identity = expectation.get("authority_mimi_identity")
+    if not isinstance(expected_mimi_identity, Mapping):
+        return False
+    mimi_path = expected_mimi_identity.get("path")
+    mimi_sha256 = expected_mimi_identity.get("sha256")
+    expected_mimi_environment = _expected_mimi_environment_observation(
+        mimi_path if isinstance(mimi_path, str) else None,
+        mimi_sha256 if isinstance(mimi_sha256, str) else None,
+    )
+    if expected_mimi_environment is None:
+        return False
+    expected_environment_overrides = dict(expected_mimi_environment)
+    if assertion.get("generated_source_path") is not None:
+        expected_environment_overrides[ROUTE_CENSUS_AUTHORITY_SOURCE_ENV] = {
+            "path": authority_source_path,
+            "sha256_before": expected_authority_source_hash,
+            "sha256_after": expected_authority_source_hash,
+        }
+    expected_executable_identity = {
+        "path": mimi_path,
+        "sha256_expected": mimi_sha256,
+        "build_sha256_before": mimi_sha256,
+        "build_sha256_after": mimi_sha256,
+        "test_sha256_before": mimi_sha256,
+        "test_sha256_after": mimi_sha256,
+    }
+    if proof.get("mimi_executable_identity") != expected_executable_identity:
+        return False
+    if authority_bundle is not None and (
+        not isinstance(authority_bundle, Mapping)
+        or authority_bundle.get("authority_source_path") != authority_source_path
+        or authority_bundle.get("authority_source_sha256") != expected_authority_source_hash
+        or not _route_authority_bundle_is_stable(authority_bundle)
+    ):
+        return False
+
     metadata_stdout = _captured_bytes(metadata_evidence.get("stdout_raw"))
     metadata_stderr = _captured_bytes(metadata_evidence.get("stderr_raw"))
     cargo_path = (
@@ -5725,19 +7292,15 @@ def _expected_rejection_execution_proof_is_valid(
     if selected_target is None or dict(target) != selected_target:
         return False
 
-    manifest_path = str(target.get("manifest_path"))
-    target_name = str(target.get("target_name"))
-    expected_build_command = [
-        cargo_path, "test", "--manifest-path", manifest_path,
-        "--test", target_name, "--no-run",
-    ]
-    expected_run_command = [
-        cargo_path, "test", "--manifest-path", manifest_path,
-        "--test", target_name, test_id, "--", "--exact", "--nocapture",
-    ]
+    expected_commands = _cargo_test_target_commands(
+        root, cargo_path, target, test_id
+    )
+    if expected_commands is None:
+        return False
+    expected_build_command, expected_run_command = expected_commands
     if (
-        build.get("command") != expected_build_command
-        or run.get("command") != expected_run_command
+        not _cargo_command_matches(build.get("command"), expected_build_command)
+        or not _cargo_command_matches(run.get("command"), expected_run_command)
         or build.get("cwd") != str(root)
         or run.get("cwd") != str(root)
         or build.get("run_status") != "completed"
@@ -5763,14 +7326,22 @@ def _expected_rejection_execution_proof_is_valid(
             or _captured_bytes(command_record.get("stderr_raw")) is None
             or not _raw_sidecar_matches(logs_root, command_record.get("stdout_raw"))
             or not _raw_sidecar_matches(logs_root, command_record.get("stderr_raw"))
+            or command_record.get("environment_overrides")
+            != expected_environment_overrides
         ):
             return False
     if not _cargo_exact_test_output(
         _captured_bytes(run.get("stdout_raw")) or b"", test_id
     ):
         return False
+    if not _authority_mimi_identity_output_valid(
+        _captured_bytes(run.get("stdout_raw")) or b"",
+        _authority_mimi_identity_marker(str(mimi_path), str(mimi_sha256)) or "",
+    ):
+        return False
 
     authority_hashes = proof.get("authority_source_hashes")
+    target_hashes = proof.get("authority_target_source_hashes")
     fixture_hashes = proof.get("fixture_source_hashes")
     return bool(
         isinstance(authority_hashes, Mapping)
@@ -5779,6 +7350,12 @@ def _expected_rejection_execution_proof_is_valid(
         and authority_hashes.get("after_build") == expected_authority_hash
         and authority_hashes.get("before_test") == expected_authority_hash
         and authority_hashes.get("after_test") == expected_authority_hash
+        and isinstance(target_hashes, Mapping)
+        and target_hashes.get("expected") == target_source_hash
+        and target_hashes.get("before_build") == target_source_hash
+        and target_hashes.get("after_build") == target_source_hash
+        and target_hashes.get("before_test") == target_source_hash
+        and target_hashes.get("after_test") == target_source_hash
         and isinstance(fixture_hashes, Mapping)
         and fixture_hashes.get("path") == fixture_path
         and fixture_hashes.get("expected") == expected_fixture_hash
@@ -5786,6 +7363,116 @@ def _expected_rejection_execution_proof_is_valid(
         and fixture_hashes.get("after_build") == expected_fixture_hash
         and fixture_hashes.get("before_test") == expected_fixture_hash
         and fixture_hashes.get("after_test") == expected_fixture_hash
+    )
+
+
+def _expected_source_diagnostic_source_authority_is_valid(
+    expectation: Mapping[str, Any], *, root: Path
+) -> bool:
+    """Recheck the exact source, generated Rust test, and isolated output path."""
+    if expectation.get("class") != "expected_source_diagnostic":
+        return False
+    authority = expectation.get("authority")
+    assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+    source_path = expectation.get("path")
+    source_sha = expectation.get("source_sha256")
+    if (
+        not isinstance(authority, Mapping)
+        or not isinstance(assertion, Mapping)
+        or not isinstance(source_path, str)
+        or not isinstance(source_sha, str)
+        or not _is_sha256(source_sha)
+        or expectation.get("source_hash_status") != "matched"
+        or not isinstance(assertion.get("path"), str)
+        or not _is_sha256(assertion.get("sha256"))
+    ):
+        return False
+    fixture = root / source_path
+    assertion_file = _authority_assertion_source_file(root, assertion)
+    target_file = root / str(assertion["path"])
+    try:
+        if (
+            fixture.is_symlink()
+            or not fixture.is_file()
+            or _stable_regular_file_sha256(fixture) != source_sha
+            or assertion_file.is_symlink()
+            or not assertion_file.is_file()
+            or target_file.is_symlink()
+            or not target_file.is_file()
+        ):
+            return False
+        resolved = assertion_file.resolve(strict=True)
+        if assertion.get("generated_source_path") is None:
+            resolved.relative_to(root.resolve(strict=True))
+        raw = assertion_file.read_bytes()
+        source_text = raw.decode("utf-8")
+        target_sha = assertion.get("target_source_sha256", assertion.get("sha256"))
+        if (
+            sha256_bytes(raw) != assertion.get("sha256")
+            or not _is_sha256(target_sha)
+            or _stable_regular_file_sha256(target_file) != target_sha
+        ):
+            return False
+        bundle = authority.get("bundle")
+        if bundle is not None and (
+            not isinstance(bundle, Mapping)
+            or bundle.get("authority_source_path") != str(assertion_file.resolve())
+            or bundle.get("authority_source_sha256") != assertion.get("sha256")
+            or not _route_authority_bundle_is_stable(bundle)
+        ):
+            return False
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+    test_id = authority.get("test_id")
+    assertion_line = assertion.get("line")
+    return bool(
+        _expected_source_diagnostic_test_authority_is_valid(
+            test_id=test_id,
+            source_path=source_path,
+            source_sha256=source_sha,
+            expected_exit_code=expectation.get("expected_exit_code"),
+            target_kind=str(expectation.get("target_kind", "unknown")),
+            output_path=expectation.get("expected_output_path"),
+            expected_diagnostic_text=expectation.get("expected_diagnostic_text"),
+            expected_diagnostic_codes=expectation.get("expected_diagnostic_codes"),
+            expected_diagnostic_lines=expectation.get("expected_diagnostic_lines"),
+            source_text=source_text,
+            assertion_line=assertion_line,
+            root=root,
+        )
+    )
+
+
+def _expected_source_diagnostic_execution_proof_is_valid(
+    expectation: Mapping[str, Any],
+    *,
+    root: Path,
+    logs_root: Path | None,
+    cargo_authority: Mapping[str, Any] | None = None,
+) -> bool:
+    """Require a passing exact Cargo test whose body pins the failing Mimi build."""
+    if (
+        expectation.get("class") != "expected_source_diagnostic"
+        or expectation.get("test_contract_valid") is not True
+        or expectation.get("source_authority_valid") is not True
+        or expectation.get("source_hash_status") != "matched"
+        or not _expected_source_diagnostic_source_authority_is_valid(
+            expectation, root=root
+        )
+    ):
+        return False
+    proof = expectation.get("test_execution_proof")
+    if (
+        not isinstance(proof, Mapping)
+        or proof.get("source_diagnostic_output_path")
+        != expectation.get("expected_output_path")
+    ):
+        return False
+    return _expected_rejection_execution_proof_is_valid(
+        expectation,
+        root=root,
+        logs_root=logs_root,
+        cargo_authority=cargo_authority,
     )
 
 
@@ -5808,14 +7495,34 @@ def _required_compile_source_authority_is_valid(
         or not _is_sha256(assertion.get("sha256"))
     ):
         return False
-    assertion_file = root / str(assertion["path"])
+    assertion_file = _authority_assertion_source_file(root, assertion)
+    target_source_file = root / str(assertion["path"])
     try:
         resolved = assertion_file.resolve(strict=True)
-        resolved.relative_to(root.resolve(strict=True))
+        if assertion.get("generated_source_path") is None:
+            resolved.relative_to(root.resolve(strict=True))
         if not assertion_file.is_file() or assertion_file.is_symlink():
+            return False
+        if (
+            not target_source_file.is_file()
+            or target_source_file.is_symlink()
+            or (
+                assertion.get("generated_source_path") is not None
+                and (
+                    assertion.get("path") != ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+                    or _stable_regular_file_sha256(target_source_file)
+                    != assertion.get("target_source_sha256")
+                )
+            )
+        ):
             return False
         raw = assertion_file.read_bytes()
         text = raw.decode("utf-8")
+        if assertion.get("generated_source_path") is not None and (
+            text.count(ROUTE_CENSUS_MIMI_HELPER_SOURCE) != 1
+            or "CARGO_BIN_EXE_mimi" in text
+        ):
+            return False
     except (OSError, UnicodeDecodeError, ValueError):
         return False
     lines = text.splitlines()
@@ -5859,6 +7566,43 @@ def _required_compile_execution_proof_is_valid(
     )
 
 
+def _authority_mimi_environment(
+    mimi_path: str | None, mimi_sha256: str | None
+) -> dict[str, str]:
+    if (
+        not isinstance(mimi_path, str)
+        or not Path(mimi_path).is_absolute()
+        or not isinstance(mimi_sha256, str)
+        or not _is_sha256(mimi_sha256)
+    ):
+        return {}
+    return {
+        ROUTE_CENSUS_MIMI_MODE_ENV: "1",
+        ROUTE_CENSUS_MIMI_PATH_ENV: mimi_path,
+        ROUTE_CENSUS_MIMI_SHA256_ENV: mimi_sha256,
+    }
+
+
+def _authority_source_environment(
+    expectation: Mapping[str, Any],
+    *,
+    mimi_path: str | None,
+    mimi_sha256: str | None,
+) -> dict[str, str]:
+    authority = expectation.get("authority")
+    assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+    source_path = assertion.get("generated_source_path") if isinstance(assertion, Mapping) else None
+    environment = _authority_mimi_environment(mimi_path, mimi_sha256)
+    if source_path is not None:
+        if isinstance(source_path, str) and Path(source_path).is_absolute():
+            environment[ROUTE_CENSUS_AUTHORITY_SOURCE_ENV] = source_path
+        else:
+            environment.pop(ROUTE_CENSUS_MIMI_PATH_ENV, None)
+            environment.pop(ROUTE_CENSUS_MIMI_SHA256_ENV, None)
+            environment.pop(ROUTE_CENSUS_MIMI_MODE_ENV, None)
+    return environment
+
+
 def _run_required_compile_authority_tests(
     root: Path,
     logs_root: Path,
@@ -5866,6 +7610,8 @@ def _run_required_compile_authority_tests(
     expectations: Mapping[str, dict[str, Any]],
     timeout: float,
     cargo_authority: Mapping[str, Any] | None = None,
+    mimi_path: str | None = None,
+    mimi_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Compile and run exact Rust authorities for generic required_compile rows.
 
@@ -5899,6 +7645,10 @@ def _run_required_compile_authority_tests(
     groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
     rejected: list[str] = []
     for path, item in sorted(required_items.items()):
+        item["authority_mimi_identity"] = {
+            "path": mimi_path,
+            "sha256": mimi_sha256,
+        }
         item["cargo_metadata"] = metadata_record
         item["cargo_target_valid"] = False
         item["cargo_test_target"] = None
@@ -5922,7 +7672,12 @@ def _run_required_compile_authority_tests(
         test_id = authority.get("test_id")
         authority_path = assertion.get("path")
         target = _cargo_test_target_for_source(metadata_document, root, str(authority_path))
-        if not isinstance(test_id, str) or target is None:
+        cargo_path = str(cargo_authority.get("cargo", {}).get("path"))
+        if (
+            not isinstance(test_id, str)
+            or target is None
+            or _cargo_test_target_commands(root, cargo_path, target, test_id) is None
+        ):
             item["authority_status"] = "not_a_cargo_test_target"
             rejected.append(path)
             continue
@@ -5936,29 +7691,50 @@ def _run_required_compile_authority_tests(
     test_reports: list[dict[str, Any]] = []
     for target_index, (key, entries) in enumerate(sorted(groups.items()), 1):
         manifest_path, target_name, _package_id = key
+        cargo_path = str(cargo_authority.get("cargo", {}).get("path"))
         fixture_before = {
             path: _regular_file_sha256(root / path) for path, _item, _target in entries
         }
         authority_paths = {
-            str(item["authority"]["assertion"]["path"])
+            str(_authority_assertion_source_file(root, item["authority"]["assertion"]).resolve())
             for _path, item, _target in entries
         }
         authority_before = {
-            path: _regular_file_sha256(root / path) for path in authority_paths
+            path: _stable_regular_file_sha256(Path(path)) for path in authority_paths
         }
-        cargo_path = str(cargo_authority.get("cargo", {}).get("path"))
-        build_command = [
-            cargo_path, "test", "--manifest-path", manifest_path,
-            "--test", target_name, "--no-run",
-        ]
+        target_source_paths = {
+            str((root / str(item["authority"]["assertion"]["path"])).resolve())
+            for _path, item, _target in entries
+        }
+        target_source_before = {
+            path: _stable_regular_file_sha256(Path(path)) for path in target_source_paths
+        }
+        target_commands = _cargo_test_target_commands(
+            root,
+            str(cargo_authority.get("cargo", {}).get("path")),
+            entries[0][2],
+            str(entries[0][1]["authority"]["test_id"]),
+        )
+        if target_commands is None:
+            raise RuntimeError("Cargo authority target command contract changed after validation")
+        build_command, _first_run_command = target_commands
         build_result = _run_cargo_authority_command(
-            build_command, root, timeout, cargo_authority
+            build_command, root, timeout, cargo_authority,
+            environment_overrides=_authority_source_environment(
+                entries[0][1], mimi_path=mimi_path, mimi_sha256=mimi_sha256
+            ),
+            require_mimi_identity=True,
+            expected_mimi_path=mimi_path,
+            expected_mimi_sha256=mimi_sha256,
         )
         fixture_after_build = {
             path: _regular_file_sha256(root / path) for path, _item, _target in entries
         }
         authority_after_build = {
-            path: _regular_file_sha256(root / path) for path in authority_paths
+            path: _stable_regular_file_sha256(Path(path)) for path in authority_paths
+        }
+        target_source_after_build = {
+            path: _stable_regular_file_sha256(Path(path)) for path in target_source_paths
         }
         target_stem = sha256_bytes("\0".join(key).encode("utf-8"))[:12]
         build_record = _authority_command_record(
@@ -5978,15 +7754,28 @@ def _run_required_compile_authority_tests(
             assertion = authority["assertion"]
             test_id = str(authority["test_id"])
             authority_path = str(assertion["path"])
-            run_command = [
-                cargo_path, "test", "--manifest-path", manifest_path,
-                "--test", target_name, test_id, "--", "--exact", "--nocapture",
-            ]
-            source_before_test = _regular_file_sha256(root / authority_path)
+            authority_source_path = str(
+                _authority_assertion_source_file(root, assertion).resolve()
+            )
+            target_source_path = str((root / authority_path).resolve())
+            test_commands = _cargo_test_target_commands(
+                root, cargo_path, target, test_id
+            )
+            if test_commands is None:
+                raise RuntimeError("Cargo authority test command contract changed after validation")
+            _build_command, run_command = test_commands
+            source_before_test = _stable_regular_file_sha256(Path(authority_source_path))
+            target_source_before_test = _stable_regular_file_sha256(Path(target_source_path))
             fixture_before_test = _regular_file_sha256(root / path)
             if build_record.get("run_status") == "completed" and build_record.get("exit_code") == 0:
                 run_result = _run_cargo_authority_command(
-                    run_command, root, timeout, cargo_authority
+                    run_command, root, timeout, cargo_authority,
+                    environment_overrides=_authority_source_environment(
+                        item, mimi_path=mimi_path, mimi_sha256=mimi_sha256
+                    ),
+                    require_mimi_identity=True,
+                    expected_mimi_path=mimi_path,
+                    expected_mimi_sha256=mimi_sha256,
                 )
                 run_record = _authority_command_record(
                     run_result,
@@ -6005,13 +7794,19 @@ def _run_required_compile_authority_tests(
                     "stdout_raw": None,
                     "stderr_raw": None,
                 }
-            source_after_test = _regular_file_sha256(root / authority_path)
+            source_after_test = _stable_regular_file_sha256(Path(authority_source_path))
+            target_source_after_test = _stable_regular_file_sha256(Path(target_source_path))
             fixture_after_test = _regular_file_sha256(root / path)
             proof = {
                 "status": "pending",
                 "cargo_toolchain_identity_sha256": cargo_authority.get("identity_sha256"),
                 "test_id": test_id,
                 "authority_path": authority_path,
+                "authority_source_path": authority_source_path,
+                "authority_bundle": authority.get("bundle"),
+                "mimi_executable_identity": _authority_mimi_identity_proof(
+                    mimi_path, mimi_sha256, build_record, run_record
+                ),
                 "fixture_path": path,
                 "cargo_metadata": metadata_record,
                 "cargo_test_target": target,
@@ -6019,10 +7814,19 @@ def _run_required_compile_authority_tests(
                 "exact_test_run": run_record,
                 "authority_source_hashes": {
                     "expected": assertion.get("sha256"),
-                    "before_build": authority_before.get(authority_path),
-                    "after_build": authority_after_build.get(authority_path),
+                    "before_build": authority_before.get(authority_source_path),
+                    "after_build": authority_after_build.get(authority_source_path),
                     "before_test": source_before_test,
                     "after_test": source_after_test,
+                },
+                "authority_target_source_hashes": {
+                    "expected": assertion.get(
+                        "target_source_sha256", assertion.get("sha256")
+                    ),
+                    "before_build": target_source_before.get(target_source_path),
+                    "after_build": target_source_after_build.get(target_source_path),
+                    "before_test": target_source_before_test,
+                    "after_test": target_source_after_test,
                 },
                 "fixture_source_hashes": {
                     "path": path,
@@ -6089,16 +7893,25 @@ def _run_expected_rejection_authority_tests(
     expectations: Mapping[str, dict[str, Any]],
     timeout: float,
     cargo_authority: Mapping[str, Any] | None = None,
+    mimi_path: str | None = None,
+    mimi_sha256: str | None = None,
+    expectation_class: str = "expected_build_rejection",
 ) -> dict[str, Any]:
     """Build each Cargo test target once, then run each exact test ID serially."""
     source_by_path = {str(source.get("path")): source for source in sources}
     rejection_items = {
         path: item
         for path, item in expectations.items()
-        if isinstance(item, dict) and item.get("class") == "expected_build_rejection"
+        if isinstance(item, dict) and item.get("class") == expectation_class
     }
     if not rejection_items:
-        return {"status": "not_required", "cargo_metadata": None, "targets": [], "tests": []}
+        return {
+            "status": "not_required",
+            "authority_class": expectation_class,
+            "cargo_metadata": None,
+            "targets": [],
+            "tests": [],
+        }
 
     if cargo_authority is None:
         cargo_authority = cargo_test_toolchain_authority(root)
@@ -6116,6 +7929,10 @@ def _run_expected_rejection_authority_tests(
     groups: dict[tuple[str, str, str], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
     rejected: list[str] = []
     for path, item in sorted(rejection_items.items()):
+        item["authority_mimi_identity"] = {
+            "path": mimi_path,
+            "sha256": mimi_sha256,
+        }
         item["cargo_metadata"] = metadata_record
         item["cargo_target_valid"] = False
         item["cargo_test_target"] = None
@@ -6138,7 +7955,12 @@ def _run_expected_rejection_authority_tests(
         test_id = authority.get("test_id")
         authority_path = assertion.get("path")
         target = _cargo_test_target_for_source(metadata_document, root, str(authority_path))
-        if not isinstance(test_id, str) or target is None:
+        cargo_path = str(cargo_authority.get("cargo", {}).get("path"))
+        if (
+            not isinstance(test_id, str)
+            or target is None
+            or _cargo_test_target_commands(root, cargo_path, target, test_id) is None
+        ):
             item["authority_status"] = "not_a_cargo_test_target"
             rejected.append(path)
             continue
@@ -6152,33 +7974,55 @@ def _run_expected_rejection_authority_tests(
     test_reports: list[dict[str, Any]] = []
     for target_index, (key, entries) in enumerate(sorted(groups.items()), 1):
         manifest_path, target_name, _package_id = key
+        cargo_path = str(cargo_authority.get("cargo", {}).get("path"))
         fixture_before = {
             path: _regular_file_sha256(root / path) for path, _item, _target in entries
         }
         assertion_paths = {
-            str(item["authority"]["assertion"]["path"])
+            str(_authority_assertion_source_file(root, item["authority"]["assertion"]).resolve())
             for _path, item, _target in entries
         }
         authority_before = {
-            path: _regular_file_sha256(root / path) for path in assertion_paths
+            path: _stable_regular_file_sha256(Path(path)) for path in assertion_paths
         }
-        build_command = [
-            str(cargo_authority.get("cargo", {}).get("path")), "test", "--manifest-path", manifest_path,
-            "--test", target_name, "--no-run",
-        ]
+        target_source_paths = {
+            str((root / str(item["authority"]["assertion"]["path"])).resolve())
+            for _path, item, _target in entries
+        }
+        target_source_before = {
+            path: _stable_regular_file_sha256(Path(path)) for path in target_source_paths
+        }
+        target_commands = _cargo_test_target_commands(
+            root,
+            str(cargo_authority.get("cargo", {}).get("path")),
+            entries[0][2],
+            str(entries[0][1]["authority"]["test_id"]),
+        )
+        if target_commands is None:
+            raise RuntimeError("Cargo rejection authority target command contract changed after validation")
+        build_command, _first_run_command = target_commands
         build_result = _run_cargo_authority_command(
-            build_command, root, timeout, cargo_authority
+            build_command, root, timeout, cargo_authority,
+            environment_overrides=_authority_source_environment(
+                entries[0][1], mimi_path=mimi_path, mimi_sha256=mimi_sha256
+            ),
+            require_mimi_identity=True,
+            expected_mimi_path=mimi_path,
+            expected_mimi_sha256=mimi_sha256,
         )
         fixture_after_build = {
             path: _regular_file_sha256(root / path) for path, _item, _target in entries
         }
         authority_after_build = {
-            path: _regular_file_sha256(root / path) for path in assertion_paths
+            path: _stable_regular_file_sha256(Path(path)) for path in assertion_paths
+        }
+        target_source_after_build = {
+            path: _stable_regular_file_sha256(Path(path)) for path in target_source_paths
         }
         target_stem = sha256_bytes("\0".join(key).encode("utf-8"))[:12]
         build_record = _authority_command_record(
             build_result, logs_root,
-            f"expected-rejection-target-{target_index:03d}-{target_stem}.build",
+            f"{expectation_class}-target-{target_index:03d}-{target_stem}.build",
         )
         target_reports.append(
             {
@@ -6195,21 +8039,37 @@ def _run_expected_rejection_authority_tests(
             assertion = authority["assertion"]
             test_id = str(authority["test_id"])
             authority_path = str(assertion["path"])
-            run_command = [
-                str(cargo_authority.get("cargo", {}).get("path")), "test", "--manifest-path", manifest_path,
-                "--test", target_name, test_id, "--", "--exact", "--nocapture",
-            ]
+            authority_source_path = str(
+                _authority_assertion_source_file(root, assertion).resolve()
+            )
+            target_source_path = str((root / authority_path).resolve())
+            test_commands = _cargo_test_target_commands(
+                root,
+                str(cargo_authority.get("cargo", {}).get("path")),
+                target,
+                test_id,
+            )
+            if test_commands is None:
+                raise RuntimeError("Cargo rejection authority test command contract changed after validation")
+            _build_command, run_command = test_commands
             run_record: dict[str, Any]
-            source_before_test = _regular_file_sha256(root / authority_path)
+            source_before_test = _stable_regular_file_sha256(Path(authority_source_path))
+            target_source_before_test = _stable_regular_file_sha256(Path(target_source_path))
             fixture_before_test = _regular_file_sha256(root / path)
             if build_record.get("run_status") == "completed" and build_record.get("exit_code") == 0:
                 run_result = _run_cargo_authority_command(
-                    run_command, root, timeout, cargo_authority
+                    run_command, root, timeout, cargo_authority,
+                    environment_overrides=_authority_source_environment(
+                        item, mimi_path=mimi_path, mimi_sha256=mimi_sha256
+                    ),
+                    require_mimi_identity=True,
+                    expected_mimi_path=mimi_path,
+                    expected_mimi_sha256=mimi_sha256,
                 )
                 run_record = _authority_command_record(
                     run_result,
                     logs_root,
-                    f"expected-rejection-target-{target_index:03d}-{target_stem}.test-{test_index:03d}",
+                    f"{expectation_class}-target-{target_index:03d}-{target_stem}.test-{test_index:03d}",
                 )
             else:
                 run_record = {
@@ -6223,24 +8083,44 @@ def _run_expected_rejection_authority_tests(
                     "stdout_raw": None,
                     "stderr_raw": None,
                 }
-            source_after_test = _regular_file_sha256(root / authority_path)
+            source_after_test = _stable_regular_file_sha256(Path(authority_source_path))
+            target_source_after_test = _stable_regular_file_sha256(Path(target_source_path))
             fixture_after_test = _regular_file_sha256(root / path)
             proof = {
                 "status": "pending",
                 "cargo_toolchain_identity_sha256": cargo_authority.get("identity_sha256"),
                 "test_id": test_id,
                 "authority_path": authority_path,
+                "authority_source_path": authority_source_path,
+                "authority_bundle": authority.get("bundle"),
+                "mimi_executable_identity": _authority_mimi_identity_proof(
+                    mimi_path, mimi_sha256, build_record, run_record
+                ),
                 "fixture_path": path,
+                "source_diagnostic_output_path": (
+                    item.get("expected_output_path")
+                    if expectation_class == "expected_source_diagnostic"
+                    else None
+                ),
                 "cargo_metadata": metadata_record,
                 "cargo_test_target": target,
                 "target_build": build_record,
                 "exact_test_run": run_record,
                 "authority_source_hashes": {
                     "expected": assertion.get("sha256"),
-                    "before_build": authority_before.get(authority_path),
-                    "after_build": authority_after_build.get(authority_path),
+                    "before_build": authority_before.get(authority_source_path),
+                    "after_build": authority_after_build.get(authority_source_path),
                     "before_test": source_before_test,
                     "after_test": source_after_test,
+                },
+                "authority_target_source_hashes": {
+                    "expected": assertion.get(
+                        "target_source_sha256", assertion.get("sha256")
+                    ),
+                    "before_build": target_source_before.get(target_source_path),
+                    "after_build": target_source_after_build.get(target_source_path),
+                    "before_test": target_source_before_test,
+                    "after_test": target_source_after_test,
                 },
                 "fixture_source_hashes": {
                     "path": path,
@@ -6294,10 +8174,35 @@ def _run_expected_rejection_authority_tests(
     )
     return {
         "status": "passed" if passed else "failed",
+        "authority_class": expectation_class,
         "cargo_metadata": metadata_record,
         "targets": target_reports,
         "tests": test_reports,
     }
+
+
+def _run_source_diagnostic_authority_tests(
+    root: Path,
+    logs_root: Path,
+    sources: Sequence[Mapping[str, Any]],
+    expectations: Mapping[str, dict[str, Any]],
+    timeout: float,
+    cargo_authority: Mapping[str, Any] | None = None,
+    mimi_path: str | None = None,
+    mimi_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Run only exact direct Cargo tests for typed source-diagnostic rows."""
+    return _run_expected_rejection_authority_tests(
+        root,
+        logs_root,
+        sources,
+        expectations,
+        timeout,
+        cargo_authority,
+        mimi_path,
+        mimi_sha256,
+        expectation_class="expected_source_diagnostic",
+    )
 
 
 def _write_json_exclusive(path: Path, value: Any) -> None:
@@ -6483,8 +8388,15 @@ def _run_one(
     logs_root: Path,
     expected: Mapping[str, Any],
     actor_contracts: Mapping[str, Mapping[str, Any]] | None = None,
+    mimi_sha256: str | None = None,
 ) -> dict[str, Any]:
     started = time.time()
+    mimi_invocation_path = str(mimi.expanduser().resolve())
+    if mimi_sha256 is None:
+        mimi_sha256 = _executable_observation(mimi_invocation_path).get("sha256")
+    mimi_identity_before: dict[str, Any] | None = None
+    mimi_identity_after: dict[str, Any] | None = None
+    mimi_identity_matches_expected: bool | None = None
     source_path = root / source["path"]
     observed_hash_before: str | None = None
     source_is_symlink = source.get("presence_kind") == "symlink"
@@ -6517,12 +8429,18 @@ def _run_one(
         else None
     )
     scratch = scratch_root / f"input-{index:06d}"
+    scratch_existed_before = scratch.exists() or scratch.is_symlink()
     scratch.mkdir()
+    scratch_created_exclusively = not scratch_existed_before
     stat_dir = scratch / "dispatch-stats"
     stat_dir.mkdir()
     temp_dir = scratch / "tmp"
     temp_dir.mkdir()
     output_path = scratch / ("out.so" if source["target_kind"] == "shared_library_probe" else "out")
+    output_observation_before_build: dict[str, Any] | None = None
+    output_observation_after_build: dict[str, Any] | None = None
+    output_observation_before_build_taken = False
+    output_observation_after_build_taken = False
     command: list[str] | None = None
     run_status = "completed"
     stdout_bytes = b""
@@ -6553,38 +8471,62 @@ def _run_one(
         run_status = "not_run"
         exit_code = None
     else:
-        command = [str(mimi.resolve()), "build", str(source_path), "-o", str(output_path)]
-        if source["target_kind"] == "shared_library_probe":
-            command.insert(2, "--shared")
-        env = os.environ.copy()
-        env["MIMI_STAT"] = "1"
-        env["MIMI_VERBOSE"] = "1"
-        env["MIMI_ROUTE_CENSUS"] = "1"
-        env.pop("MIMI_REACHABLE_DISPATCH", None)
-        env.pop("MIMI_RESOLVED_MODULE_BODIES", None)
-        env["MIMI_STAT_OUT"] = str(stat_dir)
-        env["TMPDIR"] = str(temp_dir)
-        try:
-            proc = subprocess.run(
-                command,
-                cwd=root,
-                env=env,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
+        mimi_identity_before = _executable_observation(mimi_invocation_path)
+        if (
+            mimi_identity_before.get("path") != mimi_invocation_path
+            or mimi_identity_before.get("resolved_path") != mimi_invocation_path
+            or mimi_identity_before.get("sha256") != mimi_sha256
+            or not _is_sha256(mimi_sha256)
+        ):
+            run_status = "mimi_identity_mismatch_before_execution"
+            stderr_bytes = b"--mimi executable path/hash differs from the frozen toolchain identity\n"
+            exit_code = None
+        else:
+            command = [mimi_invocation_path, "build", str(source_path), "-o", str(output_path)]
+            if source["target_kind"] == "shared_library_probe":
+                command.insert(2, "--shared")
+            env = os.environ.copy()
+            env["MIMI_STAT"] = "1"
+            env["MIMI_VERBOSE"] = "1"
+            env["MIMI_ROUTE_CENSUS"] = "1"
+            env["NO_COLOR"] = "1"
+            env.pop("MIMI_REACHABLE_DISPATCH", None)
+            env.pop("MIMI_RESOLVED_MODULE_BODIES", None)
+            env["MIMI_STAT_OUT"] = str(stat_dir)
+            env["TMPDIR"] = str(temp_dir)
+            try:
+                output_observation_before_build = _output_artifact_observation(output_path)
+                output_observation_before_build_taken = True
+                proc = subprocess.run(
+                    command,
+                    cwd=root,
+                    env=env,
+                    capture_output=True,
+                    timeout=timeout,
+                    check=False,
+                )
+                stdout_bytes = proc.stdout or b""
+                stderr_bytes = proc.stderr or b""
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired as error:
+                run_status = "timeout"
+                stdout_bytes = error.output or b""
+                stderr_bytes = error.stderr or b""
+                exit_code = None
+            except OSError as error:
+                run_status = "spawn_error"
+                stderr_bytes = str(error).encode("utf-8", errors="replace")
+                exit_code = None
+            mimi_identity_after = _executable_observation(mimi_invocation_path)
+            mimi_identity_matches_expected = bool(
+                mimi_identity_before == mimi_identity_after
+                and mimi_identity_after.get("sha256") == mimi_sha256
             )
-            stdout_bytes = proc.stdout or b""
-            stderr_bytes = proc.stderr or b""
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired as error:
-            run_status = "timeout"
-            stdout_bytes = error.output or b""
-            stderr_bytes = error.stderr or b""
-            exit_code = None
-        except OSError as error:
-            run_status = "spawn_error"
-            stderr_bytes = str(error).encode("utf-8", errors="replace")
-            exit_code = None
+            if not mimi_identity_matches_expected:
+                run_status = "mimi_identity_changed_during_execution"
+                stderr_bytes += b"--mimi executable path/hash changed during the build observation window\n"
+            output_observation_after_build = _output_artifact_observation(output_path)
+            output_observation_after_build_taken = True
     log_stem = f"{index:06d}"
     stdout_artifact = _write_raw_artifact(logs_root / f"{log_stem}.stdout.bin", stdout_bytes)
     stderr_artifact = _write_raw_artifact(logs_root / f"{log_stem}.stderr.bin", stderr_bytes)
@@ -6624,7 +8566,11 @@ def _run_one(
             target_kind=source["target_kind"],
             route=route,
         )
-    output_artifact = _output_artifact_observation(output_path)
+    output_artifact = (
+        output_observation_after_build
+        if command is not None
+        else _output_artifact_observation(output_path)
+    )
     executable_run: dict[str, Any] | None = None
     source_name = str(source.get("path", ""))
     if source_name in ACTOR_FALLBACK_INPUTS:
@@ -6694,8 +8640,65 @@ def _run_one(
         run_status=run_status,
         failure_classification=failure,
         captured_output=stdout_bytes + b"\n" + stderr_bytes,
+        captured_stdout=stdout_bytes,
+        captured_stderr=stderr_bytes,
         output_artifact=output_artifact,
         executable_run=executable_run,
+    )
+    output_absence_evidence: dict[str, Any] | None = None
+    parsed_output_path = _mimi_output_argument(command)
+    if (
+        expectation.get("class") in {
+            "expected_build_rejection",
+            "expected_source_diagnostic",
+        }
+        and command is not None
+        and parsed_output_path is not None
+        and output_observation_before_build_taken
+        and output_observation_after_build_taken
+    ):
+        parsed_output = Path(parsed_output_path)
+        before_observation = _output_path_observation(
+            parsed_output, output_observation_before_build
+        )
+        after_observation = _output_path_observation(
+            parsed_output, output_observation_after_build
+        )
+        output_absence_evidence = {
+            "schema_version": 2,
+            "scratch": {
+                "path": str(scratch),
+                "input_index": index,
+                "existed_before": scratch_existed_before,
+                "created_exclusively": scratch_created_exclusively,
+                "output_absent_before_build": (
+                    before_observation["exists"] is False
+                    and before_observation["sha256"] is None
+                ),
+            },
+            "output_path": parsed_output_path,
+            "command_output_path": parsed_output_path,
+            "mimi_executable_identity": {
+                "path": mimi_invocation_path,
+                "sha256_expected": mimi_sha256,
+                "before": mimi_identity_before,
+                "after": mimi_identity_after,
+                "matches_expected": mimi_identity_matches_expected,
+            },
+            "before": before_observation,
+            "after": after_observation,
+        }
+    rejection_artifact_evidence = (
+        dict(output_absence_evidence)
+        if expectation.get("class") == "expected_build_rejection"
+        and output_absence_evidence is not None
+        else None
+    )
+    source_diagnostic_artifact_evidence = (
+        dict(output_absence_evidence)
+        if expectation.get("class") == "expected_source_diagnostic"
+        and output_absence_evidence is not None
+        else None
     )
     candidate_classification = _route_candidate_classification(route, expectation)
     record: dict[str, Any] = {
@@ -6703,6 +8706,13 @@ def _run_one(
         "input_index": index,
         "run_status": run_status,
         "command": command if not input_changed_before else None,
+        "mimi_executable_identity": {
+            "path": mimi_invocation_path,
+            "sha256_expected": mimi_sha256,
+            "before": mimi_identity_before,
+            "after": mimi_identity_after,
+            "matches_expected": mimi_identity_matches_expected,
+        },
         "exit_code": exit_code,
         "build_not_run_reason": build_not_run_reason if run_status == "not_run" else None,
         "started_unix_seconds": started,
@@ -6718,6 +8728,8 @@ def _run_one(
         "dispatch_stats": stats_result,
         "per_function": function_details,
         "output_artifact": output_artifact,
+        "rejection_artifact_evidence": rejection_artifact_evidence,
+        "source_diagnostic_artifact_evidence": source_diagnostic_artifact_evidence,
         "native_executable_run": executable_run,
         "source_hash_before_execution": observed_hash_before,
         "source_hash_after_execution": observed_hash_after,
@@ -6753,6 +8765,8 @@ def _gate_report(
     expected_rejection_source_root: Path | None = None,
     cargo_authority: Mapping[str, Any] | None = None,
     expected_rejection_cargo_authority: Mapping[str, Any] | None = None,
+    mimi_identity: Mapping[str, Any] | None = None,
+    strict_check: bool = False,
 ) -> dict[str, Any]:
     if expected_rejection_cargo_authority is None:
         expected_rejection_cargo_authority = cargo_authority
@@ -6762,6 +8776,15 @@ def _gate_report(
 
     def raw_capture_is_complete(value: Any) -> bool:
         return _captured_bytes(value) is not None and _raw_sidecar_matches(logs_root, value)
+
+    def rejection_artifact_is_proven(record: Mapping[str, Any]) -> bool:
+        return _rejection_artifact_evidence_valid(
+            record.get("rejection_artifact_evidence"),
+            command=record.get("command"),
+            input_index=record.get("input_index"),
+            target_kind=record.get("target_kind"),
+            mimi_identity=record.get("mimi_executable_identity"),
+        )
 
     def expected_rejection_is_proven(record: Mapping[str, Any]) -> bool:
         expectation = nested(record, "expectation")
@@ -6807,7 +8830,67 @@ def _gate_report(
             and diagnostic_contract.get("required_output_substrings_match") is True
             and diagnostic_contract.get("output_artifact_absent") is True
             and record.get("output_artifact") is None
+            and rejection_artifact_is_proven(record)
             and not nested(record, "per_function").get("has_fallback", False)
+            and record.get("source_stable_for_input") is True
+        )
+
+    def source_diagnostic_artifact_is_proven(record: Mapping[str, Any]) -> bool:
+        return _rejection_artifact_evidence_valid(
+            record.get("source_diagnostic_artifact_evidence"),
+            command=record.get("command"),
+            input_index=record.get("input_index"),
+            target_kind=record.get("target_kind"),
+            mimi_identity=record.get("mimi_executable_identity"),
+        )
+
+    def expected_source_diagnostic_is_proven(record: Mapping[str, Any]) -> bool:
+        expectation = nested(record, "expectation")
+        route = nested(record, "route")
+        failure = nested(record, "failure_classification")
+        expected = nested(expectation, "expected")
+        diagnostic = nested(expectation, "diagnostic_contract")
+        return bool(
+            expectation.get("class") == "expected_source_diagnostic"
+            and expectation.get("matched") is True
+            and expectation.get("status") == "matched"
+            and expectation.get("explicit_expectation") is True
+            and expectation.get("source_hash_status") == "matched"
+            and expectation.get("authority_valid") is True
+            and expectation.get("test_contract_valid") is True
+            and expectation.get("source_authority_valid") is True
+            and expectation.get("cargo_target_valid") is True
+            and expectation.get("test_execution_valid") is True
+            and _expected_source_diagnostic_execution_proof_is_valid(
+                expectation,
+                root=root,
+                logs_root=logs_root,
+                cargo_authority=expected_rejection_cargo_authority,
+            )
+            and record.get("run_status") == "completed"
+            and record.get("exit_code") == expected.get("exit_code")
+            and isinstance(expected.get("exit_code"), int)
+            and not isinstance(expected.get("exit_code"), bool)
+            and expected.get("exit_code", 0) > 0
+            and route.get("disposition") == "rejected"
+            and route.get("classification_status") == "inferred_pre_route_rejection"
+            and route.get("observations") == []
+            and route.get("route_marker_count") == 0
+            and failure.get("class") == "source_diagnostic"
+            and failure.get("status") == "classified"
+            and diagnostic.get("valid") is True
+            and diagnostic.get("diagnostic_codes_match_exactly") is True
+            and diagnostic.get("diagnostic_lines_match_exactly") is True
+            and diagnostic.get("diagnostic_text_matches_exactly") is True
+            and diagnostic.get("stdout_empty") is True
+            and diagnostic.get("unknown_or_extra_diagnostics_absent") is True
+            and diagnostic.get("route_telemetry_absent") is True
+            and diagnostic.get("fallback_markers_absent") is True
+            and diagnostic.get("output_artifact_absent") is True
+            and record.get("output_artifact") is None
+            and source_diagnostic_artifact_is_proven(record)
+            and nested(record, "per_function").get("named_roster_complete") is False
+            and nested(record, "per_function").get("has_fallback") is False
             and record.get("source_stable_for_input") is True
         )
 
@@ -6885,6 +8968,7 @@ def _gate_report(
         for record in records
         if nested(record, "route").get("disposition") != "canonical"
         and not expected_rejection_is_proven(record)
+        and not expected_source_diagnostic_is_proven(record)
     ]
     unclassified_failures = [
         str(record.get("path"))
@@ -6914,6 +8998,7 @@ def _gate_report(
         str(record.get("path"))
         for record in records
         if not expected_rejection_is_proven(record)
+        and not expected_source_diagnostic_is_proven(record)
         and not nested(record, "per_function").get("named_roster_complete", False)
     ]
     fallback_inputs = [
@@ -6998,6 +9083,18 @@ def _gate_report(
             root=root,
             logs_root=logs_root,
             cargo_authority=cargo_authority,
+            mimi_path=(
+                mimi_identity.get("path")
+                if isinstance(mimi_identity, Mapping)
+                and isinstance(mimi_identity.get("path"), str)
+                else None
+            ),
+            mimi_sha256=(
+                mimi_identity.get("sha256")
+                if isinstance(mimi_identity, Mapping)
+                and isinstance(mimi_identity.get("sha256"), str)
+                else None
+            ),
         )
     actor_test_execution_exact = (
         isinstance(actor_test_execution, Mapping)
@@ -7038,19 +9135,9 @@ def _gate_report(
     expectation_path_duplicates = sorted(
         name for name, count in Counter(expectation_paths).items() if count > 1
     )
-    if expectation_contract is None:
-        expectation_contract = {
-            "exact_bijection": (
-                set(expectation_paths) == expected_paths
-                and not expectation_path_duplicates
-                and len(expectation_paths) == len(expected_paths)
-            ),
-            "missing_paths": sorted(expected_paths - set(expectation_paths)),
-            "extra_paths": sorted(set(expectation_paths) - expected_paths),
-            "duplicate_inventory_paths": [],
-            "invalid_source_hash_paths": [],
-            "invalid_authority_paths": [],
-        }
+    bound_expectation_contract = (
+        expectation_contract if isinstance(expectation_contract, Mapping) else {}
+    )
     all_mapped_expectations_have_authority = all(
         nested(record, "expectation").get("class") == "unmapped"
         or (
@@ -7058,17 +9145,23 @@ def _gate_report(
             and nested(record, "expectation").get("authority_valid") is True
         )
         for record in records
-    ) and not expectation_contract.get("invalid_authority_paths")
+    ) and not bound_expectation_contract.get("invalid_authority_paths")
     all_expectation_source_hashes_match = all(
         nested(record, "expectation").get("class") == "unmapped"
         or nested(record, "expectation").get("source_hash_status") == "matched"
         for record in records
-    ) and not expectation_contract.get("invalid_source_hash_paths")
+    ) and not bound_expectation_contract.get("invalid_source_hash_paths")
     expected_negative_matches = sorted(
         str(record.get("path"))
         for record in records
         if nested(record, "expectation").get("class")
         in {"expected_build_rejection", "environment_failure"}
+        and nested(record, "expectation").get("matched") is True
+    )
+    expected_source_diagnostic_matches = sorted(
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class") == "expected_source_diagnostic"
         and nested(record, "expectation").get("matched") is True
     )
     passed_expected_rejections = sorted(
@@ -7077,6 +9170,24 @@ def _gate_report(
         if expected_rejection_is_proven(record)
     )
     passed_expected_rejection_set = set(passed_expected_rejections)
+    passed_expected_source_diagnostics = sorted(
+        str(record.get("path"))
+        for record in records
+        if expected_source_diagnostic_is_proven(record)
+    )
+    passed_expected_source_diagnostic_set = set(passed_expected_source_diagnostics)
+    unproven_expected_source_diagnostics = sorted(
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class") == "expected_source_diagnostic"
+        and not expected_source_diagnostic_is_proven(record)
+    )
+    unproven_source_diagnostic_artifact_inputs = sorted(
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class") == "expected_source_diagnostic"
+        and not source_diagnostic_artifact_is_proven(record)
+    )
     canonical_success_inputs = sorted(
         str(record.get("path"))
         for record in records
@@ -7116,6 +9227,7 @@ def _gate_report(
         for record in records
         if (record.get("run_status") != "completed" or record.get("exit_code") != 0)
         and str(record.get("path")) not in passed_expected_rejection_set
+        and str(record.get("path")) not in passed_expected_source_diagnostic_set
     ]
     unexpected_failure_inputs = [
         str(record.get("path"))
@@ -7128,12 +9240,19 @@ def _gate_report(
             )
         )
         and str(record.get("path")) not in passed_expected_rejection_set
+        and str(record.get("path")) not in passed_expected_source_diagnostic_set
     ]
     unproven_expected_rejections = sorted(
         str(record.get("path"))
         for record in records
         if nested(record, "expectation").get("class") == "expected_build_rejection"
         and not expected_rejection_is_proven(record)
+    )
+    unproven_rejection_artifact_inputs = sorted(
+        str(record.get("path"))
+        for record in records
+        if nested(record, "expectation").get("class") == "expected_build_rejection"
+        and not rejection_artifact_is_proven(record)
     )
     missing_manifest_inputs = [str(record.get("path")) for record in manifest if not record.get("present", False)]
     tracked_manifest_paths = sorted(
@@ -7284,14 +9403,65 @@ def _gate_report(
     scope_is_exact = (
         source_scope.get("exactly_once") is True
         if isinstance(source_scope, Mapping)
-        else True
+        else False
     ) and not scope_duplicate_paths
     classification_exact = (
         sum(candidate_classification_counts.values()) == len(records)
         and not unclassified_candidates
         and len(record_paths) == len(set(record_paths))
     )
+    mimi_identity_is_source_bound = bool(
+        isinstance(mimi_identity, Mapping)
+        and isinstance(mimi_identity.get("path"), str)
+        and Path(str(mimi_identity.get("path"))).is_absolute()
+        and _is_sha256(mimi_identity.get("sha256"))
+        and isinstance(mimi_identity.get("before_authority_tests"), Mapping)
+        and mimi_identity["before_authority_tests"].get("path") == mimi_identity.get("path")
+        and mimi_identity["before_authority_tests"].get("resolved_path") == mimi_identity.get("path")
+        and mimi_identity["before_authority_tests"].get("sha256") == mimi_identity.get("sha256")
+        and isinstance(mimi_identity.get("after_collection"), Mapping)
+        and mimi_identity["after_collection"].get("path") == mimi_identity.get("path")
+        and mimi_identity["after_collection"].get("resolved_path") == mimi_identity.get("path")
+        and mimi_identity["after_collection"].get("sha256") == mimi_identity.get("sha256")
+    )
+    source_bound_gate_inputs_present = bool(
+        isinstance(expectation_contract, Mapping)
+        and bound_expectation_contract.get("exact_bijection") is True
+        and bound_expectation_contract.get("authority_bundle_stable") is True
+        and isinstance(source_scope, Mapping)
+        and source_scope.get("exactly_once") is True
+        and mimi_identity_is_source_bound
+    )
     checks = {
+        "mimi_binary_identity_is_stable_for_census_and_authorities": (
+            bool(
+                isinstance(mimi_identity, Mapping)
+                and isinstance(mimi_identity.get("path"), str)
+                and Path(str(mimi_identity.get("path"))).is_absolute()
+                and _is_sha256(mimi_identity.get("sha256"))
+                and all(
+                    nested(record, "mimi_executable_identity").get("matches_expected") is True
+                    and nested(record, "mimi_executable_identity").get("path") == mimi_identity.get("path")
+                    and nested(record, "mimi_executable_identity").get("sha256_expected") == mimi_identity.get("sha256")
+                    and nested(nested(record, "mimi_executable_identity"), "before").get("sha256") == mimi_identity.get("sha256")
+                    and nested(nested(record, "mimi_executable_identity"), "after").get("sha256") == mimi_identity.get("sha256")
+                    for record in records
+                    if record.get("command") is not None
+                )
+                and isinstance(mimi_identity.get("before_authority_tests"), Mapping)
+                and mimi_identity["before_authority_tests"].get("path") == mimi_identity.get("path")
+                and mimi_identity["before_authority_tests"].get("resolved_path") == mimi_identity.get("path")
+                and mimi_identity["before_authority_tests"].get("sha256") == mimi_identity.get("sha256")
+                and isinstance(mimi_identity.get("after_collection"), Mapping)
+                and mimi_identity["after_collection"].get("path") == mimi_identity.get("path")
+                and mimi_identity["after_collection"].get("resolved_path") == mimi_identity.get("path")
+                and mimi_identity["after_collection"].get("sha256") == mimi_identity.get("sha256")
+            )
+        ),
+        "all_required_source_bound_gate_inputs_are_present": source_bound_gate_inputs_present,
+        "strict_check_has_source_bound_gate_inputs": (
+            not strict_check or source_bound_gate_inputs_present
+        ),
         "cargo_test_toolchain_identity_is_current_and_unmodified": (
             _cargo_toolchain_identity_valid(cargo_authority, root=root)
         ),
@@ -7302,6 +9472,17 @@ def _gate_report(
             )
             if any(
                 nested(record, "expectation").get("class") == "expected_build_rejection"
+                for record in records
+            )
+            else True
+        ),
+        "expected_source_diagnostic_cargo_toolchain_identity_is_current_and_unmodified": (
+            _cargo_toolchain_identity_valid(
+                expected_rejection_cargo_authority,
+                root=expected_rejection_source_root or root,
+            )
+            if any(
+                nested(record, "expectation").get("class") == "expected_source_diagnostic"
                 for record in records
             )
             else True
@@ -7337,14 +9518,40 @@ def _gate_report(
             or expected_rejection_is_proven(record)
             for record in records
         ),
+        "all_expected_rejections_bind_exact_absent_output_path": (
+            not unproven_rejection_artifact_inputs
+        ),
+        "all_expected_source_diagnostics_are_proven_separately": all(
+            nested(record, "expectation").get("class") != "expected_source_diagnostic"
+            or expected_source_diagnostic_is_proven(record)
+            for record in records
+        ),
+        "all_expected_source_diagnostics_bind_exact_absent_output_paths": (
+            not unproven_source_diagnostic_artifact_inputs
+        ),
+        "source_diagnostics_never_become_observed_route_rejections_or_canonical_rosters": all(
+            nested(record, "expectation").get("class") != "expected_source_diagnostic"
+            or (
+                nested(record, "route").get("disposition") == "rejected"
+                and nested(record, "route").get("classification_status")
+                == "inferred_pre_route_rejection"
+                and not nested(record, "route").get("observations")
+                and nested(record, "route").get("route_marker_count") == 0
+                and nested(record, "per_function").get("named_roster_complete") is False
+            )
+            for record in records
+        ),
         "no_unclassified_failure_causes": not unclassified_failures,
         "all_outcomes_match_expectations": not mismatches,
         "expectation_paths_exactly_biject_inventory": (
-            expectation_contract.get("exact_bijection") is True
+            bound_expectation_contract.get("exact_bijection") is True
             and not expectation_path_duplicates
-            and not expectation_contract.get("duplicate_inventory_paths")
+            and not bound_expectation_contract.get("duplicate_inventory_paths")
         ),
         "all_mapped_expectations_have_test_authority": all_mapped_expectations_have_authority,
+        "generated_authority_bundle_is_stable": (
+            bound_expectation_contract.get("authority_bundle_stable") is True
+        ),
         "all_mapped_expectation_source_hashes_match": all_expectation_source_hashes_match,
         "all_successes_have_hashed_output_artifacts": not missing_output_artifacts,
         "all_stdout_stderr_logs_are_retained": (
@@ -7371,6 +9578,10 @@ def _gate_report(
         "unclassified_candidates": unclassified_candidates,
         "unknown_or_unmapped_candidates": unmapped_candidates,
         "intentional_reject_candidates": sorted(intentional_rejections),
+        "source_diagnostic_candidates": passed_expected_source_diagnostics,
+        "source_diagnostic_matches": expected_source_diagnostic_matches,
+        "unproven_source_diagnostic_inputs": unproven_expected_source_diagnostics,
+        "unproven_source_diagnostic_artifact_inputs": unproven_source_diagnostic_artifact_inputs,
         "missing_tracked_inputs": missing_manifest_inputs,
         "missing_actor_fallback_cases": list(actor_fallbacks.get("missing_cases", [])),
         "legacy_owner_audit_complete": bool(legacy_owner_audit.get("accepted_as_complete_inventory")),
@@ -7404,23 +9615,25 @@ def _gate_report(
         "unclassified_failure_inputs": unclassified_failures,
         "unexpected_or_mismatched_inputs": mismatches,
         "expectation_path_coverage": {
-            "exact_bijection": expectation_contract.get("exact_bijection") is True,
-            "missing_paths": list(expectation_contract.get("missing_paths", [])),
-            "extra_paths": list(expectation_contract.get("extra_paths", [])),
+            "exact_bijection": bound_expectation_contract.get("exact_bijection") is True,
+            "missing_paths": list(bound_expectation_contract.get("missing_paths", [])),
+            "extra_paths": list(bound_expectation_contract.get("extra_paths", [])),
             "duplicate_record_paths": expectation_path_duplicates,
             "duplicate_inventory_paths": list(
-                expectation_contract.get("duplicate_inventory_paths", [])
+                bound_expectation_contract.get("duplicate_inventory_paths", [])
             ),
         },
         "invalid_expectation_source_hash_inputs": list(
-            expectation_contract.get("invalid_source_hash_paths", [])
+            bound_expectation_contract.get("invalid_source_hash_paths", [])
         ),
         "invalid_expectation_authority_inputs": list(
-            expectation_contract.get("invalid_authority_paths", [])
+            bound_expectation_contract.get("invalid_authority_paths", [])
         ),
         "expected_negative_matches": expected_negative_matches,
         "passed_expected_rejections": passed_expected_rejections,
+        "passed_expected_source_diagnostics": passed_expected_source_diagnostics,
         "unproven_expected_rejection_inputs": unproven_expected_rejections,
+        "unproven_rejection_artifact_inputs": unproven_rejection_artifact_inputs,
         "unexpected_failure_inputs": unexpected_failure_inputs,
         "canonical_success_inputs": canonical_success_inputs,
         "canonical_success_count": len(canonical_success_inputs),
@@ -7530,15 +9743,101 @@ def collect(args: argparse.Namespace) -> int:
         key=lambda item: (item["path"], item["kind"]),
     )
     snapshot_start = source_snapshot(root, sources)
+    build_receipt_value: dict[str, Any] | None = None
+    build_receipt_path: Path | None = None
+    build_receipt_sha256: str | None = None
+    build_receipt_issues: list[str] = []
+    if args.build_receipt:
+        requested_receipt = Path(args.build_receipt).expanduser()
+        receipt_candidate = (
+            requested_receipt if requested_receipt.is_absolute() else root / requested_receipt
+        )
+        build_receipt_path = receipt_candidate.parent.resolve(strict=False) / receipt_candidate.name
+        try:
+            import actor_census_build_receipt
+
+            build_receipt_value, build_receipt_sha256 = actor_census_build_receipt.read_receipt(
+                build_receipt_path
+            )
+            build_receipt_issues = actor_census_build_receipt.validate_receipt(
+                build_receipt_value,
+                receipt_path=build_receipt_path,
+                root=root,
+                mimi_path=mimi,
+                report_snapshots={"source_snapshot": snapshot_start},
+                expected_receipt_sha256=build_receipt_sha256,
+                verify_receipt_file=False,
+            )
+        except (ImportError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+            build_receipt_issues = [f"could not validate source-bound Cargo build receipt: {error}"]
+    if build_receipt_path is None:
+        build_provenance: dict[str, Any] = {
+            "status": "caller_supplied_unverified",
+            "current_source_attested": False,
+            "receipt_path": None,
+            "receipt_sha256": None,
+            "issues": ["no source-bound isolated Cargo build receipt was supplied"],
+        }
+    else:
+        build_provenance = {
+            "status": "verified" if not build_receipt_issues else "invalid",
+            "current_source_attested": not build_receipt_issues,
+            "receipt_path": str(build_receipt_path),
+            "receipt_sha256": build_receipt_sha256,
+            "source_attestation": _build_receipt_source_attestation(build_receipt_value),
+            "issues": list(build_receipt_issues),
+        }
     manifest_sha256 = _manifest_digest(sources)
     requested_worker_count = getattr(args, "jobs", 4)
     actual_worker_count = (
         0 if args.inventory_only else min(requested_worker_count, len(sources))
     )
     declared_expectations, expectations_identity = load_expectations(
-        Path(args.expectations).expanduser().resolve() if args.expectations else None,
+        None,
         root,
     )
+    authority_bundle_binding: dict[str, Any] | None = None
+    if args.authority_bundle:
+        authority_bundle_binding = _validate_route_authority_bundle(
+            Path(args.authority_bundle), root=root, sources=sources, mimi_path=mimi
+        )
+        _require_strict_authority_bundle_for_check(
+            authority_bundle_binding,
+            check=args.check,
+        )
+        bundled_expectations, _bundled_expectations_identity = load_expectations(
+            Path(authority_bundle_binding["expectations_path"]), root
+        )
+        if args.expectations:
+            caller_expectations, expectations_identity = load_expectations(
+                Path(args.expectations).expanduser().resolve(), root
+            )
+            _validate_external_expectations_against_bundle(
+                caller_expectations,
+                bundled_expectations,
+                sources,
+            )
+        else:
+            caller_expectations = None
+            expectations_identity = _bundled_expectations_identity
+        declared_expectations = bundled_expectations
+        for expectation in declared_expectations.values():
+            authority = expectation.get("authority")
+            assertion = authority.get("assertion") if isinstance(authority, Mapping) else None
+            if (
+                not isinstance(authority, dict)
+                or not isinstance(assertion, dict)
+                or assertion.get("path") != ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+                or assertion.get("sha256") != authority_bundle_binding["authority_source_sha256"]
+            ):
+                raise ValueError("authority bundle expectations do not bind its generated source and Cargo target")
+            assertion["generated_source_path"] = authority_bundle_binding["authority_source_path"]
+            assertion["target_source_sha256"] = authority_bundle_binding["wrapper_sha256"]
+            authority["bundle"] = dict(authority_bundle_binding)
+    elif args.expectations:
+        declared_expectations, expectations_identity = load_expectations(
+            Path(args.expectations).expanduser().resolve(), root
+        )
     actor_contracts = actor_fixture_test_contracts(root)
     declared_expectations, actor_default_expectations = add_actor_default_expectations(
         declared_expectations,
@@ -7589,6 +9888,7 @@ def collect(args: argparse.Namespace) -> int:
         "expectations": {
             "identity": {
                 "provided_manifest": expectations_identity,
+                "generated_authority_bundle": authority_bundle_binding,
                 "built_in_actor_defaults": actor_default_expectations,
             },
             **expectation_contract,
@@ -7602,6 +9902,7 @@ def collect(args: argparse.Namespace) -> int:
         },
         "actor_fixture_contracts": actor_contracts,
         "source_snapshot": snapshot_start,
+        "build_provenance": build_provenance,
         "repository": repository_identity(root),
         "toolchain": toolchain_manifest(
             mimi,
@@ -7611,6 +9912,7 @@ def collect(args: argparse.Namespace) -> int:
             cargo_authority=cargo_authority,
         ),
         "cargo_test_toolchain_authority": cargo_authority,
+        "generated_authority_bundle": authority_bundle_binding,
         "execution_contract": {
             "command_template": ["<mimi>", "build", "[--shared for no-main inputs]", "<source>", "-o", "<unique-output>"],
             "route_mode": "default production route; --mir is not passed",
@@ -7677,21 +9979,75 @@ def collect(args: argparse.Namespace) -> int:
     )
     logs_root = artifact_root / "logs"
     legacy_owner_audit = _collect_legacy_owner_audit(root, logs_root)
+    toolchain_manifest_record = base.get("toolchain")
+    mimi_manifest = (
+        toolchain_manifest_record.get("mimi")
+        if isinstance(toolchain_manifest_record, Mapping)
+        else None
+    )
+    authority_mimi_path = mimi_manifest.get("path") if isinstance(mimi_manifest, Mapping) else None
+    authority_mimi_sha256 = mimi_manifest.get("sha256") if isinstance(mimi_manifest, Mapping) else None
+    base["authority_mimi_identity"] = {
+        "path": authority_mimi_path,
+        "sha256": authority_mimi_sha256,
+        "before_authority_tests": _executable_observation(authority_mimi_path),
+    }
     actor_test_execution = _run_actor_authority_tests(
-        root, logs_root, sources, actor_contracts, args.timeout, cargo_authority
+        root,
+        logs_root,
+        sources,
+        actor_contracts,
+        args.timeout,
+        cargo_authority,
+        mimi_path=authority_mimi_path,
+        mimi_sha256=authority_mimi_sha256,
     )
     base["actor_rust_test_execution"] = actor_test_execution
     expected_rejection_authority_execution = _run_expected_rejection_authority_tests(
-        root, logs_root, sources, expectations, args.timeout, cargo_authority
+        root,
+        logs_root,
+        sources,
+        expectations,
+        args.timeout,
+        cargo_authority,
+        mimi_path=authority_mimi_path,
+        mimi_sha256=authority_mimi_sha256,
     )
     base["expected_rejection_authority_execution"] = (
         expected_rejection_authority_execution
     )
+    expected_source_diagnostic_authority_execution = (
+        _run_source_diagnostic_authority_tests(
+            root,
+            logs_root,
+            sources,
+            expectations,
+            args.timeout,
+            cargo_authority,
+            mimi_path=authority_mimi_path,
+            mimi_sha256=authority_mimi_sha256,
+        )
+    )
+    base["expected_source_diagnostic_authority_execution"] = (
+        expected_source_diagnostic_authority_execution
+    )
     required_compile_authority_execution = _run_required_compile_authority_tests(
-        root, logs_root, sources, expectations, args.timeout, cargo_authority
+        root,
+        logs_root,
+        sources,
+        expectations,
+        args.timeout,
+        cargo_authority,
+        mimi_path=authority_mimi_path,
+        mimi_sha256=authority_mimi_sha256,
     )
     base["required_compile_authority_execution"] = (
         required_compile_authority_execution
+    )
+    authority_bundle_stable_after_authority_tests = (
+        _route_authority_bundle_is_stable(authority_bundle_binding)
+        if authority_bundle_binding is not None
+        else None
     )
     expectation_contract["invalid_authority_paths"] = sorted(
         name
@@ -7720,6 +10076,7 @@ def collect(args: argparse.Namespace) -> int:
                 logs_root=logs_root,
                 expected=expectations,
                 actor_contracts=actor_contracts,
+                mimi_sha256=authority_mimi_sha256,
             )
 
         def record_worker_error(
@@ -7757,6 +10114,9 @@ def collect(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+    base["authority_mimi_identity"]["after_collection"] = _executable_observation(
+        authority_mimi_path
+    )
     tracked_paths_end, tracked_inventory_end = tracked_mimi_paths(root)
     snapshot_end = source_snapshot(root, enumerate_sources(root, tracked_paths_end))
     excluded_symlinks_end = source_symlink_exclusions(root)
@@ -7780,6 +10140,34 @@ def collect(args: argparse.Namespace) -> int:
     base["tracked_git_inventory_end"] = tracked_inventory_end
     base["unfollowed_mimi_symlinks_end"] = excluded_symlinks_end
     base["source_snapshot_stable"] = snapshot_stable
+    if build_receipt_path is not None:
+        try:
+            import actor_census_build_receipt
+
+            build_receipt_issues = actor_census_build_receipt.validate_receipt(
+                build_receipt_value,
+                receipt_path=build_receipt_path,
+                root=root,
+                mimi_path=mimi,
+                report_snapshots={
+                    "source_snapshot": snapshot_start,
+                    "source_snapshot_end": snapshot_end,
+                },
+                expected_receipt_sha256=build_receipt_sha256,
+                verify_receipt_file=False,
+            )
+        except (ImportError, OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+            build_receipt_issues = [f"could not revalidate source-bound Cargo build receipt: {error}"]
+        base["build_provenance"] = {
+            "status": "verified" if not build_receipt_issues else "invalid",
+            "current_source_attested": not build_receipt_issues,
+            "receipt_path": str(build_receipt_path),
+            "receipt_sha256": build_provenance.get("receipt_sha256"),
+            "source_attestation": _build_receipt_source_attestation(build_receipt_value),
+            "issues": list(build_receipt_issues),
+        }
+    else:
+        base["build_provenance"] = build_provenance
     base["artifacts"] = {
         "root": str(artifact_root),
         "inventory": "inventory.json",
@@ -7795,6 +10183,7 @@ def collect(args: argparse.Namespace) -> int:
         actor_test_execution,
         root=root,
         cargo_authority=cargo_authority,
+        mimi_identity=base["authority_mimi_identity"],
     )
     base["legacy_owner_audit"] = legacy_owner_audit
     base["route_counts"] = _count_by(
@@ -7831,6 +10220,50 @@ def collect(args: argparse.Namespace) -> int:
         ],
         "classification",
     )
+    if authority_bundle_binding is not None:
+        authority_bundle_stable_after_collection = _route_authority_bundle_is_stable(
+            authority_bundle_binding
+        )
+        base["generated_authority_bundle_execution"] = {
+            "status": (
+                "stable"
+                if authority_bundle_stable_after_authority_tests is True
+                and authority_bundle_stable_after_collection
+                else "changed_or_unavailable"
+            ),
+            "stable_after_authority_tests": authority_bundle_stable_after_authority_tests,
+            "stable_after_collection": authority_bundle_stable_after_collection,
+            "source_environment_variable": ROUTE_CENSUS_AUTHORITY_SOURCE_ENV,
+            "binding": authority_bundle_binding,
+        }
+        expectation_contract["authority_bundle_stable"] = bool(
+            authority_bundle_stable_after_authority_tests is True
+            and authority_bundle_stable_after_collection
+        )
+        if not expectation_contract["authority_bundle_stable"]:
+            for item in expectations.values():
+                if item.get("class") != "unmapped":
+                    item["authority_valid"] = False
+                    item["test_execution_valid"] = False
+                    item["authority_status"] = "generated_authority_bundle_changed_during_run"
+            for record in records:
+                item = record.get("expectation")
+                if isinstance(item, dict) and item.get("class") != "unmapped":
+                    item["authority_valid"] = False
+                    item["test_execution_valid"] = False
+                    item["authority_status"] = "generated_authority_bundle_changed_during_run"
+        expectation_contract["invalid_authority_paths"] = sorted(
+            name
+            for name, expectation in expectations.items()
+            if expectation.get("class") != "unmapped"
+            and expectation.get("authority_valid") is not True
+        )
+        base["expectations"]["invalid_authority_paths"] = list(
+            expectation_contract["invalid_authority_paths"]
+        )
+        base["expectations"]["authority_bundle_stable"] = expectation_contract[
+            "authority_bundle_stable"
+        ]
     gate_symlink_evidence = [
         item for item in excluded_symlinks
         if not _is_archival_source_path(str(item.get("path", "")))
@@ -7850,10 +10283,39 @@ def collect(args: argparse.Namespace) -> int:
         root,
         cargo_authority=cargo_authority,
         mimi_identity=base["authority_mimi_identity"],
+        strict_check=bool(args.check),
     )
     base["gate"]["requested"] = bool(args.check)
     base["gate"]["mode"] = "strict_check" if args.check else "evidence_collection_only"
+    apply_build_provenance_to_gate(
+        base["gate"], base["build_provenance"], requested_check=bool(args.check)
+    )
     validate_report_destination()
+    if build_receipt_path is not None:
+        try:
+            import actor_census_build_receipt
+
+            final_receipt_sha256 = actor_census_build_receipt.receipt_file_sha256(
+                build_receipt_path
+            )
+        except (ImportError, OSError, ValueError) as error:
+            final_receipt_sha256 = None
+            build_receipt_issues.append(
+                f"could not safely re-open build receipt at report finalization: {error}"
+            )
+        if final_receipt_sha256 != build_receipt_sha256:
+            build_receipt_issues.append(
+                "build receipt file changed between initial parse and report finalization"
+            )
+        final_provenance = dict(base["build_provenance"])
+        final_provenance["final_receipt_sha256"] = final_receipt_sha256
+        final_provenance["issues"] = sorted(set(build_receipt_issues))
+        final_provenance["current_source_attested"] = not build_receipt_issues
+        final_provenance["status"] = "verified" if not build_receipt_issues else "invalid"
+        base["build_provenance"] = final_provenance
+        apply_build_provenance_to_gate(
+            base["gate"], final_provenance, requested_check=bool(args.check)
+        )
     _write_json_exclusive(output, base)
     print(
         f"[full-route-census] {'PASS' if base['gate']['passed'] else 'FAIL'}: "
@@ -7861,6 +10323,39 @@ def collect(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return 1 if args.check and not base["gate"]["passed"] else 0
+
+
+def apply_build_provenance_to_gate(
+    gate: dict[str, Any], provenance: Mapping[str, Any], *, requested_check: bool
+) -> dict[str, Any]:
+    """Prevent a caller-supplied --mimi path from passing current-source --check."""
+    attested = provenance.get("current_source_attested") is True
+    gate["current_source_attested"] = attested
+    gate["build_provenance_status"] = provenance.get("status")
+    if requested_check:
+        checks = gate.get("checks")
+        if not isinstance(checks, dict):
+            checks = {}
+            gate["checks"] = checks
+        checks["source_bound_mimi_build_receipt"] = attested
+        gate["passed"] = bool(gate.get("passed")) and attested
+    return gate
+
+
+def _build_receipt_source_attestation(receipt: Any) -> dict[str, Any] | None:
+    if not isinstance(receipt, Mapping):
+        return None
+    build_source = receipt.get("build_source")
+    if not isinstance(build_source, Mapping):
+        return None
+    manifest = build_source.get("manifest")
+    manifest_digest = manifest.get("manifest_sha256") if isinstance(manifest, Mapping) else None
+    return {
+        "source_snapshot_id": build_source.get("before_snapshot_id"),
+        "source_manifest_sha256": manifest_digest,
+        "cargo_config": build_source.get("cargo_config"),
+        "combined_sha256": build_source.get("source_attestation_sha256"),
+    }
 
 
 def _count_by(items: Iterable[Mapping[str, Any]], field: str) -> dict[str, int]:
@@ -7887,11 +10382,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=str(ROOT), help="repository/source root (default: script's repository)")
     parser.add_argument("--mimi", default=os.environ.get("MIMI", str(ROOT / "target/debug/mimi")), help="Mimi CLI binary")
+    parser.add_argument(
+        "--build-receipt",
+        help=(
+            "optional source-bound isolated Cargo build receipt; without it, --mimi is "
+            "reported as caller-supplied and cannot satisfy current-source --check attestation"
+        ),
+    )
     parser.add_argument("--output", required=True, help="new JSON report path; existing files are never overwritten")
     parser.add_argument("--artifacts", help="new artifact directory (default: <output>.artifacts)")
     parser.add_argument(
         "--expectations",
         help="optional schema-v4 typed expectation manifest with test authority and source hashes",
+    )
+    parser.add_argument(
+        "--authority-bundle",
+        help=(
+            "generated authority bundle directory; the collector revalidates its report, manifest, "
+            "expectations, source bytes, and exact feature target before passing the staged source to Cargo"
+        ),
     )
     parser.add_argument("--timeout", type=float, default=120.0, help="per-input timeout in seconds (default: 120)")
     parser.add_argument(
@@ -7914,6 +10423,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--jobs must be between 1 and 8")
     if args.inventory_only and args.check:
         parser.error("--check cannot be combined with --inventory-only")
+    if args.inventory_only and args.build_receipt:
+        parser.error("--build-receipt requires a full execution")
+    if args.inventory_only and args.authority_bundle:
+        parser.error("--authority-bundle requires a full execution")
     return args
 
 

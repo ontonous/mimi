@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import shutil
 import subprocess
@@ -18,9 +19,12 @@ import full_route_census as census
 def _actor_helper_source() -> str:
     source = (census.ROOT / census.ACTOR_HELPER_TEST_PATH).read_text(encoding="utf-8")
     span = census._rust_named_function_span(source, census.ACTOR_HELPER_NAME)
-    if span is None:
-        raise AssertionError("repository Actor helper is not a top-level function")
-    return source[span[0] : span[1]]
+    identity_span = census._rust_named_function_span(
+        source, census.ACTOR_IDENTITY_HELPER_NAME
+    )
+    if span is None or identity_span is None:
+        raise AssertionError("repository Actor helpers are not top-level functions")
+    return source[identity_span[0] : identity_span[1]] + "\n" + source[span[0] : span[1]]
 
 
 EXPECTED_REJECTION_ROUTE = {
@@ -28,6 +32,16 @@ EXPECTED_REJECTION_ROUTE = {
     "classification_status": "observed",
     "reason": "expected diagnostic",
 }
+
+
+def _write_test_mimi(root: Path) -> tuple[Path, str]:
+    """Create the canonical executable fixture required by _run_one's identity gate."""
+    mimi = root / "mimi"
+    if not mimi.exists():
+        mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        mimi.chmod(0o755)
+    mimi = mimi.resolve(strict=True)
+    return mimi, census.sha256_file(mimi)
 
 
 class InventoryTests(unittest.TestCase):
@@ -537,7 +551,24 @@ fn mimi_bin() -> &'static str { "forged-mimi" }
 
 
 class ActorAuthorityExecutionTests(unittest.TestCase):
-    def _temporary_actor_project(self, root: Path) -> tuple[list[dict], dict]:
+    def test_actor_authority_census_mode_fails_closed_without_identity(self) -> None:
+        authority_path = census.ROOT / census.ACTOR_HELPER_TEST_PATH
+        source = authority_path.read_text(encoding="utf-8")
+        identity_span = census._rust_named_function_span(
+            source, census.ACTOR_IDENTITY_HELPER_NAME
+        )
+        self.assertIsNotNone(identity_span)
+        helper = source[identity_span[0] : identity_span[1]]
+        self.assertIn('MIMI_ROUTE_CENSUS_MIMI")', helper)
+        self.assertIn('MIMI_ROUTE_CENSUS_MIMI_SHA256")', helper)
+        self.assertIn('census_mode.as_deref() != Some("1")', helper)
+        self.assertIn('Some("1")', helper)
+        self.assertIn("canonical and symlink-free", helper)
+        self.assertIn("CARGO_BIN_EXE_mimi", helper)
+        contracts = census.actor_fixture_test_contracts(census.ROOT)
+        self.assertTrue(all(item["helper_valid"] for item in contracts.values()))
+
+    def _temporary_actor_project(self, root: Path) -> tuple[list[dict], dict, tuple[str, str]]:
         (root / "Cargo.toml").write_text(
             '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
             encoding="utf-8",
@@ -564,12 +595,21 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
             _actor_helper_source() + "\n" + "\n".join(test_lines) + "\n",
             encoding="utf-8",
         )
+        mimi = root / "bin" / "mimi"
+        mimi.parent.mkdir()
+        mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        mimi.chmod(0o755)
         sources = [census.source_record(root / path, root) for path in census.ACTOR_FALLBACK_INPUTS]
-        return sources, census.actor_fixture_test_contracts(root)
+        return sources, census.actor_fixture_test_contracts(root), (
+            str(mimi), census.sha256_file(mimi)
+        )
 
     @staticmethod
-    def _successful_test_output(test_id: str) -> bytes:
+    def _successful_test_output(test_id: str, mimi_identity: tuple[str, str]) -> bytes:
+        marker = census._authority_mimi_identity_marker(*mimi_identity)
+        assert marker is not None
         return (
+            f"{marker}\n"
             f"running 1 test\ntest {test_id} ... ok\n\n"
             "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
             "0 filtered out; finished in 0.00s\n"
@@ -578,7 +618,7 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
     def test_actor_runner_executes_exact_tests_and_retains_hash_bound_bin_logs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            sources, contracts = self._temporary_actor_project(root)
+            sources, contracts, mimi_identity = self._temporary_actor_project(root)
             logs = root / "artifacts/logs"
             logs.mkdir(parents=True)
             completed = [
@@ -586,7 +626,7 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
                     ["cargo", "test"],
                     0,
                     self._successful_test_output(
-                        census.ACTOR_AUTHORITY_TEST_IDS[path]
+                        census.ACTOR_AUTHORITY_TEST_IDS[path], mimi_identity
                     ),
                     b"",
                 )
@@ -596,7 +636,14 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
 
             with patch.object(census.subprocess, "run", side_effect=completed) as run:
                 execution = census._run_actor_authority_tests(
-                    root, logs, sources, contracts, 30.0, cargo_authority
+                    root,
+                    logs,
+                    sources,
+                    contracts,
+                    30.0,
+                    cargo_authority,
+                    mimi_path=mimi_identity[0],
+                    mimi_sha256=mimi_identity[1],
                 )
 
             self.assertEqual(run.call_count, 2)
@@ -606,7 +653,7 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
                 [
                     [
                         cargo_authority["cargo"]["path"], "test", "--test", "real_world_cli",
-                        census.ACTOR_AUTHORITY_TEST_IDS[path], "--", "--exact"
+                        census.ACTOR_AUTHORITY_TEST_IDS[path], "--", "--exact", "--nocapture"
                     ]
                     for path in census.ACTOR_FALLBACK_INPUTS
                 ],
@@ -626,6 +673,107 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
                     self.assertEqual(Path(capture["path"]).suffix, ".bin")
                     self.assertTrue(census._raw_sidecar_matches(logs, capture))
 
+    def test_actor_runner_rejects_successful_test_with_wrong_mimi_identity_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources, contracts, mimi_identity = self._temporary_actor_project(root)
+            logs = root / "artifacts/logs"
+            logs.mkdir(parents=True)
+            first_test_id = census.ACTOR_AUTHORITY_TEST_IDS[
+                census.ACTOR_FALLBACK_INPUTS[0]
+            ]
+            second_test_id = census.ACTOR_AUTHORITY_TEST_IDS[
+                census.ACTOR_FALLBACK_INPUTS[1]
+            ]
+            wrong_sha256 = "0" * 64 if mimi_identity[1] != "0" * 64 else "1" * 64
+            mismatched_identity = (mimi_identity[0], wrong_sha256)
+            results = [
+                subprocess.CompletedProcess(
+                    ["cargo", "test"],
+                    0,
+                    self._successful_test_output(first_test_id, mismatched_identity),
+                    b"",
+                ),
+                subprocess.CompletedProcess(
+                    ["cargo", "test"],
+                    0,
+                    self._successful_test_output(second_test_id, mimi_identity),
+                    b"",
+                ),
+            ]
+            cargo_authority = census.cargo_test_toolchain_authority(root)
+
+            with patch.object(census.subprocess, "run", side_effect=results):
+                execution = census._run_actor_authority_tests(
+                    root,
+                    logs,
+                    sources,
+                    contracts,
+                    30.0,
+                    cargo_authority,
+                    mimi_path=mimi_identity[0],
+                    mimi_sha256=mimi_identity[1],
+                )
+
+        self.assertEqual(execution["status"], "failed")
+        self.assertFalse(execution["cases"][0]["execution_valid"])
+        self.assertTrue(execution["cases"][1]["execution_valid"])
+
+    def test_actor_execution_validator_rejects_mismatched_mimi_identity_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources, contracts, mimi_identity = self._temporary_actor_project(root)
+            logs = root / "artifacts/logs"
+            logs.mkdir(parents=True)
+            completed = [
+                subprocess.CompletedProcess(
+                    ["cargo", "test"],
+                    0,
+                    self._successful_test_output(
+                        census.ACTOR_AUTHORITY_TEST_IDS[path], mimi_identity
+                    ),
+                    b"",
+                )
+                for path in census.ACTOR_FALLBACK_INPUTS
+            ]
+            cargo_authority = census.cargo_test_toolchain_authority(root)
+
+            with patch.object(census.subprocess, "run", side_effect=completed):
+                execution = census._run_actor_authority_tests(
+                    root,
+                    logs,
+                    sources,
+                    contracts,
+                    30.0,
+                    cargo_authority,
+                    mimi_path=mimi_identity[0],
+                    mimi_sha256=mimi_identity[1],
+                )
+
+            valid_case = execution["cases"][0]
+            source_path = census.ACTOR_FALLBACK_INPUTS[0]
+            self.assertTrue(valid_case["execution_valid"])
+            mismatched_case = dict(valid_case)
+            mismatched_identity = dict(valid_case["mimi_executable_identity"])
+            mismatched_identity["sha256_after"] = (
+                "0" * 64 if mimi_identity[1] != "0" * 64 else "1" * 64
+            )
+            mismatched_case["mimi_executable_identity"] = mismatched_identity
+
+            self.assertFalse(
+                census._actor_test_execution_valid(
+                    mismatched_case,
+                    source_path,
+                    sources[0],
+                    contracts[source_path],
+                    root=root,
+                    logs_root=logs,
+                    cargo_authority=cargo_authority,
+                    mimi_path=mimi_identity[0],
+                    mimi_sha256=mimi_identity[1],
+                )
+            )
+
     def test_actor_runner_rejects_nonzero_and_incorrect_test_output(self) -> None:
         invalid_first_results = (
             (
@@ -642,7 +790,7 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
         for label, returncode, stdout in invalid_first_results:
             with self.subTest(result=label), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                sources, contracts = self._temporary_actor_project(root)
+                sources, contracts, mimi_identity = self._temporary_actor_project(root)
                 logs = root / "artifacts/logs"
                 logs.mkdir(parents=True)
                 failed = subprocess.CompletedProcess(["cargo", "test"], returncode, stdout, b"runtime failure\n")
@@ -650,14 +798,22 @@ class ActorAuthorityExecutionTests(unittest.TestCase):
                     ["cargo", "test"],
                     0,
                     self._successful_test_output(
-                        census.ACTOR_AUTHORITY_TEST_IDS[census.ACTOR_FALLBACK_INPUTS[1]]
+                        census.ACTOR_AUTHORITY_TEST_IDS[census.ACTOR_FALLBACK_INPUTS[1]],
+                        mimi_identity,
                     ),
                     b"",
                 )
                 cargo_authority = census.cargo_test_toolchain_authority(root)
                 with patch.object(census.subprocess, "run", side_effect=[failed, passed]):
                     execution = census._run_actor_authority_tests(
-                        root, logs, sources, contracts, 30.0, cargo_authority
+                        root,
+                        logs,
+                        sources,
+                        contracts,
+                        30.0,
+                        cargo_authority,
+                        mimi_path=mimi_identity[0],
+                        mimi_sha256=mimi_identity[1],
                     )
 
                 self.assertEqual(execution["status"], "failed")
@@ -671,6 +827,121 @@ class CargoAuthorityTests(unittest.TestCase):
             '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
             encoding="utf-8",
         )
+
+    def test_route_authority_requires_matching_mimi_path_and_hash_before_and_after(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._root(root)
+            mimi = root / "bin" / "mimi"
+            mimi.parent.mkdir()
+            mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mimi.chmod(0o755)
+            mimi = mimi.resolve()
+            mimi_sha = census.sha256_file(mimi)
+            environment = {
+                census.ROUTE_CENSUS_MIMI_MODE_ENV: "1",
+                census.ROUTE_CENSUS_MIMI_PATH_ENV: str(mimi),
+                census.ROUTE_CENSUS_MIMI_SHA256_ENV: mimi_sha,
+            }
+            toolchain = root / "toolchain"
+            toolchain.mkdir()
+            identities = {}
+            for name in ("cargo", "rustc", "rustup"):
+                executable = toolchain / name
+                executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                executable.chmod(0o755)
+                identities[name] = {
+                    "path": str(executable),
+                    "resolved_path": str(executable.resolve()),
+                    "sha256": census.sha256_file(executable),
+                    "native_executable": True,
+                }
+            authority = {
+                **identities,
+                "rustup_toolchain": {"policy": {"valid": True}},
+                "policy": {"valid": True},
+                "identity_sha256": "a" * 64,
+            }
+            with (
+                patch.object(census, "cargo_test_toolchain_authority", return_value=authority),
+                patch.object(census, "_cargo_toolchain_identity_valid", return_value=True),
+            ):
+                with patch.object(census.subprocess, "run") as run:
+                    missing = census._run_cargo_authority_command(
+                        [authority["cargo"]["path"], "test", "--no-run"],
+                        root,
+                        1.0,
+                        authority,
+                        require_mimi_identity=True,
+                        expected_mimi_path=str(mimi),
+                        expected_mimi_sha256=mimi_sha,
+                    )
+                self.assertEqual(run.call_count, 0)
+                self.assertNotEqual(missing["run_status"], "completed")
+
+                wrong_environment = {
+                    **environment,
+                    census.ROUTE_CENSUS_MIMI_SHA256_ENV: "f" * 64,
+                }
+                with patch.object(census.subprocess, "run") as run:
+                    mismatched = census._run_cargo_authority_command(
+                        [authority["cargo"]["path"], "test", "--no-run"],
+                        root,
+                        1.0,
+                        authority,
+                        environment_overrides=wrong_environment,
+                        require_mimi_identity=True,
+                        expected_mimi_path=str(mimi),
+                        expected_mimi_sha256=mimi_sha,
+                    )
+                self.assertEqual(run.call_count, 0)
+                self.assertNotEqual(mismatched["run_status"], "completed")
+
+                alternate = root / "bin" / "alternate-mimi"
+                alternate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                alternate.chmod(0o755)
+                alternate = alternate.resolve()
+                wrong_path_environment = {
+                    census.ROUTE_CENSUS_MIMI_MODE_ENV: "1",
+                    census.ROUTE_CENSUS_MIMI_PATH_ENV: str(alternate),
+                    census.ROUTE_CENSUS_MIMI_SHA256_ENV: census.sha256_file(alternate),
+                }
+                with patch.object(census.subprocess, "run") as run:
+                    wrong_path = census._run_cargo_authority_command(
+                        [authority["cargo"]["path"], "test", "--no-run"],
+                        root,
+                        1.0,
+                        authority,
+                        environment_overrides=wrong_path_environment,
+                        require_mimi_identity=True,
+                        expected_mimi_path=str(mimi),
+                        expected_mimi_sha256=mimi_sha,
+                    )
+                self.assertEqual(run.call_count, 0)
+                self.assertNotEqual(wrong_path["run_status"], "completed")
+
+                def mutate_binary(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                    mimi.write_text("#!/bin/sh\necho mutated\n", encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0, b"", b"")
+
+                with patch.object(census.subprocess, "run", side_effect=mutate_binary) as run:
+                    mutated = census._run_cargo_authority_command(
+                        [authority["cargo"]["path"], "test", "--no-run"],
+                        root,
+                        1.0,
+                        authority,
+                        environment_overrides=environment,
+                        require_mimi_identity=True,
+                        expected_mimi_path=str(mimi),
+                        expected_mimi_sha256=mimi_sha,
+                    )
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(mutated["run_status"], "completed")
+                self.assertNotEqual(
+                    mutated["environment_overrides"][census.ROUTE_CENSUS_MIMI_PATH_ENV]["sha256_before"],
+                    mutated["environment_overrides"][census.ROUTE_CENSUS_MIMI_PATH_ENV]["sha256_after"],
+                )
+                self.assertFalse(mutated["cargo_execution"]["stable"])
 
     def test_path_cargo_shim_is_never_invoked_or_accepted_as_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -899,6 +1170,350 @@ class CargoAuthorityTests(unittest.TestCase):
 
         self.assertIn("rust-toolchain.toml", snapshot["files"])
         self.assertFalse(authority_still_valid)
+
+
+class CargoRouteAuthorityTargetTests(unittest.TestCase):
+    def _metadata_fixture(
+        self,
+        root: Path,
+        *,
+        required_features: list[str] | None = None,
+        route_feature: list[str] | None = None,
+        default_features: list[str] | None = None,
+        source_relative: str = census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH,
+        target_name: str = census.ROUTE_CENSUS_AUTHORITY_TARGET_NAME,
+    ) -> dict[str, object]:
+        (root / "Cargo.toml").write_text(
+            '[package]\nname = "mimi"\nversion = "0.1.11-dev"\nedition = "2021"\n',
+            encoding="utf-8",
+        )
+        source = root / census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(census.ROUTE_CENSUS_AUTHORITY_WRAPPER_SOURCE, encoding="utf-8")
+        target_source = root / source_relative
+        target_source.parent.mkdir(parents=True, exist_ok=True)
+        if not target_source.exists():
+            target_source.write_text("#[test] fn generated_authority() {}\n", encoding="utf-8")
+        package_id = "path+file:///fixture/mimi#0.1.11-dev"
+        features: dict[str, list[str]] = {"default": default_features or []}
+        if route_feature is not None:
+            features[census.ROUTE_CENSUS_AUTHORITY_FEATURE] = route_feature
+        return {
+            "workspace_members": [package_id],
+            "packages": [
+                {
+                    "id": package_id,
+                    "name": "mimi",
+                    "manifest_path": str(root / "Cargo.toml"),
+                    "features": features,
+                    "targets": [
+                        {
+                            "name": target_name,
+                            "kind": ["test"],
+                            "test": True,
+                            "src_path": str(target_source),
+                            "required-features": required_features,
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def test_exact_non_default_empty_feature_target_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            metadata = self._metadata_fixture(
+                root,
+                required_features=[census.ROUTE_CENSUS_AUTHORITY_FEATURE],
+                route_feature=[],
+                default_features=["llvm18-host-dynamic"],
+            )
+            target = census._cargo_test_target_for_source(
+                metadata, root, census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+            )
+            commands = census._cargo_test_target_commands(
+                root, "/toolchain/bin/cargo", target or {}, "census_fixture_exact"
+            )
+
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertEqual(target["target_name"], "route-census-authorities")
+        self.assertEqual(target["required_features"], ["route-census-authorities"])
+        self.assertEqual(
+            commands,
+            (
+                [
+                    "/toolchain/bin/cargo", "test", "--manifest-path",
+                    str(root / "Cargo.toml"), "--test", "route-census-authorities",
+                    "--features", "route-census-authorities", "--no-run",
+                ],
+                [
+                    "/toolchain/bin/cargo", "test", "--manifest-path",
+                    str(root / "Cargo.toml"), "--test", "route-census-authorities",
+                    "--features", "route-census-authorities", "census_fixture_exact",
+                    "--", "--exact", "--nocapture",
+                ],
+            ),
+        )
+
+    def test_missing_extra_or_dependency_bearing_feature_is_rejected(self) -> None:
+        cases = (
+            ("missing_required_feature", [], []),
+            (
+                "extra_required_feature",
+                [census.ROUTE_CENSUS_AUTHORITY_FEATURE, "other-feature"],
+                [],
+            ),
+            (
+                "dependency_bearing_feature",
+                [census.ROUTE_CENSUS_AUTHORITY_FEATURE],
+                ["dep:extra-authority-dependency"],
+            ),
+        )
+        for name, required_features, route_feature in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                metadata = self._metadata_fixture(
+                    root,
+                    required_features=required_features,
+                    route_feature=route_feature,
+                )
+                if name == "extra_required_feature":
+                    package = metadata["packages"][0]  # type: ignore[index]
+                    package["features"]["other-feature"] = []  # type: ignore[index]
+                target = census._cargo_test_target_for_source(
+                    metadata, root, census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+                )
+                self.assertIsNone(target)
+
+    def test_missing_package_feature_or_default_activation_is_rejected(self) -> None:
+        cases = (
+            ("missing_package_feature", None, []),
+            (
+                "feature_enabled_by_default",
+                [],
+                [census.ROUTE_CENSUS_AUTHORITY_FEATURE],
+            ),
+        )
+        for name, feature_body, default_features in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                metadata = self._metadata_fixture(
+                    root,
+                    required_features=[census.ROUTE_CENSUS_AUTHORITY_FEATURE],
+                    route_feature=feature_body,
+                    default_features=default_features,
+                )
+                target = census._cargo_test_target_for_source(
+                    metadata, root, census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+                )
+                self.assertIsNone(target)
+
+    def test_wrong_target_path_or_name_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            wrong_path = self._metadata_fixture(
+                root,
+                required_features=[census.ROUTE_CENSUS_AUTHORITY_FEATURE],
+                route_feature=[],
+                source_relative="tests/route-census/other.rs",
+            )
+            wrong_name = self._metadata_fixture(
+                root,
+                required_features=[census.ROUTE_CENSUS_AUTHORITY_FEATURE],
+                route_feature=[],
+                target_name="ordinary-integration-tests",
+            )
+            self.assertIsNone(
+                census._cargo_test_target_for_source(
+                    wrong_path, root, census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+                )
+            )
+            self.assertIsNone(
+                census._cargo_test_target_for_source(
+                    wrong_name, root, census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+                )
+            )
+
+    def test_wrong_or_extra_cargo_feature_command_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            metadata = self._metadata_fixture(
+                root,
+                required_features=[census.ROUTE_CENSUS_AUTHORITY_FEATURE],
+                route_feature=[],
+            )
+            target = census._cargo_test_target_for_source(
+                metadata, root, census.ROUTE_CENSUS_AUTHORITY_SOURCE_PATH
+            )
+            self.assertIsNotNone(target)
+            assert target is not None
+            commands = census._cargo_test_target_commands(
+                root, "/toolchain/bin/cargo", target, "census_fixture_exact"
+            )
+            self.assertIsNotNone(commands)
+            assert commands is not None
+            expected_build, expected_run = commands
+            missing_feature = [arg for arg in expected_build if arg != "--features"]
+            missing_feature.remove(census.ROUTE_CENSUS_AUTHORITY_FEATURE)
+            extra_feature = [
+                *expected_run[:-5], "--features", "unexpected-feature", *expected_run[-5:]
+            ]
+
+        self.assertTrue(census._cargo_command_matches(expected_build, expected_build))
+        self.assertTrue(census._cargo_command_matches(expected_run, expected_run))
+        self.assertFalse(census._cargo_command_matches(missing_feature, expected_build))
+        self.assertFalse(census._cargo_command_matches(extra_feature, expected_run))
+
+
+def _valid_rejection_artifact_evidence_fixture(
+    root: Path,
+    *,
+    input_index: int = 1,
+    target_kind: str = "executable",
+) -> tuple[list[str], dict]:
+    scratch = root / "scratch" / f"input-{input_index:06d}"
+    output_path = scratch / ("out.so" if target_kind == "shared_library_probe" else "out")
+    mimi = root / "mimi"
+    mimi.parent.mkdir(parents=True, exist_ok=True)
+    if not mimi.exists():
+        mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        mimi.chmod(0o755)
+    mimi = mimi.resolve()
+    mimi_sha = census.sha256_file(mimi)
+    mimi_observation = {
+        "path": str(mimi), "resolved_path": str(mimi), "sha256": mimi_sha
+    }
+    mimi_identity = {
+        "path": str(mimi), "sha256_expected": mimi_sha,
+        "before": mimi_observation, "after": mimi_observation,
+        "matches_expected": True,
+    }
+    command = [str(mimi), "build", str(root / "case.mimi"), "-o", str(output_path)]
+    observation = {"path": str(output_path), "exists": False, "sha256": None}
+    evidence = {
+        "schema_version": 2,
+        "scratch": {
+            "path": str(scratch),
+            "input_index": input_index,
+            "existed_before": False,
+            "created_exclusively": True,
+            "output_absent_before_build": True,
+        },
+        "output_path": str(output_path),
+        "command_output_path": str(output_path),
+        "mimi_executable_identity": mimi_identity,
+        "before": dict(observation),
+        "after": dict(observation),
+    }
+    return command, evidence
+
+
+class RejectionArtifactEvidenceTests(unittest.TestCase):
+    def test_collector_emits_exact_output_path_and_absent_observation_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "case.mimi"
+            source_path.write_text("func main() { }\n", encoding="utf-8")
+            source = census.source_record(source_path, root)
+            entry = ExpectationContractTests._entry(
+                root,
+                "case.mimi",
+                source["sha256"],
+                expectation_class="expected_build_rejection",
+                expected_exit_code=1,
+            )
+            expected, _coverage = census.bind_expectations_to_inventory(
+                {"case.mimi": entry}, [source], root
+            )
+            scratch_root = root / "scratch"
+            scratch_root.mkdir()
+            logs_root = root / "logs"
+            logs_root.mkdir()
+            mimi = root / "mimi"
+            mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mimi.chmod(0o755)
+            completed = subprocess.CompletedProcess(
+                ["mimi", "build"],
+                1,
+                b"",
+                (
+                    b"error[E0432]: expected negative diagnostic\n"
+                    b"canonical MIR build rejected: expected diagnostic\n"
+                ),
+            )
+            with patch.object(census.subprocess, "run", return_value=completed):
+                record = census._run_one(
+                    root=root,
+                    source=source,
+                    index=1,
+                    mimi=mimi,
+                    mimi_sha256=census.sha256_file(mimi),
+                    timeout=5,
+                    scratch_root=scratch_root,
+                    logs_root=logs_root,
+                    expected=expected,
+                )
+            command = record["command"]
+            evidence = record["rejection_artifact_evidence"]
+            self.assertEqual(evidence["before"], {
+                "path": evidence["output_path"], "exists": False, "sha256": None
+            })
+            self.assertEqual(evidence["after"], evidence["before"])
+            self.assertTrue(
+                census._rejection_artifact_evidence_valid(
+                    evidence,
+                    command=command,
+                    input_index=record["input_index"],
+                    target_kind=record["target_kind"],
+                    mimi_identity=record["mimi_executable_identity"],
+                )
+            )
+
+    def test_path_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            command, evidence = _valid_rejection_artifact_evidence_fixture(Path(temporary))
+            evidence["command_output_path"] = str(Path(evidence["output_path"]).parent / "other")
+            self.assertFalse(
+                census._rejection_artifact_evidence_valid(
+                    evidence,
+                    command=command,
+                    input_index=1,
+                    target_kind="executable",
+                    mimi_identity=evidence["mimi_executable_identity"],
+                )
+            )
+
+    def test_preexisting_output_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            command, evidence = _valid_rejection_artifact_evidence_fixture(Path(temporary))
+            evidence["scratch"]["output_absent_before_build"] = False
+            evidence["before"]["exists"] = True
+            evidence["before"]["sha256"] = "a" * 64
+            self.assertFalse(
+                census._rejection_artifact_evidence_valid(
+                    evidence,
+                    command=command,
+                    input_index=1,
+                    target_kind="executable",
+                    mimi_identity=evidence["mimi_executable_identity"],
+                )
+            )
+
+    def test_missing_before_or_after_observation_is_rejected(self) -> None:
+        for missing_field in ("before", "after"):
+            with self.subTest(missing_field=missing_field), tempfile.TemporaryDirectory() as temporary:
+                command, evidence = _valid_rejection_artifact_evidence_fixture(Path(temporary))
+                del evidence[missing_field]
+                self.assertFalse(
+                    census._rejection_artifact_evidence_valid(
+                        evidence,
+                        command=command,
+                        input_index=1,
+                        target_kind="executable",
+                        mimi_identity=evidence["mimi_executable_identity"],
+                    )
+                )
 
 
 class WholeProgramRouteTests(unittest.TestCase):
@@ -2230,6 +2845,8 @@ class StrictGateTests(unittest.TestCase):
         sidecar_root_symlink: bool = False,
         owner_audit: dict | None = None,
         root: Path | None = None,
+        strict_check: bool = False,
+        omit_mimi_identity: bool = False,
     ) -> dict:
         actor_manifest = [
             {
@@ -2275,6 +2892,37 @@ class StrictGateTests(unittest.TestCase):
             "path_count": len(tracked_paths),
             "paths_sha256": census._manifest_paths_hash(tracked_paths),
         }
+        mimi_fixture_dir: tempfile.TemporaryDirectory[str] | None = None
+        command_records = [record for record in records if record.get("command") is not None]
+        if command_records:
+            record_identity = command_records[0].get("mimi_executable_identity")
+            if isinstance(record_identity, dict):
+                gate_mimi_identity = {
+                    "path": record_identity.get("path"),
+                    "sha256": record_identity.get("sha256_expected"),
+                    "before_authority_tests": record_identity.get("before"),
+                    "after_collection": record_identity.get("after"),
+                }
+            else:
+                gate_mimi_identity = {}
+        else:
+            mimi_fixture_dir = tempfile.TemporaryDirectory(
+                prefix="route-census-gate-mimi-"
+            )
+            mimi_fixture_path = Path(mimi_fixture_dir.name) / "mimi"
+            mimi_fixture_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mimi_fixture_path.chmod(0o755)
+            mimi_fixture_path = mimi_fixture_path.resolve(strict=True)
+            mimi_fixture_observation = census._executable_observation(
+                str(mimi_fixture_path)
+            )
+            mimi_fixture_sha256 = mimi_fixture_observation.get("sha256")
+            gate_mimi_identity = {
+                "path": str(mimi_fixture_path),
+                "sha256": mimi_fixture_sha256,
+                "before_authority_tests": mimi_fixture_observation,
+                "after_collection": mimi_fixture_observation,
+            }
         actor_contracts = census.actor_fixture_test_contracts(census.ROOT)
         actor_cargo_authority = census.cargo_test_toolchain_authority(census.ROOT)
         actor_cargo_observation = census._executable_observation(
@@ -2307,8 +2955,15 @@ class StrictGateTests(unittest.TestCase):
                 if isinstance(assertion, dict)
                 else None
             )
+            mimi_path = gate_mimi_identity.get("path")
+            mimi_sha256 = gate_mimi_identity.get("sha256")
+            marker = census._authority_mimi_identity_marker(
+                mimi_path if isinstance(mimi_path, str) else None,
+                mimi_sha256 if isinstance(mimi_sha256, str) else None,
+            )
             stdout = (
-                f"running 1 test\ntest {test_id} ... ok\n\n"
+                (marker + "\n" if marker is not None else "")
+                + f"running 1 test\ntest {test_id} ... ok\n\n"
                 "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
                 "0 filtered out; finished in 0.00s\n"
             ).encode()
@@ -2318,8 +2973,18 @@ class StrictGateTests(unittest.TestCase):
                 "authority_path": "tests/real_world_cli.rs",
                 "command": [
                     actor_cargo_authority["cargo"]["path"], "test", "--test",
-                    "real_world_cli", test_id, "--", "--exact"
+                    "real_world_cli", test_id, "--", "--exact", "--nocapture"
                 ],
+                "mimi_executable_identity": {
+                    "path": mimi_path,
+                    "sha256": mimi_sha256,
+                    "sha256_before": mimi_sha256,
+                    "sha256_after": mimi_sha256,
+                },
+                "mimi_environment_overrides": census._expected_mimi_environment_observation(
+                    mimi_path if isinstance(mimi_path, str) else None,
+                    mimi_sha256 if isinstance(mimi_sha256, str) else None,
+                ),
                 "cargo_toolchain_identity_sha256": actor_cargo_authority["identity_sha256"],
                 "cargo_execution": actor_cargo_execution,
                 "cwd": str(census.ROOT),
@@ -2351,6 +3016,7 @@ class StrictGateTests(unittest.TestCase):
             actor_execution,
             root=census.ROOT,
             cargo_authority=actor_cargo_authority,
+            mimi_identity=gate_mimi_identity,
         )
         owner_stdout = census._raw_capture(
             b"owner audit output\n", "legacy-owner-audit.stdout.bin"
@@ -2413,30 +3079,136 @@ class StrictGateTests(unittest.TestCase):
                 else:
                     assert isinstance(override, bytes)
                     (sidecar_write_root / name).write_bytes(override)
-            return census._gate_report(
-                all_records,
-                manifest,
-                True,
-                list(excluded_symlinks),
-                tracked,
-                actors,
-                owner_audit,
-                expectation_contract,
-                source_scope=source_scope,
-                logs_root=logs_root,
-                root=root or census.ROOT,
-                expected_rejection_source_root=effective_root or census.ROOT,
-                cargo_authority=actor_cargo_authority,
-                expected_rejection_cargo_authority=(
-                    census.cargo_test_toolchain_authority(effective_root or census.ROOT)
-                ),
-            )
+            try:
+                gate_report = census._gate_report(
+                    all_records,
+                    manifest,
+                    True,
+                    list(excluded_symlinks),
+                    tracked,
+                    actors,
+                    owner_audit,
+                    expectation_contract,
+                    source_scope=source_scope,
+                    logs_root=logs_root,
+                    root=root or census.ROOT,
+                    expected_rejection_source_root=effective_root or census.ROOT,
+                    cargo_authority=actor_cargo_authority,
+                    expected_rejection_cargo_authority=(
+                        census.cargo_test_toolchain_authority(
+                            effective_root or census.ROOT
+                        )
+                    ),
+                    mimi_identity=(
+                        None if omit_mimi_identity else gate_mimi_identity
+                    ),
+                    strict_check=strict_check,
+                )
+            finally:
+                if mimi_fixture_dir is not None:
+                    mimi_fixture_dir.cleanup()
+            return gate_report
 
     def test_gate_can_pass_only_for_exact_canonical_zero_fallback_roster(self) -> None:
-        gate = self._gate([], [])
+        gate = self._gate(
+            [],
+            [],
+            source_scope={"exactly_once": True},
+            expectation_contract={
+                "exact_bijection": True,
+                "duplicate_inventory_paths": [],
+                "invalid_source_hash_paths": [],
+                "invalid_authority_paths": [],
+                "authority_bundle_stable": True,
+            },
+        )
         self.assertTrue(gate["passed"])
         self.assertEqual(
             gate["canonical_success_inputs"], sorted(census.ACTOR_FALLBACK_INPUTS)
+        )
+
+    @staticmethod
+    def _complete_source_bound_contract() -> dict:
+        return {
+            "exact_bijection": True,
+            "duplicate_inventory_paths": [],
+            "invalid_source_hash_paths": [],
+            "invalid_authority_paths": [],
+            "authority_bundle_stable": True,
+        }
+
+    def test_strict_gate_requires_explicit_source_bound_inputs(self) -> None:
+        positive = self._gate(
+            [],
+            [],
+            source_scope={"exactly_once": True},
+            expectation_contract=self._complete_source_bound_contract(),
+            strict_check=True,
+        )
+        self.assertTrue(positive["passed"])
+        self.assertTrue(
+            positive["checks"]["all_required_source_bound_gate_inputs_are_present"]
+        )
+
+        missing_source_scope = self._gate(
+            [],
+            [],
+            expectation_contract=self._complete_source_bound_contract(),
+            strict_check=True,
+        )
+        self.assertFalse(
+            missing_source_scope["checks"]["source_scope_is_accounted_exactly_once"]
+        )
+        self.assertFalse(
+            missing_source_scope["checks"]["all_required_source_bound_gate_inputs_are_present"]
+        )
+
+        missing_identity = self._gate(
+            [],
+            [],
+            source_scope={"exactly_once": True},
+            expectation_contract=self._complete_source_bound_contract(),
+            strict_check=True,
+            omit_mimi_identity=True,
+        )
+        self.assertFalse(
+            missing_identity["checks"][
+                "mimi_binary_identity_is_stable_for_census_and_authorities"
+            ]
+        )
+        self.assertFalse(
+            missing_identity["checks"]["all_required_source_bound_gate_inputs_are_present"]
+        )
+
+        missing_contract = self._gate(
+            [], [], source_scope={"exactly_once": True}, strict_check=True
+        )
+        self.assertFalse(
+            missing_contract["checks"]["expectation_paths_exactly_biject_inventory"]
+        )
+        self.assertFalse(
+            missing_contract["checks"]["generated_authority_bundle_is_stable"]
+        )
+        self.assertFalse(
+            missing_contract["checks"]["all_required_source_bound_gate_inputs_are_present"]
+        )
+
+        missing_bundle_stability = self._complete_source_bound_contract()
+        del missing_bundle_stability["authority_bundle_stable"]
+        unstable_bundle_contract = self._gate(
+            [],
+            [],
+            source_scope={"exactly_once": True},
+            expectation_contract=missing_bundle_stability,
+            strict_check=True,
+        )
+        self.assertFalse(
+            unstable_bundle_contract["checks"]["generated_authority_bundle_is_stable"]
+        )
+        self.assertFalse(
+            unstable_bundle_contract["checks"][
+                "all_required_source_bound_gate_inputs_are_present"
+            ]
         )
 
     def test_gate_revalidates_owner_tuples_and_zero_accessor_count(self) -> None:
@@ -2513,6 +3285,108 @@ class StrictGateTests(unittest.TestCase):
         self.assertFalse(gate["checks"]["all_builds_succeeded_or_rejected_as_declared"])
         self.assertFalse(gate["checks"]["all_outcomes_match_expectations"])
         self.assertFalse(gate["checks"]["all_routes_are_canonical_or_authorized_rejections"])
+
+    def test_proven_source_diagnostic_stays_separate_and_route_markers_fail_closed(self) -> None:
+        path = "tests/a.mimi"
+
+        def source_diagnostic_record() -> dict:
+            record = self._record(path, route="rejected")
+            diagnostic = f"error[E0432] {census.ROOT / path}:2:1-2 unknown name\n"
+            record.update({
+                "run_status": "completed",
+                "exit_code": 1,
+                "route": {
+                    "disposition": "rejected",
+                    "classification_status": "inferred_pre_route_rejection",
+                    "observations": [],
+                    "route_marker_count": 0,
+                },
+                "failure_classification": {
+                    "class": "source_diagnostic",
+                    "status": "classified",
+                },
+                "per_function": {
+                    "named_roster_complete": False,
+                    "has_fallback": False,
+                },
+                "output_artifact": None,
+                "source_stable_for_input": True,
+                "source_diagnostic_artifact_evidence": {"before": {}, "after": {}},
+                "stdout_raw": census._raw_capture(b"", "source-diagnostic.stdout.bin"),
+                "stderr_raw": census._raw_capture(
+                    diagnostic.encode("utf-8"), "source-diagnostic.stderr.bin"
+                ),
+            })
+            record["expectation"] = {
+                "class": "expected_source_diagnostic",
+                "status": "matched",
+                "matched": True,
+                "explicit_expectation": True,
+                "source_hash_status": "matched",
+                "authority_valid": True,
+                "test_contract_valid": True,
+                "source_authority_valid": True,
+                "cargo_target_valid": True,
+                "test_execution_valid": True,
+                "expected": {"exit_code": 1},
+                "diagnostic_contract": {
+                    "valid": True,
+                    "diagnostic_codes_match_exactly": True,
+                    "diagnostic_lines_match_exactly": True,
+                    "diagnostic_text_matches_exactly": True,
+                    "stdout_empty": True,
+                    "unknown_or_extra_diagnostics_absent": True,
+                    "route_telemetry_absent": True,
+                    "fallback_markers_absent": True,
+                    "output_artifact_absent": True,
+                },
+            }
+            return record
+
+        with (
+            patch.object(
+                census,
+                "_expected_source_diagnostic_execution_proof_is_valid",
+                return_value=True,
+            ),
+            patch.object(
+                census,
+                "_rejection_artifact_evidence_valid",
+                return_value=True,
+            ),
+        ):
+            accepted = self._gate([path], [source_diagnostic_record()])
+            self.assertTrue(
+                accepted["checks"]["all_expected_source_diagnostics_are_proven_separately"]
+            )
+            self.assertTrue(
+                accepted["checks"]["all_expected_source_diagnostics_bind_exact_absent_output_paths"]
+            )
+            self.assertTrue(
+                accepted["checks"][
+                    "source_diagnostics_never_become_observed_route_rejections_or_canonical_rosters"
+                ]
+            )
+            self.assertEqual(accepted["passed_expected_source_diagnostics"], [path])
+            self.assertEqual(accepted["passed_expected_rejections"], [])
+            self.assertEqual(accepted["expected_negative_matches"], [])
+
+            forged = source_diagnostic_record()
+            forged["route"].update({
+                "classification_status": "observed",
+                "observations": [{"kind": "route_rejection"}],
+                "route_marker_count": 1,
+            })
+            forged["per_function"]["named_roster_complete"] = True
+            rejected = self._gate([path], [forged])
+            self.assertFalse(
+                rejected["checks"]["all_expected_source_diagnostics_are_proven_separately"]
+            )
+            self.assertFalse(
+                rejected["checks"][
+                    "source_diagnostics_never_become_observed_route_rejections_or_canonical_rosters"
+                ]
+            )
 
     def test_external_dependency_classification_still_fails_nonzero_build(self) -> None:
         record = self._record("tests/fixtures/v02_app/w4_loopback_service.mimi")
@@ -2737,6 +3611,15 @@ class StrictGateTests(unittest.TestCase):
 
 class ExpectationContractTests(unittest.TestCase):
     @staticmethod
+    def _mimi_identity(root: Path) -> tuple[str, str]:
+        mimi = root / "target" / "debug" / "mimi"
+        mimi.parent.mkdir(parents=True, exist_ok=True)
+        mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        mimi.chmod(0o755)
+        mimi = mimi.resolve()
+        return str(mimi), census.sha256_file(mimi)
+
+    @staticmethod
     def _entry(
         root: Path,
         source_path: str,
@@ -2746,20 +3629,46 @@ class ExpectationContractTests(unittest.TestCase):
         expected_exit_code: int | None = None,
     ) -> dict:
         is_rejection = expectation_class == "expected_build_rejection"
+        is_source_diagnostic = expectation_class == "expected_source_diagnostic"
         assertion_relative_path = (
             "tests/route_contract.rs"
-            if expectation_class in {"required_compile", "expected_build_rejection"}
+            if expectation_class in {
+                "required_compile", "expected_build_rejection", "expected_source_diagnostic"
+            }
             else "tests/route_contract.py"
         )
         assertion_path = root / assertion_relative_path
         assertion_path.parent.mkdir(parents=True, exist_ok=True)
-        if expectation_class in {"required_compile", "expected_build_rejection"} and not (root / "Cargo.toml").exists():
+        if expectation_class in {
+            "required_compile", "expected_build_rejection", "expected_source_diagnostic"
+        } and not (root / "Cargo.toml").exists():
             (root / "Cargo.toml").write_text(
                 '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
                 encoding="utf-8",
             )
         test_id = "test_route_contract"
-        if is_rejection:
+        if is_source_diagnostic:
+            diagnostic_text = (
+                f"error[E0432] {root / source_path}:2:3-8 unknown name 'absent'\n"
+                "error: type checking failed\n"
+            )
+            output_path = census._source_diagnostic_authority_output_path(
+                source_path, source_sha256
+            )
+            source, assertion_line = census._render_expected_source_diagnostic_test(
+                test_id=test_id,
+                source_path=source_path,
+                source_sha256=source_sha256,
+                expected_exit_code=(
+                    expected_exit_code if expected_exit_code is not None else 1
+                ),
+                target_kind="executable",
+                output_path=output_path,
+                expected_diagnostic_text=diagnostic_text,
+                root=root,
+            )
+            assertion_path.write_text(source, encoding="utf-8")
+        elif is_rejection:
             fixture_path = "".join(
                 f'.join({json.dumps(part)})' for part in Path(source_path).parts
             )
@@ -2768,12 +3677,13 @@ class ExpectationContractTests(unittest.TestCase):
                 f"fn {test_id}() {{\n"
                 "    let fixture = ::std::path::Path::new(::std::env!(\"CARGO_MANIFEST_DIR\"))"
                 f"{fixture_path};\n"
-                "    let result = ::std::process::Command::new(::std::env!(\"CARGO_BIN_EXE_mimi\"))\n"
+                "    let result = ::std::process::Command::new(route_census_mimi_path())\n"
                 "        .current_dir(::std::env!(\"CARGO_MANIFEST_DIR\"))\n"
                 '        .arg("build")\n'
                 "        .arg(&fixture)\n"
                 '        .arg("-o")\n'
                 '        .arg("route-contract-output")\n'
+                '        .env("MIMI_ROUTE_CENSUS", "1")\n'
                 "        .output()\n"
                 '        .expect("failed to execute fixture build");\n'
                 "    ::std::assert!(!result.status.success());\n"
@@ -2784,7 +3694,7 @@ class ExpectationContractTests(unittest.TestCase):
                 "}\n",
                 encoding="utf-8",
             )
-            assertion_line = 14
+            assertion_line = 15
         elif expectation_class == "required_compile":
             fixture_path = "".join(
                 f'.join({json.dumps(part)})' for part in Path(source_path).parts
@@ -2794,7 +3704,7 @@ class ExpectationContractTests(unittest.TestCase):
                 f"fn {test_id}() {{\n"
                 "    let fixture = ::std::path::Path::new(::std::env!(\"CARGO_MANIFEST_DIR\"))"
                 f"{fixture_path};\n"
-                "    let result = ::std::process::Command::new(::std::env!(\"CARGO_BIN_EXE_mimi\"))\n"
+                "    let result = ::std::process::Command::new(route_census_mimi_path())\n"
                 "        .current_dir(::std::env!(\"CARGO_MANIFEST_DIR\"))\n"
                 '        .arg("build")\n'
                 "        .arg(&fixture)\n"
@@ -2845,6 +3755,18 @@ class ExpectationContractTests(unittest.TestCase):
             entry["expected_route_classification_status"] = "observed"
             entry["expected_route_reason"] = "expected diagnostic"
             entry["expected_failure_class"] = "capability"
+        if is_source_diagnostic:
+            entry.update({
+                "expected_exit_code": (
+                    expected_exit_code if expected_exit_code is not None else 1
+                ),
+                "expected_diagnostic_codes": ["E0432"],
+                "expected_diagnostic_lines": census._source_diagnostic_lines(
+                    diagnostic_text
+                ),
+                "expected_diagnostic_text": diagnostic_text,
+                "expected_output_path": output_path,
+            })
         return entry
 
     def _load_and_bind(
@@ -2872,12 +3794,14 @@ class ExpectationContractTests(unittest.TestCase):
         target_source: Path | None = None,
         target_kind: str = "test",
         run_stdout: bytes | None = None,
+        expectation_class: str = "expected_build_rejection",
     ) -> dict:
         logs = root / "authority-logs"
         logs.mkdir(exist_ok=True)
+        mimi_identity = self._mimi_identity(root)
         first = next(
             item for item in bound.values()
-            if item.get("class") == "expected_build_rejection"
+            if item.get("class") == expectation_class
         )
         authority_path = root / first["authority"]["assertion"]["path"]
         source_path = target_source or authority_path
@@ -2889,6 +3813,7 @@ class ExpectationContractTests(unittest.TestCase):
             "kind": kind,
             "crate_types": ["bin"],
             "test": target_kind == "test",
+            "required-features": None,
             "doc": False,
         }
         package_id = "fixture 0.1.0 (path+file:///fixture)"
@@ -2924,13 +3849,23 @@ class ExpectationContractTests(unittest.TestCase):
                     "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
                     "0 filtered out; finished in 0.00s\n"
                 ).encode("utf-8")
+            marker = census._authority_mimi_identity_marker(*mimi_identity)
+            assert marker is not None
+            stdout = marker.encode("utf-8") + b"\n" + stdout
             return subprocess.CompletedProcess(command, 0, stdout, b"")
 
         cargo_authority = census.cargo_test_toolchain_authority(root)
+        runner = (
+            census._run_source_diagnostic_authority_tests
+            if expectation_class == "expected_source_diagnostic"
+            else census._run_expected_rejection_authority_tests
+        )
         with patch.object(census.subprocess, "run", side_effect=fake_run):
-            result = census._run_expected_rejection_authority_tests(
+            result = runner(
                 root, logs, sources, bound, timeout=5,
                 cargo_authority=cargo_authority,
+                mimi_path=mimi_identity[0],
+                mimi_sha256=mimi_identity[1],
             )
         return result
 
@@ -2942,6 +3877,7 @@ class ExpectationContractTests(unittest.TestCase):
     ) -> dict:
         logs = root / "required-compile-authority-logs"
         logs.mkdir(exist_ok=True)
+        mimi_identity = self._mimi_identity(root)
         first = next(
             item for item in bound.values()
             if item.get("class") == "required_compile"
@@ -2953,6 +3889,7 @@ class ExpectationContractTests(unittest.TestCase):
             "kind": ["test"],
             "crate_types": ["bin"],
             "test": True,
+            "required-features": None,
             "doc": False,
         }
         package_id = "fixture 0.1.0 (path+file:///fixture)"
@@ -2984,6 +3921,9 @@ class ExpectationContractTests(unittest.TestCase):
                 "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
                 "0 filtered out; finished in 0.00s\n"
             ).encode("utf-8")
+            marker = census._authority_mimi_identity_marker(*mimi_identity)
+            assert marker is not None
+            stdout = marker.encode("utf-8") + b"\n" + stdout
             return subprocess.CompletedProcess(command, 0, stdout, b"")
 
         cargo_authority = census.cargo_test_toolchain_authority(root)
@@ -2991,7 +3931,23 @@ class ExpectationContractTests(unittest.TestCase):
             return census._run_required_compile_authority_tests(
                 root, logs, sources, bound, timeout=5,
                 cargo_authority=cargo_authority,
+                mimi_path=mimi_identity[0],
+                mimi_sha256=mimi_identity[1],
             )
+
+    def _attach_valid_rejection_artifact_evidence(
+        self, record: dict, root: Path, source_path: str, *, input_index: int = 1
+    ) -> None:
+        target_kind = "executable"
+        command, evidence = _valid_rejection_artifact_evidence_fixture(
+            root, input_index=input_index, target_kind=target_kind
+        )
+        command[2] = str(root / source_path)
+        record["input_index"] = input_index
+        record["target_kind"] = target_kind
+        record["command"] = command
+        record["rejection_artifact_evidence"] = evidence
+        record["mimi_executable_identity"] = evidence["mimi_executable_identity"]
 
     def _valid_expected_rejection_record(
         self, root: Path, source_path: str = "case.mimi"
@@ -3041,6 +3997,7 @@ class ExpectationContractTests(unittest.TestCase):
             "reason": "compiler reported an explicit Canonical/native capability rejection",
         }
         record["expectation"] = result
+        self._attach_valid_rejection_artifact_evidence(record, root, source_path)
         self.assertEqual(authority_execution["status"], "passed")
         return source, record, coverage, bound
 
@@ -3062,6 +4019,7 @@ class ExpectationContractTests(unittest.TestCase):
             scratch.mkdir()
             logs = root / "logs"
             logs.mkdir()
+            mimi, mimi_sha256 = _write_test_mimi(root)
 
             def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
                 output_path = Path(command[-1])
@@ -3086,7 +4044,8 @@ class ExpectationContractTests(unittest.TestCase):
                     root=root,
                     source=source,
                     index=1,
-                    mimi=root / "mimi",
+                    mimi=mimi,
+                    mimi_sha256=mimi_sha256,
                     timeout=5,
                     scratch_root=scratch,
                     logs_root=logs,
@@ -3256,6 +4215,36 @@ class ExpectationContractTests(unittest.TestCase):
         self.assertTrue(result["matched"])
         self.assertTrue(coverage["exact_bijection"])
 
+    def test_source_diagnostic_authority_and_collector_use_plain_text_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            source = census.source_record(fixture, root)
+            output_path = census._source_diagnostic_authority_output_path(
+                "case.mimi", source["sha256"]
+            )
+            diagnostic_text = (
+                f"error[E0432] {fixture}:2:3-8 unknown name 'absent'\n"
+                "error: type checking failed\n"
+            )
+            authority, _line = census._render_expected_source_diagnostic_test(
+                test_id="test_plain_source_diagnostic",
+                source_path="case.mimi",
+                source_sha256=source["sha256"],
+                expected_exit_code=1,
+                target_kind="executable",
+                output_path=output_path,
+                expected_diagnostic_text=diagnostic_text,
+                root=root,
+            )
+
+        self.assertIn('.env("NO_COLOR", "1")', authority)
+        self.assertIn(
+            'env["NO_COLOR"] = "1"', inspect.getsource(census._run_one)
+        )
+        self.assertIn('"NO_COLOR": "1"', inspect.getsource(census.toolchain_manifest))
+
     def test_expected_rejection_schema_requires_disposition_reason_and_failure(self) -> None:
         required_fields = (
             "expected_route_disposition",
@@ -3306,6 +4295,7 @@ class ExpectationContractTests(unittest.TestCase):
             classes = [
                 "required_compile",
                 "expected_build_rejection",
+                "expected_source_diagnostic",
                 "interpreter_only",
                 "known_gap",
                 "unmapped",
@@ -3324,6 +4314,7 @@ class ExpectationContractTests(unittest.TestCase):
                 else:
                     expected_code = 1 if expectation_class in {
                         "expected_build_rejection",
+                        "expected_source_diagnostic",
                         "environment_failure",
                     } else None
                     inputs[name] = self._entry(
@@ -3497,8 +4488,18 @@ class ExpectationContractTests(unittest.TestCase):
                 "status": "classified",
                 "reason": "compiler reported an explicit Canonical/native capability rejection",
             }
+            self._attach_valid_rejection_artifact_evidence(record, root, "case.mimi")
             gate = StrictGateTests._gate(
-                ["case.mimi"], [record]
+                ["case.mimi"],
+                [record],
+                source_scope={"exactly_once": True},
+                expectation_contract={
+                    "exact_bijection": True,
+                    "duplicate_inventory_paths": [],
+                    "invalid_source_hash_paths": [],
+                    "invalid_authority_paths": [],
+                    "authority_bundle_stable": True,
+                },
             )
 
         self.assertTrue(result["matched"])
@@ -3515,6 +4516,301 @@ class ExpectationContractTests(unittest.TestCase):
         self.assertTrue(gate["checks"]["all_routes_are_canonical_or_authorized_rejections"])
         self.assertTrue(gate["checks"]["all_builds_succeeded_or_rejected_as_declared"])
         self.assertTrue(gate["passed"])
+
+    def test_source_diagnostic_is_source_bound_and_runs_its_exact_cargo_test(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            source = census.source_record(fixture, root)
+            entry = self._entry(
+                root,
+                "case.mimi",
+                source["sha256"],
+                expectation_class="expected_source_diagnostic",
+                expected_exit_code=1,
+            )
+            bound, coverage = self._load_and_bind(root, {"case.mimi": entry}, [source])
+            execution = self._execute_authority_tests(
+                root,
+                [source],
+                bound,
+                expectation_class="expected_source_diagnostic",
+            )
+            item = bound["case.mimi"]
+            stderr = item["expected_diagnostic_text"].encode("utf-8")
+            route = census._route_observation("", stderr.decode(), 1, "completed")
+            failure = census._failure_classification(
+                run_status="completed",
+                exit_code=1,
+                text=stderr.decode(),
+                target_kind="executable",
+                route=route,
+            )
+            result = census._expectation_result(
+                "case.mimi",
+                1,
+                route,
+                bound,
+                run_status="completed",
+                failure_classification=failure,
+                captured_output=stderr,
+                captured_stdout=b"",
+                captured_stderr=stderr,
+                output_artifact=None,
+            )
+            source_test = (
+                root / entry["authority"]["assertion"]["path"]
+            ).read_text(encoding="utf-8")
+
+        self.assertEqual(item["source_hash_status"], "matched")
+        self.assertTrue(item["test_contract_valid"])
+        self.assertTrue(item["source_authority_valid"])
+        self.assertTrue(item["test_execution_valid"])
+        self.assertEqual(execution["authority_class"], "expected_source_diagnostic")
+        self.assertEqual(execution["status"], "passed")
+        self.assertEqual(
+            item["test_execution_proof"]["exact_test_run"]["command"][-4:],
+            ["test_route_contract", "--", "--exact", "--nocapture"],
+        )
+        self.assertEqual(
+            item["test_execution_proof"]["source_diagnostic_output_path"],
+            entry["expected_output_path"],
+        )
+        self.assertIn("::std::assert_eq!(output.status.code(), Some(1));", source_test)
+        self.assertIn(
+            "::std::assert_eq!(output.stderr.as_slice(), expected_stderr.as_slice());",
+            source_test,
+        )
+        self.assertNotIn("String::from_utf8_lossy(&output.stderr)", source_test)
+        self.assertTrue(result["matched"])
+        self.assertEqual(result["class"], "expected_source_diagnostic")
+        self.assertEqual(result["actual_route_classification_status"], "inferred_pre_route_rejection")
+        self.assertEqual(result["actual_failure_class"], "source_diagnostic")
+        self.assertTrue(coverage["exact_bijection"])
+
+    def test_source_diagnostic_authority_compares_utf8_bytes_without_replacement_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            source = census.source_record(fixture, root)
+            diagnostic_text = (
+                f"error[E0432] {fixture}:2:3-8 unknown name '\uFFFD'\n"
+                "error: type checking failed\n"
+            )
+            output_path = census._source_diagnostic_authority_output_path(
+                "case.mimi", source["sha256"]
+            )
+            authority_source, _assertion_line = (
+                census._render_expected_source_diagnostic_test(
+                    test_id="test_exact_utf8_diagnostic",
+                    source_path="case.mimi",
+                    source_sha256=source["sha256"],
+                    expected_exit_code=7,
+                    target_kind="executable",
+                    output_path=output_path,
+                    expected_diagnostic_text=diagnostic_text,
+                    root=root,
+                )
+            )
+            expected_bytes = diagnostic_text.encode("utf-8")
+            invalid_bytes = expected_bytes.replace("\uFFFD".encode("utf-8"), b"\xff", 1)
+
+        self.assertEqual(invalid_bytes.decode("utf-8", errors="replace"), diagnostic_text)
+        self.assertNotEqual(invalid_bytes, expected_bytes)
+        self.assertIn("::std::assert_eq!(output.status.code(), Some(7));", authority_source)
+        self.assertIn(".into_bytes();", authority_source)
+        self.assertIn(
+            "::std::assert_eq!(output.stderr.as_slice(), expected_stderr.as_slice());",
+            authority_source,
+        )
+        self.assertNotIn("String::from_utf8_lossy(&output.stderr)", authority_source)
+        self.assertTrue(expected_bytes == diagnostic_text.encode("utf-8"))
+
+    def test_source_diagnostic_rejects_extra_diagnostics_route_markers_fallback_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            source = census.source_record(fixture, root)
+            entry = self._entry(
+                root,
+                "case.mimi",
+                source["sha256"],
+                expectation_class="expected_source_diagnostic",
+                expected_exit_code=1,
+            )
+            bound, _coverage = self._load_and_bind(root, {"case.mimi": entry}, [source])
+            self._execute_authority_tests(
+                root,
+                [source],
+                bound,
+                expectation_class="expected_source_diagnostic",
+            )
+            item = bound["case.mimi"]
+            expected_text = item["expected_diagnostic_text"].encode("utf-8")
+            cases = {
+                "extra_diagnostic": (
+                    expected_text
+                    + f"error[E9999] {fixture}:8:1-2 unexpected extra error\n".encode()
+                , b"", None),
+                "route_marker": (
+                    expected_text + b"default Canonical MIR route rejected: wrong\n",
+                    b"", None),
+                "fallback_marker": (
+                    expected_text + b"warning: legacy fallback used\n",
+                    b"", None),
+                "stdout_diagnostic": (expected_text, b"unexpected stdout\n", None),
+                "output_artifact": (expected_text, b"", {"sha256": "f" * 64, "bytes": 1}),
+            }
+            for label, (stderr_bytes, stdout_bytes, output_artifact) in cases.items():
+                with self.subTest(label=label):
+                    route = census._route_observation(
+                        stdout_bytes.decode(), stderr_bytes.decode(), 1, "completed"
+                    )
+                    failure = census._failure_classification(
+                        run_status="completed",
+                        exit_code=1,
+                        text=stderr_bytes.decode() + stdout_bytes.decode(),
+                        target_kind="executable",
+                        route=route,
+                    )
+                    result = census._expectation_result(
+                        "case.mimi",
+                        1,
+                        route,
+                        bound,
+                        run_status="completed",
+                        failure_classification=failure,
+                        captured_output=stdout_bytes + b"\n" + stderr_bytes,
+                        captured_stdout=stdout_bytes,
+                        captured_stderr=stderr_bytes,
+                        output_artifact=output_artifact,
+                    )
+                    self.assertFalse(result["matched"])
+
+    def test_source_diagnostic_schema_rejects_route_rejection_semantics_and_stale_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            source = census.source_record(fixture, root)
+            entry = self._entry(
+                root,
+                "case.mimi",
+                source["sha256"],
+                expectation_class="expected_source_diagnostic",
+                expected_exit_code=1,
+            )
+            expectation_path = root / "expectations.json"
+            expectation_path.write_text(
+                json.dumps({"schema_version": census.EXPECTATION_SCHEMA_VERSION,
+                            "inputs": {"case.mimi": {**entry, "expected_failure_class": "capability"}}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "cannot claim observed route-rejection"):
+                census.load_expectations(expectation_path, root)
+
+            wrong_diagnostic_source = json.loads(json.dumps(entry))
+            wrong_diagnostic_source["expected_diagnostic_text"] = (
+                entry["expected_diagnostic_text"].replace(
+                    str(fixture), str(root / "elsewhere.mimi")
+                )
+            )
+            wrong_diagnostic_source["expected_diagnostic_lines"] = (
+                census._source_diagnostic_lines(
+                    wrong_diagnostic_source["expected_diagnostic_text"]
+                )
+            )
+            expectation_path.write_text(
+                json.dumps({"schema_version": census.EXPECTATION_SCHEMA_VERSION,
+                            "inputs": {"case.mimi": wrong_diagnostic_source}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "bound to its exact input"):
+                census.load_expectations(expectation_path, root)
+
+            forged_output_path = json.loads(json.dumps(entry))
+            forged_output_path["expected_output_path"] = (
+                "target/route-census-source-diagnostic-forged.out"
+            )
+            expectation_path.write_text(
+                json.dumps({"schema_version": census.EXPECTATION_SCHEMA_VERSION,
+                            "inputs": {"case.mimi": forged_output_path}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "deterministic isolated source-diagnostic path"):
+                census.load_expectations(expectation_path, root)
+
+            forged_fixture_path = json.loads(json.dumps(entry))
+            assertion_file = root / forged_fixture_path["authority"]["assertion"]["path"]
+            assertion_text = assertion_file.read_text(encoding="utf-8")
+            self.assertIn('.join("case.mimi")', assertion_text)
+            assertion_file.write_text(
+                assertion_text.replace(
+                    '.join("case.mimi")', '.join("elsewhere.mimi")', 1
+                ),
+                encoding="utf-8",
+            )
+            forged_fixture_path["authority"]["assertion"]["sha256"] = (
+                census.sha256_file(assertion_file)
+            )
+            expectation_path.write_text(
+                json.dumps({"schema_version": census.EXPECTATION_SCHEMA_VERSION,
+                            "inputs": {"case.mimi": forged_fixture_path}}),
+                encoding="utf-8",
+            )
+            declared_fixture_path, _identity = census.load_expectations(
+                expectation_path, root
+            )
+            bound_fixture_path, coverage_fixture_path = (
+                census.bind_expectations_to_inventory(
+                    declared_fixture_path, [source], root
+                )
+            )
+            self.assertFalse(bound_fixture_path["case.mimi"]["test_contract_valid"])
+            self.assertFalse(bound_fixture_path["case.mimi"]["source_authority_valid"])
+            self.assertEqual(
+                coverage_fixture_path["invalid_authority_paths"], ["case.mimi"]
+            )
+
+            stale = dict(entry)
+            stale_sha = "0" * 64
+            stale["source_sha256"] = stale_sha
+            stale_output_path = census._source_diagnostic_authority_output_path(
+                "case.mimi", stale_sha
+            )
+            stale_source, stale_assertion_line = (
+                census._render_expected_source_diagnostic_test(
+                    test_id=stale["authority"]["test_id"],
+                    source_path="case.mimi",
+                    source_sha256=stale_sha,
+                    expected_exit_code=stale["expected_exit_code"],
+                    target_kind="executable",
+                    output_path=stale_output_path,
+                    expected_diagnostic_text=stale["expected_diagnostic_text"],
+                    root=root,
+                )
+            )
+            assertion_file = root / stale["authority"]["assertion"]["path"]
+            assertion_file.write_text(stale_source, encoding="utf-8")
+            stale["authority"]["assertion"]["line"] = stale_assertion_line
+            stale["authority"]["assertion"]["sha256"] = census.sha256_file(
+                assertion_file
+            )
+            stale["expected_output_path"] = stale_output_path
+            expectation_path.write_text(
+                json.dumps({"schema_version": census.EXPECTATION_SCHEMA_VERSION,
+                            "inputs": {"case.mimi": stale}}),
+                encoding="utf-8",
+            )
+            declared, _identity = census.load_expectations(expectation_path, root)
+            bound, coverage = census.bind_expectations_to_inventory(declared, [source], root)
+            self.assertEqual(bound["case.mimi"]["source_hash_status"], "mismatch")
+            self.assertTrue(bound["case.mimi"]["source_authority_valid"])
+            self.assertFalse(bound["case.mimi"]["authority_valid"])
+            self.assertEqual(coverage["invalid_source_hash_paths"], ["case.mimi"])
 
     def test_expected_rejection_requires_exact_observed_route_and_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3707,6 +5003,18 @@ class ExpectationContractTests(unittest.TestCase):
                     "true",
                 ),
                 "unexecuted_command": valid_text.replace(".output()", ".status()"),
+                "missing_route_telemetry": valid_text.replace(
+                    '        .env("MIMI_ROUTE_CENSUS", "1")\n', ""
+                ),
+                "wrong_route_telemetry_value": valid_text.replace(
+                    '.env("MIMI_ROUTE_CENSUS", "1")',
+                    '.env("MIMI_ROUTE_CENSUS", "true")',
+                ),
+                "duplicate_route_telemetry": valid_text.replace(
+                    '        .env("MIMI_ROUTE_CENSUS", "1")\n',
+                    '        .env("MIMI_ROUTE_CENSUS", "1")\n'
+                    '        .env("MIMI_ROUTE_CENSUS", "1")\n',
+                ),
                 "unqualified_command": valid_text.replace(
                     "::std::process::Command", "Command"
                 ).replace(
@@ -4028,6 +5336,7 @@ class ExpectationContractTests(unittest.TestCase):
             scratch.mkdir()
             logs = root / "logs"
             logs.mkdir()
+            mimi, mimi_sha256 = _write_test_mimi(root)
 
             def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
                 Path(command[-1]).write_bytes(b"rejected-build-output")
@@ -4046,7 +5355,8 @@ class ExpectationContractTests(unittest.TestCase):
                     root=root,
                     source=source,
                     index=1,
-                    mimi=root / "mimi",
+                    mimi=mimi,
+                    mimi_sha256=mimi_sha256,
                     timeout=5,
                     scratch_root=scratch,
                     logs_root=logs,
@@ -4081,6 +5391,7 @@ class ExpectationContractTests(unittest.TestCase):
             source_path = root / "interpreter.mimi"
             source_path.write_text("func main() { }\n", encoding="utf-8")
             source = census.source_record(source_path, root)
+            mimi, mimi_sha256 = _write_test_mimi(root)
             entry = self._entry(
                 root,
                 "interpreter.mimi",
@@ -4098,7 +5409,8 @@ class ExpectationContractTests(unittest.TestCase):
                     root=root,
                     source=source,
                     index=1,
-                    mimi=root / "mimi",
+                    mimi=mimi,
+                    mimi_sha256=mimi_sha256,
                     timeout=5,
                     scratch_root=scratch,
                     logs_root=logs,
@@ -4167,6 +5479,7 @@ class RawCaptureTests(unittest.TestCase):
                 + b"\n"
             )
             source = census.source_record(source_path, root)
+            mimi, mimi_sha256 = _write_test_mimi(root)
 
             def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
                 env = kwargs["env"]
@@ -4179,7 +5492,8 @@ class RawCaptureTests(unittest.TestCase):
                     root=root,
                     source=source,
                     index=1,
-                    mimi=root / "mimi",
+                    mimi=mimi,
+                    mimi_sha256=mimi_sha256,
                     timeout=5,
                     scratch_root=scratch,
                     logs_root=logs,
@@ -4251,6 +5565,242 @@ class RawCaptureTests(unittest.TestCase):
 
 
 class CollectionPathTests(unittest.TestCase):
+    def test_collect_forwards_its_authority_mimi_identity_to_the_production_gate_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            mimi = root / "mimi"
+            mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mimi.chmod(0o755)
+            mimi = mimi.resolve(strict=True)
+            mimi_sha256 = census.sha256_file(mimi)
+            source = census.source_record(fixture, root)
+            tracked_inventory = {
+                "status": "available",
+                "path_count": 0,
+                "paths_sha256": census._manifest_paths_hash([]),
+            }
+            cargo_authority = {"identity_sha256": "d" * 64, "cargo": {}, "rustc": {}}
+            expectation_contract = {
+                "exact_bijection": True,
+                "missing_paths": [],
+                "extra_paths": [],
+                "duplicate_inventory_paths": [],
+                "invalid_source_hash_paths": [],
+                "invalid_authority_paths": [],
+            }
+            expectations = {source["path"]: {"class": "unmapped"}}
+            record = {
+                **source,
+                "input_index": 1,
+                "candidate_classification": "unmapped",
+                "run_status": "completed",
+                "failure_classification": {"class": "none"},
+                "route": {"disposition": "unobserved", "classification_status": "not_run"},
+                "expectation": {"class": "unmapped", "matched": False},
+                "per_function": {"named_roster_complete": False},
+                "source_stable_for_input": True,
+            }
+            args = census.parse_args([
+                "--root", str(root),
+                "--mimi", str(mimi),
+                "--output", str(root / "report.json"),
+                "--artifacts", str(root / "artifacts"),
+            ])
+
+            with (
+                patch.object(census, "tracked_mimi_paths", return_value=([], tracked_inventory)),
+                patch.object(
+                    census,
+                    "enumerate_source_scope",
+                    return_value=([source], [], {"exactly_once": True}),
+                ),
+                patch.object(census, "enumerate_sources", return_value=[source]),
+                patch.object(census, "source_symlink_exclusions", return_value=[]),
+                patch.object(census, "tracked_symlink_parent_blockers", return_value=[]),
+                patch.object(census, "source_snapshot", return_value={"snapshot_id": "fixed"}),
+                patch.object(census, "actor_fixture_test_contracts", return_value={}),
+                patch.object(census, "load_expectations", return_value=({}, {"path": None, "sha256": None})),
+                patch.object(
+                    census,
+                    "bind_expectations_to_inventory",
+                    return_value=(expectations, expectation_contract),
+                ),
+                patch.object(census, "cargo_test_toolchain_authority", return_value=cargo_authority),
+                patch.object(
+                    census,
+                    "toolchain_manifest",
+                    return_value={
+                        "mimi": {"path": str(mimi), "sha256": mimi_sha256},
+                        "cargo": {},
+                        "rustc": {},
+                    },
+                ),
+                patch.object(census, "repository_identity", return_value={}),
+                patch.object(census, "_collect_legacy_owner_audit", return_value={}),
+                patch.object(
+                    census,
+                    "_run_actor_authority_tests",
+                    return_value={"status": "stubbed", "cases": []},
+                ),
+                patch.object(
+                    census,
+                    "_run_expected_rejection_authority_tests",
+                    return_value={"status": "stubbed", "cases": []},
+                ),
+                patch.object(
+                    census,
+                    "_run_source_diagnostic_authority_tests",
+                    return_value={"status": "stubbed", "cases": []},
+                ),
+                patch.object(
+                    census,
+                    "_run_required_compile_authority_tests",
+                    return_value={"status": "stubbed", "cases": []},
+                ),
+                patch.object(
+                    census,
+                    "_actor_fallback_evidence",
+                    return_value={"missing_cases": []},
+                ),
+                patch.object(
+                    census,
+                    "_run_bounded_parallel_ordered",
+                    return_value=([record], False),
+                ),
+                patch.object(
+                    census,
+                    "_gate_report",
+                    return_value={"passed": False, "checks": {}},
+                ) as gate_report,
+            ):
+                status = census.collect(args)
+                report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(gate_report.call_count, 1)
+        self.assertEqual(
+            gate_report.call_args.kwargs["mimi_identity"],
+            report["authority_mimi_identity"],
+        )
+        self.assertEqual(report["authority_mimi_identity"]["path"], str(mimi))
+        self.assertEqual(report["authority_mimi_identity"]["sha256"], mimi_sha256)
+
+    def test_authority_bundle_can_be_paired_with_independent_expectations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = census.parse_args([
+                "--root", str(root),
+                "--mimi", str(root / "mimi"),
+                "--output", str(root / "report.json"),
+                "--authority-bundle", str(root / "bundle"),
+                "--expectations", str(root / "expectations-v4.json"),
+                "--check",
+            ])
+
+        self.assertTrue(args.check)
+        self.assertTrue(args.authority_bundle)
+        self.assertTrue(args.expectations)
+
+    def test_strict_check_rejects_zero_blocker_bootstrap_authority_bundle(self) -> None:
+        with self.assertRaisesRegex(ValueError, "bootstrap_observation bundles are observation-only"):
+            census._require_strict_authority_bundle_for_check(
+                {
+                    "generation_mode": "bootstrap_observation",
+                    "bootstrap_blocker_count": 0,
+                },
+                check=True,
+            )
+
+    def test_collect_check_rejects_bootstrap_bundle_before_authority_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            mimi = root / "mimi"
+            mimi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            mimi.chmod(0o755)
+            source = census.source_record(fixture, root)
+            args = census.parse_args([
+                "--root", str(root),
+                "--mimi", str(mimi),
+                "--output", str(root / "check.json"),
+                "--authority-bundle", str(root / "bundle"),
+                "--check",
+            ])
+            with (
+                patch.object(census, "tracked_mimi_paths", return_value=([], {"status": "available"})),
+                patch.object(
+                    census,
+                    "enumerate_source_scope",
+                    return_value=([source], [], {"exactly_once": True}),
+                ),
+                patch.object(
+                    census,
+                    "_validate_route_authority_bundle",
+                    return_value={
+                        "generation_mode": "bootstrap_observation",
+                        "bootstrap_blocker_count": 0,
+                    },
+                ),
+                patch.object(
+                    census,
+                    "_run_actor_authority_tests",
+                    side_effect=AssertionError("bootstrap bundle must be rejected before Cargo"),
+                ) as authority_tests,
+            ):
+                with self.assertRaisesRegex(ValueError, "bootstrap_observation bundles are observation-only"):
+                    census.collect(args)
+
+        authority_tests.assert_not_called()
+
+    def test_non_check_observation_bundle_remains_observation_only(self) -> None:
+        census._require_strict_authority_bundle_for_check(
+            {"generation_mode": "bootstrap_observation", "bootstrap_blocker_count": 0},
+            check=False,
+        )
+
+    def test_external_expectations_must_match_bundle_class_and_source_hash(self) -> None:
+        sources = [{"path": "case.mimi", "sha256": "a" * 64}]
+        caller = {"case.mimi": {"class": "required_compile", "source_sha256": "a" * 64}}
+        generated = {"case.mimi": {"class": "required_compile", "source_sha256": "a" * 64}}
+        census._validate_external_expectations_against_bundle(caller, generated, sources)
+
+        generated["case.mimi"]["class"] = "expected_build_rejection"
+        with self.assertRaisesRegex(ValueError, "not grounded in independent expectations"):
+            census._validate_external_expectations_against_bundle(caller, generated, sources)
+
+    def test_report_expectations_identity_matches_exact_path_and_digest(self) -> None:
+        sha256 = "b" * 64
+        report = {
+            "expectations": {
+                "identity": {
+                    "provided_manifest": {"path": "/tmp/expectations-v4.json", "sha256": sha256}
+                }
+            }
+        }
+        self.assertTrue(census._provided_expectations_identity_matches(
+            report,
+            expected_path="/tmp/expectations-v4.json",
+            expected_sha256=sha256,
+        ))
+        self.assertFalse(census._provided_expectations_identity_matches(
+            report,
+            expected_path="/tmp/other-expectations-v4.json",
+            expected_sha256=sha256,
+        ))
+        self.assertFalse(census._provided_expectations_identity_matches(
+            report,
+            expected_path="/tmp/expectations-v4.json",
+            expected_sha256="c" * 64,
+        ))
+        self.assertFalse(census._provided_expectations_identity_matches(
+            {"expectations": {"identity": {"provided_manifest": None}}},
+            expected_path="/tmp/expectations-v4.json",
+            expected_sha256=sha256,
+        ))
+
     def test_inventory_only_never_invokes_cargo_rustc_or_mimi(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -4572,6 +6122,11 @@ class BoundedParallelExecutionTests(unittest.TestCase):
         self.assertEqual(report["execution_contract"]["worker_count"], 1)
         self.assertEqual(report["execution_contract"]["parallelism"], 1)
         self.assertEqual(report["records"][0]["input_index"], 1)
+        self.assertEqual(
+            report["build_provenance"]["status"], "caller_supplied_unverified"
+        )
+        self.assertFalse(report["build_provenance"]["current_source_attested"])
+        self.assertFalse(report["gate"]["current_source_attested"])
 
     def test_jobs_argument_is_bounded_and_defaults_to_four(self) -> None:
         base = ["--output", "report.json"]
