@@ -409,7 +409,7 @@ require_passed_tests() {
     done
 }
 
-run_gate canonical-actor-l1 40 0 test --lib canonical_actor_ -- --nocapture --test-threads=1 || true
+run_gate canonical-actor-l1 41 0 test --lib canonical_actor_ -- --nocapture --test-threads=1 || true
 require_passed_tests canonical-actor-l1 \
     core::mir::actor_tests::canonical_actor_reference_preserves_original_capture_stdout \
     core::mir::actor_tests::canonical_actor_reference_preserves_original_shadow_and_global_stdout \
@@ -450,11 +450,12 @@ require_passed_tests native-jit-l2 \
     codegen::mir::actor_status::tests::canonical_actor_native_jit_power_wrap_and_traps_join_before_reporting \
     codegen::mir::actor_status::tests::canonical_actor_native_jit_preserves_fixtures_state_and_domain_join \
     codegen::mir::actor_status::tests::canonical_actor_native_jit_tagged_traps_propagate_801_802_and_join
-run_gate actor-cli-l2 5 1 test --test real_world_cli canonical_actor_ -- --nocapture --test-threads=1 || true
+run_gate actor-cli-l2 6 1 test --test real_world_cli canonical_actor_ -- --nocapture --test-threads=1 || true
 
 require_passed_tests actor-cli-l2 \
     canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback \
-    canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback
+    canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback \
+    canonical_actor_cli_no_z3_keeps_infrastructure_and_owner_nits_results
 cat > "$ARTIFACT_DIR/fixture-contracts.txt" <<'EOF'
 tests/real_world/actor_nested_func_capture.mimi stdout: 15\n
 tests/real_world/actor_nested_func_shadow.mimi stdout: 42\n101\n
@@ -489,33 +490,47 @@ validate_actor_l3_route_bindings() {
         }
         /^Actor L3 route-binding / {
             line_count++
-            if (NF != 8) {
-                fail("route-binding line must contain exactly five structured fields: " $0)
+            if (NF != 11) {
+                fail("route-binding line must contain exactly eight structured fields: " $0)
                 next
             }
             fixture = field($4, "fixture")
             mode = field($5, "mode")
             profile = field($6, "checker_profile")
-            digest = field($7, "mir_digest")
-            identity = field($8, "receipt_identity_digest")
+            build_profile = field($7, "build_route_profile")
+            digest = field($8, "mir_digest")
+            route_identity = field($9, "mir_route_identity_digest")
+            identity = field($10, "receipt_identity_digest")
+            build_identity = field($11, "build_route_identity_digest")
             key = fixture SUBSEP mode
             if (!(key in expected)) {
                 fail("unexpected fixture/mode pair: " fixture " / " mode)
                 next
             }
             if (++seen[key] != 1) fail("duplicate fixture/mode pair: " fixture " / " mode)
-            if (profile != "build-canonical-v1") {
+            if (profile != "scalar-actor-domain-v1") {
                 fail("unexpected build profile for " fixture " / " mode ": " profile)
+            }
+            if (build_profile != profile) {
+                fail("checker/build route profiles differ for " fixture " / " mode ": " profile " / " build_profile)
             }
             if (length(digest) != 64 || digest ~ /[^0-9a-f]/) {
                 fail("MIR digest is not canonical lowercase 64-hex for " fixture " / " mode)
             }
-            if (length(identity) != 64 || identity ~ /[^0-9a-f]/) {
-                fail("receipt identity is not canonical lowercase 64-hex for " fixture " / " mode)
+            if (length(route_identity) != 64 || route_identity ~ /[^0-9a-f]/ ||
+                length(identity) != 64 || identity ~ /[^0-9a-f]/ ||
+                length(build_identity) != 64 || build_identity ~ /[^0-9a-f]/) {
+                fail("route/receipt/build identities are not canonical lowercase 64-hex for " fixture " / " mode)
+            }
+            if (route_identity != identity || build_identity != identity) {
+                fail("route, receipt, and build identity digests differ for " fixture " / " mode)
             }
             profiles[key] = profile
+            build_profiles[key] = build_profile
             digests[key] = digest
+            route_identities[key] = route_identity
             identities[key] = identity
+            build_identities[key] = build_identity
         }
         END {
             if (line_count != 4) fail("expected exactly four route-binding lines; observed " (line_count + 0))
@@ -529,12 +544,15 @@ validate_actor_l3_route_bindings() {
                 explicit_key = fixture SUBSEP "explicit-mir"
                 if (seen[default_key] == 1 && seen[explicit_key] == 1 &&
                     (profiles[default_key] != profiles[explicit_key] ||
+                     build_profiles[default_key] != build_profiles[explicit_key] ||
                      digests[default_key] != digests[explicit_key] ||
-                     identities[default_key] != identities[explicit_key])) {
-                    fail("default and explicit build tuples differ for " fixture)
+                     route_identities[default_key] != route_identities[explicit_key] ||
+                     identities[default_key] != identities[explicit_key] ||
+                     build_identities[default_key] != build_identities[explicit_key])) {
+                    fail("default and explicit route/receipt/build tuples differ for " fixture)
                 }
             }
-            if (!failed) print "PASS exactly four expected Actor L3 fixture/mode pairs; each uses build-canonical-v1 and each fixture has matching default/explicit MIR digest and receipt identity"
+            if (!failed) print "PASS exactly four expected Actor L3 fixture/mode pairs; each uses scalar-actor-domain-v1 and each fixture has matching default/explicit route profile, MIR digest, route identity, receipt identity, and build identity"
             exit failed
         }
     ' "$log_path"

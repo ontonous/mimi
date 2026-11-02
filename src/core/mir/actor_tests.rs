@@ -802,29 +802,45 @@ extern "C" {
 func main() -> i32 {
     let counter = Counter.spawn()
     let actor_value = counter.bump(5)
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(41 as i32))
-    let observed = match map_get_i32(updated, "answer") {
-        Ok(value) => value,
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "answer", scalar_probe(41 as i32)) {
+                Ok(updated) => {
+                    let observed = match map_get_i32(updated, "answer") {
+                        Ok(value) => value,
+                        Err(code) => code,
+                    }
+                    let size = map_size(updated)
+                    drop(updated)
+                    println(actor_value)
+                    actor_value + size + observed
+                },
+                Err(code) => code,
+            }
+        },
         Err(code) => code,
     }
-    let size = map_size(updated)
-    drop(updated)
-    println(actor_value)
-    actor_value + size + observed
 }
 "#;
     const UNUSED_ACTOR_MAIN: &str = r#"
 func main() -> i32 {
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(41 as i32))
-    let observed = match map_get_i32(updated, "answer") {
-        Ok(value) => value,
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "answer", scalar_probe(41 as i32)) {
+                Ok(updated) => {
+                    let observed = match map_get_i32(updated, "answer") {
+                        Ok(value) => value,
+                        Err(code) => code,
+                    }
+                    let size = map_size(updated)
+                    drop(updated)
+                    size + observed
+                },
+                Err(code) => code,
+            }
+        },
         Err(code) => code,
     }
-    let size = map_size(updated)
-    drop(updated)
-    size + observed
 }
 "#;
     let actor_prefix = CAPTURE
@@ -869,18 +885,29 @@ func main() -> i32 {
             "{label} FFI contract must select the Actor proof compatibility boundary"
         );
 
-        let direct = crate::verifier::verify_ffi_checked(&checked)
-            .unwrap_or_else(|error| panic!("{label}: dedicated FFI adapter: {error}"));
-        let direct_requirement = direct
-            .iter()
-            .find(|result| result.func_name == "main calls scalar_probe")
-            .unwrap_or_else(|| panic!("{label}: missing dedicated FFI result: {direct:?}"));
-        assert_eq!(
-            direct_requirement.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset
-        );
-        assert!(direct_requirement.artifact.is_none());
-        assert!(direct_requirement.message.contains("Map profile"));
+        match crate::verifier::verify_ffi_checked(&checked) {
+            Ok(direct) => {
+                let direct_requirement = direct
+                    .iter()
+                    .find(|result| result.func_name == "main calls scalar_probe")
+                    .unwrap_or_else(|| {
+                        panic!("{label}: missing dedicated FFI result: {direct:?}")
+                    });
+                assert_eq!(
+                    direct_requirement.status,
+                    crate::verifier::VerifStatus::NotInTrustedSubset
+                );
+                assert!(direct_requirement.artifact.is_none());
+                assert!(direct_requirement.message.contains("Map profile"));
+            }
+            Err(error) => assert!(
+                error.contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                    && error.contains("ordinary Map/Any owner-v2")
+                    && error.contains("cannot be combined")
+                    && error.contains("scalar FFI"),
+                "{label}: verifier must reject the unreceipted mixed owner composition explicitly: {error}"
+            ),
+        }
 
         for (entry, result) in [
             (

@@ -25505,6 +25505,52 @@ fn canonical_mir_string_assign_keeps_compatibility_route() {
 
 // The two original Actor regressions now require the same checked state,
 // mailbox and lexical environment graph through default and explicit routes.
+fn route_census_mimi_path() -> PathBuf {
+    let path = std::env::var_os("MIMI_ROUTE_CENSUS_MIMI");
+    let sha256 = std::env::var("MIMI_ROUTE_CENSUS_MIMI_SHA256").ok();
+    let census_mode = std::env::var("MIMI_ROUTE_CENSUS").ok();
+    match (path, sha256) {
+        (None, None) if census_mode.as_deref() != Some("1") => {
+            PathBuf::from(env!("CARGO_BIN_EXE_mimi"))
+        }
+        (None, None) => {
+            panic!("route census Mimi path and SHA-256 are required when MIMI_ROUTE_CENSUS=1")
+        }
+        (Some(path), Some(sha256)) => {
+            assert_eq!(
+                census_mode.as_deref(),
+                Some("1"),
+                "route census Mimi identity requires MIMI_ROUTE_CENSUS=1"
+            );
+            let path = PathBuf::from(path);
+            assert!(
+                path.is_absolute(),
+                "route census Mimi path must be absolute"
+            );
+            assert_eq!(
+                path.canonicalize()
+                    .expect("route census Mimi binary must exist"),
+                path,
+                "route census Mimi path must be canonical and symlink-free"
+            );
+            assert!(
+                sha256.len() == 64
+                    && sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "route census Mimi SHA-256 must be lowercase hexadecimal"
+            );
+            println!(
+                "MIMI_ROUTE_CENSUS_AUTHORITY_BINARY path={} sha256={}",
+                path.display(),
+                sha256
+            );
+            path
+        }
+        _ => panic!("route census Mimi path and SHA-256 must be provided together"),
+    }
+}
+
 fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memcheck: bool) {
     let source = ::std::path::Path::new(::std::env!("CARGO_MANIFEST_DIR"))
         .join("tests/real_world")
@@ -25534,7 +25580,7 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memch
             ::std::string::String::from_utf8_lossy(&version.stdout).trim()
         );
     }
-    let receipt = ::std::process::Command::new(::std::env!("CARGO_BIN_EXE_mimi"))
+    let receipt = ::std::process::Command::new(route_census_mimi_path())
         .arg("mir")
         .arg(&source)
         .arg("--receipt")
@@ -25557,7 +25603,7 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memch
     for explicit in [false, true] {
         let binary = dir.join(if explicit { "explicit" } else { "default" });
         for (command_index, command) in ["run", "build", "verify"].into_iter().enumerate() {
-            let mut child = ::std::process::Command::new(::std::env!("CARGO_BIN_EXE_mimi"));
+            let mut child = ::std::process::Command::new(route_census_mimi_path());
             child
                 .current_dir(::std::path::Path::new(::std::env!("CARGO_MANIFEST_DIR")))
                 .env("MIMI_ROUTE_CENSUS", "1")
@@ -25616,15 +25662,10 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memch
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
                 "{fixture} {command} explicit={explicit} must emit a complete lowercase route receipt identity digest: {stderr}"
             );
-            let expected_checker_profile = match command {
-                "run" => "run-canonical-v1",
-                "build" => "build-canonical-v1",
-                "verify" => "verify-canonical-v1",
-                _ => unreachable!("fixed Actor CLI consumer list"),
-            };
+            let expected_checker_profile = "scalar-actor-domain-v1";
             ::std::assert_eq!(
                 checker_profile, expected_checker_profile,
-                "{fixture} {command} explicit={explicit} must use its canonical consumer profile: {stderr}"
+                "{fixture} {command} explicit={explicit} must use the canonical Actor route profile: {stderr}"
             );
             ::std::assert_eq!(
                 route_digest, digest,
@@ -25723,7 +25764,7 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memch
             );
         }
     }
-    let disasm = ::std::process::Command::new(::std::env!("CARGO_BIN_EXE_mimi"))
+    let disasm = ::std::process::Command::new(route_census_mimi_path())
         .env("MIMI_ROUTE_CENSUS", "1")
         .arg("disasm")
         .arg(&source)
@@ -25801,7 +25842,14 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
             .find_map(|line| line.strip_prefix("mir_digest="))
             .expect("original Actor MIR receipt digest")
             .to_owned();
-        let mut default_l3_build_identity: Option<(String, String, String)> = None;
+        let mut default_l3_build_identity: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )> = None;
 
         for explicit_mir in [false, true] {
             let mode = if explicit_mir {
@@ -25869,7 +25917,7 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
             let census_fields = census_line.split_whitespace().collect::<Vec<_>>();
             assert_eq!(
                 census_fields.len(),
-                7,
+                10,
                 "{fixture} {mode} Memcheck build census must contain only its route identity fields:\n{build_stderr}"
             );
             assert_eq!(census_fields[0], "MIMI_ROUTE_CENSUS");
@@ -25889,31 +25937,61 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
             let checker_profile = census_field(4, "checker_profile")
                 .expect("strict Actor L3 build checker profile")
                 .to_owned();
-            let route_digest = census_field(5, "mir_digest")
+            let build_route_profile = census_field(5, "build_route_profile")
+                .expect("strict Actor L3 build route profile")
+                .to_owned();
+            let route_digest = census_field(6, "mir_digest")
                 .expect("strict Actor L3 build MIR digest")
                 .to_owned();
-            let receipt_identity_digest = census_field(6, "receipt_identity_digest")
+            let mir_route_identity_digest = census_field(7, "mir_route_identity_digest")
+                .expect("strict Actor L3 MIR route identity digest")
+                .to_owned();
+            let receipt_identity_digest = census_field(8, "receipt_identity_digest")
                 .expect("strict Actor L3 build receipt identity digest")
                 .to_owned();
+            let build_route_identity_digest = census_field(9, "build_route_identity_digest")
+                .expect("strict Actor L3 build route identity digest")
+                .to_owned();
             assert_eq!(
-                checker_profile, "build-canonical-v1",
-                "{fixture} {mode} Memcheck binary must use the canonical build profile:\n{build_stderr}"
+                checker_profile, "scalar-actor-domain-v1",
+                "{fixture} {mode} Memcheck binary must use the canonical Actor route profile:\n{build_stderr}"
+            );
+            assert_eq!(
+                build_route_profile, checker_profile,
+                "{fixture} {mode} Memcheck binary must retain the checker-selected Actor route profile through native build:\n{build_stderr}"
             );
             assert_eq!(
                 route_digest, digest,
                 "{fixture} {mode} Memcheck binary must bind to the inspected Actor MIR receipt:\n{build_stderr}"
             );
-            assert!(
-                receipt_identity_digest.len() == 64
-                    && receipt_identity_digest
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-                "{fixture} {mode} Memcheck binary must expose a canonical lowercase 64-hex receipt identity:\n{build_stderr}"
+            for (label, identity) in [
+                ("MIR route", mir_route_identity_digest.as_str()),
+                ("receipt", receipt_identity_digest.as_str()),
+                ("build route", build_route_identity_digest.as_str()),
+            ] {
+                assert!(
+                    identity.len() == 64
+                        && identity
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                    "{fixture} {mode} Memcheck binary must expose a canonical lowercase 64-hex {label} identity:\n{build_stderr}"
+                );
+            }
+            assert_eq!(
+                mir_route_identity_digest, receipt_identity_digest,
+                "{fixture} {mode} Memcheck build must bind the route and receipt identities:\n{build_stderr}"
+            );
+            assert_eq!(
+                build_route_identity_digest, receipt_identity_digest,
+                "{fixture} {mode} Memcheck build must preserve the receipt identity through native build:\n{build_stderr}"
             );
             let identity = (
                 checker_profile.clone(),
+                build_route_profile.clone(),
                 route_digest.clone(),
+                mir_route_identity_digest.clone(),
                 receipt_identity_digest.clone(),
+                build_route_identity_digest.clone(),
             );
             if explicit_mir {
                 assert_eq!(
@@ -25927,7 +26005,7 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
                 default_l3_build_identity = Some(identity.clone());
             }
             eprintln!(
-                "Actor L3 route-binding fixture={fixture} mode={route_mode} checker_profile={checker_profile} mir_digest={route_digest} receipt_identity_digest={receipt_identity_digest}"
+                "Actor L3 route-binding fixture={fixture} mode={route_mode} checker_profile={checker_profile} build_route_profile={build_route_profile} mir_digest={route_digest} mir_route_identity_digest={mir_route_identity_digest} receipt_identity_digest={receipt_identity_digest} build_route_identity_digest={build_route_identity_digest}"
             );
 
             let native = Command::new(&binary)
@@ -26087,7 +26165,7 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
 }
 
 #[test]
-fn canonical_actor_default_verify_retains_dormant_true_false_and_embedded_contracts() {
+fn canonical_actor_default_verify_retains_top_level_contracts_and_rejects_embedded_contracts() {
     let original =
         fs::read_to_string(project_root().join("tests/real_world/actor_nested_func_capture.mimi"))
             .unwrap();
@@ -26108,24 +26186,41 @@ fn canonical_actor_default_verify_retains_dormant_true_false_and_embedded_contra
     ].into_iter().enumerate() {
         let path = dir.join(format!("dormant-{index}.mimi"));
         fs::write(&path, format!("{original}\n{suffix}")).unwrap();
-        let observed = Command::new(mimi_bin()).env("MIMI_ROUTE_CENSUS", "1").arg("verify").arg(&path).output().unwrap();
+        let observed = Command::new(mimi_bin())
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .arg("verify")
+            .arg(&path)
+            .arg("--stats")
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&observed.stdout);
         let stderr = String::from_utf8_lossy(&observed.stderr);
+        if index >= 2 {
+            assert!(!observed.status.success(), "{stdout} {stderr}");
+            assert!(
+                stderr.contains("E0503"),
+                "embedded contract was not rejected with E0503: {stdout} {stderr}"
+            );
+            assert!(
+                stderr.contains("top-level callable-body contract"),
+                "embedded contract rejection must identify its required placement: {stdout} {stderr}"
+            );
+            continue;
+        }
         assert!(stdout.contains("guarded"), "the dormant owner must have a real default verifier obligation: {stdout} {stderr}");
         assert!(!stdout.contains("No contracts to verify"));
-        // The dormant user contract is still checked by the explicit Actor
-        // compatibility verifier, while the unsupported Actor method body
-        // remains an honest unknown.  The CLI therefore stays fail-closed;
-        // inspect the named guarded owner below for its actual verdict.
+        // Top-level function contracts remain visible in the default verifier,
+        // while the unsupported Actor method body stays an honest unknown.
+        // The CLI therefore stays fail-closed; inspect the named owner below.
         assert!(!observed.status.success(), "{stdout} {stderr}");
         let guarded_line = stdout
             .lines()
             .find(|line| line.contains("guarded"))
             .unwrap_or_else(|| panic!("missing guarded verdict: {stdout} {stderr}"));
         if guarded_proven {
-            assert!(guarded_line.contains("Proven"), "{guarded_line}");
+            assert!(guarded_line.contains("pass"), "{guarded_line}");
         } else {
-            assert!(!guarded_line.contains("Proven"), "{guarded_line}");
+            assert!(guarded_line.contains("fail"), "{guarded_line}");
         }
         assert!(stderr.contains("actor-proof-obligations-compatibility"));
         let explicit = Command::new(mimi_bin()).arg("verify").arg(&path).arg("--mir").output().unwrap();
@@ -26239,7 +26334,7 @@ func actor_ffi_negative() -> i64 {{
 }
 
 #[test]
-fn canonical_actor_contracts_cannot_bypass_default_map_ffi_execution_gate() {
+fn canonical_actor_contracts_cannot_bypass_default_map_any_owner_gate() {
     let original =
         fs::read_to_string(project_root().join("tests/real_world/actor_nested_func_capture.mimi"))
             .unwrap();
@@ -26269,20 +26364,36 @@ extern "C" {
 func main() -> i32 {
     let counter = Counter.spawn()
     let actor_value = counter.bump(5)
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(actor_value))
-    let size = map_size(updated)
-    drop(updated)
-    size
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "answer", scalar_probe(actor_value)) {
+                Ok(updated) => {
+                    let size = map_size(updated)
+                    drop(updated)
+                    size
+                },
+                Err(status) => status,
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
     const UNUSED_ACTOR_MAIN: &str = r#"
 func main() -> i32 {
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(41 as i32))
-    let size = map_size(updated)
-    drop(updated)
-    size
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "answer", scalar_probe(41 as i32)) {
+                Ok(updated) => {
+                    let size = map_size(updated)
+                    drop(updated)
+                    size
+                },
+                Err(status) => status,
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
 
@@ -26323,8 +26434,10 @@ func main() -> i32 {
                 "{label} executed before rejection: {stdout:?}"
             );
             assert!(
-                stderr.contains("profile cannot be combined") && stderr.contains("scalar FFI"),
-                "{label} {command} must report the shared Map-owner composition boundary: {stderr}"
+                stderr.contains("MIR-COVERAGE-001")
+                    && stderr.contains("incomplete ordinary Map/Any owner-v2 attempt")
+                    && stderr.contains("cannot use legacy"),
+                "{label} {command} must report the incomplete Map/Any owner gate before fallback: {stderr}"
             );
             assert!(
                 !stderr.contains("canonical route disposition: legacy"),
@@ -26332,10 +26445,10 @@ func main() -> i32 {
             );
         }
 
-        // Verification applies the same whole-program composition gate.  A
-        // mixed Actor+Map+FFI graph has no combined checker-owned receipt, so
-        // it must be rejected before the explicit Actor proof compatibility
-        // owner can hide the Map/Any ownership boundary.
+        // The Map API has explicit Result capacity outcomes, but its complete
+        // whole-program owner receipt is still pending. Verification must
+        // preserve that incomplete owner as a hard rejection before the
+        // explicit Actor proof compatibility owner can hide it.
         let verify = Command::new(mimi_bin())
             .current_dir(project_root())
             .env("MIMI_ROUTE_CENSUS", "1")
@@ -26352,10 +26465,9 @@ func main() -> i32 {
         );
         assert!(
             transcript.contains("MIR-COVERAGE-001")
-                && transcript.contains("cannot be combined")
-                && transcript.contains("scalar FFI")
-                && transcript.contains("Map/Any owner"),
-            "{label} verification must report the shared composition boundary: {transcript}"
+                && transcript.contains("incomplete ordinary Map/Any owner-v2 attempt")
+                && transcript.contains("cannot use legacy"),
+            "{label} verification must preserve the incomplete Map/Any owner rejection: {transcript}"
         );
         assert!(
             stdout.is_empty() && !transcript.contains("canonical route disposition: legacy"),
@@ -26750,4 +26862,248 @@ fn canonical_mir_shift_face_keeps_named_legacy_disposition() {
         ),
         "the shift face must carry the named island-preflight compatibility reason: {stderr}"
     );
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn canonical_actor_cli_no_z3_keeps_infrastructure_and_owner_nits_results() {
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-actor-no-z3-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create Actor no-Z3 directory");
+    for (fixture, actor_owner) in [
+        ("actor_nested_func_capture.mimi", "Counter::bump"),
+        ("actor_nested_func_shadow.mimi", "Shadower::touch"),
+    ] {
+        let original = project_root().join("tests/real_world").join(fixture);
+        let source = dir.join(fixture);
+
+        // The original no-contract programs stay on the canonical Actor route
+        // in both CLI modes even when the solver is unavailable.
+        for explicit_mir in [false, true] {
+            let mode = if explicit_mir {
+                "explicit-mir"
+            } else {
+                "default"
+            };
+            let mut verify = Command::new(mimi_bin());
+            verify
+                .current_dir(project_root())
+                .arg("verify")
+                .arg(&original);
+            if explicit_mir {
+                verify.arg("--mir");
+            }
+            let observed = verify
+                .env("MIMI_TEST_FORCE_NO_Z3", "1")
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .expect("verify original Actor fixture without Z3");
+            let stdout = String::from_utf8_lossy(&observed.stdout);
+            let stderr = String::from_utf8_lossy(&observed.stderr);
+            assert!(
+                observed.status.success(),
+                "{fixture} {mode} no-contract verification must remain neutral: {stdout} {stderr}"
+            );
+            assert!(
+                stdout.contains("no contracts") && !stdout.contains("Proven"),
+                "{fixture} {mode} must report neutral no-contract rows rather than a proof: {stdout}"
+            );
+            assert!(
+                !stderr.contains("canonical route disposition: legacy"),
+                "{fixture} {mode} must remain on the canonical no-contract Actor route: {stderr}"
+            );
+            let route_mode = if explicit_mir {
+                "explicit-mir"
+            } else {
+                "default"
+            };
+            let prefix = format!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=verify mode={route_mode} checker_profile=scalar-actor-domain-v1"
+            );
+            assert_eq!(
+                stderr
+                    .lines()
+                    .filter(|line| line.starts_with(&prefix))
+                    .count(),
+                1,
+                "{fixture} {mode} must report exactly one canonical route receipt: {stderr}"
+            );
+            if !explicit_mir {
+                assert!(
+                    stderr.contains("canonical route disposition: canonical (scalar-actor-domain-v1)"),
+                    "{fixture} default no-Z3 verification must select the scalar Actor route: {stderr}"
+                );
+            }
+        }
+
+        // Add independent proof owners without changing either checked-in
+        // fixture. The Actor proof fallback remains the production route for
+        // this whole-source request; with no Z3, every owner stays an
+        // infrastructure or typed coverage result and carries no artifact.
+        let original_source = fs::read_to_string(&original).expect("read original Actor fixture");
+        fs::write(
+            &source,
+            format!(
+                r#"{original_source}
+func accepted_owner(value: i64) -> i64 {{
+    requires: value >= 0
+    ensures: result == value
+    value
+}}
+extern "C" {{
+    func actor_ffi_probe(value: i64) -> i64
+        requires: value > 0
+        ensures: result == value;
+}}
+func actor_ffi_caller(value: i64) -> i64 {{ actor_ffi_probe(value) }}
+"#
+            ),
+        )
+        .expect("write Actor no-Z3 proof-owner source");
+
+        let observed = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("verify")
+            .arg(&source)
+            .env("MIMI_TEST_FORCE_NO_Z3", "1")
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .expect("run Actor proof-owner verification without Z3");
+        let stdout = String::from_utf8_lossy(&observed.stdout);
+        let stderr = String::from_utf8_lossy(&observed.stderr);
+        let transcript = format!("{stdout}{stderr}");
+        assert!(
+            !observed.status.success(),
+            "infrastructure and unsupported proof owners must remain fail-closed: {transcript}"
+        );
+        assert!(
+            stdout.contains("accepted_owner") && stdout.contains("Z3 solver not available"),
+            "an admitted proof owner must produce a visible no-Z3 infrastructure result: {stdout}"
+        );
+        assert!(
+            transcript.contains(actor_owner) && transcript.contains("MIR-COVERAGE-001"),
+            "the unsupported {actor_owner} proof owner must retain its span-bearing NITS diagnostic: {transcript}"
+        );
+        assert!(
+            transcript.contains("extern actor_ffi_probe")
+                && transcript.contains("actor_ffi_caller -> extern actor_ffi_probe Ensures"),
+            "typed foreign Requires and Ensures keep their separate no-Z3 outcomes: {transcript}"
+        );
+        assert!(
+            stderr.contains("actor-proof-obligations-compatibility"),
+            "the default CLI must retain the named Actor proof compatibility route: {stderr}"
+        );
+
+        let stats = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("verify")
+            .arg(&source)
+            .arg("--stats")
+            .env("MIMI_TEST_FORCE_NO_Z3", "1")
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .expect("inspect Actor no-Z3 owner artifact identities");
+        let stats_stdout = String::from_utf8_lossy(&stats.stdout);
+        assert!(!stats.status.success());
+        for owner in ["accepted_owner", actor_owner] {
+            let row = stats_stdout
+                .lines()
+                .find(|line| line.contains(owner))
+                .unwrap_or_else(|| panic!("missing stats row for {owner}: {stats_stdout}"));
+            assert!(
+                row.trim_end().ends_with('—'),
+                "no-Z3 owner row must not carry a proof artifact identity: {row}"
+            );
+        }
+        assert!(
+            !transcript.contains("failed to initialize Z3")
+                && !transcript.contains("Proven")
+                && !transcript.contains("✓ pass"),
+            "unavailable Z3 cannot turn this request into a pseudo-proof or top-level solver error: {transcript}"
+        );
+
+        // Explicit MIR may not discard the proof obligations to keep an Actor
+        // source looking canonical. It must reject before any solver attempt.
+        let proof_only_source = dir.join(format!("{fixture}.proof-only.mimi"));
+        fs::write(
+            &proof_only_source,
+            format!(
+                r#"{original_source}
+func accepted_owner(value: i64) -> i64 {{
+    requires: value >= 0
+    ensures: result == value
+    value
+}}
+"#
+            ),
+        )
+        .expect("write Actor proof-only source");
+        let explicit = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("verify")
+            .arg(&proof_only_source)
+            .arg("--mir")
+            .env("MIMI_TEST_FORCE_NO_Z3", "1")
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .expect("explicit MIR verification of proof-bearing Actor source");
+        let explicit_stdout = String::from_utf8_lossy(&explicit.stdout);
+        let explicit_stderr = String::from_utf8_lossy(&explicit.stderr);
+        assert!(!explicit.status.success());
+        assert!(
+            explicit_stderr.contains("cannot discard proof obligations"),
+            "explicit MIR must fail closed on the whole-source proof boundary: {explicit_stdout} {explicit_stderr}"
+        );
+        assert!(
+            !explicit_stderr.contains("canonical route disposition: legacy")
+                && !explicit_stdout.contains("Proven"),
+            "explicit MIR rejection must not hide a compatibility fallback or fabricate a proof: {explicit_stdout} {explicit_stderr}"
+        );
+    }
+
+    // Exercise the actual CLI branch that previously handed a selected MIR
+    // graph to SolverSession unconditionally. `--mir` keeps the graph
+    // preflight, while the unavailable solver is reported by the checked
+    // verifier as an owner result.
+    let scalar_source = dir.join("scalar.mimi");
+    fs::write(
+        &scalar_source,
+        "func accepted_owner(value: i32) -> i32 {\n    requires: value >= 0\n    ensures: result == value\n    value\n}\nfunc main() -> i32 { 0 }\n",
+    )
+    .expect("write scalar MIR verification source");
+    let scalar = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&scalar_source)
+        .arg("--mir")
+        .env("MIMI_TEST_FORCE_NO_Z3", "1")
+        .env("MIMI_ROUTE_CENSUS", "1")
+        .output()
+        .expect("run canonical scalar verification without Z3");
+    let scalar_stdout = String::from_utf8_lossy(&scalar.stdout);
+    let scalar_stderr = String::from_utf8_lossy(&scalar.stderr);
+    assert!(!scalar.status.success());
+    assert!(
+        scalar_stdout.contains("accepted_owner")
+            && scalar_stdout.contains("Z3 solver not available"),
+        "canonical CLI no-Z3 path must report infrastructure as an owner row: {scalar_stdout}"
+    );
+    assert!(
+        scalar_stderr.contains(
+            "canonical verifier result: MIR candidate retained; Z3 unavailable; no proof artifacts or proof verdicts emitted; owner-scoped results follow"
+        ),
+        "canonical candidate must stay explicit when the proof engine is unavailable: {scalar_stderr}"
+    );
+    assert!(
+        !scalar_stderr.contains("failed to initialize Z3")
+            && !scalar_stdout.contains("Proven"),
+        "canonical CLI no-Z3 path must not abort or report a proof: {scalar_stdout} {scalar_stderr}"
+    );
+    fs::remove_dir_all(&dir).expect("remove Actor no-Z3 directory");
 }
