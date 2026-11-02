@@ -737,7 +737,7 @@ if [ "$hash_status" -ne 0 ]; then
     result='FAIL'
 fi
 cp "$scratch/artifact-validation.txt" "$artifact_dir/artifact-validation.txt"
-if [ "$result" = PASS ] && [ "$hash_status" -eq 0 ]; then
+if [ "$hash_status" -eq 0 ]; then
     printf 'artifact_hash_manifest=PASS\n' >> "$artifact_dir/artifact-validation.txt"
 else
     printf 'artifact_hash_manifest=FAIL\n' >> "$artifact_dir/artifact-validation.txt"

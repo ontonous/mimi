@@ -1869,37 +1869,38 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
 
     let zero_miss_route = "    if admission.ordinary_map_owned_any_v2_zero_miss_i32() {\n        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\n    }\n";
     let keys_snapshot_route = "    if admission.ordinary_map_owned_any_v2\n        == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::KeysSnapshot\n    {\n        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE;\n    }\n";
+    let dynamic_keys_get_route = "    if admission.ordinary_map_owned_any_v2_dynamic_keys_get() {\n        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE;\n    }\n";
     let values_producer_caller_route = "    if admission.ordinary_map_owned_any_v2_values_producer_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesProducerCaller\n            .as_str();\n    }\n";
     let values_crosscall_string_caller_index1_route = "    if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\n            .as_str();\n    }\n";
     let values_crosscall_string_caller_route = "    if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\n            .as_str();\n    }\n";
     let map_root_get_any_caller_route = "    if admission.ordinary_map_owned_any_v2_map_root_get_any_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller\n            .as_str();\n    }\n";
     let map_root_producer_caller_route = "    if admission.ordinary_map_owned_any_v2_map_root_producer_caller() {\n        return mimi::core::mir::CanonicalMirRouteProfile::\n            OrdinaryMapOwnedAnyV2MapRootProducerCaller\n            .as_str();\n    }\n";
     let early_route_order = format!(
-        "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
+        "{zero_miss_route}{keys_snapshot_route}{dynamic_keys_get_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
     );
     let early_route_reorders = [
         (
             "zero-miss and ValuesProducerCaller",
             format!(
-                "{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{zero_miss_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
+                "{keys_snapshot_route}{dynamic_keys_get_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{zero_miss_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
             ),
         ),
         (
             "ValuesCrosscallStringCallerIndex1 and ValuesCrosscallStringCaller",
             format!(
-                "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_route}{values_crosscall_string_caller_index1_route}{values_producer_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
+                "{zero_miss_route}{keys_snapshot_route}{dynamic_keys_get_route}{values_crosscall_string_caller_route}{values_crosscall_string_caller_index1_route}{values_producer_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
             ),
         ),
         (
             "ValuesCrosscallStringCaller and ValuesProducerCaller",
             format!(
-                "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_producer_caller_route}{values_crosscall_string_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
+                "{zero_miss_route}{keys_snapshot_route}{dynamic_keys_get_route}{values_crosscall_string_caller_index1_route}{values_producer_caller_route}{values_crosscall_string_caller_route}{map_root_get_any_caller_route}{map_root_producer_caller_route}"
             ),
         ),
         (
             "MapRootGetAnyCaller and MapRootProducerCaller",
             format!(
-                "{zero_miss_route}{keys_snapshot_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{map_root_producer_caller_route}{map_root_get_any_caller_route}"
+                "{zero_miss_route}{keys_snapshot_route}{dynamic_keys_get_route}{values_crosscall_string_caller_index1_route}{values_crosscall_string_caller_route}{values_producer_caller_route}{map_root_producer_caller_route}{map_root_get_any_caller_route}"
             ),
         ),
     ];
