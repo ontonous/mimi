@@ -98,21 +98,15 @@ tests/stdlib_matrix_generated/
 tests/stdlib_matrix_scratch/
 mm_probe_*.txt
 
-# Native executables, object files, runtime archives, and temporary files emitted by strict L3 gates.
-# The high-volume full-route census sidecars below are retained locally but not
-# included by default; validators require those bytes, so such a run is not a
-# self-contained checked-in evidence bundle unless its exact run is opted in.
-# Keep aggregate results, run manifests, command transcripts, checksums, and
-# source snapshots visible for review.
-evidence/0.1.11-dev/gates/full-route-census-*/full-route-census.artifacts/logs/*.bin
-evidence/0.1.11-dev/gates/full-route-census-*.artifacts/logs/*.bin
-evidence/0.1.11-dev/gates/actor-two-fixture-current-*/full-route-census.artifacts/logs/*.bin
+# Ignore only named generated native executables, object files, runtime archives,
+# and temporary files emitted by strict L3 gates. Census sidecars and programs
+# referenced by evidence checksum manifests stay visible so a captured run can
+# be reviewed and verified from a checkout.
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/native-object
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/runtime-archive
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/**/relinked-program
 evidence/0.1.11-dev/gates/map-v2-values-static-oob-l3-*/native-tmp/
-# GetOrDefault<i32> L3 reuses the strict gate's named replay artifacts. The
-# generic evidence/**/program and *.o rules above already cover those names.
+# GetOrDefault<i32> L3 reuses the strict gate's named replay artifacts.
 evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/native-object
 evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/runtime-archive
 evidence/0.1.11-dev/gates/map-owned-any-v2-get-or-default-i32-l3-*/**/relinked-program
@@ -130,9 +124,8 @@ evidence/0.1.11-dev/gates/actor-two-fixture-current-*/**/native-object
 evidence/0.1.11-dev/gates/actor-two-fixture-current-*/**/runtime-archive
 evidence/0.1.11-dev/gates/actor-two-fixture-current-*/**/relinked-program
 evidence/0.1.11-dev/gates/actor-two-fixture-current-*/native-tmp/
-# Full-route census JSON, journals, and logs preserve each run's denominator,
-# per-input results, and raw command output.
-evidence/**/program
+# Full-route census JSON, journals, binary sidecars, programs, and logs preserve
+# each run's denominator, per-input results, executable identity, and raw output.
 evidence/**/program.tmp*
 evidence/**/source*.tmp
 evidence/**/files.sha256.tmp
@@ -146,11 +139,8 @@ evidence/**/native-l3-*/*/callbacks.o
 evidence/**/test-artifacts/strict-memcheck/native-default
 evidence/**/test-artifacts/strict-memcheck/native-explicit-mir
 evidence/**/callback-test
-# The 2026-11-02 CheckedGet-only L1/L2 and strict L3 records include executable
-# hashes in their root manifests. Keep those exact historical run bundles
-# complete for checksum review; they are not current-source signoff.
-!evidence/0.1.11-dev/gates/checked-get-current-20261102-r3-l1l2/**/program
-!evidence/0.1.11-dev/gates/checked-get-current-20261102-r1-l3/**/program
+# Retain raw captures and manifests, including stale and failed runs; evidence
+# visibility is independent of whether a run is current-source signoff.
 evidence/**/strict-l3/*-native
 evidence/**/raw-memcheck/*-native
 # Observer V1 manual L3 gates emit profile-specific native executables.
