@@ -2475,7 +2475,8 @@ fn select_scalar_actor_route(program: MirProgram) -> DefaultMirRoute {
 fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
     if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
         return DefaultMirRoute::Rejected(format!(
-            "scalar FFI MIR verifier capability: {errors:?}"
+            "{}: scalar FFI MIR verifier capability: {errors:?}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
     }
     let receipt = program.route_receipt("scalar-ffi-v1");
@@ -2483,11 +2484,15 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
         mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
     {
         return DefaultMirRoute::Rejected(format!(
-            "scalar FFI MIR bytecode capability: {errors:?}"
+            "{}: scalar FFI MIR bytecode capability: {errors:?}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
     }
     if let Err(errors) = mimi::codegen::mir::validate_mir_native(&program) {
-        return DefaultMirRoute::Rejected(format!("scalar FFI MIR native capability: {errors:?}"));
+        return DefaultMirRoute::Rejected(format!(
+            "{}: scalar FFI MIR native capability: {errors:?}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
     }
     match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
         Ok(results)
@@ -2496,9 +2501,13 @@ fn select_scalar_ffi_route(program: MirProgram) -> DefaultMirRoute {
             DefaultMirRoute::Canonical(Box::new(program))
         }
         Ok(results) => DefaultMirRoute::Rejected(format!(
-            "scalar FFI MIR verifier returned an unsupported or inconclusive result: {results:?}"
+            "{}: scalar FFI MIR verifier returned an unsupported or inconclusive result: {results:?}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         )),
-        Err(error) => DefaultMirRoute::Rejected(format!("scalar FFI MIR verifier pass: {error}")),
+        Err(error) => DefaultMirRoute::Rejected(format!(
+            "{}: scalar FFI MIR verifier pass: {error}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        )),
     }
 }
 
@@ -4161,14 +4170,14 @@ func main() -> i32 {
             panic!("unsupported unit-valued nested binding must fail before compatibility");
         };
         assert!(
-            reason.contains("outside the canonical root-scope MIR slice"),
+            reason.contains("outside the canonical scalar nested-callable slice"),
             "{reason}"
         );
         assert!(!reason.contains("legacy"), "{reason}");
     }
 
     #[test]
-    fn scalar_ffi_nested_recursive_call_graph_is_rejected_without_legacy() {
+    fn scalar_ffi_nested_recursive_effect_boundary_rejects_without_legacy() {
         let source = r#"
             extern "C" { func llabs(value: i64) -> i64; }
             func main() -> i32 {
@@ -4187,8 +4196,45 @@ func main() -> i32 {
                 "recursive nested scalar FFI graph must fail closed without compatibility routing"
             );
         };
-        assert!(reason.contains("recursive MIR call graph"), "{reason}");
+        assert!(reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+        assert!(reason.contains("unknown effect"), "{reason}");
+        assert!(reason.contains("call site 'main'"), "{reason}");
         assert!(!reason.contains("legacy"), "{reason}");
+    }
+
+    #[test]
+    fn scalar_ffi_effect_exception_rejects_unreceipted_dynamic_helpers() {
+        let (checked, file) = checked(
+            r#"
+                extern "C" { func llabs(value: i64) -> i64; }
+                func apply(f: func(i64) -> i64, value: i64) -> i64 { f(value) }
+                func identity(value: i64) -> i64 { value }
+                func main() -> i64 { apply(identity, llabs(-17 as i64)) }
+            "#,
+        );
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
+        assert!(admission.scalar_ffi);
+        let reason = mimi::core::mir::unknown_effect_boundary_reason(&checked)
+            .expect("the dynamic helper remains outside the scalar-FFI effect proof");
+        assert!(reason.contains("apply"), "{reason}");
+        assert!(reason.contains("unknown"), "{reason}");
+
+        let DefaultMirRoute::Rejected(default_reason) = select_default_route(&checked, &file)
+        else {
+            panic!("scalar FFI must not hide the dynamic helper: {reason}");
+        };
+        assert!(
+            default_reason.contains("MIR-COVERAGE-001"),
+            "{default_reason}"
+        );
+        assert!(default_reason.contains("apply"), "{default_reason}");
+        let explicit_reason = build_canonical_program(&checked, &file)
+            .expect_err("explicit MIR construction shares the unknown-effect boundary");
+        assert!(
+            explicit_reason.contains("MIR-COVERAGE-001"),
+            "{explicit_reason}"
+        );
+        assert!(explicit_reason.contains("apply"), "{explicit_reason}");
     }
 
     #[test]

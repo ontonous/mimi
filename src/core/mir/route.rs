@@ -11,7 +11,7 @@
 //! report the structured failure and may not re-enter a legacy consumer.
 //! `MixedCoverage` and `OutsideProfile` remain explicit compatibility states.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::core::mir::reference::MirProgram;
 use crate::core::{
@@ -1015,6 +1015,7 @@ pub fn classify_canonical_mir_route_admission(
 /// intentionally route-owned so native, bytecode, and verifier dispatchers
 /// share the same fail-closed boundary before any backend materializes code.
 pub fn unknown_effect_boundary_reason(program: &CheckedProgram) -> Option<String> {
+    let scalar_ffi_effect_proof = scalar_ffi_unknown_effects_are_receipted(program);
     let mut functions = program.functions().values().collect::<Vec<_>>();
     functions.sort_by(|left, right| {
         left.qualified_name
@@ -1032,7 +1033,11 @@ pub fn unknown_effect_boundary_reason(program: &CheckedProgram) -> Option<String
         for effect in &function.effects {
             match crate::core::effects::EffectKind::parse(effect) {
                 Some(crate::core::effects::EffectKind::Unknown) | None => {
-                    if actor_unknown_effects_are_receipted(program, &function.node_id) {
+                    if actor_unknown_effects_are_receipted(program, &function.node_id)
+                        || scalar_ffi_effect_proof
+                            .as_ref()
+                            .is_some_and(|proof| proof.owners.contains(&function.node_id))
+                    {
                         continue;
                     }
                     return Some(format!(
@@ -1076,7 +1081,10 @@ pub fn unknown_effect_boundary_reason(program: &CheckedProgram) -> Option<String
                 crate::core::effects::EffectKind::parse(effect),
                 Some(crate::core::effects::EffectKind::Unknown)
             )
-        }) && actor_unknown_call_site_is_receipted(program, site)
+        }) && (actor_unknown_call_site_is_receipted(program, site)
+            || scalar_ffi_effect_proof
+                .as_ref()
+                .is_some_and(|proof| proof.call_sites.contains(&site.node_id)))
         {
             continue;
         }
@@ -1093,6 +1101,182 @@ pub fn unknown_effect_boundary_reason(program: &CheckedProgram) -> Option<String
         }
     }
     None
+}
+
+#[derive(Debug, Default)]
+struct ScalarFfiUnknownEffectProof {
+    owners: BTreeSet<crate::core::NodeId>,
+    call_sites: BTreeSet<crate::core::NodeId>,
+}
+
+/// The scalar FFI island may carry an `unknown` effect only when every such
+/// effect is checker-attributed to an exact, supported extern call or to a
+/// helper whose unknown effects are recursively explained by those calls.
+/// Direct effect sources are retained from the checker so a same-function
+/// dynamic call, pinned boundary, or opaque builtin cannot be hidden beside a
+/// valid FFI call. The MIR FFI source census and consumer gates still validate
+/// the actual call/declaration receipts; this helper only narrows the shared
+/// effect boundary and never treats an extern call as pure.
+fn scalar_ffi_unknown_effects_are_receipted(
+    program: &CheckedProgram,
+) -> Option<ScalarFfiUnknownEffectProof> {
+    if !super::is_scalar_ffi_candidate(program) || scalar_ffi_boundary_reason(program).is_some() {
+        return None;
+    }
+
+    let mut unknown_owners = BTreeSet::new();
+    for function in program.functions().values() {
+        if is_prelude_origin(program, &function.origin) {
+            continue;
+        }
+        if function.effects.iter().any(|effect| {
+            matches!(
+                crate::core::effects::EffectKind::parse(effect),
+                Some(crate::core::effects::EffectKind::Unknown)
+            )
+        }) {
+            // Unrecognized effect names remain a hard error. The scalar FFI
+            // proof accounts only for the checker's explicit Unknown kind.
+            if function
+                .effects
+                .iter()
+                .any(|effect| crate::core::effects::EffectKind::parse(effect).is_none())
+            {
+                return None;
+            }
+            unknown_owners.insert(function.node_id.clone());
+        }
+    }
+    if unknown_owners.is_empty() {
+        return None;
+    }
+
+    let mut proof = ScalarFfiUnknownEffectProof {
+        owners: unknown_owners.clone(),
+        call_sites: BTreeSet::new(),
+    };
+    let mut ffi_owners = BTreeSet::new();
+    let mut function_edges = BTreeMap::<crate::core::NodeId, BTreeSet<crate::core::NodeId>>::new();
+
+    for owner in &unknown_owners {
+        let Some(function) = program.functions().get(owner) else {
+            return None;
+        };
+        let direct_sources = function
+            .direct_effect_sources
+            .get(&crate::core::effects::EffectKind::Unknown)
+            .cloned()
+            .unwrap_or_default();
+        let direct_extern_sources = direct_sources
+            .iter()
+            .map(|source| {
+                source
+                    .strip_prefix("extern '")
+                    .and_then(|name| name.strip_suffix("'"))
+                    .map(str::to_owned)
+            })
+            .collect::<Option<BTreeSet<_>>>()?;
+
+        let unknown_sites = program
+            .call_sites_sorted()
+            .into_iter()
+            .filter(|site| site.owner == owner.0)
+            .filter(|site| {
+                site.effects.iter().any(|effect| {
+                    matches!(
+                        crate::core::effects::EffectKind::parse(effect),
+                        Some(crate::core::effects::EffectKind::Unknown)
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut observed_extern_sources = BTreeSet::new();
+        if unknown_sites.is_empty() {
+            // A summary with no typed unknown call and no direct extern source
+            // may have come from an unmodeled statement or incomplete checker
+            // provenance. Do not infer its origin from the program-wide FFI
+            // candidate alone.
+            return None;
+        }
+
+        for site in unknown_sites {
+            if site
+                .effects
+                .iter()
+                .any(|effect| crate::core::effects::EffectKind::parse(effect).is_none())
+            {
+                return None;
+            }
+            match site.resolved_callee.as_ref() {
+                Some(crate::core::ir::ResolvedCallee::Extern(declaration_id))
+                    if site.kind == crate::core::ResolvedCallKind::Extern
+                        && site.effects.iter().all(|effect| {
+                            matches!(
+                                crate::core::effects::EffectKind::parse(effect),
+                                Some(crate::core::effects::EffectKind::Unknown)
+                            )
+                        }) =>
+                {
+                    let Ok(Some(declaration)) =
+                        program.extern_func_signature_for_call(&site.callee, site.argc)
+                    else {
+                        return None;
+                    };
+                    if declaration.node_id != *declaration_id {
+                        return None;
+                    }
+                    observed_extern_sources.insert(site.callee.clone());
+                    ffi_owners.insert(owner.clone());
+                    proof.call_sites.insert(site.node_id.clone());
+                }
+                Some(crate::core::ir::ResolvedCallee::Function(target))
+                    if site.kind == crate::core::ResolvedCallKind::Function
+                        && site
+                            .target_function
+                            .as_ref()
+                            .is_none_or(|target_hint| target_hint == target)
+                        && unknown_owners.contains(target) =>
+                {
+                    function_edges
+                        .entry(owner.clone())
+                        .or_default()
+                        .insert(target.clone());
+                    proof.call_sites.insert(site.node_id.clone());
+                }
+                _ => return None,
+            }
+        }
+        if observed_extern_sources != direct_extern_sources {
+            return None;
+        }
+    }
+
+    fn reaches_extern(
+        owner: &crate::core::NodeId,
+        ffi_owners: &BTreeSet<crate::core::NodeId>,
+        function_edges: &BTreeMap<crate::core::NodeId, BTreeSet<crate::core::NodeId>>,
+        visited: &mut BTreeSet<crate::core::NodeId>,
+    ) -> bool {
+        if ffi_owners.contains(owner) {
+            return true;
+        }
+        if !visited.insert(owner.clone()) {
+            return false;
+        }
+        function_edges.get(owner).is_some_and(|targets| {
+            targets
+                .iter()
+                .any(|target| reaches_extern(target, ffi_owners, function_edges, visited))
+        })
+    }
+
+    if unknown_owners
+        .iter()
+        .any(|owner| !reaches_extern(owner, &ffi_owners, &function_edges, &mut BTreeSet::new()))
+    {
+        return None;
+    }
+    Some(proof)
 }
 
 /// The scalar Actor island owns two deliberately narrow sources of the

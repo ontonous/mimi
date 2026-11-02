@@ -499,6 +499,11 @@ pub struct ResolvedFunction {
     pub param_decls: Vec<crate::ast::Param>,
     pub ret: Type,
     pub effects: Vec<String>,
+    /// Direct checker effect sources before interprocedural propagation.
+    /// Route gates use these provenance facts to distinguish a checked
+    /// scalar-FFI boundary from unrelated unknown operations in the same
+    /// call graph; an `unknown` summary alone is never permission to proceed.
+    pub(crate) direct_effect_sources: BTreeMap<crate::core::effects::EffectKind, BTreeSet<String>>,
     pub pub_: bool,
     pub is_comptime: bool,
     pub is_async: bool,
@@ -1007,6 +1012,7 @@ impl CheckedProgram {
                 .or_else(|| effect_summary_for_name(&effect_summaries, &function.qualified_name))
             {
                 function.effects = summary.inferred.to_vec();
+                function.direct_effect_sources = summary.sources.clone();
             }
         }
         for site in program.call_sites.values_mut() {
@@ -2848,6 +2854,7 @@ fn collect_items(
                         param_decls: function.params.clone(),
                         ret,
                         effects: function.effects.clone(),
+                        direct_effect_sources: BTreeMap::new(),
                         pub_: function.pub_,
                         is_comptime: function.is_comptime,
                         is_async: function.is_async,
@@ -3331,6 +3338,7 @@ fn collect_items(
                                 .clone()
                                 .unwrap_or_else(|| Type::Name("unit".into(), Vec::new())),
                             effects: method.effects.clone(),
+                            direct_effect_sources: BTreeMap::new(),
                             pub_: method.pub_,
                             is_comptime: method.is_comptime,
                             is_async: method.is_async,
@@ -3620,6 +3628,7 @@ fn collect_items(
                                 .clone()
                                 .unwrap_or_else(|| Type::Name("unit".into(), Vec::new())),
                             effects: method.effects.clone(),
+                            direct_effect_sources: BTreeMap::new(),
                             pub_: method.pub_,
                             is_comptime: method.is_comptime,
                             is_async: method.is_async,
@@ -3718,6 +3727,7 @@ fn collect_items(
                                     param_decls,
                                     ret: ret.clone(),
                                     effects: Vec::new(),
+                                    direct_effect_sources: BTreeMap::new(),
                                     pub_: actor.pub_,
                                     is_comptime: false,
                                     is_async: false,
@@ -3838,6 +3848,7 @@ fn collect_nested_function_records(
                     param_decls: function.params.clone(),
                     ret,
                     effects: function.effects.clone(),
+                    direct_effect_sources: BTreeMap::new(),
                     pub_: function.pub_,
                     is_comptime: function.is_comptime,
                     is_async: function.is_async,
