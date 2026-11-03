@@ -89,6 +89,7 @@ pub(crate) mod manifest;
 pub(crate) mod map_record_coverage;
 pub(crate) mod mms_integration;
 pub(crate) mod net;
+pub(crate) mod numeric_cast_parity;
 pub(crate) mod package_management;
 pub(crate) mod package_v02812;
 pub(crate) mod package_v02812_extra;
@@ -1849,6 +1850,12 @@ pub(crate) fn parse_prod(src: &str) -> crate::ast::File {
 pub(crate) fn run_source(src: &str) -> interp::Value {
     let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    // Checker-gated bytecode features (casts, method receipts) require the
+    // CheckedProgram; valid sources install it, invalid ones keep the
+    // pre-installation failure mode of the lenient compile below.
+    if let Ok(program) = core::check_program(&file) {
+        compiler.install_checked_program(&program);
+    }
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed in run_source");
@@ -1862,6 +1869,12 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
 pub(crate) fn run_source_with_stdout(src: &str) -> (interp::Value, String) {
     let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    // Checker-gated bytecode features (casts, method receipts) require the
+    // CheckedProgram; valid sources install it, invalid ones keep the
+    // pre-installation failure mode of the lenient compile below.
+    if let Ok(program) = core::check_program(&file) {
+        compiler.install_checked_program(&program);
+    }
     let prog = compiler
         .compile_file(&file)
         .expect("bytecode compile failed in run_source_with_stdout");
@@ -2199,9 +2212,15 @@ impl NativeArtifactEvidence {
 pub(crate) struct NativeRunObservation {
     pub stdout: String,
     pub stderr: String,
+    /// Exact child stdout/stderr bytes for evidence consumers that must retain
+    /// the original tool report rather than a lossy UTF-8 rendering.
+    pub stdout_bytes: Vec<u8>,
+    pub stderr_bytes: Vec<u8>,
     pub exit_code: Option<i32>,
     /// argv as passed to `Command`, including `cc` as its invoked program.
     pub actual_link_command: Vec<String>,
+    /// argv used for the child process, when it is run directly or under Valgrind.
+    pub actual_run_command: Option<Vec<String>>,
     /// argv for compiling the optional C/FFI shim, when one was supplied.
     pub ffi_compile_command: Option<Vec<String>>,
     /// Paths are always reported; content hashes are populated only for an
@@ -2359,19 +2378,22 @@ fn link_and_observe_module<'ctx>(
         }
     }
 
+    let mut actual_run_command = None;
     let output = if config.use_valgrind {
         let mut cmd = Command::new("valgrind");
         for arg in &config.valgrind_args {
             cmd.arg(arg);
         }
         cmd.arg(&bin_path);
+        actual_run_command = Some(native_command_argv(&cmd));
         cmd.output().map_err(|e| format!("valgrind run: {}", e))?
     } else if let Some(timeout) = config.run_timeout {
+        actual_run_command = Some(vec![bin_path.to_string_lossy().into_owned()]);
         run_binary_with_timeout(&bin_path, timeout)?
     } else {
-        Command::new(&bin_path)
-            .output()
-            .map_err(|e| format!("run: {}", e))?
+        let mut cmd = Command::new(&bin_path);
+        actual_run_command = Some(native_command_argv(&cmd));
+        cmd.output().map_err(|e| format!("run: {}", e))?
     };
     if keep_tmp {
         for artifact in &mut artifacts {
@@ -2387,8 +2409,11 @@ fn link_and_observe_module<'ctx>(
     let observation = NativeRunObservation {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout_bytes: output.stdout,
+        stderr_bytes: output.stderr,
         exit_code: output.status.code(),
         actual_link_command,
+        actual_run_command,
         ffi_compile_command,
         artifacts,
         kept_tmp_dir: keep_tmp.then(|| tmp_dir.clone()),
@@ -2860,6 +2885,98 @@ pub(crate) fn checked_codegen_failed_functions(
 /// Standard E2E codegen test: compile and run, return stdout.
 pub(crate) fn compile_and_run(src: &str) -> Result<String, String> {
     compile_and_run_with_config(src, &E2EConfig::default())
+}
+
+/// Exercise the retired surface-AST native emitter in its explicit test-only
+/// adapter. The parser injects a synthetic `Main.run` Flow for scripts; remove
+/// only that known RuntimeSystem wrapper so this test can directly exercise
+/// the legacy expression/FFI implementation without pretending the production
+/// checked route admitted it. Production routing is tested separately through
+/// `checked_codegen_compile_and_observe`.
+pub(crate) fn legacy_codegen_compile_and_run_for_test(src: &str) -> Result<String, String> {
+    legacy_codegen_compile_and_run_with_contracts_for_test(src, false)
+}
+
+/// Emit LLVM IR through the retired surface-AST emitter for low-level codegen
+/// mechanism tests. Keep these tests explicitly on the test-only compatibility
+/// route and strip only the parser's synthetic `Main.run` wrapper.
+pub(crate) fn legacy_codegen_compile_to_ir_for_test(src: &str) -> Result<String, String> {
+    let file = legacy_codegen_file_for_test(parse(src));
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "legacy_codegen_ir_test");
+    codegen
+        .compile_file(&file)
+        .map_err(|error| error.to_string())?;
+    Ok(codegen.emit_ir())
+}
+
+/// Compile a bare test source to an object with the retired surface-AST
+/// emitter. This is an explicit compatibility-only path for tests that need
+/// to link or run the generated object; production helpers remain checked.
+/// The caller is responsible for cleaning up the returned path.
+pub(crate) fn legacy_codegen_compile_to_object_for_test(
+    src: &str,
+) -> Result<std::path::PathBuf, String> {
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = legacy_codegen_file_for_test(parse(src));
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "legacy_codegen_object_test");
+    codegen
+        .compile_file(&file)
+        .map_err(|error| error.to_string())?;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "mimi_legacy_obj_{}_{}",
+        std::process::id(),
+        counter
+    ));
+    std::fs::create_dir_all(&tmp_dir).map_err(|error| format!("mkdir: {error}"))?;
+    let obj_path = tmp_dir.join("test.o");
+    codegen
+        .compile_to_object(&obj_path)
+        .map_err(|error| error.to_string())?;
+    Ok(obj_path)
+}
+
+pub(crate) fn legacy_codegen_compile_and_verify_contracts_for_test(
+    src: &str,
+) -> Result<String, String> {
+    legacy_codegen_compile_and_run_with_contracts_for_test(src, true)
+}
+
+fn legacy_codegen_compile_and_run_with_contracts_for_test(
+    src: &str,
+    verify_contracts: bool,
+) -> Result<String, String> {
+    if !can_link() {
+        return Err("cc is unavailable".into());
+    }
+
+    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = legacy_codegen_file_for_test(parse_prod(src));
+
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "legacy_codegen_test");
+    codegen.verify_contracts = verify_contracts;
+    codegen
+        .compile_file_inner(Arc::new(file), None, true)
+        .map_err(|error| error.to_string())?;
+    link_and_run_module(&codegen, &E2EConfig::default(), counter)
+}
+
+fn legacy_codegen_file_for_test(mut file: crate::ast::File) -> crate::ast::File {
+    file.items.retain(|item| {
+        !matches!(
+            item,
+            crate::ast::Item::Flow(flow)
+                if matches!(
+                    flow.meta.origin,
+                    crate::ast::AstOrigin::RuntimeSystem("progressive.main")
+                )
+        )
+    });
+    file.implicit_single = false;
+    file
 }
 
 /// E2E codegen test with contracts verification enabled.
