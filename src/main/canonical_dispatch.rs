@@ -627,6 +627,10 @@ fn scalar_ffi_map_owner_composition_failure(
 }
 
 /// Select the route identity used by CLI consumers for a checker-owned graph.
+/// The recoverable ordinary Map NewResult receipt leads the chain: it is
+/// shape-disjoint from every admission-based profile below (its exact source
+/// shape admits no other ordinary Map operation), so the early return cannot
+/// shadow them and the pending-source dispatch cannot be shadowed either.
 /// Observer V1, DirectPrint, CheckedGet, ComputedKeyGet,
 /// ComputedStringKeyOwnerChain, IsEmpty,
 /// MapSetDropControl, BranchLocalSetDiamond, CloneIsolation, ValuesFieldMove,

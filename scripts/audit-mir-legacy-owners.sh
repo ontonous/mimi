@@ -1323,10 +1323,22 @@ bytecode_narrow_map_any_route_binding() {
         checker-validator
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_computed_key_get_route \
-        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_zero_miss_i32_route\( \
+        pub\ fn\ compile_mir_program_with_computed_string_key_owner_chain_route\( \
         validate_ordinary_map_owned_any_v2_computed_key_get_route \
         ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE \
         ComputedKeyGet
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_computed_string_key_owner_chain_route \
+        pub\ fn\ compile_mir_program_with_dynamic_keys_get_route\( \
+        validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_route \
+        ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE \
+        ComputedStringKeyOwnerChain
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_dynamic_keys_get_route \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_zero_miss_i32_route\( \
+        validate_ordinary_map_owned_any_v2_dynamic_keys_get_route \
+        ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE \
+        DynamicKeysGet
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_ordinary_map_owned_any_v2_zero_miss_i32_route \
         pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_i32_route\( \
@@ -1335,7 +1347,7 @@ bytecode_narrow_map_any_route_binding() {
         ZeroMissI32
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_i32_route \
-        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_removed_key_checked_miss_route\( \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_string_route\( \
         validate_ordinary_map_owned_any_v2_get_or_default_i32_route \
         ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE \
         GetOrDefaultI32 \
@@ -1348,10 +1360,16 @@ bytecode_narrow_map_any_route_binding() {
         RemovedKeyCheckedMiss
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_ordinary_map_owned_any_v2_is_empty_route \
-        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route\( \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_record_unit_route\( \
         validate_ordinary_map_owned_any_v2_is_empty_route \
         ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY_PROFILE \
         IsEmpty
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_ordinary_map_owned_any_v2_record_unit_route \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route\( \
+        validate_ordinary_map_owned_any_v2_record_unit_route \
+        ORDINARY_MAP_OWNED_ANY_V2_RECORD_UNIT_PROFILE \
+        RecordUnit
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route \
         pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_branch_local_set_diamond_route\( \
@@ -1366,10 +1384,16 @@ bytecode_narrow_map_any_route_binding() {
         BranchLocalSetDiamond
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_ordinary_map_owned_any_v2_clone_isolation_route \
-        pub\ fn\ compile_mir_program_with_empty_root_root_queries_v1_route\( \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route\( \
         validate_ordinary_map_owned_any_v2_clone_isolation_route \
         ORDINARY_MAP_OWNED_ANY_V2_CLONE_ISOLATION_PROFILE \
         CloneIsolation
+    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route \
+        pub\ fn\ compile_mir_program_with_empty_root_root_queries_v1_route\( \
+        validate_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route \
+        ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE \
+        PersistentRootAliasReplacement
     bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_empty_root_root_queries_v1_route \
         enum\ ValidatedOrdinaryMapOwnedAnyV2Route \
@@ -1377,11 +1401,116 @@ bytecode_narrow_map_any_route_binding() {
         MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE \
         EmptyRootRootQueriesV1
 
-    printf 'bytecode_ordinary_map_owned_any_v2_route_binding=15-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(\n'
+    printf 'bytecode_ordinary_map_owned_any_v2_route_binding=19-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(\n'
+    printf 'bytecode_record_unit_route_binding=ordinary-map-owned-any-v2-record-unit-v1->Checker-validated-adapter+RecordUnit-token+validated-narrow-route consumer=src/interp/bytecode/mir.rs\n'
     printf 'bytecode_map_empty_root_root_queries_v1_route_binding=1-dedicated-adapter->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_with_empty_root_root_queries_v1_route(\n'
 }
 
 bytecode_narrow_map_any_route_binding
+
+# DynamicKeysGet projects an owned argv[0] String before touching the Map.
+# Every public CLI consumer must select that same Checker-derived route and
+# route its receipt through a dedicated adapter; neither generic adapter may
+# authorize the projection opcode.
+dynamic_keys_get_cli_receipt_consumers() {
+    local run_source="$ROOT_DIR/src/main/run.rs"
+    local build_source="$ROOT_DIR/src/main/build.rs"
+    local verify_source="$ROOT_DIR/src/main/verify.rs"
+    local test_source="$ROOT_DIR/src/main/test.rs"
+    local disasm_source="$ROOT_DIR/src/main/disasm_cmd.rs"
+    local bytecode_source="$ROOT_DIR/src/interp/bytecode/mir.rs"
+    local native_source="$ROOT_DIR/src/codegen/mir/eligibility.rs"
+    local verifier_source="$ROOT_DIR/src/verifier/mod.rs"
+    local emitter_source="$ROOT_DIR/src/codegen/mir/ordinary_map_owned_any_v2.rs"
+    local fixture="$ROOT_DIR/tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_keys_get.mimi"
+    local integration_test="$ROOT_DIR/tests/canonical_mir_ordinary_map_any_v2_dynamic_keys_get.rs"
+    local l3_test="$ROOT_DIR/tests/canonical_mir_ordinary_map_any_v2_dynamic_keys_get_memcheck_l3.rs"
+    local runtime_test="$ROOT_DIR/src/runtime/ordinary_map_domain.rs"
+
+    local -a consumer_requirements=(
+        "$run_source|ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE|compile_mir_program_with_dynamic_keys_get_route"
+        "$build_source|ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE|compile_checked_mir_native_with_dynamic_keys_get_route"
+        "$verify_source|ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE|verify_mir_with_ordinary_map_owned_any_v2_dynamic_keys_get_route"
+        "$test_source|ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE|compile_mir_program_with_dynamic_keys_get_route"
+        "$disasm_source|ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE|compile_mir_program_with_dynamic_keys_get_route"
+    )
+    local requirement source profile_token adapter
+    for requirement in "${consumer_requirements[@]}"; do
+        IFS='|' read -r source profile_token adapter <<< "$requirement"
+        if ! rg -F "$profile_token" "$source" >/dev/null \
+            || ! rg -F "$adapter" "$source" >/dev/null; then
+            printf 'owner_audit_error=dynamic_keys_get_cli_receipt_dispatch_missing=%s required=%s+%s\n' \
+                "${source#"$ROOT_DIR/"}" "$profile_token" "$adapter" >&2
+            audit_failed=1
+            return
+        fi
+    done
+
+    for pattern in \
+        'ValidatedOrdinaryMapOwnedAnyV2Route::DynamicKeysGet' \
+        'ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE' \
+        'narrow V2 route receipt lacks its validated Checker/MIR token'; do
+        if ! rg -F "$pattern" "$bytecode_source" >/dev/null; then
+            printf 'owner_audit_error=dynamic_keys_get_bytecode_exact_token_missing=src/interp/bytecode/mir.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    for pattern in \
+        'exact_dynamic_keys_get_receipt' \
+        'dynamic_keys_get_authorized' \
+        'with_dynamic_keys_get_authorization'; do
+        if ! rg -F "$pattern" "$native_source" >/dev/null; then
+            printf 'owner_audit_error=dynamic_keys_get_native_authorization_missing=src/codegen/mir/eligibility.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    for pattern in \
+        'program_has_dynamic_keys_get' \
+        'requires the exact CheckedProgram-aware verifier route' \
+        'OrdinaryMapOwnedAnyV2Admission::DynamicKeysGet'; do
+        if ! rg -F "$pattern" "$verifier_source" >/dev/null; then
+            printf 'owner_audit_error=dynamic_keys_get_verifier_isolation_missing=src/verifier/mod.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+
+    if ! rg -F 'args()[0]' "$fixture" >/dev/null \
+        || ! rg -F '"\0雪"' "$fixture" >/dev/null \
+        || ! rg -F 'EXPECTED_PREFIX_OUTPUT: &[u8] = b"pr\xc3\xa9\0\xe9\x9b\xaa\ntrue\n"' "$integration_test" >/dev/null \
+        || ! rg -F 'dynamic_keys_get_rejects_generic_receipts_and_missing_arg_before_output' "$integration_test" >/dev/null \
+        || ! rg -F 'dynamic_keys_get_default_and_explicit_cli_consumers_share_exact_route_receipts' "$integration_test" >/dev/null \
+        || ! rg -F 'dynamic_keys_get_disasm_uses_the_exact_bytecode_adapter_and_test_cli_stays_nonexecuting' "$integration_test" >/dev/null \
+        || ! rg -F 'MIMI_REQUIRE_VALGRIND' "$l3_test" >/dev/null \
+        || ! rg -F 'source-manifest.before.sha256' "$l3_test" >/dev/null \
+        || ! rg -F 'ordinary_map_owned_any_v2_dynamic_keys_get_default_and_explicit_are_memcheck_clean' "$l3_test" >/dev/null; then
+        printf 'owner_audit_error=dynamic_keys_get_fixture_or_adversarial_test_missing\n' >&2
+        audit_failed=1
+        return
+    fi
+
+    local emitter_context
+    emitter_context="$(sed -n '/pub(super) fn emit_ordinary_map_owned_any_v2_dynamic_arg0(/,/pub(super) fn emit_ordinary_map_owned_any_v2_values_len(/p' "$emitter_source")"
+    if ! printf '%s\n' "$emitter_context" | rg -U 'emit_ordinary_map_domain_own_string\(arg, length, subject\)\?;[\s\S]*?build_string_struct\(arg, length\)' >/dev/null \
+        || ! rg -F 'super::super::env::mimi_args_get(0)' "$runtime_test" >/dev/null \
+        || ! rg -F 'ordinary_map_domain_own_string(dynamic, 11)' "$runtime_test" >/dev/null \
+        || ! rg -F '"get-any-failure"' "$runtime_test" >/dev/null \
+        || ! rg -F 'with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test' "$runtime_test" >/dev/null; then
+        printf 'owner_audit_error=dynamic_keys_get_native_argv_owner_cleanup_missing\n' >&2
+        audit_failed=1
+        return
+    fi
+
+    printf 'dynamic_keys_get_cli_receipt_dispatch=default+explicit-run/build/verify+test/disasm use dedicated Checker/MIR adapters; generic receipts remain denied\n'
+    printf 'dynamic_keys_get_native_argv_ownership=argv-copy registered before String publication and MapNew; trap drain regression uses args_get allocation\n'
+}
+
+dynamic_keys_get_cli_receipt_consumers
 
 # Pin the V1 observer profile from the main default selector through its
 # checker/MIR receipt proof, bytecode anchor, and native build adapter. The
@@ -1409,20 +1538,27 @@ bytecode_observer_v1_route_receipt_binding() {
     native_context="$(sed -n '/^    fn compile_mir_native_inner(/,/^        let exact_checked_get_receipt/p' "$native_source")"
     native_receipt_adapter="$(sed -n '/^    pub fn compile_mir_native_with_route_receipt(/,/^    \/\/\/ Values field-move and snapshot-replacement/p' "$native_source")"
     checked_native_receipt_adapter="$(sed -n '/^    pub fn compile_checked_mir_native_with_route_receipt(/,/^    \/\/\/ Compile the exact Checker\/MIR computed-key/p' "$native_source")"
-    build_route_context="$(sed -n '/let (compile_result, canonical_default, route_receipt, route_consumer) = if mir {/,/^    \/\/ Render the route receipt before emitting any native artifact/p' "$build_source")"
+    # Count only the three compile-route branches. Later census formatting
+    # independently asks the checked selector for a label while reading the
+    # already-selected receipt; that telemetry must not be mistaken for a
+    # fourth native route or included in this receipt hand-off contract.
+    build_route_context="$(sed -n '/let (compile_result, canonical_default, route_receipt, route_consumer) = if mir {/,/^    let native_data_export_table_receipt =/p' "$build_source")"
     profile_pattern='const ORDINARY_MAP_OWNER_OBSERVER_V1_PROFILE:\s*&str\s*=\s*crate::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnerLifecycleObserverV1\s*\.as_str\(\);'
     observer_pattern='let ordinary_map_owner_observer_v1_receipts = match route_receipt \{\s*Some\(receipt\) if receipt\.profile == ORDINARY_MAP_OWNER_OBSERVER_V1_PROFILE => \{[\s\S]*?receipt\.validate_against_program\(program\)[\s\S]*?validate_ordinary_map_owner_lifecycle_observer_v1_mir_route\(\s*program,?\s*\)[\s\S]*?Some\(receipts\)\s*\}\s*_ if has_observer_mir_nodes => \{[\s\S]*?instructions require the exact route receipt[\s\S]*?\}\s*_\s*=> None,\s*\};'
     anchor_pattern='bind_ordinary_map_owner_observer_v1_route_anchor\(\s*entry,\s*&functions,\s*&builtin_names,\s*route_receipt,\s*checker_receipts\.clone\(\),\s*observer_bindings,'
-    main_profile_pattern='let admission\s*=\s*mimi::core::mir::classify_canonical_mir_route_admission\(checked\);\s*if admission\.ordinary_map_owned_any_v2_get_or_default_i32\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE;\s*\}'
+    main_profile_pattern='let admission\s*=\s*mimi::core::mir::classify_canonical_mir_route_admission\(checked\);\s*if mimi::core::mir::has_ordinary_map_new_result_route_candidate\(checked\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE;\s*\}\s*if admission\.ordinary_map_owned_any_v2_persistent_root_alias_replacement\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE;\s*\}\s*if admission\.ordinary_map_owned_any_v2_get_or_default_string\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE;\s*}'
+    main_profile_pattern+="\\s*if admission\\.ordinary_map_owned_any_v2_get_or_default_i32\\(\\)\\s*\\{\\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE;\\s*\\}"
     main_profile_pattern+="\\s*if admission\\.ordinary_map_owned_any_v2_removed_key_checked_miss\\(\\)\\s*\\{\\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_REMOVED_KEY_CHECKED_MISS_PROFILE;\\s*\\}"
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_zero_miss_i32\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::KeysSnapshot\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE;\s*\}'
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_dynamic_keys_get\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_values_producer_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesProducerCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_map_root_get_any_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_map_root_producer_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2MapRootProducerCaller\s*\.as_str\(\);\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapEmptyRootRootQueriesV1\s*\{\s*return mimi::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE;\s*\}'
+    main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::RecordUnit\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_RECORD_UNIT_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::IsEmpty\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControl\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE;\s*\}'
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_branch_local_set_diamond\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_BRANCH_LOCAL_SET_DIAMOND_PROFILE;\s*\}'
@@ -1431,7 +1567,9 @@ bytecode_observer_v1_route_receipt_binding() {
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\.is_direct_print\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\.is_checked_get\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\.is_computed_key_get\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE\s*\}'
+    main_profile_pattern+='\s*else if admission\s*\.ordinary_map_owned_any_v2\s*\.is_computed_string_key_owner_chain\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\.is_values_field_move\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE\s*\}'
+    main_profile_pattern+='\s*else if admission\s*\.ordinary_map_owned_any_v2\s*\.is_values_heterogeneous_string_index1\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_HETEROGENEOUS_STRING_INDEX1_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\s*\.ordinary_map_owned_any_v2\s*\.is_values_local_index_i32\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesMixedSnapshotRemove\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesSnapshotReplacement\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE\s*\}'
@@ -1440,10 +1578,18 @@ bytecode_observer_v1_route_receipt_binding() {
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_any_v2_complete\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owned_get_i32_string_v1_complete\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND\s*\}'
     main_profile_pattern+='\s*else if admission\.ordinary_map_owner_lifecycle_i32_string_v1_complete\(\)\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_ISLAND\s*\}'
-    main_profile_pattern+='\s*else if admission\.map_root_complete\(\)\s*\{\s*mimi::core::mir::MAP_ROOT_ISLAND\s*\}\s*else\s*\{\s*default_profile\s*\}'
+    main_profile_pattern+='\s*else if admission\.map_root_complete\(\)\s*\{\s*mimi::core::mir::MAP_ROOT_ISLAND\s*\}'
+    main_profile_pattern+='\s*else if admission\.scalar_export\s*\{\s*mimi::core::mir::SCALAR_EXPORT_ISLAND\s*\}'
+    main_profile_pattern+='\s*else if admission\.scalar_actor\s*\{\s*mimi::core::mir::SCALAR_ACTOR_ISLAND\s*\}'
+    main_profile_pattern+='\s*else if admission\.scalar_ffi\s*\{\s*"scalar-ffi-v1"\s*\}'
+    main_profile_pattern+='\s*else if admission\.scalar_nested\s*\{\s*mimi::core::mir::SCALAR_NESTED_ISLAND\s*\}'
+    main_profile_pattern+='\s*else if admission\.scalar_generic_identity_i32_complete\(\)\s*\{\s*mimi::core::mir::SCALAR_GENERIC_IDENTITY_I32_ISLAND\s*\}'
+    main_profile_pattern+='\s*else if admission\.scalar_generic_identity_i64_complete\(\)\s*\{\s*mimi::core::mir::SCALAR_GENERIC_IDENTITY_I64_ISLAND\s*\}'
+    main_profile_pattern+='\s*else if has_native_data_export_declaration\(checked\) && !admission\.has_candidate\(\)\s*\{\s*NATIVE_DATA_EXPORT_ROUTE_PROFILE\s*\}'
+    main_profile_pattern+='\s*else if mimi::codegen::has_static_generic_trait_specialization_candidate\(checked\)\s*\{\s*mimi::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE\s*\}\s*else\s*\{\s*default_profile\s*\}'
     main_route_pattern='let observer_admission = admission\.ordinary_map_owner_lifecycle_observer_v1;[\s\S]*?if observer_admission\.has_profile_signal\(\) && !observer_admission\.is_complete\(\)[\s\S]*?if observer_admission\.is_complete\(\)\s*\{\s*return match materialize_canonical_route\(checked, merged_file\)\s*\{\s*Ok\(route\)\s*if ordinary_map_owner_lifecycle_observer_v1_materialization_is_exact\(&route\)\s*=>\s*\{\s*select_ordinary_map_owner_lifecycle_observer_v1_route\(checked, route\.program\)'
     local selector_profile_count
-    selector_profile_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller([^[:alnum:]_])|OrdinaryMapOwnedAnyV2ValuesProducerCaller|OrdinaryMapOwnedAnyV2MapRootGetAnyCaller|OrdinaryMapOwnedAnyV2MapRootProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(GET_OR_DEFAULT_I32_PROFILE|REMOVED_KEY_CHECKED_MISS_PROFILE|ZERO_MISS_I32_PROFILE|KEYS_SNAPSHOT_PROFILE|IS_EMPTY_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_LOCAL_INDEX_I32_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || printf '0')"
+    selector_profile_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller([^[:alnum:]_])|OrdinaryMapOwnedAnyV2ValuesProducerCaller|OrdinaryMapOwnedAnyV2MapRootGetAnyCaller|OrdinaryMapOwnedAnyV2MapRootProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(GET_OR_DEFAULT_I32_PROFILE|GET_OR_DEFAULT_STRING_PROFILE|REMOVED_KEY_CHECKED_MISS_PROFILE|ZERO_MISS_I32_PROFILE|KEYS_SNAPSHOT_PROFILE|DYNAMIC_KEYS_GET_PROFILE|IS_EMPTY_PROFILE|RECORD_UNIT_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_HETEROGENEOUS_STRING_INDEX1_PROFILE|VALUES_LOCAL_INDEX_I32_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || printf '0')"
     local values_crosscall_v1_selector_count
     local values_crosscall_v2_selector_count
     values_crosscall_v1_selector_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\)' || printf '0')"
@@ -1457,7 +1603,7 @@ bytecode_observer_v1_route_receipt_binding() {
         || ! printf '%s\n' "$observer_nodes_context" | rg -U 'OrdinaryMapOwnerLifecycleObserverToJson\s*\{\s*\.\.\s*\}\s*\|\s*MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln\s*\{\s*\.\.\s*\}' >/dev/null \
         || ! printf '%s\n' "$observer_anchor_context" | rg -F 'ordinary_map_owner_observer_v1_receipts.as_ref()' >/dev/null \
         || ! printf '%s\n' "$observer_anchor_context" | rg -U "$anchor_pattern" >/dev/null \
-        || [ "$selector_profile_count" -ne 23 ] \
+        || [ "$selector_profile_count" -ne 29 ] \
         || [ "$values_crosscall_v1_selector_count" -ne 1 ] \
         || [ "$values_crosscall_v2_selector_count" -ne 1 ] \
         || ! printf '%s\n' "$main_profile_context" | rg -U "$main_profile_pattern" >/dev/null \
@@ -1485,6 +1631,8 @@ bytecode_observer_v1_route_receipt_binding() {
         audit_failed=1
         return
     fi
+    printf 'native_build_route_receipt_binding=three-route-selections+exact-receipt+checked-native-adapter consumer=src/main/build.rs\n'
+    printf 'checked_route_profile_fallback_binding=scalar-export+actor+ffi+nested+generic-i32+i64+native-data-export+static-generic-trait+default consumer=src/main/canonical_dispatch.rs\n'
     printf 'observer_v1_exact_route_binding=CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1->ordinary-map-owner-lifecycle-observer-v1->ordered-default-selector+materialization-receipt-equality+checker-MIR-bytecode-native-verifier-preflight+same-bytecode-and-native-receipt-adapters consumer=src/main/canonical_dispatch.rs+src/main/build.rs+src/interp/bytecode/mir.rs+src/codegen/mir/eligibility.rs\n'
 }
 bytecode_observer_v1_route_receipt_binding
