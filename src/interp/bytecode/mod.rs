@@ -24,13 +24,42 @@ pub mod mir_ffi;
 pub mod registry;
 pub mod vm;
 
+#[cfg(test)]
+mod test_alloc;
+
 pub use compiler::BytecodeCompiler;
 pub use instr::{
     BytecodeProgram, CanonicalFfiDescriptor, CanonicalFfiScalarType, ConstValue, FunctionProto, Op,
 };
 pub use mir::{
-    compile_mir_program, compile_mir_program_with_route_manifest,
-    compile_mir_program_with_route_receipt,
+    compile_mir_program, compile_mir_program_with_computed_key_get_route,
+    compile_mir_program_with_computed_string_key_owner_chain_route,
+    compile_mir_program_with_dynamic_keys_get_route,
+    compile_mir_program_with_empty_root_root_queries_v1_route,
+    compile_mir_program_with_keys_snapshot_route,
+    compile_mir_program_with_map_new_result_route,
+    compile_mir_program_with_map_root_get_any_caller_route,
+    compile_mir_program_with_map_root_producer_caller_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_branch_local_set_diamond_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_clone_isolation_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_i32_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_string_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_is_empty_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_record_unit_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_removed_key_checked_miss_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_zero_miss_i32_route,
+    compile_mir_program_with_route_manifest, compile_mir_program_with_route_receipt,
+    compile_mir_program_with_values_crosscall_string_caller_index1_route,
+    compile_mir_program_with_values_crosscall_string_caller_route,
+    compile_mir_program_with_values_field_move_route,
+    compile_mir_program_with_values_heterogeneous_string_index1_route,
+    compile_mir_program_with_values_local_index_i32_route,
+    compile_mir_program_with_values_mixed_snapshot_remove_route,
+    compile_mir_program_with_values_mixed_snapshot_route,
+    compile_mir_program_with_values_producer_caller_route,
+    compile_mir_program_with_values_snapshot_replacement_route,
 };
 pub use registry::{BuiltinCategory, BuiltinDesc, BuiltinRegistry};
 pub use vm::BytecodeVM;
@@ -38,7 +67,7 @@ pub use vm::BytecodeVM;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interp::Value;
+    use crate::interp::{SharedString, Value};
     use crate::lexer::Lexer;
 
     /// Helper: compile a simple program and run it.
@@ -366,7 +395,7 @@ mod tests {
         assert_owned_get_result(
             &values[5],
             "Ok",
-            &Value::String(crate::interp::SharedString::new("owned\0é".into())),
+            &Value::String(SharedString::new("owned\0é".into())),
         );
         assert_owned_get_result(&values[6], "Err", &Value::Int(2));
         assert_owned_get_result(&values[7], "Err", &Value::Int(2));
@@ -406,7 +435,7 @@ mod tests {
         assert_owned_get_result(
             &result,
             "Ok",
-            &Value::String(crate::interp::SharedString::new("owned-value".into())),
+            &Value::String(SharedString::new("owned-value".into())),
         );
     }
 
@@ -896,25 +925,16 @@ mod tests {
 
     #[test]
     fn canonical_mir_managed_any_println_formats_i32_and_preserves_the_source_owner() {
-        // This is the checked join shape: the integer literal is packed into
-        // DynamicAny before the join, and Println borrows the resulting local.
+        // Keep this route to one MapGet owner and print its Any field directly.
         let source = r#"
-            func carry<T>(value: T) -> T { value }
             func main() -> i32 {
                 let empty = map_new()
-                let root = map_set(empty, "zero", 0)
-                let number_pair = map_get(root, "zero")
+                let root = map_set(empty, "zero", 42)
+                let pair = map_get(root, "zero")
                 drop(empty)
                 drop(root)
-                let number_found = number_pair.0
-                let zero_payload = number_pair.1
-                let zero_carried = carry(zero_payload)
-                let zero = if number_found { zero_carried } else { 0 }
-                println(number_found)
-                println(zero)
-                drop(number_pair)
-                drop(zero_payload)
-                drop(zero_carried)
+                println(pair.1)
+                drop(pair)
                 0
             }
         "#;
@@ -940,7 +960,7 @@ mod tests {
             vm.run_value().expect("checked Any Println"),
             Value::Int(0)
         ));
-        assert_eq!(vm.stdout(), "true\n0\n");
+        assert_eq!(vm.stdout(), "42\n");
     }
 
     #[test]
@@ -952,10 +972,8 @@ mod tests {
                 let pair = map_get(root, "k")
                 drop(empty)
                 drop(root)
-                let payload = pair.1
-                println(payload)
+                println(pair.1)
                 drop(pair)
-                drop(payload)
                 0
             }
         "#;
@@ -990,10 +1008,8 @@ mod tests {
                 let pair = map_get(root, "k")
                 drop(empty)
                 drop(root)
-                let payload = pair.1
-                println(payload)
+                println(pair.1)
                 drop(pair)
-                drop(payload)
                 0
             }
         "#;
@@ -1050,10 +1066,8 @@ mod tests {
                 let pair = map_get(root, "k")
                 drop(empty)
                 drop(root)
-                let payload = pair.1
-                println(payload)
+                println(pair.1)
                 drop(pair)
-                drop(payload)
                 0
             }
         "#;

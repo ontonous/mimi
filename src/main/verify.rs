@@ -149,28 +149,703 @@ pub(crate) fn verify(
     // provenance line below.  The verifier consumes the same receipt object;
     // this is only a read-only view after verification, never a second route
     // construction.
-    let canonical_receipt = canonical
+    // A selected MIR route still goes through the checked library boundary
+    // when Z3 is unavailable. That boundary reports owner-scoped
+    // InfrastructureError/NITS rows without constructing a solver; direct
+    // MIR consumption here would otherwise turn the same request into a
+    // top-level SolverSession initialization error.
+    let canonical_mir_available = canonical
         .as_ref()
-        .map(|program| program.route_receipt("verify-canonical-v1"));
+        .is_some_and(|_| mimi::verifier::is_z3_available());
+    let canonical_mir_selected = canonical.is_some();
+    let canonical_receipt_profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
+        &checked_program,
+        "verify-canonical-v1",
+    );
+    let get_or_default_string_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_get_or_default_string();
+    let get_or_default_string_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE;
+    if get_or_default_string_admitted != get_or_default_string_receipt_profile {
+        return Err(format!(
+            "canonical GetOrDefault<String> verifier route rejected: Checker admission/profile mismatch (admitted={get_or_default_string_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if get_or_default_string_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical GetOrDefault<String> verifier route rejected: Checker admission has no canonical MIR graph to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_get_or_default_string(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical GetOrDefault<String> verifier route rejected: {reason}")
+        })?;
+    }
+    let checked_get_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            .is_checked_get();
+    let checked_get_receipt_profile =
+        canonical_receipt_profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE;
+    if checked_get_admitted != checked_get_receipt_profile {
+        return Err(format!(
+            "canonical CheckedGet verifier route rejected: Checker admission/profile mismatch (admitted={checked_get_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if checked_get_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical CheckedGet verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_checked_get(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical CheckedGet verifier route rejected: {reason}"))?;
+    }
+    let zero_miss_i32_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_zero_miss_i32();
+    let zero_miss_i32_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;
+    if zero_miss_i32_admitted != zero_miss_i32_receipt_profile {
+        return Err(format!(
+            "canonical ZeroMissI32 verifier route rejected: Checker admission/profile mismatch (admitted={zero_miss_i32_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if zero_miss_i32_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical ZeroMissI32 verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_zero_miss_i32(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical ZeroMissI32 verifier route rejected: {reason}"))?;
+    }
+    let removed_key_checked_miss_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_removed_key_checked_miss();
+    let removed_key_checked_miss_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_REMOVED_KEY_CHECKED_MISS_PROFILE;
+    if removed_key_checked_miss_admitted != removed_key_checked_miss_receipt_profile {
+        return Err(format!(
+            "canonical RemovedKeyCheckedMiss verifier route rejected: Checker admission/profile mismatch (admitted={removed_key_checked_miss_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if removed_key_checked_miss_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical RemovedKeyCheckedMiss verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_removed_key_checked_miss(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical RemovedKeyCheckedMiss verifier route rejected: {reason}")
+        })?;
+    }
+    let keys_snapshot_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::KeysSnapshot;
+    let keys_snapshot_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE;
+    if keys_snapshot_admitted != keys_snapshot_receipt_profile {
+        return Err(format!(
+            "canonical KeysSnapshot verifier route rejected: Checker admission/profile mismatch (admitted={keys_snapshot_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if keys_snapshot_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical KeysSnapshot verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_keys_snapshot(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical KeysSnapshot verifier route rejected: {reason}"))?;
+    }
+    let values_producer_caller_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_values_producer_caller();
+    let values_producer_caller_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesProducerCaller
+            .as_str();
+    if values_producer_caller_admitted != values_producer_caller_receipt_profile {
+        return Err(format!(
+            "canonical ValuesProducerCaller verifier route rejected: Checker admission/profile mismatch (admitted={values_producer_caller_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if values_producer_caller_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical ValuesProducerCaller verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_values_producer_caller(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical ValuesProducerCaller verifier route rejected: {reason}")
+        })?;
+    }
+    let values_crosscall_string_caller_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_values_crosscall_string_caller_v1();
+    let values_crosscall_string_caller_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller
+            .as_str();
+    if values_crosscall_string_caller_admitted != values_crosscall_string_caller_receipt_profile {
+        return Err(format!(
+            "canonical ValuesCrosscallStringCaller verifier route rejected: Checker admission/profile mismatch (admitted={values_crosscall_string_caller_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if values_crosscall_string_caller_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical ValuesCrosscallStringCaller verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_values_crosscall_string_caller(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical ValuesCrosscallStringCaller verifier route rejected: {reason}")
+        })?;
+    }
+    let values_crosscall_string_caller_index1_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_values_crosscall_string_caller_index1();
+    let values_crosscall_string_caller_index1_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
+            .as_str();
+    if values_crosscall_string_caller_index1_admitted
+        != values_crosscall_string_caller_index1_receipt_profile
+    {
+        return Err(format!(
+            "canonical ValuesCrosscallStringCallerIndex1 verifier route rejected: Checker admission/profile mismatch (admitted={values_crosscall_string_caller_index1_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if values_crosscall_string_caller_index1_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical ValuesCrosscallStringCallerIndex1 verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!(
+                "canonical ValuesCrosscallStringCallerIndex1 verifier route rejected: {reason}"
+            )
+        })?;
+    }
+    let map_root_producer_caller_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_map_root_producer_caller();
+    let map_root_producer_caller_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller
+            .as_str();
+    if map_root_producer_caller_admitted != map_root_producer_caller_receipt_profile {
+        return Err(format!(
+            "canonical MapRootProducerCaller verifier route rejected: Checker admission/profile mismatch (admitted={map_root_producer_caller_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if map_root_producer_caller_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical MapRootProducerCaller verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_map_root_producer_caller(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical MapRootProducerCaller verifier route rejected: {reason}")
+        })?;
+    }
+    let map_root_get_any_caller_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_map_root_get_any_caller();
+    let map_root_get_any_caller_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller
+            .as_str();
+    if map_root_get_any_caller_admitted != map_root_get_any_caller_receipt_profile {
+        return Err(format!(
+            "canonical MapRootGetAnyCaller verifier route rejected: Checker admission/profile mismatch (admitted={map_root_get_any_caller_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if map_root_get_any_caller_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical MapRootGetAnyCaller verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_map_root_get_any_caller(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical MapRootGetAnyCaller verifier route rejected: {reason}")
+        })?;
+    }
+    let is_empty_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::IsEmpty;
+    let is_empty_receipt_profile =
+        canonical_receipt_profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY_PROFILE;
+    if is_empty_admitted != is_empty_receipt_profile {
+        return Err(format!(
+            "canonical IsEmpty verifier route rejected: Checker admission/profile mismatch (admitted={is_empty_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if is_empty_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical IsEmpty verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_is_empty(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical IsEmpty verifier route rejected: {reason}"))?;
+    }
+    let record_unit_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::RecordUnit;
+    let record_unit_receipt_profile =
+        canonical_receipt_profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_RECORD_UNIT_PROFILE;
+    if record_unit_admitted != record_unit_receipt_profile {
+        return Err(format!(
+            "canonical RecordUnit verifier route rejected: Checker admission/profile mismatch (admitted={record_unit_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if record_unit_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical RecordUnit verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_record_unit(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical RecordUnit verifier route rejected: {reason}"))?;
+    }
+    let map_set_drop_control_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControl;
+    let map_set_drop_control_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE;
+    if map_set_drop_control_admitted != map_set_drop_control_receipt_profile {
+        return Err(format!(
+            "canonical MapSetDropControl verifier route rejected: Checker admission/profile mismatch (admitted={map_set_drop_control_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if map_set_drop_control_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical MapSetDropControl verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_map_set_drop_control(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical MapSetDropControl verifier route rejected: {reason}")
+        })?;
+    }
+    let branch_local_set_diamond_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_branch_local_set_diamond();
+    let branch_local_set_diamond_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_BRANCH_LOCAL_SET_DIAMOND_PROFILE;
+    if branch_local_set_diamond_admitted != branch_local_set_diamond_receipt_profile {
+        return Err(format!(
+            "canonical BranchLocalSetDiamond verifier route rejected: Checker admission/profile mismatch (admitted={branch_local_set_diamond_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if branch_local_set_diamond_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical BranchLocalSetDiamond verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_branch_local_set_diamond(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical BranchLocalSetDiamond verifier route rejected: {reason}")
+        })?;
+    }
+    let clone_isolation_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::CloneIsolation;
+    let clone_isolation_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CLONE_ISOLATION_PROFILE;
+    if clone_isolation_admitted != clone_isolation_receipt_profile {
+        return Err(format!(
+            "canonical CloneIsolation verifier route rejected: Checker admission/profile mismatch (admitted={clone_isolation_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if clone_isolation_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical CloneIsolation verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_clone_isolation(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical CloneIsolation verifier route rejected: {reason}"))?;
+    }
+    let persistent_root_alias_replacement_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_persistent_root_alias_replacement();
+    let persistent_root_alias_replacement_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE;
+    if persistent_root_alias_replacement_admitted
+        != persistent_root_alias_replacement_receipt_profile
+    {
+        return Err(format!(
+            "canonical PersistentRootAliasReplacement verifier route rejected: Checker admission/profile mismatch (admitted={persistent_root_alias_replacement_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if persistent_root_alias_replacement_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical PersistentRootAliasReplacement verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_persistent_root_alias_replacement(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical PersistentRootAliasReplacement verifier route rejected: {reason}")
+        })?;
+    }
+    let values_local_index_i32_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_values_local_index_i32();
+    let values_local_index_i32_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_PROFILE;
+    if values_local_index_i32_admitted != values_local_index_i32_receipt_profile {
+        return Err(format!(
+            "canonical ValuesLocalIndexI32 verifier route rejected: Checker admission/profile mismatch (admitted={values_local_index_i32_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if values_local_index_i32_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical ValuesLocalIndexI32 verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_owned_any_v2_values_local_index_i32_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical ValuesLocalIndexI32 verifier route rejected: {reason}")
+        })?;
+    }
+    let values_heterogeneous_string_index1_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2_values_heterogeneous_string_index1();
+    let values_heterogeneous_string_index1_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_HETEROGENEOUS_STRING_INDEX1_PROFILE;
+    if values_heterogeneous_string_index1_admitted
+        != values_heterogeneous_string_index1_receipt_profile
+    {
+        return Err(format!(
+            "canonical ValuesHeterogeneousStringIndex1 verifier route rejected: Checker admission/profile mismatch (admitted={values_heterogeneous_string_index1_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if values_heterogeneous_string_index1_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical ValuesHeterogeneousStringIndex1 verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_owned_any_v2_values_heterogeneous_string_index1_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!(
+                "canonical ValuesHeterogeneousStringIndex1 verifier route rejected: {reason}"
+            )
+        })?;
+    }
+    if canonical_receipt_profile == mimi::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE {
+        if let Some(program) = canonical.as_ref() {
+            mimi::core::mir::validate_map_empty_root_root_queries_v1_route(
+                &checked_program,
+                program,
+            )?;
+        }
+    }
+    if canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE
+    {
+        if let Some(program) = canonical.as_ref() {
+            mimi::core::mir::validate_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_route(
+                &checked_program,
+                program,
+            )
+            .map_err(|reason| {
+                format!("canonical ValuesMixedSnapshotRemove verifier route rejected: {reason}")
+            })?;
+        }
+    }
+    if canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE
+    {
+        if let Some(program) = canonical.as_ref() {
+            mimi::core::mir::validate_ordinary_map_owned_any_v2_values_mixed_snapshot_route(
+                &checked_program,
+                program,
+            )
+            .map_err(|reason| {
+                format!("canonical ValuesMixedSnapshot verifier route rejected: {reason}")
+            })?;
+        }
+    }
     if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
-        if let Some(receipt) = canonical_receipt.as_ref() {
+        if let Some(program) = canonical.as_ref() {
             let admission_mode = if mir { "explicit-mir" } else { "default" };
             eprintln!(
                 "MIMI_ROUTE_CENSUS route-admission consumer=verify mode={} checker_profile={} mir_digest={} receipt_identity_digest={}",
                 admission_mode,
-                "verify-canonical-v1",
-                receipt.mir_digest,
-                receipt.semantic_identity_digest(),
+                canonical_receipt_profile,
+                program.canonical_digest(),
+                program
+                    .route_receipt(canonical_receipt_profile)
+                    .route_identity_digest(),
             );
         }
     }
+    let canonical_receipt = canonical
+        .as_ref()
+        .filter(|_| canonical_mir_available)
+        .map(|program| program.route_receipt(canonical_receipt_profile));
 
     let mut results = if let Some(canonical) = canonical {
         // The shared dispatcher checks the complete graph. Executable inputs
         // also preflight execution consumers; contract libraries need no main.
-        // The verifier validates its own final boundary and never falls back.
-        let receipt = canonical.route_receipt("verify-canonical-v1");
-        mimi::verifier::verify_mir_with_route_receipt(&canonical, &receipt, source_hash)?
+        // With a solver, MIR validates the final boundary. Without one, the
+        // checked route preserves the owner-scoped infrastructure results.
+        if canonical_mir_available {
+            let receipt = canonical.route_receipt(canonical_receipt_profile);
+            if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_checked_get_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_get_or_default_string_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_get_or_default_i32_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_zero_miss_i32_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_REMOVED_KEY_CHECKED_MISS_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_removed_key_checked_miss_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_keys_snapshot_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_dynamic_keys_get_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_computed_string_key_owner_chain_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2ValuesProducerCaller
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_producer_caller_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2MapRootProducerCaller
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_map_root_producer_caller_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2MapRootGetAnyCaller
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_map_root_get_any_caller_route(
+                    &checked_program,
+                    &canonical,
+                    source_hash,
+                    &receipt,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_HETEROGENEOUS_STRING_INDEX1_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_heterogeneous_string_index1_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CLONE_ISOLATION_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_clone_isolation_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE
+            {
+                mimi::verifier::verify_mir_with_map_empty_root_root_queries_v1_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_is_empty_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_map_set_drop_control_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_BRANCH_LOCAL_SET_DIAMOND_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_branch_local_set_diamond_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE
+            {
+                // The execution graph is the contract-free L1 projection; the
+                // verifier re-derives its own L2 projection (contracts, proof
+                // worklist, source census) from the same CheckedProgram and
+                // binds its receipts to that graph.
+                let l2 = mimi::core::mir::materialize_ordinary_map_new_result_verifier_route(
+                    &checked_program,
+                )
+                .map_err(|reason| {
+                    format!("canonical Map NewResult verifier route rejected: {reason}")
+                })?;
+                let l2_receipt = l2
+                    .route_receipt(mimi::core::mir::ORDINARY_MAP_NEW_RESULT_L2_VERIFIER_PROFILE);
+                mimi::verifier::verify_mir_with_ordinary_map_new_result_l2_verifier_route(
+                    &checked_program,
+                    &l2,
+                    &l2_receipt,
+                    source_hash,
+                )?
+            } else {
+                mimi::verifier::verify_mir_with_route_receipt(&canonical, &receipt, source_hash)?
+            }
+        } else {
+            mimi::verifier::verify_checked(&checked_program, source_hash)?
+        }
     } else if dump_z3 {
         // --dump-z3 needs access to Verifier::dump_smt2 after verification,
         // which the Flow state machine doesn't expose. Keep direct for this case.
@@ -192,6 +867,19 @@ pub(crate) fn verify(
         // when their verdict classes disagree.
         mimi::verifier::verify_checked_dual(&checked_program, source_hash)?
     };
+
+    if canonical_mir_selected
+        && !canonical_mir_available
+        && !results.is_empty()
+        && results.iter().all(|result| result.artifact.is_none())
+        && results.iter().all(|result| !result.status.is_definitive())
+        && (std::env::var_os("MIMI_VERBOSE").is_some()
+            || std::env::var_os("MIMI_ROUTE_CENSUS").is_some())
+    {
+        eprintln!(
+            "canonical verifier result: MIR candidate retained; Z3 unavailable; no proof artifacts or proof verdicts emitted; owner-scoped results follow"
+        );
+    }
 
     // The canonical scalar FFI verifier proves call-site preconditions from
     // shared MIR receipts. A program containing an exported C body stays on
@@ -283,7 +971,7 @@ pub(crate) fn verify(
                 .unwrap_or(&source_hash_for_provenance);
             {
                 eprintln!(
-                    "canonical MIR verifier provenance: profile={} mir_digest={} type_desc_digest={} abi_digest={} ffi_digest={} ownership_digest={} flow_transition_digest={} source_hash={}",
+                    "canonical MIR verifier provenance: profile={} mir_digest={} type_desc_digest={} abi_digest={} ffi_digest={} ownership_digest={} flow_transition_digest={} source_hash={} route_identity_digest={}",
                     receipt.profile,
                     receipt.mir_digest,
                     receipt.type_desc_digest,
@@ -292,6 +980,7 @@ pub(crate) fn verify(
                     receipt.ownership_digest,
                     receipt.flow_transition_digest,
                     provenance_source_hash,
+                    receipt.route_identity_digest(),
                 );
             }
         }
@@ -310,10 +999,10 @@ pub(crate) fn verify(
         // Show per-function stats table if --stats is set
         if show_stats {
             println!(
-                "{:30} {:>10} {:>12} {:>8}",
-                "Function", "Status", "Constraints", "Time"
+                "{:30} {:>10} {:>12} {:>8}  {}",
+                "Function", "Status", "Constraints", "Time", "Proof profile / scope"
             );
-            println!("{}", "-".repeat(64));
+            println!("{}", "-".repeat(110));
         }
 
         for r in &results {
@@ -340,15 +1029,34 @@ pub(crate) fn verify(
                 } else {
                     "? unknown"
                 };
+                let identity = r
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| artifact.identity_label())
+                    .unwrap_or_else(|| "—".to_string());
                 println!(
-                    "{:30} {:>10} {:>12} {:>8}",
-                    r.func_name, status_str, r.constraint_count, time_str
+                    "{:30} {:>10} {:>12} {:>8}  {}",
+                    r.func_name, status_str, r.constraint_count, time_str, identity
                 );
             }
 
             if let Some(diag) = &r.diagnostic {
                 let formatted =
                     format_diagnostic_with_registry(diag, &merged_file.sources, src_ref, filename);
+                // A call-site-owned diagnostic can otherwise hide the result
+                // label entirely: the source span and message identify the
+                // declaration, but not the caller/obligation row that owns
+                // the verdict. Keep the named FFI Ensures observation visible
+                // in the normal (non-stats) CLI transcript while preserving
+                // the structured diagnostic and its exact source span.
+                if !show_stats {
+                    if let Some(artifact) = &r.artifact {
+                        eprint!("  [{}] ", artifact.identity_label());
+                    }
+                    if r.func_name.contains(" -> extern ") {
+                        eprint!("{}: ", r.func_name);
+                    }
+                }
                 if use_color {
                     eprint!("{}", formatted);
                 } else {
@@ -360,9 +1068,14 @@ pub(crate) fn verify(
                 } else {
                     format!(" ({}µs)", r.duration_us)
                 };
+                let identity = r
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| format!(" [{}]", artifact.identity_label()))
+                    .unwrap_or_default();
                 println!(
-                    "  {} {}: {} [{} constraints]{}",
-                    icon, r.func_name, r.message, r.constraint_count, time_str
+                    "  {} {}: {} [{} constraints]{}{}",
+                    icon, r.func_name, r.message, r.constraint_count, time_str, identity
                 );
             }
 

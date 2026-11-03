@@ -1,0 +1,17 @@
+// Recoverable ordinary Map NewResult core shape: the Checker-issued source
+// receipt covers exactly one `map_new()` Result binding, an exhaustive
+// Ok/Err match, `map_size` observing the root inside Ok, an explicit
+// `drop(root)`, and the unchanged `Err(status)` return. The default route
+// must admit this program through the isolated NewResult execution profile;
+// empty-map `map_size` yields 0 so the process exits 0.
+func main() -> i32 {
+    let result = map_new()
+    match result {
+        Ok(root) => {
+            let size = map_size(root)
+            drop(root)
+            size
+        },
+        Err(status) => status,
+    }
+}

@@ -10,9 +10,33 @@ use super::instr::*;
 use super::registry::{self, BuiltinFastPath, BuiltinRegistry};
 use crate::ast::Lit;
 use crate::interp::error::InterpError;
-use crate::interp::value::Value;
+use crate::interp::value::{CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot, SharedString, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Weak};
+
+#[cfg(test)]
+thread_local! {
+    static ORDINARY_MAP_NEW_RESULT_SIZE_FAILURE_FOR_TEST: std::cell::Cell<bool> =
+        std::cell::Cell::new(false);
+}
+
+#[cfg(test)]
+pub(crate) fn with_ordinary_map_new_result_size_failure_for_test<T>(
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ORDINARY_MAP_NEW_RESULT_SIZE_FAILURE_FOR_TEST.with(|fail| fail.set(self.0));
+        }
+    }
+
+    let previous = ORDINARY_MAP_NEW_RESULT_SIZE_FAILURE_FOR_TEST.with(|fail| fail.replace(true));
+    let reset = Reset(previous);
+    let result = operation();
+    drop(reset);
+    result
+}
 
 /// i32 bytes copied alongside an Any-v2 owner at GetAny/Values creation. The Any-v2
 /// payload is intentionally private in `value.rs`; this VM-local backing is
@@ -23,6 +47,60 @@ struct OrdinaryMapOwnedAnyV2I32UnpackBacking {
     owner: Weak<crate::interp::value::CanonicalManagedAnyV2>,
     type_id: crate::core::ResolvedTypeId,
     value: i32,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BytecodeOrdinaryMapOwnedAnyV2UnpackTestObservation {
+    pub(crate) function_index: FuncIdx,
+    pub(crate) binding: CanonicalOrdinaryMapOwnedAnyV2UnpackBinding,
+    pub(crate) value: crate::core::mir::reference::MirOrdinaryMapOwnedAnyV2UnpackTestValue,
+}
+
+#[cfg(test)]
+fn ordinary_map_owned_any_v2_unpack_test_value(
+    value: &Value,
+    binding: &CanonicalOrdinaryMapOwnedAnyV2UnpackBinding,
+    selected_kind: Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadKind>,
+) -> Option<crate::core::mir::reference::MirOrdinaryMapOwnedAnyV2UnpackTestValue> {
+    use crate::core::mir::reference::MirOrdinaryMapOwnedAnyV2UnpackTestValue as Snapshot;
+
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    if binding.target_type == i32_type {
+        return match value {
+            Value::Int(value) => i32::try_from(*value).ok().map(Snapshot::I32),
+            _ => None,
+        };
+    }
+    if binding.target_type == bool_type {
+        return match value {
+            Value::Bool(value) => Some(Snapshot::Bool(*value)),
+            _ => None,
+        };
+    }
+    if binding.target_type == string_type {
+        return match value {
+            Value::String(value) => Some(Snapshot::String(value.as_bytes().to_vec())),
+            _ => None,
+        };
+    }
+    let Some(CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal }) = selected_kind else {
+        return None;
+    };
+    match value {
+        Value::Record(Some(actual_nominal), fields) if actual_nominal == nominal => {
+            match (fields.len(), fields.get("text")) {
+                (1, Some(Value::String(text))) => Some(Snapshot::Label {
+                    nominal: actual_nominal.clone(),
+                    text: text.as_bytes().to_vec(),
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// A single function activation frame.
@@ -123,6 +201,9 @@ pub struct BytecodeVM {
     /// extending the checked pair's lifetime.
     ordinary_map_owned_any_v2_i32_unpack_backings:
         HashMap<usize, OrdinaryMapOwnedAnyV2I32UnpackBacking>,
+    #[cfg(test)]
+    ordinary_map_owned_any_v2_unpack_test_observations:
+        Vec<BytecodeOrdinaryMapOwnedAnyV2UnpackTestObservation>,
     /// Captured stdout output (for testing).
     stdout: String,
     /// Shared stdout capture buffer (for actor worker threads).
@@ -148,6 +229,9 @@ pub struct BytecodeVM {
     /// Reusable register buffers (frame regs Vec capacity is preserved across
     /// calls, so deep recursion does not re-malloc per frame).
     free_regs: Vec<Vec<Value>>,
+    /// Prepared before execution; consumed on a failed String allocation so
+    /// error construction/propagation preserves ErrorContext without allocating.
+    string_allocation_error: Option<InterpError>,
     /// AST-free runtime for canonical MIR scalar FFI descriptors.
     canonical_ffi_runtime: super::mir_ffi::CanonicalMirFfiRuntime,
     /// Only weak domain participation and turn-local state live in a Send VM.
@@ -161,6 +245,68 @@ pub struct BytecodeVM {
 }
 
 const MAX_DEPTH: usize = 768;
+
+const OBSERVER_STRING_ALLOCATION_ERROR: &str =
+    "[E0800] ordinary Map owner lifecycle observer v1 JSON allocation failed";
+const STRING_CONCAT_CAPACITY_ERROR: &str = "[E0800] String concatenation capacity";
+const STRING_CONCAT_ALLOCATION_ERROR: &str = "[E0800] String concatenation allocation failed";
+const STRING_CONCAT_PUBLICATION_ERROR: &str = "[E0800] String concatenation publication failed";
+const _: () = assert!(
+    OBSERVER_STRING_ALLOCATION_ERROR.len() >= STRING_CONCAT_CAPACITY_ERROR.len()
+        && OBSERVER_STRING_ALLOCATION_ERROR.len() >= STRING_CONCAT_ALLOCATION_ERROR.len()
+        && OBSERVER_STRING_ALLOCATION_ERROR.len() >= STRING_CONCAT_PUBLICATION_ERROR.len()
+);
+
+/// Stage a complete concatenation before sharing or register publication. The
+/// two logical checkpoints match the canonical reference/native contract.
+fn try_concat_shared_string(left: &Value, right: &Value) -> Result<SharedString, &'static str> {
+    use std::fmt::Write as _;
+    struct FallibleWriter(String);
+    impl std::fmt::Write for FallibleWriter {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0
+                .try_reserve(text.len())
+                .map_err(|_| std::fmt::Error)?;
+            self.0.push_str(text);
+            Ok(())
+        }
+    }
+
+    let capacity = match (left, right) {
+        (Value::String(left), Value::String(right)) => {
+            let length = left
+                .len()
+                .checked_add(right.len())
+                .ok_or(STRING_CONCAT_CAPACITY_ERROR)?;
+            length
+                .checked_add(1)
+                .filter(|length| *length <= isize::MAX as usize)
+                .filter(|_| i64::try_from(length).is_ok())
+                .ok_or(STRING_CONCAT_CAPACITY_ERROR)?;
+            length
+        }
+        _ => 0, // Compatibility formatting still goes through fallible writes.
+    };
+    crate::runtime::ordinary_map_string_concat_checkpoint(0)
+        .map_err(|_| STRING_CONCAT_ALLOCATION_ERROR)?;
+    let mut output = FallibleWriter(String::new());
+    output
+        .0
+        .try_reserve_exact(capacity)
+        .map_err(|_| STRING_CONCAT_ALLOCATION_ERROR)?;
+    write!(output, "{left}{right}").map_err(|_| STRING_CONCAT_ALLOCATION_ERROR)?;
+    crate::runtime::ordinary_map_string_concat_checkpoint(1)
+        .map_err(|_| STRING_CONCAT_PUBLICATION_ERROR)?;
+    let publish = || SharedString::try_new(output.0);
+    #[cfg(test)]
+    let shared = super::test_alloc::at_shared_string_request(
+        super::test_alloc::SharedStringSite::Concat,
+        publish,
+    );
+    #[cfg(not(test))]
+    let shared = publish();
+    shared.map_err(|_| STRING_CONCAT_PUBLICATION_ERROR)
+}
 
 /// The runtime reports String staging allocation failures as owned-Get
 /// `Err(3)`. Keep the same explicit fallible allocation point in the VM; do
@@ -186,99 +332,101 @@ fn ordinary_map_owned_any_v2_root_publish_checkpoint() -> Result<(), InterpError
     Ok(())
 }
 
-fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), InterpError> {
+fn ordinary_map_owned_any_v2_get_any_publish_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
-        return crate::runtime::ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test()
-            .map_err(|_| {
-                InterpError::new(
-                    "[E0800] ordinary Map/Any owner-v2 GetAny result publication failed",
-                )
-            });
+        return crate::runtime::ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test();
     }
     #[cfg(not(test))]
     Ok(())
 }
 
-fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), InterpError> {
+fn ordinary_map_owned_any_v2_unpack_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
-        return crate::runtime::ordinary_map_owned_any_v2_unpack_checkpoint_for_test().map_err(
-            |_| InterpError::new("[E0800] ordinary Map/Any owner-v2 unpack Capacity failure"),
+        return crate::runtime::ordinary_map_owned_any_v2_unpack_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_owner_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owned_any_v2_string_copy_clone_checkpoint() -> Result<(), ()> {
+    #[cfg(test)]
+    {
+        return crate::runtime::ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
         );
     }
     #[cfg(not(test))]
     Ok(())
 }
 
-fn ordinary_map_owned_any_v2_string_copy_checkpoint(stage: i32) -> Result<(), InterpError> {
+fn ordinary_map_owned_any_v2_string_copy_publish_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
-        let message = if stage == crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE
-        {
-            "[E0800] ordinary Map/Any owner-v2 String result allocation failed"
-        } else {
-            "[E0800] ordinary Map/Any owner-v2 String result publication failed"
-        };
-        return crate::runtime::ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(stage)
-            .map_err(|_| InterpError::new(message));
-    }
-    #[cfg(not(test))]
-    {
-        let _ = stage;
-        Ok(())
-    }
-}
-
-fn ordinary_map_owned_any_v2_values_unpack_owner_checkpoint() -> Result<(), InterpError> {
-    #[cfg(test)]
-    {
-        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_owner_checkpoint_for_test()
-            .map_err(|_| {
-                InterpError::new(
-                    "[E0800] ordinary Map/Any owner-v2 Values selected-owner capacity failure",
-                )
-            });
+        return crate::runtime::ordinary_map_owned_any_v2_string_copy_checkpoint_for_test(
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
+        );
     }
     #[cfg(not(test))]
     Ok(())
 }
 
-fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint() -> Result<(), InterpError> {
+fn ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
-        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test()
-            .map_err(|_| {
-                InterpError::new(
-                    "[E0800] ordinary Map/Any owner-v2 Values String result allocation failed",
-                )
-            });
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint_for_test();
     }
     #[cfg(not(test))]
     Ok(())
 }
 
-fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint() -> Result<(), InterpError> {
+fn ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
-        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test()
-            .map_err(|_| {
-                InterpError::new(
-                    "[E0800] ordinary Map/Any owner-v2 Values String result publication failed",
-                )
-            });
+        return crate::runtime::ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint_for_test();
     }
     #[cfg(not(test))]
     Ok(())
 }
 
-fn ordinary_map_owned_any_v2_values_publish_checkpoint() -> Result<(), InterpError> {
+fn ordinary_map_owned_any_v2_values_publish_checkpoint() -> Result<(), ()> {
     #[cfg(test)]
     {
-        return crate::runtime::ordinary_map_owned_any_v2_values_publish_checkpoint_for_test()
+        return crate::runtime::ordinary_map_owned_any_v2_values_publish_checkpoint_for_test();
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+/// Keep Values List Clone's output-allocation and per-payload clone capacity
+/// boundaries observable under the shared test failpoint. The production
+/// fallible boundaries are the list reservation and payload deep copies.
+fn ordinary_map_owned_any_v2_values_clone_allocation_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        crate::runtime::ordinary_map_owned_any_v2_values_clone_capacity_checkpoint_for_test()
             .map_err(|_| {
-                InterpError::new("[E0800] ordinary Map/Any owner-v2 Values publication failed")
-            });
+                InterpError::new(
+                    "[E0800] ordinary Map/Any owner-v2 Values List Clone allocation failed",
+                )
+            })?;
+        return crate::runtime::ordinary_map_owned_get_allocation_checkpoint_for_test().map_err(
+            |_| {
+                InterpError::new(
+                    "[E0800] ordinary Map/Any owner-v2 Values List Clone allocation failed",
+                )
+            },
+        );
     }
     #[cfg(not(test))]
     Ok(())
@@ -298,30 +446,6 @@ fn try_copy_ordinary_map_owned_get_string(value: &str, reserve_terminator: bool)
     Some(copy)
 }
 
-fn try_concatenate_canonical_strings(left: &str, right: &str) -> Result<crate::interp::SharedString, InterpError> {
-    let total_len = left
-        .len()
-        .checked_add(right.len())
-        .ok_or_else(|| InterpError::new("[E0800] String concatenation capacity"))?;
-    let _allocation_len = total_len
-        .checked_add(1)
-        .filter(|length| *length <= isize::MAX as usize)
-        .filter(|_| i64::try_from(total_len).is_ok())
-        .ok_or_else(|| InterpError::new("[E0800] String concatenation capacity"))?;
-    crate::runtime::ordinary_map_string_concat_checkpoint(0)
-        .map_err(|_| InterpError::new("[E0800] String concatenation allocation failed"))?;
-    let mut concatenated = String::new();
-    concatenated
-        .try_reserve_exact(total_len)
-        .map_err(|_| InterpError::new("[E0800] String concatenation allocation failed"))?;
-    concatenated.push_str(left);
-    concatenated.push_str(right);
-    let concatenated = crate::interp::SharedString::new(concatenated);
-    crate::runtime::ordinary_map_string_concat_checkpoint(1)
-        .map_err(|_| InterpError::new("[E0800] String concatenation publication failed"))?;
-    Ok(concatenated)
-}
-
 fn clone_ordinary_map_owned_any_v2_entries(
     root: &BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value>,
 ) -> Result<BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value>, InterpError>
@@ -337,6 +461,12 @@ fn clone_ordinary_map_owned_any_v2_entries(
                     value: *value,
                 }
             }
+            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Bool { type_id, value } => {
+                crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Bool {
+                    type_id: type_id.clone(),
+                    value: *value,
+                }
+            }
             crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String { type_id, text } => {
                 let text =
                     try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
@@ -344,7 +474,7 @@ fn clone_ordinary_map_owned_any_v2_entries(
                     })?;
                 crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
                     type_id: type_id.clone(),
-                    text: crate::interp::SharedString::new(text),
+                    text: SharedString::new(text),
                 }
             }
             crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
@@ -359,13 +489,134 @@ fn clone_ordinary_map_owned_any_v2_entries(
                 crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
                     type_id: type_id.clone(),
                     nominal: nominal.clone(),
-                    text: crate::interp::SharedString::new(text),
+                    text: SharedString::new(text),
                 }
             }
         };
         entries.insert(key, value);
     }
     Ok(entries)
+}
+
+/// Serialize the lifecycle-v1 root directly, without passing its private
+/// runtime value through `Value` Display or the generic builtin JSON path.
+/// The BTreeMap iteration order is the canonical key order. String escaping
+/// follows the runtime's fallible JSON writer exactly, without temporary
+/// `serde_json::to_string` allocations.
+fn ordinary_map_owner_lifecycle_i32_string_v1_json(
+    root: &BTreeMap<
+        String,
+        crate::interp::value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value,
+    >,
+) -> Result<String, InterpError> {
+    use std::fmt::Write as _;
+
+    fn reserve(output: &mut String, additional: usize) -> Result<(), InterpError> {
+        ordinary_map_owner_lifecycle_observer_v1_try_reserve(output, additional)
+    }
+
+    fn append_json_string(output: &mut String, value: &str) -> Result<(), InterpError> {
+        fn encoded_char_len(character: char) -> usize {
+            match character {
+                '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+                '\u{00}'..='\u{1f}' => 6,
+                other => other.len_utf8(),
+            }
+        }
+
+        let escaped_len = value
+            .chars()
+            .try_fold(2usize, |length, character| {
+                length.checked_add(encoded_char_len(character))
+            })
+            .ok_or_else(|| {
+                InterpError::new(
+                    "[E0800] ordinary Map owner lifecycle observer v1 JSON allocation failed",
+                )
+            })?;
+        reserve(output, escaped_len)?;
+
+        output.push('"');
+        for character in value.chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\u{08}' => output.push_str("\\b"),
+                '\u{0c}' => output.push_str("\\f"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                '\u{00}'..='\u{1f}' => {
+                    const HEX: &[u8; 16] = b"0123456789abcdef";
+                    let code = character as u8;
+                    output.push_str("\\u00");
+                    output.push(HEX[(code >> 4) as usize] as char);
+                    output.push(HEX[(code & 0x0f) as usize] as char);
+                }
+                other => output.push(other),
+            }
+        }
+        output.push('"');
+        Ok(())
+    }
+
+    let mut json = String::new();
+    reserve(&mut json, 2)?;
+    json.push('{');
+    for (index, (key, value)) in root.iter().enumerate() {
+        if index != 0 {
+            reserve(&mut json, 1)?;
+            json.push(',');
+        }
+        append_json_string(&mut json, key)?;
+        reserve(&mut json, 1)?;
+        json.push(':');
+        match value {
+            crate::interp::value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value::I32(
+                value,
+            ) => {
+                reserve(&mut json, 11)?;
+                write!(json, "{value}").map_err(|_| {
+                    InterpError::new(
+                        "[E0800] ordinary Map owner lifecycle observer v1 JSON formatting failed",
+                    )
+                })?;
+            }
+            crate::interp::value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value::String(
+                value,
+            ) => {
+                append_json_string(&mut json, value.as_str())?;
+            }
+        }
+    }
+    reserve(&mut json, 1)?;
+    json.push('}');
+    Ok(json)
+}
+
+/// Synthetic stage failpoints complement the actual fallible String reserves
+/// and shared-owner allocation. They do not simulate allocator request denial.
+fn ordinary_map_owner_lifecycle_observer_v1_allocation_checkpoint() -> Result<(), InterpError> {
+    #[cfg(test)]
+    {
+        return ordinary_map_owned_get_allocation_checkpoint().map_err(|_| {
+            InterpError::new(
+                "[E0800] ordinary Map owner lifecycle observer v1 JSON allocation failed",
+            )
+        });
+    }
+    #[cfg(not(test))]
+    Ok(())
+}
+
+fn ordinary_map_owner_lifecycle_observer_v1_try_reserve(
+    output: &mut String,
+    additional: usize,
+) -> Result<(), InterpError> {
+    ordinary_map_owner_lifecycle_observer_v1_allocation_checkpoint()?;
+    output.try_reserve(additional).map_err(|_| {
+        InterpError::new("[E0800] ordinary Map owner lifecycle observer v1 JSON allocation failed")
+    })
 }
 
 fn stage_ordinary_map_owned_any_v2_set_payload(
@@ -375,6 +626,12 @@ fn stage_ordinary_map_owned_any_v2_set_payload(
     use crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value as Payload;
 
     match (&binding.kind, value) {
+        (super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Bool, Value::Bool(value)) => {
+            Ok(Payload::Bool {
+                type_id: binding.type_id.clone(),
+                value: *value,
+            })
+        }
         (super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32, Value::Int(value)) => {
             Ok(Payload::I32 {
                 type_id: binding.type_id.clone(),
@@ -391,7 +648,7 @@ fn stage_ordinary_map_owned_any_v2_set_payload(
             })?;
             Ok(Payload::String {
                 type_id: binding.type_id.clone(),
-                text: crate::interp::SharedString::new(text),
+                text: SharedString::new(text),
             })
         }
         (
@@ -415,7 +672,7 @@ fn stage_ordinary_map_owned_any_v2_set_payload(
             Ok(Payload::Record {
                 type_id: binding.type_id.clone(),
                 nominal: actual_nominal.clone(),
-                text: crate::interp::SharedString::new(text),
+                text: SharedString::new(text),
             })
         }
         (_, other) => Err(InterpError::new(format!(
@@ -433,6 +690,12 @@ fn copy_ordinary_map_owned_any_v2_payload(
         CanonicalManagedAnyV2, CanonicalOrdinaryMapOwnedAnyV2Value as Payload,
     };
     match (payload, &binding.kind) {
+        (
+            Payload::Bool { type_id, value },
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Bool,
+        ) if type_id == &binding.type_id => {
+            Ok(CanonicalManagedAnyV2::from_bool(type_id.clone(), *value))
+        }
         (
             Payload::I32 { type_id, value },
             super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32,
@@ -483,9 +746,54 @@ fn copy_ordinary_map_owned_any_v2_string_for_unpack(
             "ordinary Map/Any owner-v2 unpack String payload TypeDesc does not exactly match its target",
         )
     })?;
-    try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+    ordinary_map_owned_any_v2_string_copy_clone_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 String result allocation failed")
+    })?;
+    let copied = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
         InterpError::new("ordinary Map/Any owner-v2 unpack String result snapshot failed")
-    })
+    })?;
+    ordinary_map_owned_any_v2_string_copy_publish_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 String result publication failed")
+    })?;
+    Ok(copied)
+}
+
+fn copy_ordinary_map_owned_any_v2_values_string_for_unpack(
+    owner: &crate::interp::value::CanonicalManagedAnyV2,
+    expected_type_id: &crate::core::ResolvedTypeId,
+) -> Result<String, InterpError> {
+    let text = owner.string_for_type_id(expected_type_id).ok_or_else(|| {
+        InterpError::new(
+            "ordinary Map/Any owner-v2 Values unpack String payload TypeDesc does not exactly match its target",
+        )
+    })?;
+    ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Values String result allocation failed")
+    })?;
+    let copied = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+        InterpError::new("ordinary Map/Any owner-v2 Values unpack String result snapshot failed")
+    })?;
+    ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint().map_err(|_| {
+        InterpError::new(
+            "[E0800] ordinary Map/Any owner-v2 Values String result publication failed",
+        )
+    })?;
+    Ok(copied)
+}
+
+fn copy_ordinary_map_owned_any_v2_keys_string(value: &str) -> Result<String, InterpError> {
+    ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Keys String allocation failed")
+    })?;
+    let mut copied = String::new();
+    copied.try_reserve_exact(value.len()).map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Keys String allocation failed")
+    })?;
+    copied.push_str(value);
+    ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Keys String owner publication failed")
+    })?;
+    Ok(copied)
 }
 
 fn copy_ordinary_map_owned_any_v2_record_for_unpack(
@@ -500,12 +808,45 @@ fn copy_ordinary_map_owned_any_v2_record_for_unpack(
                 "ordinary Map/Any owner-v2 unpack record payload TypeDesc or nominal identity does not exactly match its target",
             )
         })?;
+    ordinary_map_owned_any_v2_string_copy_clone_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Label text allocation failed")
+    })?;
     let text = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
         InterpError::new("ordinary Map/Any owner-v2 unpack record result snapshot failed")
     })?;
+    ordinary_map_owned_any_v2_string_copy_publish_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Label result publication failed")
+    })?;
     Ok(Value::Record(
         Some(expected_nominal.to_owned()),
-        HashMap::from([("text".to_owned(), Value::String(crate::interp::SharedString::new(text)))]),
+        HashMap::from([("text".to_owned(), Value::String(SharedString::new(text)))]),
+    ))
+}
+
+fn copy_ordinary_map_owned_any_v2_values_record_for_unpack(
+    owner: &crate::interp::value::CanonicalManagedAnyV2,
+    expected_type_id: &crate::core::ResolvedTypeId,
+    expected_nominal: &str,
+) -> Result<Value, InterpError> {
+    let text = owner
+        .record_text_for_type_id(expected_type_id, expected_nominal)
+        .ok_or_else(|| {
+            InterpError::new(
+                "ordinary Map/Any owner-v2 Values unpack record payload TypeDesc or nominal identity does not exactly match its target",
+            )
+        })?;
+    ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Values Label text allocation failed")
+    })?;
+    let text = try_copy_ordinary_map_owned_get_string(text, false).ok_or_else(|| {
+        InterpError::new("ordinary Map/Any owner-v2 Values unpack record result snapshot failed")
+    })?;
+    ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint().map_err(|_| {
+        InterpError::new("[E0800] ordinary Map/Any owner-v2 Values Label result publication failed")
+    })?;
+    Ok(Value::Record(
+        Some(expected_nominal.to_owned()),
+        HashMap::from([("text".to_owned(), Value::String(SharedString::new(text)))]),
     ))
 }
 
@@ -523,6 +864,133 @@ fn contains_managed_any_v2(value: &Value) -> bool {
         Value::Record(_, fields) => fields.values().any(contains_managed_any_v2),
         Value::Newtype(_, value) => contains_managed_any_v2(value),
         _ => false,
+    }
+}
+
+fn contains_ordinary_map_new_result_runtime_root(value: &Value) -> bool {
+    match value {
+        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => true,
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => values
+            .iter()
+            .any(contains_ordinary_map_new_result_runtime_root),
+        Value::List(values) => values
+            .iter()
+            .any(contains_ordinary_map_new_result_runtime_root),
+        Value::Record(_, fields) => fields
+            .values()
+            .any(contains_ordinary_map_new_result_runtime_root),
+        Value::Newtype(_, inner) => contains_ordinary_map_new_result_runtime_root(inner),
+        Value::DynTrait { data, .. } => contains_ordinary_map_new_result_runtime_root(data),
+        _ => false,
+    }
+}
+
+/// Retire only NewResult runtime roots reachable from one bytecode value. The
+/// owner wrapper performs exact-handle Drop; this helper never clears a global
+/// or thread-wide root registry.
+fn cleanup_ordinary_map_new_result_runtime_roots(value: &Value) {
+    match value {
+        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => root.cleanup(),
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => values
+            .iter()
+            .for_each(cleanup_ordinary_map_new_result_runtime_roots),
+        Value::List(values) => values
+            .iter()
+            .for_each(cleanup_ordinary_map_new_result_runtime_roots),
+        Value::Record(_, fields) => fields
+            .values()
+            .for_each(cleanup_ordinary_map_new_result_runtime_roots),
+        Value::Newtype(_, inner) => cleanup_ordinary_map_new_result_runtime_roots(inner),
+        Value::DynTrait { data, .. } => cleanup_ordinary_map_new_result_runtime_roots(data),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+fn ordinary_map_new_result_live_runtime_root_occurrences(value: &Value) -> usize {
+    match value {
+        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => usize::from(root.is_live()),
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => values
+            .iter()
+            .map(ordinary_map_new_result_live_runtime_root_occurrences)
+            .sum(),
+        Value::List(values) => values
+            .iter()
+            .map(ordinary_map_new_result_live_runtime_root_occurrences)
+            .sum(),
+        Value::Record(_, fields) => fields
+            .values()
+            .map(ordinary_map_new_result_live_runtime_root_occurrences)
+            .sum(),
+        Value::Newtype(_, inner) => ordinary_map_new_result_live_runtime_root_occurrences(inner),
+        Value::DynTrait { data, .. } => ordinary_map_new_result_live_runtime_root_occurrences(data),
+        _ => 0,
+    }
+}
+
+fn retire_ordinary_map_new_result_runtime_root(
+    root: CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot,
+    operation: &'static str,
+) -> Result<(), InterpError> {
+    if !root.is_unique() {
+        return Err(InterpError::new(format!(
+            "[E0800] ordinary Map NewResult {operation}: runtime root has a stale or duplicate owner"
+        )));
+    }
+    let owner = root.take_unique().map_err(|_| {
+        InterpError::new(format!(
+            "[E0800] ordinary Map NewResult {operation}: runtime root was already retired"
+        ))
+    })?;
+    owner.try_drop().map_err(|(_, error)| {
+        InterpError::new(format!(
+            "[E0800] ordinary Map NewResult {operation}: exact runtime Drop failed: {error:?}"
+        ))
+    })
+}
+
+#[cfg(test)]
+fn managed_any_v2_owner_occurrences_for_failure_model(value: &Value) -> usize {
+    match value {
+        Value::CanonicalManagedAnyV2(_) => 1,
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => values
+            .iter()
+            .map(managed_any_v2_owner_occurrences_for_failure_model)
+            .sum(),
+        Value::List(values) => values
+            .iter()
+            .map(managed_any_v2_owner_occurrences_for_failure_model)
+            .sum(),
+        Value::Record(_, fields) => fields
+            .values()
+            .map(managed_any_v2_owner_occurrences_for_failure_model)
+            .sum(),
+        Value::Newtype(_, inner) => managed_any_v2_owner_occurrences_for_failure_model(inner),
+        _ => 0,
     }
 }
 
@@ -642,12 +1110,28 @@ fn reg_as_f64(v: &Value) -> Result<f64, InterpError> {
 }
 
 impl BytecodeVM {
+    fn take_string_allocation_error(&mut self, message: &'static str) -> InterpError {
+        // Every public/nested execution starts with push_frame, which prepares
+        // this reserve. A trap cannot resume execution and consume it twice.
+        let mut error = self
+            .string_allocation_error
+            .take()
+            .expect("String allocation diagnostic prepared before execution");
+        let context = error.ctx_mut();
+        debug_assert!(context.msg.capacity() >= message.len());
+        context.msg.clear();
+        context.msg.push_str(message);
+        error
+    }
+
     pub fn new(program: std::sync::Arc<BytecodeProgram>) -> Self {
         let max_children = program.max_children;
         BytecodeVM {
             program,
             stack: Vec::with_capacity(64),
             ordinary_map_owned_any_v2_i32_unpack_backings: HashMap::new(),
+            #[cfg(test)]
+            ordinary_map_owned_any_v2_unpack_test_observations: Vec::new(),
             stdout: String::new(),
             stdout_capture: None,
             depth: 0,
@@ -658,6 +1142,9 @@ impl BytecodeVM {
             cli_args: Vec::new(),
             exit_requested: None,
             free_regs: Vec::new(),
+            string_allocation_error: Some(InterpError::prepare_allocation_failure(
+                OBSERVER_STRING_ALLOCATION_ERROR,
+            )),
             canonical_ffi_runtime: super::mir_ffi::CanonicalMirFfiRuntime::new(),
             canonical_actor_runtime: super::actor::CanonicalActorRuntime::default(),
             quote_stack: Vec::new(),
@@ -669,6 +1156,33 @@ impl BytecodeVM {
     /// Access the compiled program (for builtins that need type info).
     pub fn program(&self) -> &BytecodeProgram {
         &self.program
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_ordinary_map_owned_any_v2_unpack_test_observations(
+        &mut self,
+    ) -> Vec<BytecodeOrdinaryMapOwnedAnyV2UnpackTestObservation> {
+        std::mem::take(&mut self.ordinary_map_owned_any_v2_unpack_test_observations)
+    }
+
+    #[cfg(test)]
+    fn record_ordinary_map_owned_any_v2_unpack_test_observation(
+        &mut self,
+        function_index: FuncIdx,
+        binding: &CanonicalOrdinaryMapOwnedAnyV2UnpackBinding,
+        selected_kind: Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadKind>,
+        value: &Value,
+    ) {
+        if let Some(value) =
+            ordinary_map_owned_any_v2_unpack_test_value(value, binding, selected_kind)
+        {
+            self.ordinary_map_owned_any_v2_unpack_test_observations
+                .push(BytecodeOrdinaryMapOwnedAnyV2UnpackTestObservation {
+                    function_index,
+                    binding: binding.clone(),
+                    value,
+                });
+        }
     }
 
     fn remember_ordinary_map_owned_any_v2_i32_unpack_payload(
@@ -687,6 +1201,116 @@ impl BytecodeVM {
                 value,
             },
         );
+    }
+
+    /// Build the actual runtime result of the V2 GetAny operation shared by
+    /// the public GetAny opcode and the private GetOrDefault<i32> opcode.
+    /// Hits are copied only through the Core-selected payload binding; misses
+    /// receive the canonical V2 i32-zero sentinel. The source Map register is
+    /// borrowed and remains live.
+    fn ordinary_map_owned_any_v2_get_any_pair(
+        &mut self,
+        root_reg: Reg,
+        key: &str,
+        miss_payload_type: &crate::core::ResolvedTypeId,
+        remember_miss_unpack_backing: bool,
+    ) -> Result<Value, InterpError> {
+        let expected_i32 = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        if miss_payload_type != &expected_i32 {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 GetAny miss binding is not canonical i32",
+            ));
+        }
+        let (found, owner, unpack_backing) = match self.get_reg(root_reg) {
+            Value::CanonicalOrdinaryMapOwnedAnyV2(root) if Arc::strong_count(root) == 1 => {
+                match root.get(key) {
+                    None => (
+                        false,
+                        crate::interp::value::CanonicalManagedAnyV2::from_i32(
+                            expected_i32.clone(),
+                            0,
+                        ),
+                        Some((expected_i32.clone(), 0)),
+                    ),
+                    Some(payload) => {
+                        let type_id = match payload {
+                            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                                type_id,
+                                ..
+                            }
+                            | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Bool {
+                                type_id,
+                                ..
+                            }
+                            | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
+                                type_id,
+                                ..
+                            }
+                            | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                                type_id,
+                                ..
+                            } => type_id,
+                        };
+                        let payload_binding = self
+                            .program
+                            .canonical_map_any_owner_v1_receipt
+                            .as_ref()
+                            .and_then(|receipt| {
+                                receipt.ordinary_map_owned_any_v2_selected_payload_binding(type_id)
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 GetAny hit uses a TypeDesc outside the Core-selected payload table",
+                                )
+                            })?;
+                        let unpack_backing = match payload {
+                            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                                type_id,
+                                value,
+                            } => Some((type_id.clone(), *value)),
+                            crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Bool {
+                                ..
+                            }
+                            | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
+                                ..
+                            }
+                            | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
+                                ..
+                            } => None,
+                        };
+                        (
+                            true,
+                            copy_ordinary_map_owned_any_v2_payload(payload, &payload_binding)?,
+                            unpack_backing,
+                        )
+                    }
+                }
+            }
+            Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
+                return Err(InterpError::new(
+                    "ordinary Map/Any owner-v2 GetAny root has a stale or duplicate owner",
+                ));
+            }
+            other => {
+                return Err(InterpError::new(format!(
+                    "ordinary Map/Any owner-v2 GetAny: expected Map owner, got {other}"
+                )));
+            }
+        };
+        let owner = Arc::new(owner);
+        ordinary_map_owned_any_v2_get_any_publish_checkpoint().map_err(|_| {
+            InterpError::new("[E0800] ordinary Map/Any owner-v2 GetAny result publication failed")
+        })?;
+        if let Some((type_id, value)) =
+            unpack_backing.filter(|_| found || remember_miss_unpack_backing)
+        {
+            self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(&owner, type_id, value);
+        }
+        Ok(Value::Tuple(vec![
+            Value::Bool(found),
+            Value::CanonicalManagedAnyV2(owner),
+        ]))
     }
 
     fn ordinary_map_owned_any_v2_i32_unpack_payload(
@@ -719,6 +1343,34 @@ impl BytecodeVM {
             ));
         }
         Ok(backing.value)
+    }
+
+    /// Common checked i32 extraction used by the ordinary receipted Unpack
+    /// opcode and by the private GetOrDefault<i32> operation. Both the
+    /// owner-bound copied bytes and the V2 payload tag must agree with the
+    /// exact canonical target TypeDesc.
+    fn checked_ordinary_map_owned_any_v2_i32_unpack(
+        &self,
+        owner: &Arc<crate::interp::value::CanonicalManagedAnyV2>,
+        expected_type: &crate::core::ResolvedTypeId,
+    ) -> Result<i32, InterpError> {
+        if owner.type_id() != expected_type {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 unpack payload TypeDesc does not exactly match its target",
+            ));
+        }
+        let copied = self.ordinary_map_owned_any_v2_i32_unpack_payload(owner, expected_type)?;
+        let tagged = owner.i32_value_for_type_id(expected_type).ok_or_else(|| {
+            InterpError::new(
+                "ordinary Map/Any owner-v2 unpack i32 payload tag does not exactly match its target",
+            )
+        })?;
+        if copied != tagged {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 unpack owner-bound i32 snapshot disagrees with its V2 payload tag",
+            ));
+        }
+        Ok(copied)
     }
 
     /// Execute one compiler-emitted Any/String comparison with test-seeded
@@ -937,6 +1589,262 @@ impl BytecodeVM {
         })();
         self.program = original_program;
         result_value
+    }
+
+    /// Execute one receipted Keys snapshot with a test-seeded root and return
+    /// the owned List<String> before source cleanup. A following Map Size
+    /// proves the snapshot operation leaves its input root live.
+    #[cfg(test)]
+    pub(crate) fn execute_ordinary_map_owned_any_v2_keys_for_test(
+        &mut self,
+        function_idx: FuncIdx,
+        root_value: Value,
+    ) -> Result<Value, InterpError> {
+        self.preflight_canonical_program_structure()?;
+        let (pc, result, root, register_count) = self
+            .program
+            .functions
+            .get(function_idx as usize)
+            .ok_or_else(|| InterpError::new("test owner-v2 Keys function is absent"))?
+            .code
+            .iter()
+            .enumerate()
+            .find_map(|(pc, op)| match op {
+                Op::MirOrdinaryMapOwnedAnyV2Keys { rd, ra } => Some((
+                    pc,
+                    *rd,
+                    *ra,
+                    self.program.functions[function_idx as usize].register_count,
+                )),
+                _ => None,
+            })
+            .ok_or_else(|| InterpError::new("test owner-v2 Keys opcode is absent"))?;
+        let root_probe = (0..register_count)
+            .find(|register| *register != result && *register != root)
+            .ok_or_else(|| {
+                InterpError::new("test owner-v2 Keys has no register for the source-liveness probe")
+            })?;
+        if root as usize >= register_count as usize || result as usize >= register_count as usize {
+            return Err(InterpError::new(
+                "test owner-v2 Keys register is outside its emitted frame",
+            ));
+        }
+
+        // Authenticate the full compiler output before narrowing execution to
+        // the receipted opcode. Keep a Map Size probe after Keys so the root
+        // remains observably live until the snapshot result is returned.
+        let original_program = Arc::clone(&self.program);
+        {
+            let program = std::sync::Arc::make_mut(&mut self.program);
+            let proto = &mut program.functions[function_idx as usize];
+            proto.code.truncate(pc + 1);
+            proto.code.push(Op::MirOrdinaryMapOwnedAnyV2Size {
+                rd: root_probe,
+                ra: root,
+            });
+            proto.code.push(Op::Ret { ra: result });
+        }
+        let result_value = (|| {
+            self.push_frame(function_idx, Vec::new(), None)?;
+            let frame = self.cur_frame_mut();
+            frame.regs[root as usize] = root_value;
+            frame.pc = pc;
+            self.exec_loop()
+        })();
+        self.program = original_program;
+        result_value
+    }
+
+    /// Execute the route's unique index-zero Keys unpack against a supplied
+    /// snapshot. A following List Len proves unpack leaves the snapshot live.
+    #[cfg(test)]
+    pub(crate) fn execute_ordinary_map_owned_any_v2_keys_unpack_for_test(
+        &mut self,
+        function_idx: FuncIdx,
+        snapshot: Value,
+    ) -> Result<Value, InterpError> {
+        self.preflight_canonical_program_structure()?;
+        let (pc, result, keys, register_count) = self
+            .program
+            .functions
+            .get(function_idx as usize)
+            .ok_or_else(|| InterpError::new("test owner-v2 Keys unpack function is absent"))?
+            .code
+            .iter()
+            .enumerate()
+            .find_map(|(pc, op)| match op {
+                Op::MirOrdinaryMapOwnedAnyV2KeysUnpack { rd, ra } => Some((
+                    pc,
+                    *rd,
+                    *ra,
+                    self.program.functions[function_idx as usize].register_count,
+                )),
+                _ => None,
+            })
+            .ok_or_else(|| InterpError::new("test owner-v2 Keys unpack opcode is absent"))?;
+        let keys_probe = (0..register_count)
+            .find(|register| *register != result && *register != keys)
+            .ok_or_else(|| {
+                InterpError::new(
+                    "test owner-v2 Keys unpack has no register for the snapshot-liveness probe",
+                )
+            })?;
+        if keys as usize >= register_count as usize || result as usize >= register_count as usize {
+            return Err(InterpError::new(
+                "test owner-v2 Keys unpack register is outside its emitted frame",
+            ));
+        }
+
+        // The original receipt/site is checked before replacing the suffix.
+        // The test program then returns the cloned key after a List Len probe.
+        let original_program = Arc::clone(&self.program);
+        {
+            let program = std::sync::Arc::make_mut(&mut self.program);
+            let proto = &mut program.functions[function_idx as usize];
+            proto.code.truncate(pc + 1);
+            proto.code.push(Op::Len {
+                rd: keys_probe,
+                ra: keys,
+            });
+            proto.code.push(Op::Ret { ra: result });
+        }
+        let result_value = (|| {
+            self.push_frame(function_idx, Vec::new(), None)?;
+            let frame = self.cur_frame_mut();
+            frame.regs[keys as usize] = snapshot;
+            frame.pc = pc;
+            self.exec_loop()
+        })();
+        self.program = original_program;
+        result_value
+    }
+
+    fn clone_ordinary_map_owned_any_v2_values(
+        &self,
+        values: &[Value],
+    ) -> Result<Vec<Value>, InterpError> {
+        #[cfg(test)]
+        let source_value_count = values.len();
+        #[cfg(test)]
+        let source_owner_snapshot = values
+            .iter()
+            .map(|value| match value {
+                Value::CanonicalManagedAnyV2(owner) => {
+                    (Arc::as_ptr(owner) as usize, Arc::strong_count(owner))
+                }
+                _ => (usize::MAX, usize::MAX),
+            })
+            .collect::<Vec<_>>();
+        #[cfg(test)]
+        let assert_source_unchanged = || {
+            assert_eq!(
+                values.len(),
+                source_value_count,
+                "injected Values Clone failure must preserve the source value count"
+            );
+            assert_eq!(
+                values
+                    .iter()
+                    .map(|value| match value {
+                        Value::CanonicalManagedAnyV2(owner) => {
+                            (Arc::as_ptr(owner) as usize, Arc::strong_count(owner))
+                        }
+                        _ => (usize::MAX, usize::MAX),
+                    })
+                    .collect::<Vec<_>>(),
+                source_owner_snapshot,
+                "injected Values Clone failure must preserve source owner identity and counts"
+            );
+        };
+        if let Err(error) = ordinary_map_owned_any_v2_values_clone_allocation_checkpoint() {
+            #[cfg(test)]
+            assert_source_unchanged();
+            return Err(error);
+        }
+        let mut cloned = Vec::new();
+        // Reserve at least one slot even for an empty snapshot. This keeps a
+        // real fallible output-buffer stage for zero-length clones.
+        cloned.try_reserve_exact(values.len().max(1)).map_err(|_| {
+            InterpError::new(
+                "[E0800] ordinary Map/Any owner-v2 Values List Clone allocation failed",
+            )
+        })?;
+        for value in values {
+            let Value::CanonicalManagedAnyV2(owner) = value else {
+                return Err(InterpError::new(
+                    "ordinary Map/Any owner-v2 Values List Clone found a non-V2 payload",
+                ));
+            };
+            if Arc::strong_count(owner) != 1 {
+                return Err(InterpError::new(
+                    "ordinary Map/Any owner-v2 Values List Clone found an aliased payload owner",
+                ));
+            }
+            let selected = self
+                .program
+                .canonical_map_any_owner_v1_receipt
+                .as_ref()
+                .and_then(|receipt| {
+                    receipt.ordinary_map_owned_any_v2_selected_payload_binding(owner.type_id())
+                })
+                .ok_or_else(|| {
+                    InterpError::new(
+                        "ordinary Map/Any owner-v2 Values List Clone found a payload outside the exact selected TypeDesc table",
+                    )
+                })?;
+            let payload_kind_matches = match &selected.kind {
+                CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Bool => false,
+                CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32 => {
+                    owner.i32_value_for_type_id(&selected.type_id).is_some()
+                }
+                CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String => {
+                    owner.string_for_type_id(&selected.type_id).is_some()
+                }
+                CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal } => owner
+                    .record_text_for_type_id(&selected.type_id, nominal)
+                    .is_some(),
+            };
+            if !payload_kind_matches {
+                return Err(InterpError::new(
+                    "ordinary Map/Any owner-v2 Values List Clone payload tag or nominal does not match its exact selected TypeDesc",
+                ));
+            }
+            if let Err(error) = ordinary_map_owned_any_v2_values_clone_allocation_checkpoint() {
+                #[cfg(test)]
+                assert_source_unchanged();
+                return Err(error);
+            }
+            let clone = owner.try_deep_clone().map_err(|_| {
+                InterpError::new(
+                    "[E0800] ordinary Map/Any owner-v2 Values List Clone payload allocation failed",
+                )
+            })?;
+            cloned.push(Value::CanonicalManagedAnyV2(Arc::new(clone)));
+        }
+        Ok(cloned)
+    }
+
+    /// Exercise only the receipted Values payload-clone implementation while
+    /// keeping the source borrowed and observable to the caller. This is a
+    /// test seam for failure atomicity; production bytecode still reaches the
+    /// helper only after the opcode's exact PC receipt and source-owner checks.
+    #[cfg(test)]
+    pub(crate) fn clone_ordinary_map_owned_any_v2_values_for_test(
+        &self,
+        source: &Value,
+    ) -> Result<Value, InterpError> {
+        let Value::List(values) = source else {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 Values List Clone test source is not a List",
+            ));
+        };
+        if Arc::strong_count(values) != 1 {
+            return Err(InterpError::new(
+                "ordinary Map/Any owner-v2 Values List Clone test source has a duplicate owner",
+            ));
+        }
+        self.clone_ordinary_map_owned_any_v2_values(values)
+            .map(|cloned| Value::List(Arc::new(cloned)))
     }
 
     /// Execute one receipted indexed Values unpack against a test-seeded
@@ -1164,6 +2072,9 @@ impl BytecodeVM {
             .stack
             .pop()
             .expect("bytecode: exec stack empty (VM invariant violated)");
+        for value in &frame.regs {
+            cleanup_ordinary_map_new_result_runtime_roots(value);
+        }
         if frame.regs.capacity() > 0 {
             self.free_regs.push(frame.regs);
         }
@@ -1656,8 +2567,35 @@ impl BytecodeVM {
         self.validate_canonical_map_root_program()?;
         self.validate_canonical_map_any_owner_v1_program()?;
         self.validate_canonical_ordinary_map_owner_lifecycle_i32_string_v1_program()?;
+        self.validate_canonical_ordinary_map_owner_observer_v1_program()?;
         self.validate_canonical_ordinary_map_owned_get_i32_string_v1_program()?;
         self.validate_canonical_ordinary_map_owned_any_v2_program()?;
+        self.validate_canonical_values_field_move_route_anchor()?;
+        self.validate_canonical_values_snapshot_replacement_route_anchor()?;
+        self.validate_canonical_values_mixed_snapshot_route_anchor()?;
+        self.validate_canonical_values_local_index_i32_route_anchor()?;
+        self.validate_canonical_values_heterogeneous_string_index1_route_anchor()?;
+        self.validate_canonical_keys_snapshot_route_anchor()?;
+        self.validate_canonical_dynamic_keys_get_route_anchor()?;
+        self.validate_canonical_values_mixed_snapshot_remove_route_anchor()?;
+        self.validate_canonical_values_producer_caller_route_anchor()?;
+        self.validate_canonical_values_crosscall_string_caller_route_anchor()?;
+        self.validate_canonical_map_root_producer_caller_route_anchor()?;
+        self.validate_canonical_empty_root_root_queries_v1_route_anchor()?;
+        self.validate_canonical_computed_key_get_route_anchor()?;
+        self.validate_canonical_computed_string_key_owner_chain_route_anchor()?;
+        self.validate_canonical_ordinary_map_owned_any_v2_zero_miss_i32_route_anchor()?;
+        self.validate_canonical_ordinary_map_owned_any_v2_get_or_default_i32_route_anchor()?;
+        self.validate_canonical_ordinary_map_owned_any_v2_get_or_default_string_route_anchor()?;
+        self.validate_canonical_ordinary_map_owned_any_v2_removed_key_checked_miss_route_anchor()?;
+        self.validate_canonical_checked_get_route_anchor()?;
+        self.validate_canonical_is_empty_route_anchor()?;
+        self.validate_canonical_record_unit_route_anchor()?;
+        self.validate_canonical_map_set_drop_control_route_anchor()?;
+        self.validate_canonical_branch_local_set_diamond_route_anchor()?;
+        self.validate_canonical_clone_isolation_route_anchor()?;
+        self.validate_canonical_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor()?;
+        self.validate_canonical_direct_print_route_anchor()?;
         self.validate_canonical_managed_any_cfg_program()?;
         self.validate_canonical_managed_any_identity_program()?;
         self.validate_canonical_managed_any_trap_cleanup_program()?;
@@ -1739,6 +2677,32 @@ impl BytecodeVM {
         }
     }
 
+    /// Direct lifecycle-v1 Map observers use a dedicated Checker/MIR route
+    /// anchor. This whole-program check runs before any instruction can emit
+    /// output, so edited operations or operands fail closed before effects.
+    fn validate_canonical_ordinary_map_owner_observer_v1_program(&self) -> Result<(), InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owner_observer_v1(
+                    self.program.entry,
+                    &self.program.functions,
+                    &self.program.builtin_names,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owner_observer_v1_ops) =>
+            {
+                Err(InterpError::new(
+                    "ordinary Map owner observer v1 bytecode has no independent route receipt",
+                ))
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Typed owned-Get ordinary Map bytecode has its own profile snapshot.
     /// Compatibility bytecode and the older ordinary owner-lifecycle
     /// profile cannot authorize these opcodes.
@@ -1780,6 +2744,598 @@ impl BytecodeVM {
                 "ordinary Map/Any owner-v2 bytecode has no independent Checker receipt",
             )),
             None => Ok(()),
+        }
+    }
+
+    /// Validate the independent Values field-move route identity, when one
+    /// was minted by the CheckedProgram/MIR bytecode adapter. Programs with
+    /// V2 diagnostics but no narrow route anchor remain executable only via
+    /// the test-only component entry while broad production readiness is
+    /// closed.
+    fn validate_canonical_values_field_move_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_field_move_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the separate Checker-sealed Values snapshot replacement
+    /// identity. It is intentionally independent from the field-move route:
+    /// one profile's route receipt cannot authorize the other profile.
+    fn validate_canonical_values_snapshot_replacement_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_snapshot_replacement_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the separate Checker-sealed Values mixed-snapshot identity.
+    /// It cannot borrow either existing Values route anchor.
+    fn validate_canonical_values_mixed_snapshot_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_mixed_snapshot_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independently Checker-sealed Values local-index i32
+    /// route. This anchor is distinct from the other Values profiles.
+    fn validate_canonical_values_local_index_i32_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_local_index_i32_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independently Checker-sealed heterogeneous Values
+    /// index-one String route before any VM execution begins.
+    fn validate_canonical_values_heterogeneous_string_index1_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_heterogeneous_string_index1_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independently Checker-sealed owner-v2 KeysSnapshot
+    /// route. Its two bytecode sites have their own profile and full-program
+    /// anchor.
+    fn validate_canonical_keys_snapshot_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_keys_snapshot_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_keys_ops) => Err(
+                InterpError::new(
+                    "ordinary Map/Any owner-v2 Keys bytecode has no exact KeysSnapshot route anchor",
+                ),
+            ),
+            None => Ok(false),
+        }
+    }
+
+    fn validate_canonical_dynamic_keys_get_route_anchor(&self) -> Result<bool, InterpError> {
+        let active = match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_dynamic_keys_get_route_anchor(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new)?,
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_dynamic_arg0) =>
+            {
+                return Err(InterpError::new(
+                    "ordinary Map/Any DynamicKeysGet argv[0] opcode has no exact route anchor",
+                ));
+            }
+            None => false,
+        };
+        if active && self.cli_args.is_empty() {
+            return Err(InterpError::index_out_of_bounds(
+                "args()[0] index out of bounds (len 0)",
+            ));
+        }
+        Ok(active)
+    }
+
+    /// Validate the independently Checker-sealed Values mixed-snapshot-remove
+    /// route. Its anchor cannot be borrowed from either existing Values
+    /// snapshot profile.
+    fn validate_canonical_empty_root_root_queries_v1_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_empty_root_root_queries_v1_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    fn validate_canonical_values_mixed_snapshot_remove_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_mixed_snapshot_remove_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed Values producer→caller route.
+    /// The route authorizes only the exact direct-call/whole-Drop MVP; its
+    /// private bytecode anchor rejects any indexed-unpack extension.
+    fn validate_canonical_values_producer_caller_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_producer_caller_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn validate_canonical_values_crosscall_string_caller_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_crosscall_string_caller_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    fn validate_canonical_values_crosscall_string_caller_index1_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_crosscall_string_caller_index1_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent CheckedProgram-sealed Map-root producer and
+    /// unique direct-caller bridge before any VM effects are allowed.
+    fn validate_canonical_map_root_producer_caller_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_map_root_producer_caller_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent CheckedProgram-sealed computed-key Get route.
+    /// Its anchor can authorize only this narrow profile while broad V2
+    /// readiness remains closed.
+    fn validate_canonical_computed_key_get_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_computed_key_get_route_anchor(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent computed String-key owner-chain route anchor
+    /// before execution; this narrow receipt does not open broad owner-v2
+    /// bytecode readiness.
+    fn validate_canonical_computed_string_key_owner_chain_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_computed_string_key_owner_chain_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the recoverable ordinary Map NewResult route anchor before
+    /// production execution; this narrow pending-L1 identity does not open
+    /// broad owner-v2 bytecode readiness.
+    fn validate_canonical_ordinary_map_new_result_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_new_result_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent CheckedGet route identity before production
+    /// execution. This anchor is narrowly scoped to the exact Checker-sealed
+    /// New/Set/GetAny/unpack/Drop chain and does not open global V2 readiness.
+    fn validate_canonical_checked_get_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_checked_get_route_anchor(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed two-GetAny zero-miss i32
+    /// route before VM execution. The private snapshot is checked in the
+    /// canonical structure preflight, before stdout or Actor side effects.
+    fn validate_canonical_ordinary_map_owned_any_v2_zero_miss_i32_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owned_any_v2_zero_miss_i32_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed GetOrDefault<i32> route
+    /// before VM execution. Its private anchor binds the exact receipt to the
+    /// complete emitted bytecode table.
+    fn validate_canonical_ordinary_map_owned_any_v2_get_or_default_i32_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owned_any_v2_get_or_default_i32_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed GetOrDefault<String> route
+    /// before VM execution. Its private anchor binds the typed MIR receipt to
+    /// the complete emitted bytecode table.
+    fn validate_canonical_ordinary_map_owned_any_v2_get_or_default_string_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owned_any_v2_get_or_default_string_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed persistent-Remove/miss route
+    /// before VM execution. The private snapshot is checked during canonical
+    /// structure preflight, before stdout or other observable effects.
+    fn validate_canonical_ordinary_map_owned_any_v2_removed_key_checked_miss_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owned_any_v2_removed_key_checked_miss_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed V2 IsEmpty route before VM
+    /// execution. Its full route receipt and bytecode snapshot authorize this
+    /// narrow profile while broad V2 readiness remains closed.
+    fn validate_canonical_is_empty_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_is_empty_route_anchor(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed no-query control before VM
+    /// execution. Its private bytecode snapshot is separate from IsEmpty.
+    fn validate_canonical_map_set_drop_control_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_map_set_drop_control_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent Checker-sealed RecordUnit route before VM
+    /// execution. Its private snapshot binds all five roots, typed payload
+    /// operations, the borrowed Label.text output, and the exact receipt.
+    fn validate_canonical_record_unit_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_record_unit_route_anchor(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the separate Checker-sealed persistent-Set diamond before
+    /// VM execution. Its route proof and bytecode snapshot authorize only the
+    /// exact arm-local Set/Size/Drop graph.
+    fn validate_canonical_branch_local_set_diamond_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_branch_local_set_diamond_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent CheckedProgram-sealed CloneIsolation route
+    /// before VM execution. Its private receipt and full bytecode snapshot
+    /// authorize only this narrow profile while broad V2 readiness is closed.
+    fn validate_canonical_clone_isolation_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_clone_isolation_route_anchor(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the separate Checker-sealed persistent-root alias
+    /// replacement route. Its bytecode anchor is independent from
+    /// CloneIsolation and admits only this exact profile while broad V2
+    /// production readiness remains closed.
+    fn validate_canonical_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independently receipted DirectPrint profile before any
+    /// VM execution. The operation-level println seal does not authorize the
+    /// production route by itself.
+    fn validate_canonical_direct_print_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_direct_print_route_anchor(self.program.entry, &self.program.functions)
+                .map_err(InterpError::new),
+            None => Ok(false),
         }
     }
 
@@ -1833,6 +3389,34 @@ impl BytecodeVM {
             )),
             None => Ok(()),
         }
+    }
+
+    /// Reseal the bytecode-table portion of a Checker Any/CFG receipt for a
+    /// test fixture that deliberately assembles a bytecode-only execution
+    /// shell around source-compiled functions. The Checker source census,
+    /// source-bound call bindings, and all independent receipts are retained
+    /// and validated. Production builds do not contain this API.
+    #[cfg(test)]
+    pub(crate) fn reseal_managed_any_cfg_fixture_program_for_test(
+        program: &mut BytecodeProgram,
+    ) -> Result<(), InterpError> {
+        let entry = program.entry;
+        let functions = program.functions.clone();
+        let receipt = program
+            .canonical_map_any_owner_v1_receipt
+            .as_mut()
+            .ok_or_else(|| InterpError::new("test fixture has no Checker receipt carrier"))?;
+        receipt
+            .reseal_managed_any_cfg_program_for_test(entry, &functions)
+            .map_err(InterpError::new)
+    }
+
+    /// Rebind this VM's test fixture after an explicit test-only bytecode
+    /// transformation. Normal runtime mutations remain unauthorized and are
+    /// still checked by the next public-entry preflight.
+    #[cfg(test)]
+    pub(crate) fn reseal_managed_any_cfg_fixture_for_test(&mut self) -> Result<(), InterpError> {
+        Self::reseal_managed_any_cfg_fixture_program_for_test(Arc::make_mut(&mut self.program))
     }
 
     /// Generic ManagedAny identity calls require a separate Checker-derived
@@ -1904,11 +3488,49 @@ impl BytecodeVM {
             return execute(self);
         }
         self.stdout.clear();
+        #[cfg(test)]
+        self.ordinary_map_owned_any_v2_unpack_test_observations
+            .clear();
         // All Checker-owned source/ownership receipts must be checked before
         // opening the Actor root. This includes Map-owned GetAny snapshots and
         // Any-bearing generic CFG/call receipts, not only generic identity and
         // trap-cleanup instances. Worker VMs also get this fresh-entry gate.
         self.preflight_canonical_program_structure()?;
+        let has_checked_narrow_v2_route = self
+            .validate_canonical_values_field_move_route_anchor()?
+            || self.validate_canonical_values_snapshot_replacement_route_anchor()?
+            || self.validate_canonical_values_mixed_snapshot_route_anchor()?
+            || self.validate_canonical_values_local_index_i32_route_anchor()?
+            || self.validate_canonical_values_heterogeneous_string_index1_route_anchor()?
+            || self.validate_canonical_keys_snapshot_route_anchor()?
+            || self.validate_canonical_dynamic_keys_get_route_anchor()?
+            || self.validate_canonical_empty_root_root_queries_v1_route_anchor()?
+            || self.validate_canonical_values_mixed_snapshot_remove_route_anchor()?
+            || self.validate_canonical_values_producer_caller_route_anchor()?
+            || self.validate_canonical_values_crosscall_string_caller_route_anchor()?
+            || self.validate_canonical_values_crosscall_string_caller_index1_route_anchor()?
+            || self.validate_canonical_map_root_producer_caller_route_anchor()?
+            || self.validate_canonical_ordinary_map_new_result_route_anchor()?
+            || self.validate_canonical_computed_key_get_route_anchor()?
+            || self.validate_canonical_computed_string_key_owner_chain_route_anchor()?
+            || self.validate_canonical_ordinary_map_owned_any_v2_zero_miss_i32_route_anchor()?
+            || self
+                .validate_canonical_ordinary_map_owned_any_v2_get_or_default_i32_route_anchor()?
+            || self
+                .validate_canonical_ordinary_map_owned_any_v2_get_or_default_string_route_anchor(
+                )?
+            || self
+                .validate_canonical_ordinary_map_owned_any_v2_removed_key_checked_miss_route_anchor(
+                )?
+            || self.validate_canonical_checked_get_route_anchor()?
+            || self.validate_canonical_is_empty_route_anchor()?
+            || self.validate_canonical_record_unit_route_anchor()?
+            || self.validate_canonical_map_set_drop_control_route_anchor()?
+            || self.validate_canonical_branch_local_set_diamond_route_anchor()?
+            || self.validate_canonical_clone_isolation_route_anchor()?
+            || self
+                .validate_canonical_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor()?
+            || self.validate_canonical_direct_print_route_anchor()?;
         if enforce_production_readiness
             && !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
             && self
@@ -1916,6 +3538,7 @@ impl BytecodeVM {
                 .functions
                 .iter()
                 .any(super::instr::function_has_ordinary_map_owned_any_v2_ops)
+            && !has_checked_narrow_v2_route
         {
             return Err(InterpError::new(
                 "MIR-COVERAGE-001: ordinary Map/Any owner-v2 bytecode execution is diagnostic-only while V2 production readiness is disabled",
@@ -1957,7 +3580,12 @@ impl BytecodeVM {
         // active frame reaches Ret.  Treat those extra frames like any other
         // early sub-execution return so a reusable VM cannot inherit them.
         if self.stack.len() > stack_len_before {
-            self.cleanup_failed_subexec(stack_len_before, depth_before);
+            match &result {
+                Err(error) => {
+                    self.cleanup_failed_subexec_for_error(stack_len_before, depth_before, error)
+                }
+                Ok(_) => self.cleanup_failed_subexec(stack_len_before, depth_before),
+            }
         }
         match result {
             Ok(Value::Int(code)) => Ok(code),
@@ -1976,10 +3604,7 @@ impl BytecodeVM {
                 "main returned non-integer: {}",
                 other
             ))),
-            Err(e) => {
-                self.cleanup_failed_subexec(stack_len_before, depth_before);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -1997,6 +3622,52 @@ impl BytecodeVM {
         self.with_canonical_actor_component_execution(Self::run_value_inner)
     }
 
+    /// Execute the complete AST-free MIR bytecode entry for a deterministic
+    /// owner-v2 failure-model test. Structural/receipt preflight, runtime
+    /// ownership scope, the instruction loop, and trap cleanup remain intact;
+    /// only the production-readiness bit is bypassed for this test-only
+    /// diagnostic because ordinary Map/Any readiness must remain closed.
+    #[cfg(test)]
+    pub(crate) fn run_value_for_ordinary_map_failure_model_test(
+        &mut self,
+    ) -> Result<Value, InterpError> {
+        let result = self.with_canonical_actor_execution_inner(Self::run_value_inner, false);
+        #[cfg(test)]
+        if result.is_err() {
+            assert!(
+                self.stack.is_empty(),
+                "same-MIR failure execution must unwind every bytecode frame"
+            );
+        }
+        result
+    }
+
+    /// Count strong V2 owner values retained by active or recycled registers
+    /// after the failure runner unwinds. Recycled register buffers are
+    /// intentionally retained by the VM, so observing them catches a partial
+    /// Clone owner that escaped the opcode-local result Vec before VM drop.
+    #[cfg(test)]
+    pub(crate) fn ordinary_map_owned_any_v2_live_owner_occurrences_for_test(&self) -> usize {
+        self.stack
+            .iter()
+            .flat_map(|frame| frame.regs.iter())
+            .chain(self.free_regs.iter().flat_map(|registers| registers.iter()))
+            .chain(self.quote_captures.values())
+            .map(managed_any_v2_owner_occurrences_for_failure_model)
+            .sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ordinary_map_new_result_live_runtime_root_occurrences_for_test(&self) -> usize {
+        self.stack
+            .iter()
+            .flat_map(|frame| frame.regs.iter())
+            .chain(self.free_regs.iter().flat_map(|registers| registers.iter()))
+            .chain(self.quote_captures.values())
+            .map(ordinary_map_new_result_live_runtime_root_occurrences)
+            .sum()
+    }
+
     fn run_value_inner(&mut self) -> Result<Value, InterpError> {
         let entry = self.program.entry;
         let stack_len_before = self.stack.len();
@@ -2004,14 +3675,16 @@ impl BytecodeVM {
         self.push_frame(entry, Vec::new(), None)?;
         let result = self.exec_entry_loop();
         if self.stack.len() > stack_len_before {
-            self.cleanup_failed_subexec(stack_len_before, depth_before);
+            match &result {
+                Err(error) => {
+                    self.cleanup_failed_subexec_for_error(stack_len_before, depth_before, error)
+                }
+                Ok(_) => self.cleanup_failed_subexec(stack_len_before, depth_before),
+            }
         }
         match result {
             Ok(v) => Ok(v),
-            Err(e) => {
-                self.cleanup_failed_subexec(stack_len_before, depth_before);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -2048,6 +3721,9 @@ impl BytecodeVM {
     /// after truncating the transition stack, so it must validate that target
     /// before mutating the stack.
     fn absorb_flow_fault(&mut self, e: &InterpError) -> Result<bool, InterpError> {
+        if e.is_trap() {
+            return Ok(false);
+        }
         let Some(idx) = self.stack.iter().rposition(|f| f.flow_tx.is_some()) else {
             return Ok(false);
         };
@@ -2169,6 +3845,9 @@ impl BytecodeVM {
 
     /// Enrich an error with the current frame's function name and source line.
     fn enrich_error(&self, err: InterpError) -> InterpError {
+        if err.is_trap() {
+            return err;
+        }
         if let Some(frame) = self.stack.last() {
             let Some(proto) = self.program.functions.get(frame.proto_idx as usize) else {
                 return err;
@@ -2193,6 +3872,11 @@ impl BytecodeVM {
         args: Vec<Value>,
         return_reg: Option<Reg>,
     ) -> Result<(), InterpError> {
+        if self.string_allocation_error.is_none() {
+            self.string_allocation_error = Some(InterpError::prepare_allocation_failure(
+                OBSERVER_STRING_ALLOCATION_ERROR,
+            ));
+        }
         // 0.35.27 (C3): local Arc clone — `proto` borrows the local `program`,
         // not `self`, so the `self.check_requires`/`self.stack.push` calls
         // below are borrow-conflict-free.
@@ -2394,6 +4078,11 @@ impl BytecodeVM {
                             "dynamic Any-v2 owner cannot be copied by generic Mov",
                         ));
                     }
+                    if rd != rs && contains_ordinary_map_new_result_runtime_root(self.get_reg(rs)) {
+                        return Err(InterpError::new(
+                            "ordinary Map NewResult runtime root cannot be copied by generic Mov",
+                        ));
+                    }
                     match self.get_reg(rs) {
                         Value::CanonicalMapRoot(_)
                         | Value::CanonicalMapAnyOwnerV1(_)
@@ -2428,9 +4117,78 @@ impl BytecodeVM {
                     self.ensure_reg(rd, "move destination")?;
                     self.ensure_reg(rs, "move source")?;
                     match self.get_reg(rs) {
-                        Value::CanonicalMapRoot(_)
-                        | Value::CanonicalMapAnyOwnerV1(_)
-                        | Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
+                            let (function_index, pc) = {
+                                let frame = self.cur_frame();
+                                (frame.proto_idx, frame.pc.saturating_sub(1))
+                            };
+                            let pc = u32::try_from(pc).map_err(|_| {
+                                InterpError::new(
+                                    "Map-root producer-caller Move PC exceeds bytecode ABI",
+                                )
+                            })?;
+                            let map_root_authorized = self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .map(|receipt| {
+                                    receipt.authorizes_map_root_producer_caller_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )
+                                })
+                                .transpose()
+                                .map_err(InterpError::new)?
+                                .unwrap_or(false);
+                            if !map_root_authorized {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Move is outside the exact Map-root producer-caller bytecode anchor",
+                                ));
+                            }
+                        }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                            if !root.is_unique() {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map NewResult Move: runtime root has a stale or duplicate owner",
+                                ));
+                            }
+                            let (function_index, pc) = {
+                                let frame = self.cur_frame();
+                                (frame.proto_idx, frame.pc.saturating_sub(1))
+                            };
+                            let pc = u32::try_from(pc).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map NewResult Move PC exceeds bytecode ABI",
+                                )
+                            })?;
+                            let authorized = self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .map(|receipt| {
+                                    receipt.authorizes_ordinary_map_new_result_root_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )
+                                })
+                                .transpose()
+                                .map_err(InterpError::new)?
+                                .unwrap_or(false);
+                            if !authorized {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 runtime-root Move is outside the exact NewResult bytecode anchor",
+                                ));
+                            }
+                        }
+                        Value::CanonicalMapRoot(_) | Value::CanonicalMapAnyOwnerV1(_) => {
                             return Err(InterpError::new(
                                 "canonical MapRoot and owned Map/Any values require their profile-specific Checker-receipted MIR operations",
                             ));
@@ -2459,6 +4217,11 @@ impl BytecodeVM {
                     if contains_managed_any_v2(self.get_reg(rs)) {
                         return Err(InterpError::new(
                             "dynamic Any-v2 owner requires its Checker-receipted ownership operation",
+                        ));
+                    }
+                    if contains_ordinary_map_new_result_runtime_root(self.get_reg(rs)) {
+                        return Err(InterpError::new(
+                            "ordinary Map NewResult runtime root requires its Checker-receipted ownership operation",
                         ));
                     }
                     match self.get_reg(rs) {
@@ -2498,6 +4261,11 @@ impl BytecodeVM {
                             "dynamic Any-v2 owner requires its Checker-receipted aggregate Drop",
                         ));
                     }
+                    if contains_ordinary_map_new_result_runtime_root(self.get_reg(ra)) {
+                        return Err(InterpError::new(
+                            "ordinary Map NewResult runtime root requires its Checker-receipted Drop",
+                        ));
+                    }
                     match self.get_reg(ra) {
                         Value::CanonicalMapRoot(_)
                         | Value::CanonicalMapAnyOwnerV1(_)
@@ -2528,6 +4296,11 @@ impl BytecodeVM {
                 Op::DropAggregate { ra, arity } => {
                     self.ensure_reg(ra, "aggregate drop source")?;
                     let value = self.get_reg(ra);
+                    if contains_ordinary_map_new_result_runtime_root(value) {
+                        return Err(InterpError::new(
+                            "ordinary Map NewResult runtime root requires its Checker-receipted Drop",
+                        ));
+                    }
                     let valid_shape = match value {
                         Value::Tuple(items) => items.len() == arity as usize,
                         Value::Record(_, fields) => fields.len() == arity as usize,
@@ -2558,6 +4331,11 @@ impl BytecodeVM {
                 }
                 Op::DropVariant { ra, shapes } => {
                     self.ensure_reg(ra, "variant drop source")?;
+                    if contains_ordinary_map_new_result_runtime_root(self.get_reg(ra)) {
+                        return Err(InterpError::new(
+                            "ordinary Map NewResult runtime root requires its Checker-receipted Drop",
+                        ));
+                    }
                     let (actual_tag, payload_len, identity) = match self.get_reg(ra) {
                         Value::Variant(tag, payload) => (tag.clone(), payload.len(), None),
                         Value::CanonicalVariant {
@@ -2682,9 +4460,10 @@ impl BytecodeVM {
                                 InterpError::integer_overflow("integer addition overflow")
                             })?)
                         }
-                        (Value::String(x), Value::String(y)) => {
-                            Value::String(try_concatenate_canonical_strings(x, y)?)
-                        }
+                        (Value::String(_), Value::String(_)) => Value::String(
+                            try_concat_shared_string(&a, &b)
+                                .map_err(|message| self.take_string_allocation_error(message))?,
+                        ),
                         _ => {
                             let af = value_to_f64(&a)?;
                             let bf = value_to_f64(&b)?;
@@ -2937,6 +4716,17 @@ impl BytecodeVM {
                         }
                     };
                     frame.regs[rd as usize] = Value::Float(a as f64);
+                }
+                Op::IntToFloat32 { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "int-to-float32")?;
+                    let frame = self.cur_frame_mut();
+                    let a = match &frame.regs[ra as usize] {
+                        Value::Int(v) => *v,
+                        other => {
+                            return Err(InterpError::new(format!("expected Int, got {}", other)));
+                        }
+                    };
+                    frame.regs[rd as usize] = Value::Float((a as f32) as f64);
                 }
                 Op::FloatNarrow { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "float-narrow")?;
@@ -3444,33 +5234,20 @@ impl BytecodeVM {
                 // ── String ─────────────────────────────────────
                 Op::ConcatStr { rd, ra, rb } => {
                     self.ensure_binary_regs(rd, ra, rb, "concat-str")?;
-                    let (left, right) = {
-                        let frame = self.cur_frame();
-                        (
-                            frame.regs[ra as usize].clone(),
-                            frame.regs[rb as usize].clone(),
-                        )
-                    };
-                    let concatenated = match (&left, &right) {
-                        (Value::String(left), Value::String(right)) => {
-                            try_concatenate_canonical_strings(left, right)?
-                        }
-                        _ => try_concatenate_canonical_strings(
-                            &left.to_string(),
-                            &right.to_string(),
-                        )?,
-                    };
-                    self.cur_frame_mut().regs[rd as usize] = Value::String(concatenated);
+                    let result = try_concat_shared_string(self.get_reg(ra), self.get_reg(rb))
+                        .map_err(|message| self.take_string_allocation_error(message))?;
+                    self.set_reg(rd, Value::String(result));
                 }
                 Op::StrAppend { ra, rb } => {
                     self.ensure_source_pair(ra, rb, "str-append")?;
                     let suffix = self.get_reg(rb).to_string();
                     let target = self.get_reg_mut(ra);
                     match target {
-                        Value::String(s) => crate::interp::SharedString::make_mut(s).push_str(&suffix),
+                        Value::String(s) => SharedString::make_mut(s).push_str(&suffix),
                         other => {
                             let base = other.to_string();
-                            *other = Value::String(crate::interp::SharedString::new(format!("{}{}", base, suffix)));
+                            *other =
+                                Value::String(SharedString::new(format!("{}{}", base, suffix)));
                         }
                     }
                 }
@@ -3803,15 +5580,7 @@ impl BytecodeVM {
                         Err(e) => {
                             // Keep canonical extern failures on the same fault
                             // routing path as compatibility extern calls.
-                            if let Some(handler_pc) =
-                                self.stack.last_mut().and_then(|f| f.fault_handlers.pop())
-                            {
-                                let frame = self.cur_frame_mut();
-                                frame.pending_fault = Some(e);
-                                frame.pc = handler_pc;
-                            } else {
-                                return Err(e);
-                            }
+                            self.route_fault(e)?;
                         }
                     }
                 }
@@ -4308,7 +6077,7 @@ impl BytecodeVM {
                                     chars.len()
                                 )));
                             }
-                            Value::String(crate::interp::SharedString::new(chars[idx].to_string()))
+                            Value::String(SharedString::new(chars[idx].to_string()))
                         }
                         Value::Set(s) => {
                             let idx = if idx_raw < 0 {
@@ -4441,59 +6210,80 @@ impl BytecodeVM {
                 } => {
                     self.ensure_reg(rd, "tuple get destination")?;
                     self.ensure_reg(ra, "tuple get source")?;
-                    if contains_managed_any_v2(self.get_reg(ra)) {
-                        return Err(InterpError::new(
-                            "tuple projection cannot copy a dynamic Any-v2 owner",
-                        ));
-                    }
                     let shape = Self::tuple_projection_contract(proto, idx, contract)?;
-                    let v = self.get_reg(ra).clone();
-                    let elem = if let Some(shape) = shape.as_ref() {
-                        let tuple =
-                            Self::validate_canonical_tuple_projection(&v, shape, "tuple get")?;
-                        tuple
-                            .get(shape.index as usize)
-                            .cloned()
-                            .ok_or_else(|| InterpError::new("tuple field is out of bounds"))?
+                    if contains_managed_any_v2(self.get_reg(ra)) {
+                        let v2_get_result =
+                            crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+                        let Some(shape) = shape.as_ref().filter(|shape| {
+                            shape.tuple_ty == v2_get_result && shape.index == 0 && shape.arity == 2
+                        }) else {
+                            return Err(InterpError::new(
+                                "tuple projection cannot copy a dynamic Any-v2 owner",
+                            ));
+                        };
+                        let tuple = Self::validate_canonical_tuple_projection(
+                            self.get_reg(ra),
+                            shape,
+                            "ordinary Map/Any owner-v2 GetAny found projection",
+                        )?;
+                        let Some(Value::Bool(found)) = tuple.first() else {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 GetAny tuple has a malformed found flag",
+                            ));
+                        };
+                        self.set_reg(rd, Value::Bool(*found));
                     } else {
-                        match v {
-                            Value::Tuple(t) => {
-                                if (idx as usize) >= t.len() {
-                                    // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
-                                    return Err(InterpError::index_out_of_bounds(format!(
-                                        "tuple index {} out of bounds (arity {})",
-                                        idx,
-                                        t.len()
+                        let v = self.get_reg(ra).clone();
+                        let elem = if let Some(shape) = shape.as_ref() {
+                            let tuple =
+                                Self::validate_canonical_tuple_projection(&v, shape, "tuple get")?;
+                            tuple
+                                .get(shape.index as usize)
+                                .cloned()
+                                .ok_or_else(|| InterpError::new("tuple field is out of bounds"))?
+                        } else {
+                            match v {
+                                Value::Tuple(t) => {
+                                    if (idx as usize) >= t.len() {
+                                        // B-2 (Wave-2): E0803 IndexOutOfBounds (see ListGet).
+                                        return Err(InterpError::index_out_of_bounds(format!(
+                                            "tuple index {} out of bounds (arity {})",
+                                            idx,
+                                            t.len()
+                                        )));
+                                    }
+                                    t[idx as usize].clone()
+                                }
+                                // Newtype .0 accessor: unwrap the inner value.
+                                // Newtypes are represented as Variant(name, [inner]) in bytecode.
+                                Value::Newtype(_, inner) if idx == 0 => *inner,
+                                Value::Variant(_, payload) if idx == 0 && payload.len() == 1 => {
+                                    payload[0].clone()
+                                }
+                                // 0.39.135 (L1 parity): with transparent newtype ctor
+                                // compilation the scrutinee IS the inner scalar, and
+                                // `.0` is identity (codegen expr/access.rs D4). The
+                                // checker only admits `.0` on tuple/newtype receivers,
+                                // so an Int/Float/Bool/String reaching here under
+                                // idx 0 is exactly a transparent-newtype projection.
+                                Value::Int(_)
+                                | Value::Float(_)
+                                | Value::Bool(_)
+                                | Value::String(_)
+                                    if idx == 0 =>
+                                {
+                                    v
+                                }
+                                other => {
+                                    return Err(InterpError::new(format!(
+                                        "tuple get: expected Tuple, got {}",
+                                        other
                                     )));
                                 }
-                                t[idx as usize].clone()
                             }
-                            // Newtype .0 accessor: unwrap the inner value.
-                            // Newtypes are represented as Variant(name, [inner]) in bytecode.
-                            Value::Newtype(_, inner) if idx == 0 => *inner,
-                            Value::Variant(_, payload) if idx == 0 && payload.len() == 1 => {
-                                payload[0].clone()
-                            }
-                            // 0.39.135 (L1 parity): with transparent newtype ctor
-                            // compilation the scrutinee IS the inner scalar, and
-                            // `.0` is identity (codegen expr/access.rs D4). The
-                            // checker only admits `.0` on tuple/newtype receivers,
-                            // so an Int/Float/Bool/String reaching here under
-                            // idx 0 is exactly a transparent-newtype projection.
-                            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::String(_)
-                                if idx == 0 =>
-                            {
-                                v
-                            }
-                            other => {
-                                return Err(InterpError::new(format!(
-                                    "tuple get: expected Tuple, got {}",
-                                    other
-                                )));
-                            }
-                        }
-                    };
-                    self.set_reg(rd, elem);
+                        };
+                        self.set_reg(rd, elem);
+                    }
                 }
 
                 // ── Record ─────────────────────────────────────
@@ -5201,7 +6991,9 @@ impl BytecodeVM {
                             })?,
                         ),
                         Value::String(value) => {
-                            crate::interp::value::CanonicalMapRootValue::String(crate::interp::SharedString::clone(value))
+                            crate::interp::value::CanonicalMapRootValue::String(
+                                SharedString::clone(value),
+                            )
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -5347,7 +7139,9 @@ impl BytecodeVM {
                             )
                         }
                         Value::String(value) => {
-                            crate::interp::value::CanonicalMapAnyOwnerV1Value::String(crate::interp::SharedString::clone(value))
+                            crate::interp::value::CanonicalMapAnyOwnerV1Value::String(
+                                SharedString::clone(value),
+                            )
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -5545,7 +7339,7 @@ impl BytecodeVM {
                         }
                         Value::String(value) => {
                             crate::interp::value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1Value::String(
-                                crate::interp::SharedString::clone(value),
+                                SharedString::clone(value),
                             )
                         }
                         other => {
@@ -5708,6 +7502,102 @@ impl BytecodeVM {
                     }
                     drop(root);
                 }
+                Op::MirOrdinaryMapOwnerLifecycleObserverV1ToJson { rd, ra }
+                | Op::MirOrdinaryMapOwnerLifecycleObserverV1Println { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map owner lifecycle observer v1")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map owner lifecycle observer v1 result aliases its borrowed root",
+                        ));
+                    }
+                    let operation = match op {
+                        Op::MirOrdinaryMapOwnerLifecycleObserverV1ToJson { .. } => {
+                            CanonicalOrdinaryMapOwnerObserverV1Operation::ToJson
+                        }
+                        Op::MirOrdinaryMapOwnerLifecycleObserverV1Println { .. } => {
+                            CanonicalOrdinaryMapOwnerObserverV1Operation::Println
+                        }
+                        _ => unreachable!("observer opcode arm only matches observer operations"),
+                    };
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map owner lifecycle observer v1 has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            u32::try_from(pc)
+                                .ok()
+                                .and_then(|pc| {
+                                    receipt.ordinary_map_owner_observer_v1_binding_at_pc(
+                                        function_index,
+                                        pc,
+                                    )
+                                })
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map owner lifecycle observer v1 has no exact route anchor site",
+                            )
+                        })?;
+                    if binding.operation != operation || binding.rd != rd || binding.ra != ra {
+                        return Err(InterpError::new(
+                            "ordinary Map owner lifecycle observer v1 disagrees with its exact route anchor site",
+                        ));
+                    }
+                    let json = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(root) => {
+                            if Arc::strong_count(root) != 1 {
+                                return Err(InterpError::new(
+                                    "ordinary Map owner lifecycle observer v1 root has a stale or duplicate owner",
+                                ));
+                            }
+                            ordinary_map_owner_lifecycle_i32_string_v1_json(root)?
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map owner lifecycle observer v1 expected its dedicated Map root, got {other}"
+                            )));
+                        }
+                    };
+                    match operation {
+                        CanonicalOrdinaryMapOwnerObserverV1Operation::ToJson => {
+                            // Build the shared owner before publishing the register.
+                            // The payload buffer and this allocation are separate
+                            // fallible boundaries; neither may expose a partial value.
+                            ordinary_map_owner_lifecycle_observer_v1_allocation_checkpoint()?;
+                            let publish = || SharedString::try_new(json);
+                            #[cfg(test)]
+                            let shared = super::test_alloc::at_shared_string_request(
+                                super::test_alloc::SharedStringSite::Observer,
+                                publish,
+                            );
+                            #[cfg(not(test))]
+                            let shared = publish();
+                            let shared = shared.map_err(|_| {
+                                self.take_string_allocation_error(OBSERVER_STRING_ALLOCATION_ERROR)
+                            })?;
+                            self.set_reg(rd, Value::String(shared));
+                        }
+                        CanonicalOrdinaryMapOwnerObserverV1Operation::Println => {
+                            let mut output = json;
+                            ordinary_map_owner_lifecycle_observer_v1_try_reserve(&mut output, 1)?;
+                            output.push('\n');
+                            self.append_ordinary_map_owner_lifecycle_observer_v1_stdout(&output)?;
+                            print!("{output}");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                            self.set_reg(rd, Value::Unit);
+                        }
+                    }
+                }
                 Op::MirOrdinaryMapOwnedGetI32StringV1New { rd } => {
                     self.ensure_reg(rd, "ordinary Map owned-Get v1 New destination")?;
                     self.set_reg(
@@ -5770,7 +7660,7 @@ impl BytecodeVM {
                         }
                         Value::String(value) => {
                             crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value::String(
-                                crate::interp::SharedString::clone(value),
+                                SharedString::clone(value),
                             )
                         }
                         other => {
@@ -6037,7 +7927,7 @@ impl BytecodeVM {
                                         ) {
                                             None => (3, Value::Int(3)),
                                             Some(owned) => {
-                                                (0, Value::String(crate::interp::SharedString::new(owned)))
+                                                (0, Value::String(SharedString::new(owned)))
                                             }
                                         }
                                     }
@@ -6311,7 +8201,7 @@ impl BytecodeVM {
                             let rd = rd.ok_or_else(|| {
                                 InterpError::new("managed Any UnpackString has no destination")
                             })?;
-                            self.set_reg(rd, Value::String(crate::interp::SharedString::new(owned)));
+                            self.set_reg(rd, Value::String(SharedString::new(owned)));
                         }
                     }
                 }
@@ -6332,6 +8222,11 @@ impl BytecodeVM {
                         ));
                     }
                     drop(root);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2NewResult { rd } => {
+                    self.ensure_reg(rd, "ordinary Map NewResult destination")?;
+                    let value = ordinary_map_new_result_bytecode_value()?;
+                    self.set_reg(rd, value);
                 }
                 Op::MirOrdinaryMapOwnedAnyV2New { rd } => {
                     self.ensure_reg(rd, "ordinary Map/Any owner-v2 New destination")?;
@@ -6501,6 +8396,34 @@ impl BytecodeVM {
                                     "E0802: ordinary Map/Any owner-v2 size overflows i32",
                                 )
                             })?,
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                            if !root.is_unique() {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map NewResult Size: runtime root has a stale or duplicate owner",
+                                ));
+                            }
+                            #[cfg(test)]
+                            if ORDINARY_MAP_NEW_RESULT_SIZE_FAILURE_FOR_TEST
+                                .with(std::cell::Cell::get)
+                            {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map NewResult Size failure injected for cleanup test",
+                                ));
+                            }
+                            match root.with_owner(|owner| owner.size()) {
+                                Some(Ok(size)) => size,
+                                Some(Err(error)) => {
+                                    return Err(InterpError::new(format!(
+                                        "[E0800] ordinary Map NewResult Size invariant failed: {error:?}"
+                                    )))
+                                }
+                                None => {
+                                    return Err(InterpError::new(
+                                        "[E0800] ordinary Map NewResult Size: runtime root was already retired",
+                                    ))
+                                }
+                            }
+                        }
                         other => {
                             return Err(InterpError::new(format!(
                                 "ordinary Map/Any owner-v2 Size: expected owner-v2 root, got {other}"
@@ -6630,96 +8553,524 @@ impl BytecodeVM {
                         try_copy_ordinary_map_owned_get_string(key, false).ok_or_else(|| {
                             InterpError::new("ordinary Map/Any owner-v2 GetAny key snapshot failed")
                         })?;
-                    let (found, any, unpack_backing) = match self.get_reg(ra) {
-                        Value::CanonicalOrdinaryMapOwnedAnyV2(root)
-                            if Arc::strong_count(root) == 1 =>
-                        {
-                            match root.get(&key) {
-                                None => {
-                                    let expected_i32 = crate::core::ir::primitive_type_id(
-                                        crate::core::PrimitiveType::I32,
-                                    );
-                                    if get_binding.miss_payload_type != expected_i32 {
-                                        return Err(InterpError::new(
-                                            "ordinary Map/Any owner-v2 GetAny miss binding is not canonical i32",
-                                        ));
-                                    }
-                                    (
-                                        false,
-                                        crate::interp::value::CanonicalManagedAnyV2::from_i32(
-                                            expected_i32.clone(),
-                                            0,
-                                        ),
-                                        Some((expected_i32, 0)),
-                                    )
-                                }
-                                Some(payload) => {
-                                    let payload_binding = self
-                                        .program
-                                        .canonical_map_any_owner_v1_receipt
-                                        .as_ref()
-                                        .and_then(|receipt| {
-                                            receipt
-                                                .ordinary_map_owned_any_v2_selected_payload_binding(
-                                                    match payload {
-                                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 { type_id, .. }
-                                                        | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String { type_id, .. }
-                                                        | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record { type_id, .. } => type_id,
-                                                    },
-                                                )
-                                        })
-                                        .cloned()
-                                        .ok_or_else(|| {
-                                            InterpError::new(
-                                                "ordinary Map/Any owner-v2 GetAny hit uses a TypeDesc outside the Core-selected payload table",
-                                            )
-                                        })?;
-                                    let unpack_backing = match payload {
-                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
-                                            type_id,
-                                            value,
-                                        } => Some((type_id.clone(), *value)),
-                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
-                                            ..
-                                        }
-                                        |
-                                        crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Record {
-                                            ..
-                                        } => None,
-                                    };
-                                    (
-                                        true,
-                                        copy_ordinary_map_owned_any_v2_payload(
-                                            payload,
-                                            &payload_binding,
-                                        )?,
-                                        unpack_backing,
-                                    )
-                                }
-                            }
-                        }
-                        Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
-                            return Err(InterpError::new(
-                                "ordinary Map/Any owner-v2 GetAny root has a stale or duplicate owner",
-                            ));
-                        }
+                    let pair = self.ordinary_map_owned_any_v2_get_any_pair(
+                        ra,
+                        &key,
+                        &get_binding.miss_payload_type,
+                        true,
+                    )?;
+                    self.set_reg(rd, pair);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 {
+                    rd,
+                    ra,
+                    key: key_reg,
+                    default: default_reg,
+                } => {
+                    self.ensure_reg(
+                        rd,
+                        "ordinary Map/Any owner-v2 GetOrDefault<i32> destination",
+                    )?;
+                    self.ensure_reg(ra, "ordinary Map/Any owner-v2 GetOrDefault<i32> Map root")?;
+                    self.ensure_reg(key_reg, "ordinary Map/Any owner-v2 GetOrDefault<i32> key")?;
+                    self.ensure_reg(
+                        default_reg,
+                        "ordinary Map/Any owner-v2 GetOrDefault<i32> default",
+                    )?;
+                    if rd == ra
+                        || rd == key_reg
+                        || rd == default_reg
+                        || ra == key_reg
+                        || ra == default_reg
+                        || key_reg == default_reg
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 GetOrDefault<i32> has aliased registers",
+                        ));
+                    }
+                    let default = match self.get_reg(default_reg) {
+                        Value::Int(value) => i32::try_from(*value).map_err(|_| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32> default is outside the i32 range",
+                            )
+                        })?,
                         other => {
                             return Err(InterpError::new(format!(
-                                "ordinary Map/Any owner-v2 GetAny: expected Map owner, got {other}"
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32>: expected i32 default, got {other}"
                             )));
                         }
                     };
-                    let any = Arc::new(any);
-                    ordinary_map_owned_any_v2_get_any_publish_checkpoint()?;
-                    if let Some((type_id, value)) = unpack_backing {
-                        self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
-                            &any, type_id, value,
-                        );
+                    let key = match self.get_reg(key_reg) {
+                        Value::String(key) => key,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32>: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let key =
+                        try_copy_ordinary_map_owned_get_string(key, false).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32> key snapshot failed",
+                            )
+                        })?;
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32> has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_get_or_default_i32_binding_at_pc(
+                                function_index,
+                                u32::try_from(pc).unwrap_or(u32::MAX),
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32> has no exact typed Core/MIR binding",
+                            )
+                        })?;
+                    binding.receipt.validate().map_err(InterpError::new)?;
+                    let i32_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                    let string_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                    if binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        || binding.rd != rd
+                        || binding.ra != ra
+                        || binding.key_reg != key_reg
+                        || binding.default_reg != default_reg
+                        || binding.receipt.root_type
+                            != crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+                        || binding.receipt.key_type != string_type
+                        || binding.receipt.type_argument != i32_type
+                        || binding.receipt.default_type != i32_type
+                        || binding.receipt.result_type != i32_type
+                        || !super::instr::is_canonical_digest(&binding.target_type_desc_digest)
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 GetOrDefault<i32> disagrees with its exact typed Core/MIR binding",
+                        ));
                     }
-                    self.set_reg(
+                    let pair = self.ordinary_map_owned_any_v2_get_any_pair(
+                        ra,
+                        &key,
+                        &binding.receipt.type_argument,
+                        false,
+                    )?;
+                    let result = (|| -> Result<Value, InterpError> {
+                        let fields = match &pair {
+                            Value::Tuple(fields) if fields.len() == 2 => fields,
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<i32> expected GetAny pair, got {other}"
+                                )));
+                            }
+                        };
+                        let found = match &fields[0] {
+                            Value::Bool(found) => *found,
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<i32> pair has a non-boolean found field: {other}"
+                                )));
+                            }
+                        };
+                        let Value::CanonicalManagedAnyV2(owner) = &fields[1] else {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32> pair has no V2 Any owner",
+                            ));
+                        };
+                        if Arc::strong_count(owner) != 1 || owner.type_id() != &i32_type {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<i32> pair has a duplicate owner or non-i32 TypeDesc",
+                            ));
+                        }
+                        if found {
+                            let selected = self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .and_then(|receipt| {
+                                    receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                        &i32_type,
+                                    )
+                                })
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map/Any owner-v2 GetOrDefault<i32> hit has no selected i32 TypeDesc",
+                                    )
+                                })?;
+                            if selected.type_id != i32_type
+                                || selected.kind
+                                    != super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+                                || selected.type_desc_digest != binding.target_type_desc_digest
+                            {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<i32> hit disagrees with its exact selected i32 TypeDesc",
+                                ));
+                            }
+                            ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                                InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 GetOrDefault<i32> unpack capacity failure",
+                                )
+                            })?;
+                            let value = self
+                                .checked_ordinary_map_owned_any_v2_i32_unpack(owner, &i32_type)?;
+                            Ok(Value::Int(i64::from(value)))
+                        } else {
+                            // The shared V2 GetAny helper constructs a fresh
+                            // canonical i32-zero sentinel on this miss arm.
+                            // Its exact TypeDesc and unique owner identity
+                            // were checked above; do not unpack or clone the
+                            // sentinel merely to select the caller default.
+                            Ok(Value::Int(i64::from(default)))
+                        }
+                    })();
+                    drop(pair);
+                    self.set_reg(rd, result?);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString {
+                    rd,
+                    ra,
+                    key: key_reg,
+                    default: default_reg,
+                } => {
+                    self.ensure_reg(
                         rd,
-                        Value::Tuple(vec![Value::Bool(found), Value::CanonicalManagedAnyV2(any)]),
-                    );
+                        "ordinary Map/Any owner-v2 GetOrDefault<String> destination",
+                    )?;
+                    self.ensure_reg(
+                        ra,
+                        "ordinary Map/Any owner-v2 GetOrDefault<String> Map root",
+                    )?;
+                    self.ensure_reg(
+                        key_reg,
+                        "ordinary Map/Any owner-v2 GetOrDefault<String> key",
+                    )?;
+                    self.ensure_reg(
+                        default_reg,
+                        "ordinary Map/Any owner-v2 GetOrDefault<String> default",
+                    )?;
+                    if rd == ra
+                        || rd == key_reg
+                        || rd == default_reg
+                        || ra == key_reg
+                        || ra == default_reg
+                        || key_reg == default_reg
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 GetOrDefault<String> has aliased registers",
+                        ));
+                    }
+                    // The fused MIR call consumes its by-value default on
+                    // both branches. Take it out of the register now so a
+                    // later frame cleanup cannot settle the same input a
+                    // second time. A hit drops this unused owner; a miss
+                    // transfers the same owner into the result with no copy.
+                    let default_value = {
+                        let frame = self.cur_frame_mut();
+                        std::mem::replace(&mut frame.regs[default_reg as usize], Value::Unit)
+                    };
+                    let default_text = match default_value {
+                        Value::String(default) => default,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 GetOrDefault<String>: expected String default, got {other}"
+                            )));
+                        }
+                    };
+                    let key = match self.get_reg(key_reg) {
+                        Value::String(key) => key,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map/Any owner-v2 GetOrDefault<String>: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let key =
+                        try_copy_ordinary_map_owned_get_string(key, false).ok_or_else(|| {
+                            InterpError::new(
+                            "ordinary Map/Any owner-v2 GetOrDefault<String> key snapshot failed",
+                        )
+                        })?;
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<String> has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_get_or_default_string_binding_at_pc(
+                                function_index,
+                                u32::try_from(pc).unwrap_or(u32::MAX),
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<String> has no exact typed Core/MIR binding",
+                            )
+                        })?;
+                    binding.receipt.validate().map_err(InterpError::new)?;
+                    let string_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                    let i32_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                    if binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        || binding.rd != rd
+                        || binding.ra != ra
+                        || binding.key_reg != key_reg
+                        || binding.default_reg != default_reg
+                        || binding.receipt.root_type
+                            != crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+                        || binding.receipt.key_type != string_type
+                        || binding.receipt.type_argument != string_type
+                        || binding.receipt.default_type != string_type
+                        || binding.receipt.result_type != string_type
+                        || binding.receipt.selected_payload_type_desc != string_type
+                        || binding.receipt.miss_payload_type_desc != i32_type
+                        || binding.miss_type_desc_digest
+                            != binding.receipt.miss_payload_type_desc_digest
+                        || !super::instr::is_canonical_digest(&binding.target_type_desc_digest)
+                        || !super::instr::is_canonical_digest(&binding.miss_type_desc_digest)
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 GetOrDefault<String> disagrees with its exact typed Core/MIR binding",
+                        ));
+                    }
+                    let pair = self.ordinary_map_owned_any_v2_get_any_pair(
+                        ra,
+                        &key,
+                        &binding.receipt.miss_payload_type_desc,
+                        false,
+                    )?;
+                    let result = (|| -> Result<Value, InterpError> {
+                        let fields = match &pair {
+                            Value::Tuple(fields) if fields.len() == 2 => fields,
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<String> expected GetAny pair, got {other}"
+                                )));
+                            }
+                        };
+                        let found = match &fields[0] {
+                            Value::Bool(found) => *found,
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<String> pair has a non-boolean found field: {other}"
+                                )));
+                            }
+                        };
+                        let Value::CanonicalManagedAnyV2(owner) = &fields[1] else {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<String> pair has no V2 Any owner",
+                            ));
+                        };
+                        if Arc::strong_count(owner) != 1 {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 GetOrDefault<String> pair has a duplicate Any owner",
+                            ));
+                        }
+                        if found {
+                            if owner.type_id() != &string_type {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<String> hit payload TypeDesc is not String",
+                                ));
+                            }
+                            let selected = self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .and_then(|receipt| {
+                                    receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                        &string_type,
+                                    )
+                                })
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map/Any owner-v2 GetOrDefault<String> hit has no selected String TypeDesc",
+                                    )
+                                })?;
+                            if selected.type_id != string_type
+                                || selected.kind
+                                    != super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                                || selected.type_desc_digest != binding.target_type_desc_digest
+                            {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<String> hit disagrees with its exact selected String TypeDesc",
+                                ));
+                            }
+                            ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                                InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 GetOrDefault<String> unpack failed",
+                                )
+                            })?;
+                            let copied = copy_ordinary_map_owned_any_v2_string_for_unpack(
+                                owner,
+                                &string_type,
+                            )?;
+                            drop(default_text);
+                            Ok(Value::String(SharedString::new(copied)))
+                        } else {
+                            // A miss is represented only by the canonical
+                            // i32-zero Any token. It is released with the pair
+                            // below and must never enter String unpack.
+                            if owner.type_id() != &i32_type
+                                || owner.i32_value_for_type_id(&i32_type) != Some(0)
+                            {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 GetOrDefault<String> miss has no canonical i32-zero sentinel",
+                                ));
+                            }
+                            Ok(Value::String(default_text))
+                        }
+                    })();
+                    drop(pair);
+                    self.set_reg(rd, result?);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Println { rd, pair } => {
+                    self.ensure_reg(rd, "ordinary Map/Any owner-v2 Println destination")?;
+                    self.ensure_reg(pair, "ordinary Map/Any owner-v2 Println pair")?;
+                    if rd == pair {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Println result aliases its borrowed pair",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Println has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let binding = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_println_binding_at_pc(
+                                function_index,
+                                u32::try_from(pc).unwrap_or(u32::MAX),
+                            )
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Println has no exact dedicated V2 anchor",
+                            )
+                        })?;
+                    if binding.rd != rd || binding.pair != pair {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Println disagrees with its exact anchor site",
+                        ));
+                    }
+                    let output = {
+                        let fields = match self.get_reg(pair) {
+                            Value::Tuple(fields) if fields.len() == 2 => fields,
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "ordinary Map/Any owner-v2 Println: expected GetAny pair, got {other}"
+                                )));
+                            }
+                        };
+                        let found = match &fields[0] {
+                            Value::Bool(found) => *found,
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "ordinary Map/Any owner-v2 Println: expected Bool found flag, got {other}"
+                                )));
+                            }
+                        };
+                        let Value::CanonicalManagedAnyV2(owner) = &fields[1] else {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Println: expected owned Any-v2 payload",
+                            ));
+                        };
+                        if Arc::strong_count(owner) != 1 {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Println pair has a stale or duplicate payload owner",
+                            ));
+                        }
+                        let is_selected = binding
+                            .receipt
+                            .selected_types
+                            .iter()
+                            .any(|selected| selected.type_id == *owner.type_id());
+                        if !is_selected {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Println payload TypeDesc is outside the exact selected root lineage",
+                            ));
+                        }
+                        if !found
+                            && (owner.type_id() != &binding.receipt.get_any.miss_payload_type
+                                || owner.i32_value_for_type_id(
+                                    &binding.receipt.get_any.miss_payload_type,
+                                ) != Some(0))
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Println GetAny miss is not the canonical i32 zero payload",
+                            ));
+                        }
+                        let i32_type =
+                            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                        let string_type =
+                            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                        if owner.type_id() == &i32_type {
+                            let value =
+                                owner.i32_value_for_type_id(&i32_type).ok_or_else(|| {
+                                    InterpError::new(
+                                    "ordinary Map/Any owner-v2 Println i32 payload tag is invalid",
+                                )
+                                })?;
+                            format!("{value}\n")
+                        } else if owner.type_id() == &string_type {
+                            let text = owner.string_for_type_id(&string_type).ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Println String payload tag is invalid",
+                                )
+                            })?;
+                            let output_len = text.len().checked_add(1).ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Println String output length overflows",
+                                )
+                            })?;
+                            let mut output = String::new();
+                            output.try_reserve_exact(output_len).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Println could not allocate String output",
+                                )
+                            })?;
+                            output.push_str(text);
+                            output.push('\n');
+                            output
+                        } else {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Println selected payload type is unsupported",
+                            ));
+                        }
+                    };
+                    self.append_stdout(&output);
+                    print!("{output}");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    self.set_reg(rd, Value::Unit);
                 }
                 Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra } => {
                     self.ensure_reg(rd, "ordinary Map/Any owner-v2 unpack destination")?;
@@ -6756,6 +9107,8 @@ impl BytecodeVM {
                         })?;
                     let i32_type =
                         crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                    let bool_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
                     let string_type =
                         crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
                     if binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
@@ -6821,6 +9174,8 @@ impl BytecodeVM {
                             "ordinary Map/Any owner-v2 unpack payload source disagrees with its exact Core provenance receipt",
                         ));
                     }
+                    #[cfg(test)]
+                    let selected_kind_for_test = selected.map(|selected| selected.kind.clone());
                     if found {
                         let selected = selected.ok_or_else(|| {
                             InterpError::new(
@@ -6828,6 +9183,9 @@ impl BytecodeVM {
                             )
                         })?;
                         let expected_kind_matches = match &selected.kind {
+                            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Bool => {
+                                binding.target_type == bool_type
+                            }
                             super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32 => {
                                 binding.target_type == i32_type
                             }
@@ -6855,31 +9213,61 @@ impl BytecodeVM {
                             "ordinary Map/Any owner-v2 unpack miss target is not the exact canonical i32 payload",
                         ));
                     }
+                    if owner.type_id() != &binding.target_type {
+                        return Err(InterpError::new(
+                            "E0800: ordinary Map/Any owner-v2 unpack payload TypeDesc does not exactly match its target",
+                        ));
+                    }
+                    ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map/Any owner-v2 typed-unpack capacity failure",
+                        )
+                    })?;
                     if binding.target_type == i32_type {
-                        let value = self.ordinary_map_owned_any_v2_i32_unpack_payload(
+                        let value = self.checked_ordinary_map_owned_any_v2_i32_unpack(
                             owner,
                             &binding.target_type,
                         )?;
-                        ordinary_map_owned_any_v2_unpack_checkpoint()?;
-                        self.set_reg(rd, Value::Int(value as i64));
+                        let unpacked = Value::Int(value as i64);
+                        #[cfg(test)]
+                        self.record_ordinary_map_owned_any_v2_unpack_test_observation(
+                            function_index,
+                            &binding,
+                            selected_kind_for_test.as_ref(),
+                            &unpacked,
+                        );
+                        self.set_reg(rd, unpacked);
+                    } else if binding.target_type == bool_type {
+                        let value = owner
+                            .bool_value_for_type_id(&binding.target_type)
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "E0800: ordinary Map/Any owner-v2 unpack bool payload tag does not exactly match its target",
+                                )
+                            })?;
+                        let unpacked = Value::Bool(value);
+                        #[cfg(test)]
+                        self.record_ordinary_map_owned_any_v2_unpack_test_observation(
+                            function_index,
+                            &binding,
+                            selected_kind_for_test.as_ref(),
+                            &unpacked,
+                        );
+                        self.set_reg(rd, unpacked);
                     } else if binding.target_type == string_type {
-                        if owner.string_for_type_id(&binding.target_type).is_none() {
-                            return Err(InterpError::new(
-                                "ordinary Map/Any owner-v2 unpack String payload TypeDesc does not exactly match its target",
-                            ));
-                        }
-                        ordinary_map_owned_any_v2_unpack_checkpoint()?;
-                        ordinary_map_owned_any_v2_string_copy_checkpoint(
-                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
-                        )?;
                         let owned = copy_ordinary_map_owned_any_v2_string_for_unpack(
                             owner,
                             &binding.target_type,
                         )?;
-                        ordinary_map_owned_any_v2_string_copy_checkpoint(
-                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
-                        )?;
-                        self.set_reg(rd, Value::String(crate::interp::SharedString::new(owned)));
+                        let unpacked = Value::String(SharedString::new(owned));
+                        #[cfg(test)]
+                        self.record_ordinary_map_owned_any_v2_unpack_test_observation(
+                            function_index,
+                            &binding,
+                            selected_kind_for_test.as_ref(),
+                            &unpacked,
+                        );
+                        self.set_reg(rd, unpacked);
                     } else {
                         let selected_nominal = selected
                             .as_ref()
@@ -6894,26 +9282,18 @@ impl BytecodeVM {
                                     "ordinary Map/Any owner-v2 unpack target is not an exact selected record payload",
                                 )
                             })?;
-                        if owner
-                            .record_text_for_type_id(&binding.target_type, &selected_nominal)
-                            .is_none()
-                        {
-                            return Err(InterpError::new(
-                                "ordinary Map/Any owner-v2 unpack record payload TypeDesc or nominal identity does not exactly match its target",
-                            ));
-                        }
-                        ordinary_map_owned_any_v2_unpack_checkpoint()?;
-                        ordinary_map_owned_any_v2_string_copy_checkpoint(
-                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_CLONE_STAGE,
-                        )?;
                         let owned = copy_ordinary_map_owned_any_v2_record_for_unpack(
                             owner,
                             &binding.target_type,
                             &selected_nominal,
                         )?;
-                        ordinary_map_owned_any_v2_string_copy_checkpoint(
-                            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_STRING_COPY_PUBLISH_STAGE,
-                        )?;
+                        #[cfg(test)]
+                        self.record_ordinary_map_owned_any_v2_unpack_test_observation(
+                            function_index,
+                            &binding,
+                            selected_kind_for_test.as_ref(),
+                            &owned,
+                        );
                         self.set_reg(rd, owned);
                     }
                 }
@@ -6935,37 +9315,111 @@ impl BytecodeVM {
                         })?;
                         (frame.proto_idx, pc)
                     };
-                    let binding = self
+                    let current_pc = u32::try_from(pc).unwrap_or(u32::MAX);
+                    let (local_binding, crosscall_binding) = self
                         .program
                         .canonical_map_any_owner_v1_receipt
                         .as_ref()
-                        .and_then(|receipt| {
-                            receipt.ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
-                                function_index,
-                                u32::try_from(pc).unwrap_or(u32::MAX),
+                        .map(|receipt| {
+                            (
+                                receipt.ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+                                    function_index,
+                                    current_pc,
+                                ),
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_crosscall_string_caller_unpack_at_pc(
+                                        function_index,
+                                        current_pc,
+                                    ),
                             )
                         })
-                        .cloned()
-                        .ok_or_else(|| {
-                            InterpError::new(
-                                "ordinary Map/Any owner-v2 Values unpack has no exact Core/MIR binding",
+                        .unwrap_or((None, None));
+                    let (
+                        conversion_to,
+                        payload_type_desc_digest,
+                        crosscall_index,
+                        index_disposition,
+                    ) = match (local_binding, crosscall_binding) {
+                        (Some(binding), None) => {
+                            if binding.pc != current_pc
+                                    || binding.rd != rd
+                                    || binding.ra != ra
+                                    || binding.index_reg != index
+                                    || binding.conversion_kind
+                                        != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                                    || binding.conversion_to != binding.result_type
+                                    || binding.settlement
+                                        != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                                    || binding.payload_selection_digest.len() != 64
+                                    || binding.payload_type_desc_digest.len() != 64
+                                {
+                                    return Err(InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values unpack disagrees with its exact Core/MIR binding",
+                                    ));
+                                }
+                            (
+                                binding.conversion_to.clone(),
+                                binding.payload_type_desc_digest.clone(),
+                                None,
+                                Some(binding.index_disposition),
                             )
-                        })?;
-                    if binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
-                        || binding.rd != rd
-                        || binding.ra != ra
-                        || binding.index_reg != index
-                        || binding.conversion_kind
-                            != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
-                        || binding.conversion_to != binding.result_type
-                        || binding.settlement
-                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
-                        || binding.payload_selection_digest.len() != 64
-                        || binding.payload_type_desc_digest.len() != 64
+                        }
+                        (None, Some((proof, site))) => {
+                            if site.function != function_index
+                                || site.pc != current_pc
+                                || !matches!(
+                                    &site.op,
+                                    Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack {
+                                        rd: site_rd,
+                                        ra: site_ra,
+                                        index: site_index,
+                                    } if (*site_rd, *site_ra, *site_index) == (rd, ra, index)
+                                )
+                                || proof.string_type != proof.checker_caller.string_type
+                                || proof.checker_caller.index_type
+                                    != crate::core::ir::primitive_type_id(
+                                        crate::core::PrimitiveType::I32,
+                                    )
+                                || proof.string_type_desc_digest != proof.payload_type_desc_digest
+                                || proof.payload_selection_digest.len() != 64
+                                || proof.payload_type_desc_digest.len() != 64
+                            {
+                                return Err(InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values cross-call String unpack disagrees with its exact route anchor",
+                                    ));
+                            }
+                            (
+                                    proof.string_type.clone(),
+                                    proof.payload_type_desc_digest.clone(),
+                                    Some(match proof.checker_caller.profile_version {
+                                        crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V1 => 0,
+                                        crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V2 => 1,
+                                    }),
+                                    None,
+                                )
+                        }
+                        (Some(_), Some(_)) => {
+                            return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values unpack has ambiguous local and cross-call receipts",
+                                ));
+                        }
+                        (None, None) => {
+                            return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values unpack has no exact Core/MIR binding",
+                                ));
+                        }
+                    };
+
+                    if let Some(
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesIndexDisposition::AlwaysOutOfBounds {
+                            raw_index,
+                            snapshot_len,
+                        },
+                    ) = index_disposition
                     {
-                        return Err(InterpError::new(
-                            "ordinary Map/Any owner-v2 Values unpack disagrees with its exact Core/MIR binding",
-                        ));
+                        return Err(InterpError::index_out_of_bounds(format!(
+                            "index {raw_index} out of bounds (len {snapshot_len})"
+                        )));
                     }
 
                     let selected = self
@@ -6974,7 +9428,7 @@ impl BytecodeVM {
                         .as_ref()
                         .and_then(|receipt| {
                             receipt.ordinary_map_owned_any_v2_selected_payload_binding(
-                                &binding.conversion_to,
+                                &conversion_to,
                             )
                         })
                         .cloned()
@@ -6983,8 +9437,8 @@ impl BytecodeVM {
                                 "ordinary Map/Any owner-v2 Values unpack target is absent from the Core-selected payload table",
                             )
                         })?;
-                    if selected.type_id != binding.conversion_to
-                        || selected.type_desc_digest != binding.payload_type_desc_digest
+                    if selected.type_id != conversion_to
+                        || selected.type_desc_digest != payload_type_desc_digest
                     {
                         return Err(InterpError::new(
                             "ordinary Map/Any owner-v2 Values unpack target disagrees with the selected TypeDesc digest",
@@ -6992,6 +9446,14 @@ impl BytecodeVM {
                     }
 
                     let raw_index = self.get_int(index)?;
+                    if crosscall_index.is_some_and(|expected| raw_index != expected) {
+                        return Err(InterpError::new(
+                            format!(
+                                "ordinary Map/Any owner-v2 Values cross-call String index is not the receipted literal {}",
+                                crosscall_index.expect("the predicate established a cross-call index")
+                            ),
+                        ));
+                    }
                     let snapshot = self.get_reg(ra);
                     let Value::List(elements) = snapshot else {
                         return Err(InterpError::new(
@@ -7040,87 +9502,67 @@ impl BytecodeVM {
                             "ordinary Map/Any owner-v2 Values unpack selected element has no V2 Any owner",
                         ));
                     };
-                    ordinary_map_owned_any_v2_values_unpack_owner_checkpoint()?;
-                    if Arc::strong_count(owner) != 1 || owner.type_id() != &binding.conversion_to {
+                    if Arc::strong_count(owner) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values unpack selected owner is stale or duplicated",
+                        ));
+                    }
+                    ordinary_map_owned_any_v2_values_unpack_owner_checkpoint().map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map/Any owner-v2 Values selected-owner capacity failure",
+                        )
+                    })?;
+                    if owner.type_id() != &conversion_to {
                         return Err(InterpError::new(
                             "E0800: ordinary Map/Any owner-v2 Values payload tag/type does not match the checked cast",
                         ));
                     }
-                    ordinary_map_owned_any_v2_unpack_checkpoint()?;
+                    ordinary_map_owned_any_v2_unpack_checkpoint().map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map/Any owner-v2 Values typed-unpack capacity failure",
+                        )
+                    })?;
                     let result = match &selected.kind {
                         CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
-                            if binding.conversion_to
+                            if conversion_to
                                 == crate::core::ir::primitive_type_id(
                                     crate::core::PrimitiveType::I32,
                                 ) =>
                         {
                             let value = self.ordinary_map_owned_any_v2_i32_unpack_payload(
                                 owner,
-                                &binding.conversion_to,
+                                &conversion_to,
                             )?;
                             Value::Int(i64::from(value))
                         }
                         CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
-                            if binding.conversion_to
+                            if conversion_to
                                 == crate::core::ir::primitive_type_id(
                                     crate::core::PrimitiveType::String,
                                 ) =>
                         {
-                            let temporary = copy_ordinary_map_owned_any_v2_string_for_unpack(
+                            let text = copy_ordinary_map_owned_any_v2_values_string_for_unpack(
                                 owner,
-                                &binding.conversion_to,
+                                &conversion_to,
                             )?;
-                            ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()?;
-                            let text = try_copy_ordinary_map_owned_get_string(&temporary, false)
-                                .ok_or_else(|| {
-                                    InterpError::new(
-                                        "E0800: ordinary Map/Any owner-v2 Values String result allocation failed",
-                                    )
-                                })?;
-                            ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()?;
-                            Value::String(crate::interp::SharedString::new(text))
+                            Value::String(SharedString::new(text))
                         }
                         CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal }
-                            if binding.conversion_to
+                            if conversion_to
                                 != crate::core::ir::primitive_type_id(
                                     crate::core::PrimitiveType::I32,
                                 )
-                                && binding.conversion_to
+                                && conversion_to
                                     != crate::core::ir::primitive_type_id(
                                         crate::core::PrimitiveType::String,
                                     )
                                 && !nominal.is_empty() =>
                         {
-                            let temporary = copy_ordinary_map_owned_any_v2_record_for_unpack(
+                            copy_ordinary_map_owned_any_v2_values_record_for_unpack(
                                 owner,
-                                &binding.conversion_to,
+                                &conversion_to,
                                 nominal,
-                            )?;
-                            let Value::Record(record_nominal, fields) = temporary else {
-                                return Err(InterpError::new(
-                                    "ordinary Map/Any owner-v2 Values temporary Label clone changed representation",
-                                ));
-                            };
-                            let text = match fields.get("text") {
-                                Some(Value::String(text)) => text,
-                                _ => {
-                                    return Err(InterpError::new(
-                                        "ordinary Map/Any owner-v2 Values temporary Label text is absent",
-                                    ));
-                                }
-                            };
-                            ordinary_map_owned_any_v2_values_unpack_string_clone_checkpoint()?;
-                            let text = try_copy_ordinary_map_owned_get_string(text, false)
-                                .ok_or_else(|| {
-                                    InterpError::new(
-                                        "E0800: ordinary Map/Any owner-v2 Values Label text allocation failed",
-                                    )
-                                })?;
-                            ordinary_map_owned_any_v2_values_unpack_string_publish_checkpoint()?;
-                            Value::Record(
-                                record_nominal,
-                                HashMap::from([("text".to_owned(), Value::String(crate::interp::SharedString::new(text)))]),
-                            )
+                            )?
                         }
                         _ => {
                             return Err(InterpError::new(
@@ -7135,6 +9577,169 @@ impl BytecodeVM {
                     // fails before the result is moved or dropped.
                     self.set_reg(rd, result);
                 }
+                Op::MirOrdinaryMapOwnedAnyV2DynamicArg0 { rd } => {
+                    self.ensure_reg(rd, "ordinary Map/Any DynamicKeysGet argv[0]")?;
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any DynamicKeysGet argv[0] has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let authorized = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| u32::try_from(pc).ok().map(|pc| (receipt, pc)))
+                        .is_some_and(|(receipt, pc)| {
+                            receipt.ordinary_map_owned_any_v2_dynamic_arg0_site_matches(
+                                function_index,
+                                pc,
+                                rd,
+                            )
+                        });
+                    if !authorized {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any DynamicKeysGet argv[0] has no exact route receipt binding",
+                        ));
+                    }
+                    let argument = self.cli_args.first().ok_or_else(|| {
+                        InterpError::index_out_of_bounds("args()[0] index out of bounds (len 0)")
+                    })?;
+                    let mut owned = String::new();
+                    owned.try_reserve_exact(argument.len()).map_err(|_| {
+                        InterpError::new("[E0800] DynamicKeysGet argv[0] String allocation failed")
+                    })?;
+                    owned.push_str(argument);
+                    let shared = SharedString::try_new(owned).map_err(|_| {
+                        InterpError::new("[E0800] DynamicKeysGet argv[0] String publication failed")
+                    })?;
+                    self.set_reg(rd, Value::String(shared));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2KeysUnpack { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 KeysUnpack")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 KeysUnpack result aliases its snapshot",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 KeysUnpack has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let pc_u32 = u32::try_from(pc).unwrap_or(u32::MAX);
+                    let authorized = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_keys_unpack_site_matches(
+                                function_index,
+                                pc_u32,
+                                rd,
+                                ra,
+                            )
+                        });
+                    if !authorized {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 KeysUnpack has no exact KeysSnapshot receipt binding",
+                        ));
+                    }
+                    let snapshot = self.get_reg(ra);
+                    let Value::List(elements) = snapshot else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 KeysUnpack expected its dedicated List<String> snapshot",
+                        ));
+                    };
+                    if Arc::strong_count(elements) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 KeysUnpack snapshot has a stale or duplicate owner",
+                        ));
+                    }
+                    let selected = elements.first().ok_or_else(|| {
+                        InterpError::index_out_of_bounds(
+                            "KeysSnapshot index 0 out of bounds (len 0)",
+                        )
+                    })?;
+                    let Value::String(text) = selected else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 KeysUnpack selected a non-String value",
+                        ));
+                    };
+                    let copied = copy_ordinary_map_owned_any_v2_keys_string(text.as_str())?;
+                    self.set_reg(rd, Value::String(SharedString::new(copied)));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2Keys { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Keys")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Keys result aliases its source root",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Keys has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let pc_u32 = u32::try_from(pc).unwrap_or(u32::MAX);
+                    let authorized = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_keys_site_matches(
+                                function_index,
+                                pc_u32,
+                                rd,
+                                ra,
+                            )
+                        });
+                    if !authorized {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Keys has no exact KeysSnapshot receipt binding",
+                        ));
+                    }
+                    let root = self.get_reg(ra);
+                    let Value::CanonicalOrdinaryMapOwnedAnyV2(root) = root else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Keys expected an owner-v2 root",
+                        ));
+                    };
+                    if Arc::strong_count(root) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Keys root has a stale or duplicate owner",
+                        ));
+                    }
+                    let mut keys = Vec::new();
+                    keys.try_reserve_exact(root.len()).map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map/Any owner-v2 Keys List allocation failed",
+                        )
+                    })?;
+                    // BTreeMap iteration is deterministic lexicographic order
+                    // over the complete UTF-8 key byte strings.
+                    for key in root.keys() {
+                        let key = copy_ordinary_map_owned_any_v2_keys_string(key)?;
+                        keys.push(Value::String(SharedString::new(key)));
+                    }
+                    ordinary_map_owned_any_v2_values_publish_checkpoint().map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map/Any owner-v2 Keys List publication failed",
+                        )
+                    })?;
+                    self.set_reg(rd, Value::List(Arc::new(keys)));
+                }
                 Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Values")?;
                     if rd == ra {
@@ -7142,15 +9747,14 @@ impl BytecodeVM {
                             "ordinary Map/Any owner-v2 Values result aliases its source root",
                         ));
                     }
-                    let (function_index, pc, values_ordinal) = {
+                    let (function_index, pc) = {
                         let frame = self.cur_frame();
                         let pc = frame.pc.checked_sub(1).ok_or_else(|| {
                             InterpError::new(
                                 "ordinary Map/Any owner-v2 Values has no current bytecode PC",
                             )
                         })?;
-                        let proto = self
-                            .program
+                        self.program
                             .functions
                             .get(frame.proto_idx as usize)
                             .ok_or_else(|| {
@@ -7158,39 +9762,88 @@ impl BytecodeVM {
                                     "ordinary Map/Any owner-v2 Values function index is invalid",
                                 )
                             })?;
-                        let ordinal = proto
-                            .code
-                            .iter()
-                            .take(pc)
-                            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Values { .. }))
-                            .count();
-                        (frame.proto_idx, pc, ordinal)
+                        (frame.proto_idx, pc)
                     };
-                    let values_binding = self
+                    let pc_u32 = u32::try_from(pc).unwrap_or(u32::MAX);
+                    let (values_binding, route_binding, crosscall_site) = self
                         .program
                         .canonical_map_any_owner_v1_receipt
                         .as_ref()
-                        .and_then(|receipt| {
-                            receipt.ordinary_map_owned_any_v2_values_binding(
-                                function_index,
-                                values_ordinal,
+                        .map(|receipt| {
+                            (
+                                receipt.ordinary_map_owned_any_v2_values_binding_at_pc(
+                                    function_index,
+                                    pc_u32,
+                                ),
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_producer_caller_binding_at_pc(
+                                        function_index,
+                                        pc_u32,
+                                    ),
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_crosscall_string_caller_site_at_pc(
+                                        function_index,
+                                        pc_u32,
+                                    ),
                             )
                         })
-                        .cloned()
-                        .ok_or_else(|| {
-                            InterpError::new(
-                                "ordinary Map/Any owner-v2 Values has no Core result-settlement binding",
-                            )
-                        })?;
-                    if values_binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
-                        || values_binding.rd != rd
-                        || values_binding.ra != ra
-                        || values_binding.settlement
-                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
-                    {
-                        return Err(InterpError::new(
-                            "ordinary Map/Any owner-v2 Values disagrees with its exact Core site binding",
-                        ));
+                        .unwrap_or((None, None, None));
+                    match (values_binding, route_binding, crosscall_site) {
+                        (Some(binding), None, None)
+                            if binding.pc == pc_u32
+                                && binding.rd == rd
+                                && binding.ra == ra
+                                && binding.settlement
+                                    == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop =>
+                        {
+                        }
+                        (None, Some(binding), None)
+                            if binding.producer_function == function_index
+                                && binding.producer_values_pc == pc_u32
+                                && binding.producer_values_rd == rd
+                                && binding.producer_values_ra == ra
+                                && binding.producer_result_type
+                                    == crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
+                                && binding.call_result_type
+                                    == crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
+                                && binding.owner_type
+                                    == crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id() =>
+                        {
+                        }
+                        (None, None, Some(site))
+                            if site.function == function_index
+                                && site.pc == pc_u32
+                                && self
+                                    .program
+                                    .functions
+                                    .get(function_index as usize)
+                                    .is_some_and(|function| site.owner.0 == function.name)
+                                && matches!(
+                                    &site.op,
+                                    Op::MirOrdinaryMapOwnedAnyV2Values {
+                                        rd: site_rd,
+                                        ra: site_ra,
+                                    } if (*site_rd, *site_ra) == (rd, ra)
+                                ) =>
+                        {
+                        }
+                        (Some(_), Some(_), _) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values has ambiguous local and producer-caller receipts",
+                            ));
+                        }
+                        (Some(_), None, _)
+                        | (None, Some(_), _)
+                        | (None, None, Some(_)) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values disagrees with its exact Core route binding",
+                            ));
+                        }
+                        (None, None, None) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values has no Core result-settlement or producer-caller binding",
+                            ));
+                        }
                     }
                     let (values, i32_backings) = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnedAnyV2(root)
@@ -7209,6 +9862,9 @@ impl BytecodeVM {
                             for payload in root.values() {
                                 let type_id = match payload {
                                     crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
+                                        type_id, ..
+                                    }
+                                    | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Bool {
                                         type_id, ..
                                     }
                                     | crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::String {
@@ -7233,6 +9889,14 @@ impl BytecodeVM {
                                             "ordinary Map/Any owner-v2 Values payload uses a TypeDesc outside the exact Core-selected payload table",
                                         )
                                     })?;
+                                if matches!(
+                                    &payload_binding.kind,
+                                    CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Bool
+                                ) {
+                                    return Err(InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values does not admit Bool payload snapshots",
+                                    ));
+                                }
                                 let owner = copy_ordinary_map_owned_any_v2_payload(
                                     payload,
                                     &payload_binding,
@@ -7264,13 +9928,178 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    ordinary_map_owned_any_v2_values_publish_checkpoint()?;
+                    ordinary_map_owned_any_v2_values_publish_checkpoint().map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map/Any owner-v2 Values publication failed",
+                        )
+                    })?;
                     for (owner, type_id, value) in i32_backings {
                         self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
                             &owner, type_id, value,
                         );
                     }
                     self.set_reg(rd, Value::List(Arc::new(values)));
+                }
+                Op::MirOrdinaryMapOwnedAnyV2ValuesClone { rd, ra } => {
+                    self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Values Clone")?;
+                    if rd == ra {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values Clone result aliases its source",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Clone has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let pc_u32 = u32::try_from(pc).unwrap_or(u32::MAX);
+                    let (source_map_reg, clone_binding_present) = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .map(|receipt| {
+                            let local = receipt
+                                .ordinary_map_owned_any_v2_values_clone_binding_at_pc(
+                                    function_index,
+                                    pc_u32,
+                                );
+                            let route = receipt
+                                .ordinary_map_owned_any_v2_values_producer_caller_len_clone_binding_at_pc(
+                                    function_index,
+                                    pc_u32,
+                                );
+                            match (local, route) {
+                                (Some((values_binding, clone_binding)), None)
+                                    if clone_binding.clone_pc == pc_u32
+                                        && clone_binding.clone_rd == rd
+                                        && clone_binding.clone_ra == ra
+                                        && clone_binding.source == values_binding.binding =>
+                                {
+                                    (Some(values_binding.ra), true)
+                                }
+                                (None, Some(binding))
+                                    if binding.caller_function == function_index
+                                        && binding.len_receiver_clone_pc == Some(pc_u32)
+                                        && binding.len_receiver_clone_rd == Some(rd)
+                                        && binding.len_receiver_clone_ra == Some(ra)
+                                        && binding.len_receiver_clone_ra
+                                            == Some(binding.caller_binding_rd)
+                                        && binding.len_receiver_drop_ra == Some(rd)
+                                        && binding.len_receiver_type.as_ref()
+                                            == Some(&binding.owner_type) =>
+                                {
+                                    (None, true)
+                                }
+                                _ => (None, false),
+                            }
+                        })
+                        .unwrap_or((None, false));
+                    if !clone_binding_present {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values Clone has no exact Core temporary-owner or producer-caller binding",
+                        ));
+                    }
+                    let Value::List(values) = self.get_reg(ra) else {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values Clone expected its dedicated List owner",
+                        ));
+                    };
+                    if Arc::strong_count(values) != 1 {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values Clone source has a stale or duplicate owner",
+                        ));
+                    }
+                    #[cfg(test)]
+                    let source_values_snapshot = (
+                        Arc::as_ptr(values) as usize,
+                        Arc::strong_count(values),
+                        values.len(),
+                        values
+                            .iter()
+                            .map(|value| match value {
+                                Value::CanonicalManagedAnyV2(owner) => {
+                                    (Arc::as_ptr(owner) as usize, Arc::strong_count(owner))
+                                }
+                                _ => (usize::MAX, usize::MAX),
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                    #[cfg(test)]
+                    let result_register_was_unpublished = matches!(self.get_reg(rd), Value::Unit);
+                    #[cfg(test)]
+                    let source_map_snapshot = source_map_reg.and_then(|root_reg| {
+                        match self.cur_frame().regs.get(root_reg as usize) {
+                            Some(Value::CanonicalOrdinaryMapOwnedAnyV2(root)) => Some((
+                                Arc::as_ptr(root) as usize,
+                                Arc::strong_count(root),
+                                root.len(),
+                            )),
+                            _ => None,
+                        }
+                    });
+                    let cloned = match self.clone_ordinary_map_owned_any_v2_values(values) {
+                        Ok(cloned) => cloned,
+                        Err(error) => {
+                            #[cfg(test)]
+                            {
+                                let source_values_after =
+                                    match self.cur_frame().regs.get(ra as usize) {
+                                        Some(Value::List(values)) => Some((
+                                            Arc::as_ptr(values) as usize,
+                                            Arc::strong_count(values),
+                                            values.len(),
+                                            values
+                                                .iter()
+                                                .map(|value| match value {
+                                                    Value::CanonicalManagedAnyV2(owner) => (
+                                                        Arc::as_ptr(owner) as usize,
+                                                        Arc::strong_count(owner),
+                                                    ),
+                                                    _ => (usize::MAX, usize::MAX),
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        )),
+                                        _ => None,
+                                    };
+                                assert_eq!(
+                                    Some(source_values_snapshot),
+                                    source_values_after,
+                                    "injected Values Clone failure must preserve the source List identity, length, and owner counts"
+                                );
+                                assert!(
+                                    result_register_was_unpublished
+                                        && matches!(
+                                            self.cur_frame().regs.get(rd as usize),
+                                            Some(Value::Unit)
+                                        ),
+                                    "failed Values Clone must not publish an output List"
+                                );
+                                let source_map_after =
+                                    source_map_reg.and_then(|root_reg| {
+                                        match self.cur_frame().regs.get(root_reg as usize) {
+                                            Some(Value::CanonicalOrdinaryMapOwnedAnyV2(root)) => {
+                                                Some((
+                                                    Arc::as_ptr(root) as usize,
+                                                    Arc::strong_count(root),
+                                                    root.len(),
+                                                ))
+                                            }
+                                            _ => None,
+                                        }
+                                    });
+                                assert_eq!(
+                                    source_map_snapshot, source_map_after,
+                                    "injected Values Clone failure must preserve the source Map identity, owner count, and entry count"
+                                );
+                            }
+                            return Err(error);
+                        }
+                    };
+                    self.set_reg(rd, Value::List(Arc::new(cloned)));
                 }
                 Op::MirOrdinaryMapOwnedAnyV2IsEmpty { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 IsEmpty")?;
@@ -7295,17 +10124,24 @@ impl BytecodeVM {
                         let frame = self.cur_frame_mut();
                         std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
                     };
-                    let Value::CanonicalOrdinaryMapOwnedAnyV2(root) = root else {
-                        return Err(InterpError::new(
-                            "ordinary Map/Any owner-v2 Drop: expected owner-v2 root",
-                        ));
-                    };
-                    if Arc::strong_count(&root) != 1 {
-                        return Err(InterpError::new(
-                            "ordinary Map/Any owner-v2 Drop: root has a stale or duplicate owner",
-                        ));
+                    match root {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                            retire_ordinary_map_new_result_runtime_root(root, "Drop")?;
+                        }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2(root) => {
+                            if Arc::strong_count(&root) != 1 {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Drop: root has a stale or duplicate owner",
+                                ));
+                            }
+                            drop(root);
+                        }
+                        _ => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Drop: expected owner-v2 root",
+                            ));
+                        }
                     }
-                    drop(root);
                 }
                 Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra } => {
                     self.ensure_reg(ra, "ordinary Map/Any owner-v2 Values Drop source")?;
@@ -7318,7 +10154,7 @@ impl BytecodeVM {
                         })?;
                         (frame.proto_idx, pc)
                     };
-                    let drop_binding = self
+                    let original_binding = self
                         .program
                         .canonical_map_any_owner_v1_receipt
                         .as_ref()
@@ -7327,20 +10163,130 @@ impl BytecodeVM {
                                 function_index,
                                 u32::try_from(pc).unwrap_or(u32::MAX),
                             )
-                        })
-                        .cloned()
-                        .ok_or_else(|| {
-                            InterpError::new(
-                                "ordinary Map/Any owner-v2 Values Drop has no exact Core settlement binding",
+                        });
+                    let borrowed_clone = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt.ordinary_map_owned_any_v2_values_clone_drop_binding_at_pc(
+                                function_index,
+                                u32::try_from(pc).unwrap_or(u32::MAX),
                             )
-                        })?;
-                    if drop_binding.drop_pc != u32::try_from(pc).unwrap_or(u32::MAX)
-                        || drop_binding.drop_ra != ra
-                        || drop_binding.settlement
-                            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
-                    {
+                        });
+                    let pc_u32 = u32::try_from(pc).unwrap_or(u32::MAX);
+                    let (route_owner_drop, route_len_drop) = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .map(|receipt| {
+                            (
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_producer_caller_owner_drop_binding_at_pc(
+                                        function_index,
+                                        pc_u32,
+                                    ),
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_producer_caller_len_drop_binding_at_pc(
+                                        function_index,
+                                        pc_u32,
+                                    ),
+                            )
+                        })
+                        .unwrap_or((None, None));
+                    let crosscall_snapshot_drop = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt
+                                .ordinary_map_owned_any_v2_values_crosscall_string_caller_snapshot_drop_at_pc(
+                                    function_index,
+                                    pc_u32,
+                                )
+                        });
+                    let authorization_count = usize::from(original_binding.is_some())
+                        + usize::from(borrowed_clone.is_some())
+                        + usize::from(route_owner_drop.is_some())
+                        + usize::from(route_len_drop.is_some())
+                        + usize::from(crosscall_snapshot_drop.is_some());
+                    if authorization_count != 1 {
                         return Err(InterpError::new(
-                            "ordinary Map/Any owner-v2 Values Drop disagrees with its exact Core settlement binding",
+                            "ordinary Map/Any owner-v2 Values Drop has no unique exact settlement or temporary Clone binding",
+                        ));
+                    }
+                    let expected_drop_ra = if let Some(binding) = original_binding {
+                        if binding.drop_pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                            || binding.settlement
+                                != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Drop disagrees with its exact Core settlement binding",
+                            ));
+                        }
+                        Some(binding.drop_ra)
+                    } else if let Some((values_binding, clone_binding)) = borrowed_clone {
+                        if clone_binding.drop_pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                            || clone_binding.source != values_binding.binding
+                            || clone_binding.drop_ra != clone_binding.clone_rd
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values temporary Drop disagrees with its exact Core Clone binding",
+                            ));
+                        }
+                        Some(clone_binding.drop_ra)
+                    } else if let Some(binding) = route_owner_drop {
+                        if binding.caller_function != function_index
+                            || binding.owner_drop_pc != pc_u32
+                            || binding.owner_drop_ra != ra
+                            || binding.owner_type
+                                != crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id(
+                                )
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values caller Drop disagrees with its exact producer-caller settlement binding",
+                            ));
+                        }
+                        Some(binding.owner_drop_ra)
+                    } else if let Some(binding) = route_len_drop {
+                        if binding.caller_function != function_index
+                            || binding.len_receiver_drop_pc != Some(pc_u32)
+                            || binding.len_receiver_drop_ra != Some(ra)
+                            || binding.len_receiver_clone_pc.is_none()
+                            || binding.len_receiver_clone_rd != Some(ra)
+                            || binding.len_receiver_drop_ra != binding.len_receiver_clone_rd
+                            || binding.len_pc.is_none()
+                            || binding.len_receiver_type.as_ref() != Some(&binding.owner_type)
+                            || binding.owner_type
+                                != crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id(
+                                )
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Len temporary Drop disagrees with its exact producer-caller Clone/Len binding",
+                            ));
+                        }
+                        Some(ra)
+                    } else if let Some((proof, site)) = crosscall_snapshot_drop {
+                        if site.function != function_index
+                            || site.pc != pc_u32
+                            || proof.caller_snapshot_drop_place_index != 0
+                            || !matches!(
+                                &site.op,
+                                Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra: site_ra }
+                                    if *site_ra == ra
+                            )
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values cross-call snapshot Drop disagrees with its exact route anchor",
+                            ));
+                        }
+                        Some(ra)
+                    } else {
+                        None
+                    };
+                    if expected_drop_ra != Some(ra) {
+                        return Err(InterpError::new(
+                            "ordinary Map/Any owner-v2 Values Drop has no exact settlement or temporary Clone binding",
                         ));
                     }
                     let Value::List(values) = self.get_reg(ra) else {
@@ -8346,12 +11292,12 @@ impl BytecodeVM {
                     match v {
                         Value::Variant(name, _) => {
                             // Return tag as a string (for comparison).
-                            self.set_reg(rd, Value::String(crate::interp::SharedString::new(name.clone())));
+                            self.set_reg(rd, Value::String(SharedString::new(name.clone())));
                         }
                         Value::CanonicalVariant { tag, .. } => {
                             // Canonical identity is preserved in the source;
                             // this projection exposes only the surface tag.
-                            self.set_reg(rd, Value::String(crate::interp::SharedString::new(tag.clone())));
+                            self.set_reg(rd, Value::String(SharedString::new(tag.clone())));
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -8475,7 +11421,7 @@ impl BytecodeVM {
                 Op::ToString { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "to-string")?;
                     let v = self.get_reg(ra).clone();
-                    self.set_reg(rd, Value::String(crate::interp::SharedString::new(v.to_string())));
+                    self.set_reg(rd, Value::String(SharedString::new(v.to_string())));
                 }
                 Op::Cast { rd, ra, target } => {
                     self.ensure_unary_regs(rd, ra, "cast")?;
@@ -8549,7 +11495,7 @@ impl BytecodeVM {
                         Value::Actor(_) => "actor".to_string(),
                         _ => crate::interp::type_name(v).to_string(),
                     };
-                    self.set_reg(rd, Value::String(crate::interp::SharedString::new(name)));
+                    self.set_reg(rd, Value::String(SharedString::new(name)));
                 }
                 Op::Trap { msg } => {
                     let msg_str = match proto.constants.get(msg as usize) {
@@ -9371,7 +12317,7 @@ impl BytecodeVM {
             }
             Err(e) => {
                 let e = if enrich { self.enrich_error(e) } else { e };
-                self.cleanup_failed_subexec(stack_len_before, depth_before);
+                self.cleanup_failed_subexec_for_error(stack_len_before, depth_before, &e);
                 Err(e)
             }
         }
@@ -9825,6 +12771,9 @@ impl BytecodeVM {
     /// jumps there (compensation runs, FaultRetEarly re-raises afterwards).
     /// Returns Err(e) when no handler is registered so the caller propagates.
     fn route_fault(&mut self, e: InterpError) -> Result<(), InterpError> {
+        if e.is_trap() {
+            return Err(e);
+        }
         if let Some(handler_pc) = self.stack.last_mut().and_then(|f| f.fault_handlers.pop()) {
             let frame = self.cur_frame_mut();
             frame.pending_fault = Some(e);
@@ -9849,11 +12798,35 @@ impl BytecodeVM {
                 .stack
                 .pop()
                 .expect("stack length re-checked in loop condition");
+            for value in &frame.regs {
+                cleanup_ordinary_map_new_result_runtime_roots(value);
+            }
             if frame.regs.capacity() > 0 {
                 self.free_regs.push(frame.regs);
             }
         }
         self.depth = depth_before;
+    }
+
+    fn cleanup_failed_subexec_for_error(
+        &mut self,
+        stack_len_before: usize,
+        depth_before: usize,
+        error: &InterpError,
+    ) {
+        if error.is_allocation_failure() {
+            // Dropping the frames releases the source roots immediately and
+            // cannot grow the recycled-register Vec under allocation denial.
+            for frame in self.stack.iter().skip(stack_len_before) {
+                for value in &frame.regs {
+                    cleanup_ordinary_map_new_result_runtime_roots(value);
+                }
+            }
+            self.stack.truncate(stack_len_before);
+            self.depth = depth_before;
+        } else {
+            self.cleanup_failed_subexec(stack_len_before, depth_before);
+        }
     }
 
     /// Bind a bytecode closure's captured environment into the frame just
@@ -10238,6 +13211,34 @@ impl BytecodeVM {
         } else {
             self.stdout.push_str(s);
         }
+    }
+
+    fn append_ordinary_map_owner_lifecycle_observer_v1_stdout(
+        &mut self,
+        output: &str,
+    ) -> Result<(), InterpError> {
+        let allocation_error = || {
+            InterpError::new(
+                "[E0800] ordinary Map owner lifecycle observer v1 stdout allocation failed",
+            )
+        };
+        if let Some(buf) = &self.stdout_capture {
+            let mut captured = buf.lock().map_err(|_| allocation_error())?;
+            ordinary_map_owner_lifecycle_observer_v1_allocation_checkpoint()
+                .map_err(|_| allocation_error())?;
+            captured
+                .try_reserve(output.len())
+                .map_err(|_| allocation_error())?;
+            captured.push_str(output);
+        } else {
+            ordinary_map_owner_lifecycle_observer_v1_allocation_checkpoint()
+                .map_err(|_| allocation_error())?;
+            self.stdout
+                .try_reserve(output.len())
+                .map_err(|_| allocation_error())?;
+            self.stdout.push_str(output);
+        }
+        Ok(())
     }
 
     /// Enable stdout capture with a new shared buffer.
@@ -11237,9 +14238,9 @@ impl BytecodeVM {
             ConstValue::Int(v) => Value::Int(*v),
             ConstValue::Float(v) => Value::Float(*v),
             ConstValue::Bool(v) => Value::Bool(*v),
-            ConstValue::Str(v) => Value::String(crate::interp::SharedString::new(v.clone())),
+            ConstValue::Str(v) => Value::String(SharedString::new(v.clone())),
             ConstValue::Unit => Value::Unit,
-            ConstValue::Type(t) => Value::String(crate::interp::SharedString::new(format!("<type {:?}>", t))),
+            ConstValue::Type(t) => Value::String(SharedString::new(format!("<type {:?}>", t))),
             ConstValue::QuoteAst(q) => Value::QuoteAst(q.clone()),
             ConstValue::LambdaSpec { .. } => Value::Unit,
             ConstValue::Pattern(_) => Value::Unit,
@@ -11267,7 +14268,7 @@ impl BytecodeVM {
             Expr::Literal(Lit::Int(n)) => Some(Value::Int(*n)),
             Expr::Literal(Lit::Float(f)) => Some(Value::Float(*f)),
             Expr::Literal(Lit::Bool(b)) => Some(Value::Bool(*b)),
-            Expr::Literal(Lit::String(s)) => Some(Value::String(crate::interp::SharedString::new(s.clone()))),
+            Expr::Literal(Lit::String(s)) => Some(Value::String(SharedString::new(s.clone()))),
             Expr::Literal(Lit::Unit) => Some(Value::Unit),
             // Negative literals: -42, -3.14
             Expr::Unary(UnOp::Neg, inner) => match Self::eval_init_expr(inner.unlocated())? {
@@ -11431,7 +14432,7 @@ impl BytecodeVM {
                 crate::ast::Type::Name(n, _) if n == "f64" => Value::Float(0.0),
                 crate::ast::Type::Name(n, _) if n == "bool" => Value::Bool(false),
                 crate::ast::Type::Name(n, _) if n == "string" => {
-                    Value::String(crate::interp::SharedString::new(String::new()))
+                    Value::String(SharedString::new(String::new()))
                 }
                 crate::ast::Type::Name(n, _) if n == "List" || n == "Vec" => {
                     Value::List(Arc::new(Vec::new()))
@@ -11475,7 +14476,7 @@ impl BytecodeVM {
                                             Value::Bool(false)
                                         }
                                         crate::ast::Type::Name(n, _) if n == "string" => {
-                                            Value::String(crate::interp::SharedString::new(String::new()))
+                                            Value::String(SharedString::new(String::new()))
                                         }
                                         _ => Value::Unit,
                                     };
@@ -11548,14 +14549,14 @@ mod ordinary_map_owned_any_v2_tests {
         CanonicalOrdinaryMapOwnedAnyV2PayloadBinding, CanonicalOrdinaryMapOwnedAnyV2PayloadKind,
     };
     use crate::interp::value::{
-        CanonicalManagedAnyV2, CanonicalOrdinaryMapOwnedAnyV2Value as Payload, Value,
+        CanonicalManagedAnyV2, CanonicalOrdinaryMapOwnedAnyV2Value as Payload, SharedString, Value,
     };
     use std::collections::{BTreeMap, HashMap};
-    use std::sync::Arc;
+    use std::sync::{Arc, Weak};
 
     #[test]
     fn v2_snapshot_clone_preserves_nominal_identity_and_copies_string_owners() {
-        let text = crate::interp::SharedString::new(String::from("same payload shape"));
+        let text = SharedString::new(String::from("same payload shape"));
         let first_type_id =
             crate::core::ResolvedTypeId::synthetic("test:ordinary-map-owned-any-v2:first");
         let second_type_id =
@@ -11566,7 +14567,7 @@ mod ordinary_map_owned_any_v2_tests {
                 Payload::Record {
                     type_id: first_type_id.clone(),
                     nominal: String::from("item:type:demo::First"),
-                    text: crate::interp::SharedString::clone(&text),
+                    text: SharedString::clone(&text),
                 },
             ),
             (
@@ -11574,7 +14575,7 @@ mod ordinary_map_owned_any_v2_tests {
                 Payload::Record {
                     type_id: second_type_id.clone(),
                     nominal: String::from("item:type:demo::Second"),
-                    text: crate::interp::SharedString::clone(&text),
+                    text: SharedString::clone(&text),
                 },
             ),
         ]);
@@ -11603,9 +14604,9 @@ mod ordinary_map_owned_any_v2_tests {
         assert_eq!(second_cloned_type_id, &second_type_id);
         assert_eq!(first_nominal, "item:type:demo::First");
         assert_eq!(second_nominal, "item:type:demo::Second");
-        assert!(!crate::interp::SharedString::ptr_eq(first_text, &text));
-        assert!(!crate::interp::SharedString::ptr_eq(second_text, &text));
-        assert!(!crate::interp::SharedString::ptr_eq(first_text, second_text));
+        assert!(!SharedString::ptr_eq(first_text, &text));
+        assert!(!SharedString::ptr_eq(second_text, &text));
+        assert!(!SharedString::ptr_eq(first_text, second_text));
     }
 
     #[test]
@@ -11617,12 +14618,12 @@ mod ordinary_map_owned_any_v2_tests {
         let first = Payload::Record {
             type_id: first_type_id,
             nominal: String::from("item:type:demo::First"),
-            text: crate::interp::SharedString::new(String::from("same")),
+            text: SharedString::new(String::from("same")),
         };
         let second = Payload::Record {
             type_id: second_type_id,
             nominal: String::from("item:type:demo::Second"),
-            text: crate::interp::SharedString::new(String::from("same")),
+            text: SharedString::new(String::from("same")),
         };
 
         assert_ne!(first, second);
@@ -11631,14 +14632,14 @@ mod ordinary_map_owned_any_v2_tests {
     #[test]
     fn v2_direct_string_set_getany_and_unpack_each_own_their_payload() {
         let type_id = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
-        let source_text = crate::interp::SharedString::new(String::from("detached string payload"));
+        let source_text = SharedString::new(String::from("detached string payload"));
         let binding = CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
             type_id: type_id.clone(),
             type_desc_digest: "a".repeat(64),
             kind: CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String,
         };
         let staged = stage_ordinary_map_owned_any_v2_set_payload(
-            &Value::String(crate::interp::SharedString::clone(&source_text)),
+            &Value::String(SharedString::clone(&source_text)),
             &binding,
         )
         .expect("Set snapshots a direct String payload");
@@ -11648,7 +14649,7 @@ mod ordinary_map_owned_any_v2_tests {
         else {
             panic!("Set staged the payload as direct String");
         };
-        assert!(!crate::interp::SharedString::ptr_eq(&source_text, staged_text));
+        assert!(!SharedString::ptr_eq(&source_text, staged_text));
 
         let entries = BTreeMap::from([(String::from("text"), staged)]);
         let cloned = clone_ordinary_map_owned_any_v2_entries(&entries)
@@ -11659,7 +14660,7 @@ mod ordinary_map_owned_any_v2_tests {
         else {
             panic!("String payload retained its direct String representation");
         };
-        assert!(!crate::interp::SharedString::ptr_eq(&source_text, cloned_text));
+        assert!(!SharedString::ptr_eq(&source_text, cloned_text));
 
         let any = copy_ordinary_map_owned_any_v2_payload(
             entries.get("text").expect("source direct String payload"),
@@ -11671,7 +14672,7 @@ mod ordinary_map_owned_any_v2_tests {
             .string_for_type_id(&type_id)
             .expect("Any token retains the exact String TypeDesc");
         assert_eq!(any_text, source_text.as_str());
-        assert_ne!(any_text.as_ptr(), source_text.as_str().as_ptr());
+        assert_ne!(any_text.as_ptr(), source_text.as_bytes().as_ptr());
 
         let unpacked = copy_ordinary_map_owned_any_v2_string_for_unpack(&any, &type_id)
             .expect("unpack deep-copies into its own output allocation");
@@ -11706,7 +14707,7 @@ mod ordinary_map_owned_any_v2_tests {
             panic!("Label.text remains an owned String");
         };
         assert_eq!(unpacked_text.as_str(), "independent record payload");
-        assert_ne!(unpacked_text.as_str().as_ptr(), source_ptr);
+        assert_ne!(unpacked_text.as_bytes().as_ptr(), source_ptr);
 
         let wrong_nominal = copy_ordinary_map_owned_any_v2_record_for_unpack(
             &owner,
@@ -11805,15 +14806,12 @@ fn value_to_f64(v: &Value) -> Result<f64, InterpError> {
     }
 }
 
-/// True when the error is a runtime panic (div-by-zero, overflow, OOB, …)
-/// that a flow transition absorbs into a Fault. Programming errors
-/// (undefined names, arity mismatches, …) always propagate.
+/// Recoverable runtime failures that a faultable Flow may absorb. Kernel-card
+/// E0800/E0801/E0802 traps always propagate before reaching this predicate.
 fn is_runtime_panic(e: &InterpError) -> bool {
     matches!(
         e,
-        InterpError::DivisionByZero(_)
-            | InterpError::IntegerOverflow(_)
-            | InterpError::IndexOutOfBounds(_)
+        InterpError::IndexOutOfBounds(_)
             | InterpError::NonExhaustiveMatch(_)
             | InterpError::FloatError(_)
             | InterpError::SliceError(_)
@@ -11867,7 +14865,7 @@ fn default_value_for_type_str(
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" => Value::Int(0),
         "f32" | "f64" | "float" => Value::Float(0.0),
         "bool" => Value::Bool(false),
-        "string" => Value::String(crate::interp::SharedString::new(String::new())),
+        "string" => Value::String(SharedString::new(String::new())),
         "unit" => Value::Unit,
         other => {
             if record_fields.contains_key(other) {
@@ -11876,5 +14874,731 @@ fn default_value_for_type_str(
                 Value::Unit
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_string_publication_tests {
+    use super::*;
+    use crate::core::mir::reference::MirProgram;
+    use crate::interp::bytecode::{compile_mir_program_with_route_receipt, test_alloc};
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn in_subprocess(test: &str, child: impl FnOnce()) {
+        let test = test.strip_prefix("mimi::").unwrap_or(test);
+        const CHILD_ENV: &str = "MIMI_SHARED_STRING_ALLOCATION_TEST_CHILD";
+        if std::env::var(CHILD_ENV).as_deref() == Ok(test) {
+            child();
+            println!("MIMI_SHARED_STRING_ALLOCATION_TEST_OK {test}");
+            return;
+        }
+        // An infallible owner allocation, or a copy-on-clone regression, would
+        // abort under denial. Keep that failure in this isolated child process.
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD_ENV, test)
+            .output()
+            .expect("run shared String allocator-denial subprocess");
+        assert!(
+            output.status.success(),
+            "allocator-denial child failed: status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("MIMI_SHARED_STRING_ALLOCATION_TEST_OK"),
+            "allocator-denial child must execute its assertions"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owner_observer_v1_real_shared_allocation_failure_is_atomic() {
+        in_subprocess(
+            concat!(
+                module_path!(),
+                "::ordinary_map_owner_observer_v1_real_shared_allocation_failure_is_atomic"
+            ),
+            || {
+                let source = r#"
+                func main() -> i32 {
+                    let empty = map_new()
+                    let root = map_set(empty, "answer", "value")
+                    let json = to_json(root)
+                    println(json)
+                    drop(json)
+                    drop(root)
+                    drop(empty)
+                    0
+                }
+            "#;
+                let tokens = Lexer::new(source)
+                    .tokenize()
+                    .expect("tokenize observer source");
+                let file = Parser::new(tokens)
+                    .parse_file()
+                    .expect("parse observer source");
+                let checked = crate::core::check_program(&file).expect("check observer source");
+                let mir = MirProgram::from_checked_program(&checked).expect("lower observer MIR");
+                let receipt = mir
+                    .ordinary_map_owner_lifecycle_observer_v1_route_receipt()
+                    .expect("preserve observer-v1 route contract");
+                let bytecode = compile_mir_program_with_route_receipt(&mir, &receipt)
+                    .expect("compile receipted observer bytecode");
+                let (destination, root_register) = bytecode.functions[bytecode.entry as usize]
+                    .code
+                    .iter()
+                    .find_map(|op| match op {
+                        Op::MirOrdinaryMapOwnerLifecycleObserverV1ToJson { rd, ra } => {
+                            Some((*rd, *ra))
+                        }
+                        _ => None,
+                    })
+                    .expect("real ToJson publication opcode");
+                let mut vm = BytecodeVM::new(bytecode);
+                vm.enable_stdout_capture();
+                let (result, observation) = test_alloc::with_observer_shared_denial(|| {
+                    // Use the public entry's receipt, runtime-scope, instruction,
+                    // error-enrichment and cleanup paths. Inspect the destination
+                    // before cleanup so cleanup cannot hide a published value.
+                    vm.with_canonical_actor_execution(|vm| {
+                        let stack_before = vm.stack.len();
+                        let depth_before = vm.depth;
+                        vm.push_frame(vm.program.entry, Vec::new(), None)?;
+                        let result = vm.exec_entry_loop();
+                        assert!(result.is_err(), "shared allocation must fail");
+                        assert!(
+                            matches!(vm.get_reg(destination), Value::Unit),
+                            "failed shared allocation must not publish its destination"
+                        );
+                        assert!(
+                            matches!(vm.get_reg(root_register),
+                        Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(root)
+                            if Arc::strong_count(root) == 1 && root.contains_key("answer")),
+                            "failed borrowed observation must retain its source owner"
+                        );
+                        vm.cleanup_failed_subexec_for_error(
+                            stack_before,
+                            depth_before,
+                            result.as_ref().expect_err("rejected shared allocation"),
+                        );
+                        result
+                    })
+                });
+                let error = result.expect_err("real allocator rejected the shared owner request");
+                assert_eq!(
+                    observation.requests, 1,
+                    "exactly one real request at the shared boundary"
+                );
+                assert_eq!(observation.rejected, 1, "allocator actually returned null");
+                assert_eq!(error.code(), "E0800");
+                assert!(error
+                    .message()
+                    .contains("ordinary Map owner lifecycle observer v1 JSON allocation failed"));
+                assert!(
+                    error.ctx().function.is_none(),
+                    "traps skip allocating enrichment"
+                );
+                assert_eq!(vm.debug_stack_state(), (0, 0), "trap cleanup must finish");
+                assert!(
+                    vm.take_stdout().is_empty(),
+                    "no JSON/output publication after failure"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn shared_string_clone_under_allocator_denial_preserves_sharing_and_cow() {
+        in_subprocess(
+            concat!(
+                module_path!(),
+                "::shared_string_clone_under_allocator_denial_preserves_sharing_and_cow"
+            ),
+            || {
+                let mut buffer = String::with_capacity(128);
+                buffer.push_str("payload");
+                let mut unique =
+                    SharedString::try_new(buffer).expect("fallible shared String success");
+                let original_pointer = SharedString::as_ptr(&unique);
+                let (_, observation) = test_alloc::with_one_shot_denial(|| {
+                    SharedString::make_mut(&mut unique).push_str("!");
+                });
+                assert_eq!(
+                    observation.requests, 0,
+                    "unique mutation within capacity must not allocate"
+                );
+                assert_eq!(observation.rejected, 0);
+                assert_eq!(SharedString::as_ptr(&unique), original_pointer);
+                let original = Value::String(unique);
+                let (mut copied, observation) =
+                    test_alloc::with_one_shot_denial(|| original.clone());
+                assert_eq!(
+                    observation.requests, 0,
+                    "Value::clone must share strings in O(1)"
+                );
+                assert_eq!(observation.rejected, 0);
+                let (Value::String(original), Value::String(copied)) = (&original, &mut copied)
+                else {
+                    panic!("cloned String retains its ordinary Value identity");
+                };
+                assert!(SharedString::ptr_eq(original, copied));
+                SharedString::make_mut(copied).push_str(" changed");
+                assert_eq!(original.as_str(), "payload!");
+                assert_eq!(copied.as_str(), "payload! changed");
+                assert!(
+                    !SharedString::ptr_eq(original, copied),
+                    "COW must detach a shared owner"
+                );
+            },
+        );
+    }
+
+    fn compile_compatibility_source(source: &str) -> Arc<BytecodeProgram> {
+        let tokens = Lexer::new(source).tokenize().expect("tokenize test source");
+        let file = Parser::new(tokens).parse_file().expect("parse test source");
+        crate::interp::bytecode::BytecodeCompiler::new()
+            .compile_file(&file)
+            .expect("compile test bytecode")
+    }
+
+    fn observer_failure_fixture() -> Arc<BytecodeProgram> {
+        let source = r#"
+            func main() -> i32 {
+                let empty = map_new()
+                let root = map_set(empty, "answer", "value")
+                let json = to_json(root)
+                println("FLOW_COMPENSATION_RAN")
+                println(json)
+                drop(json)
+                drop(root)
+                drop(empty)
+                0
+            }
+        "#;
+        let file = Parser::new(Lexer::new(source).tokenize().expect("tokens"))
+            .parse_file()
+            .expect("observer fixture");
+        let checked = crate::core::check_program(&file).expect("check observer fixture");
+        let mir = MirProgram::from_checked_program(&checked).expect("observer MIR");
+        let receipt = mir
+            .ordinary_map_owner_lifecycle_observer_v1_route_receipt()
+            .expect("observer-v1 receipt");
+        compile_mir_program_with_route_receipt(&mir, &receipt).expect("observer bytecode")
+    }
+
+    #[test]
+    fn ordinary_map_owner_observer_v1_continuing_denial_returns_trap_and_discards_frames() {
+        in_subprocess(
+            concat!(
+                module_path!(),
+                "::ordinary_map_owner_observer_v1_continuing_denial_returns_trap_and_discards_frames"
+            ),
+            || {
+                let bytecode = observer_failure_fixture();
+                let code = &bytecode.functions[bytecode.entry as usize].code;
+                let (destination, root_register) = code
+                    .iter()
+                    .find_map(|op| match op {
+                        Op::MirOrdinaryMapOwnerLifecycleObserverV1ToJson { rd, ra } => {
+                            Some((*rd, *ra))
+                        }
+                        _ => None,
+                    })
+                    .expect("ToJson site");
+                let compensation_pc = code.iter().position(|op| match op {
+                Op::LoadConst {idx,..} => matches!(bytecode.functions[bytecode.entry as usize].constants.get(*idx as usize),
+                    Some(ConstValue::Str(value)) if value == "FLOW_COMPENSATION_RAN"),
+                _ => false,
+            }).expect("compensation marker target");
+                let mut vm = BytecodeVM::new(Arc::clone(&bytecode));
+                vm.enable_stdout_capture();
+                let mut destination_unpublished = false;
+                let mut handler_untouched = false;
+                let mut root_owner = None;
+                let (result, observation) =
+                    test_alloc::with_observer_shared_continuing_denial(|| {
+                        vm.with_canonical_actor_execution(|vm| {
+                            let stack_before = vm.stack.len();
+                            let depth_before = vm.depth;
+                            vm.push_frame(vm.program.entry, Vec::new(), None)?;
+                            // Install an active compensation target before denial. The
+                            // independently receipted bytecode itself is unchanged.
+                            vm.cur_frame_mut().fault_handlers.push(compensation_pc);
+                            vm.cur_frame_mut().flow_tx = Some(FlowTxCtx {
+                                flow_name: "AllocationProbe".into(),
+                                transition_name: "publish".into(),
+                                from_state: "Ready".into(),
+                                persistent_fields: Vec::new(),
+                            });
+                            let result = vm.exec_entry_loop();
+                            // Record observations without formatting/asserting while
+                            // all allocations are still denied.
+                            destination_unpublished =
+                                matches!(vm.get_reg(destination), Value::Unit);
+                            handler_untouched =
+                                vm.cur_frame().fault_handlers.as_slice() == [compensation_pc];
+                            if let Value::CanonicalOrdinaryMapOwnerLifecycleI32StringV1(root) =
+                                vm.get_reg(root_register)
+                            {
+                                root_owner = Some(Arc::downgrade(root));
+                            }
+                            if let Err(error) = &result {
+                                vm.cleanup_failed_subexec_for_error(
+                                    stack_before,
+                                    depth_before,
+                                    error,
+                                );
+                            }
+                            result
+                        })
+                    });
+                let error =
+                    result.expect_err("continuing allocator denial must return a typed trap");
+                assert_eq!(
+                    observation.requests, 1,
+                    "propagation/cleanup must not request another allocation"
+                );
+                assert_eq!(observation.rejected, 1);
+                assert!(error.is_allocation_failure());
+                assert_eq!(error.code(), "E0800");
+                assert_eq!(error.message(), OBSERVER_STRING_ALLOCATION_ERROR);
+                assert!(error.ctx().function.is_none());
+                assert!(destination_unpublished);
+                assert!(handler_untouched, "trap must not activate compensation");
+                assert_eq!(
+                    root_owner
+                        .expect("source root observed before cleanup")
+                        .strong_count(),
+                    0,
+                    "failed-frame cleanup must release the source root"
+                );
+                assert_eq!(vm.debug_stack_state(), (0, 0));
+                assert!(vm.free_regs.is_empty(), "failed buffers must be discarded");
+                assert!(
+                    vm.take_stdout().is_empty(),
+                    "no JSON or Flow compensation marker may run"
+                );
+
+                // Reuse exercises preparation of the consumed diagnostic reserve.
+                // Both public entrypoints must return and clean up under denial.
+                let (result, observation) =
+                    test_alloc::with_observer_shared_continuing_denial(|| vm.run_value());
+                assert_eq!(result.expect_err("public run_value trap").code(), "E0800");
+                assert_eq!((observation.requests, observation.rejected), (1, 1));
+                assert_eq!(vm.debug_stack_state(), (0, 0));
+                assert!(vm.free_regs.is_empty());
+                assert!(vm.take_stdout().is_empty());
+                let (result, observation) =
+                    test_alloc::with_observer_shared_continuing_denial(|| vm.run());
+                assert_eq!(result.expect_err("public run trap").code(), "E0800");
+                assert_eq!((observation.requests, observation.rejected), (1, 1));
+                assert_eq!(vm.debug_stack_state(), (0, 0));
+                assert!(vm.take_stdout().is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn kernel_card_e0800_e0801_e0802_bypass_flow_fault_and_compensation() {
+        for (body, initial, delta, expected) in [
+            ("assert(false); return S { v: self.v }", "1", "0", "E0800"),
+            ("return S { v: self.v / d }", "7", "0", "E0801"),
+            (
+                "return S { v: self.v + d }",
+                "9223372036854775807",
+                "1",
+                "E0802",
+            ),
+        ] {
+            let source = format!(
+                r#"
+                flow TrapFlow {{
+                    state S {{ v: i64 }}
+                    transition go(S, d: i64) -> S | Fault {{
+                        on failure {{ println("FLOW_COMPENSATION_RAN") }}
+                        {body}
+                    }}
+                }}
+                func main() -> i64 {{
+                    on failure {{ println("CALLER_COMPENSATION_RAN") }}
+                    let result = TrapFlow::go(S {{ v: {initial} }}, {delta})
+                    println("FLOW_ABSORBED_TRAP")
+                    0
+                }}
+            "#
+            );
+            let mut vm = BytecodeVM::new(compile_compatibility_source(&source));
+            vm.enable_stdout_capture();
+            let error = vm
+                .run_value()
+                .expect_err("kernel-card trap must escape the Flow");
+            assert_eq!(error.code(), expected, "{error}");
+            assert!(error.is_trap());
+            assert!(error.ctx().function.is_none(), "traps skip enrichment");
+            assert!(
+                vm.take_stdout().is_empty(),
+                "trap must bypass absorption and compensation"
+            );
+        }
+    }
+
+    #[test]
+    fn kernel_card_e0803_keeps_existing_flow_absorption() {
+        let source = r#"
+            flow RecoverableFlow {
+                state S { v: i64 }
+                transition go(S) -> S | Fault {
+                    let values = [1]
+                    return S { v: values[3] }
+                }
+            }
+            func main() -> i64 {
+                let result = RecoverableFlow::go(S { v: 1 })
+                println("OOB_ABSORBED")
+                0
+            }
+        "#;
+        let mut vm = BytecodeVM::new(compile_compatibility_source(source));
+        vm.enable_stdout_capture();
+        assert!(matches!(
+            vm.run_value().expect("E0803 remains recoverable"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), "OOB_ABSORBED\n");
+    }
+
+    #[test]
+    fn shared_string_concat_checkpoints_cover_both_bytecode_paths() {
+        let source = "func main() -> string { \"nul\\0\" + \"雪\" }";
+        let original = compile_compatibility_source(source);
+        for use_add_int in [false, true] {
+            let mut bytecode = Arc::clone(&original);
+            let main = &mut Arc::make_mut(&mut bytecode).functions[original.entry as usize];
+            let operation = main
+                .code
+                .iter_mut()
+                .find(|op| matches!(op, Op::ConcatStr { .. }))
+                .expect("compatibility compiler emits String concatenation");
+            if use_add_int {
+                let Op::ConcatStr { rd, ra, rb } = *operation else {
+                    unreachable!()
+                };
+                *operation = Op::AddInt { rd, ra, rb };
+            }
+            for stage in [0, 1] {
+                let mut vm = BytecodeVM::new(Arc::clone(&bytecode));
+                let error =
+                    crate::runtime::with_ordinary_map_string_concat_failure_for_test(stage, || {
+                        vm.run_value()
+                    })
+                    .expect_err("both concat paths must preserve logical checkpoints");
+                assert_eq!(error.code(), "E0800");
+                assert_eq!(
+                    error.message(),
+                    if stage == 0 {
+                        STRING_CONCAT_ALLOCATION_ERROR
+                    } else {
+                        STRING_CONCAT_PUBLICATION_ERROR
+                    }
+                );
+            }
+            let mut vm = BytecodeVM::new(bytecode);
+            let value = vm
+                .run_value()
+                .expect("concatenation success preserves bytes");
+            assert!(matches!(value,Value::String(text) if text.as_bytes() == "nul\0雪".as_bytes()));
+        }
+    }
+
+    #[test]
+    fn shared_string_concat_actual_publication_denial_returns_without_allocating() {
+        in_subprocess(
+            concat!(
+                module_path!(),
+                "::shared_string_concat_actual_publication_denial_returns_without_allocating"
+            ),
+            || {
+                let original =
+                    compile_compatibility_source("func main() -> string { \"left\" + \"right\" }");
+                for use_add_int in [false, true] {
+                    let mut bytecode = Arc::clone(&original);
+                    if use_add_int {
+                        let main =
+                            &mut Arc::make_mut(&mut bytecode).functions[original.entry as usize];
+                        let operation = main
+                            .code
+                            .iter_mut()
+                            .find(|op| matches!(op, Op::ConcatStr { .. }))
+                            .expect("concat opcode");
+                        let Op::ConcatStr { rd, ra, rb } = *operation else {
+                            unreachable!()
+                        };
+                        *operation = Op::AddInt { rd, ra, rb };
+                    }
+                    let mut vm = BytecodeVM::new(bytecode);
+                    vm.enable_stdout_capture();
+                    let (result, observation) =
+                        test_alloc::with_concat_shared_continuing_denial(|| vm.run_value());
+                    let error = result.expect_err("real concatenation shared-owner denial");
+                    assert_eq!(error.code(), "E0800");
+                    assert_eq!(error.message(), STRING_CONCAT_PUBLICATION_ERROR);
+                    assert_eq!((observation.requests, observation.rejected), (1, 1));
+                    assert_eq!(vm.debug_stack_state(), (0, 0));
+                    assert!(vm.free_regs.is_empty());
+                    assert!(vm.take_stdout().is_empty());
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn ffi_shared_string_into_raw_denial_preserves_source_and_sibling() {
+        in_subprocess(
+            concat!(
+                module_path!(),
+                "::ffi_shared_string_into_raw_denial_preserves_source_and_sibling"
+            ),
+            || {
+                let value = Value::String(SharedString::new("shared transfer payload".into()));
+                let sibling = value.clone();
+                let raw = Box::into_raw(Box::new(value));
+                let (result, observation) = test_alloc::with_one_shot_denial(|| {
+                    // SAFETY: raw is an exclusive live boxed Value created above.
+                    unsafe { crate::ffi::runtime::mimi_string_into_raw(raw) }
+                });
+                assert!(result.is_null());
+                assert_eq!((observation.requests, observation.rejected), (1, 1));
+                // SAFETY: failure leaves the live boxed Value owned by this test.
+                assert_eq!(unsafe { &*raw }, &sibling);
+                // SAFETY: raw remains a live exclusive Value; success transfers only its contents.
+                let result = unsafe { crate::ffi::runtime::mimi_string_into_raw(raw) };
+                assert!(!result.is_null());
+                // SAFETY: result is the live NUL-terminated C allocation returned above.
+                assert_eq!(
+                    // SAFETY: result is a live NUL-terminated C allocation from the transfer API.
+                    unsafe { std::ffi::CStr::from_ptr(result) }.to_bytes(),
+                    b"shared transfer payload"
+                );
+                // SAFETY: the source remains a live boxed Value after content transfer.
+                assert!(matches!(unsafe { &*raw },Value::String(text) if text.is_empty()));
+                assert!(
+                    matches!(sibling,Value::String(text) if text.as_str() == "shared transfer payload")
+                );
+                // SAFETY: result/raw are distinct sole-owned allocations returned by the matching APIs.
+                unsafe {
+                    crate::ffi::runtime::mimi_string_free_raw(result);
+                    crate::ffi::runtime::mimi_value_free(raw);
+                }
+            },
+        );
+    }
+}
+
+pub(crate) fn ordinary_map_new_result_bytecode_value() -> Result<Value, InterpError> {
+    ordinary_map_new_result_bytecode_value_from_new(crate::runtime::OwnedAnyV2Root::try_new())
+}
+
+fn ordinary_map_new_result_bytecode_value_from_new(
+    root: Result<crate::runtime::OwnedAnyV2Root, crate::runtime::OwnedAnyV2RootError>,
+) -> Result<Value, InterpError> {
+    let (tag, payload) = match root {
+        Ok(root) => (
+            "Ok",
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(
+                CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot::new(root),
+            ),
+        ),
+        Err(crate::runtime::OwnedAnyV2RootError::Capacity) => ("Err", Value::Int(3)),
+        Err(error) => {
+            return Err(InterpError::new(format!(
+                "[E0800] ordinary Map NewResult invalid New status/handle result: {error:?}"
+            )))
+        }
+    };
+    Ok(Value::CanonicalVariant {
+        nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result").unwrap(),
+        variant: crate::core::NodeId(format!("builtin:variant:Result::{tag}")),
+        tag: tag.into(),
+        payload: vec![payload],
+    })
+}
+
+#[cfg(test)]
+mod ordinary_map_new_result_runtime_tests {
+    use super::*;
+    use crate::runtime::{ordinary_map_domain_live_counts_for_test, OwnedAnyV2RootError};
+
+    fn new_result_payload(value: &Value) -> &Value {
+        let Value::CanonicalVariant {
+            nominal,
+            variant,
+            tag,
+            payload,
+        } = value
+        else {
+            panic!("NewResult must be a canonical Result variant")
+        };
+        assert_eq!(nominal.as_str(), "builtin:type:Result");
+        assert!(matches!(tag.as_str(), "Ok" | "Err"));
+        assert_eq!(variant.0, format!("builtin:variant:Result::{tag}"));
+        assert_eq!(payload.len(), 1);
+        &payload[0]
+    }
+
+    fn into_new_result_payload(value: Value) -> Value {
+        let Value::CanonicalVariant { payload, .. } = value else {
+            panic!("NewResult must be a canonical Result variant")
+        };
+        assert_eq!(payload.len(), 1);
+        payload.into_iter().next().expect("one Result payload")
+    }
+
+    #[test]
+    fn new_result_capacity_is_only_the_exact_capacity_variant() {
+        let value =
+            ordinary_map_new_result_bytecode_value_from_new(Err(OwnedAnyV2RootError::Capacity))
+                .expect("exact status=3, handle=0 becomes a Result value");
+        assert!(matches!(new_result_payload(&value), Value::Int(3)));
+    }
+
+    #[test]
+    fn new_result_rejects_every_noncanonical_status_handle_or_lifecycle_error() {
+        for error in [
+            OwnedAnyV2RootError::UnexpectedNewResult {
+                status: 0,
+                published_handle: false,
+            },
+            OwnedAnyV2RootError::UnexpectedNewResult {
+                status: 3,
+                published_handle: true,
+            },
+            OwnedAnyV2RootError::UnexpectedNewResult {
+                status: -1,
+                published_handle: false,
+            },
+            OwnedAnyV2RootError::UnexpectedNewResult {
+                status: -1,
+                published_handle: true,
+            },
+            OwnedAnyV2RootError::UnexpectedNewResult {
+                status: 1,
+                published_handle: false,
+            },
+            OwnedAnyV2RootError::UnexpectedNewResult {
+                status: 1,
+                published_handle: true,
+            },
+            OwnedAnyV2RootError::SizeStatus(3),
+            OwnedAnyV2RootError::DropStatus(3),
+        ] {
+            let error = ordinary_map_new_result_bytecode_value_from_new(Err(error))
+                .expect_err("noncanonical New result and lifecycle errors fail closed");
+            assert!(error
+                .to_string()
+                .contains("[E0800] ordinary Map NewResult invalid"));
+        }
+    }
+
+    #[test]
+    fn new_result_uses_real_new_size_and_exact_drop_and_cleanup_preserves_other_roots() {
+        let baseline = ordinary_map_domain_live_counts_for_test()
+            .expect("runtime roots before NewResult bytecode owner test");
+        let unrelated = crate::runtime::OwnedAnyV2Root::try_new()
+            .expect("unrelated owner remains live during NewResult cleanup");
+        let unrelated_handle = unrelated.handle();
+        let value = ordinary_map_new_result_bytecode_value()
+            .expect("NewResult publishes a root through the real runtime New ABI");
+        let Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) = into_new_result_payload(value)
+        else {
+            panic!("successful NewResult must carry a real runtime owner-v2 root")
+        };
+        assert_ne!(
+            root.with_owner(|owner| owner.handle()),
+            Some(unrelated_handle)
+        );
+        assert_eq!(root.with_owner(|owner| owner.size()), Some(Ok(0)));
+        // The helper's local root and the unrelated root are both active.
+        let with_both = ordinary_map_domain_live_counts_for_test()
+            .expect("ownership domains with exact NewResult and unrelated roots");
+        assert_eq!(with_both.roots, baseline.roots + 2);
+        assert_eq!(
+            with_both.runtime_map_handles,
+            baseline.runtime_map_handles + 2
+        );
+        retire_ordinary_map_new_result_runtime_root(root, "Drop")
+            .expect("NewResult explicit Drop calls the exact runtime Drop ABI");
+        assert_eq!(
+            ordinary_map_domain_live_counts_for_test()
+                .expect("exact Drop preserves the unrelated runtime root")
+                .roots,
+            baseline.roots + 1
+        );
+        assert_eq!(unrelated.size(), Ok(0));
+
+        let cleanup_root = CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot::new(
+            crate::runtime::OwnedAnyV2Root::try_new()
+                .expect("cleanup target is another real runtime New owner"),
+        );
+        let value = Value::CanonicalVariant {
+            nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result").unwrap(),
+            variant: crate::core::NodeId("builtin:variant:Result::Ok".into()),
+            tag: "Ok".into(),
+            payload: vec![Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(
+                cleanup_root,
+            )],
+        };
+        let alias = value.clone();
+        let Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) = new_result_payload(&value)
+        else {
+            panic!("cleanup target must remain in the Result payload")
+        };
+        assert!(!root.is_unique(), "Value::clone records an owner alias");
+        cleanup_ordinary_map_new_result_runtime_roots(&value);
+        assert_eq!(
+            ordinary_map_new_result_live_runtime_root_occurrences(&value),
+            0
+        );
+        assert_eq!(
+            ordinary_map_domain_live_counts_for_test()
+                .expect("cleanup retires only the NewResult-owned handle"),
+            crate::runtime::OrdinaryMapDomainLiveCounts {
+                roots: baseline.roots + 1,
+                ordinary_map_handles: baseline.ordinary_map_handles + 1,
+                runtime_map_handles: baseline.runtime_map_handles + 1,
+                owned_get_handles: baseline.owned_get_handles,
+                managed_any: baseline.managed_any,
+                owned_strings: baseline.owned_strings,
+                any_owner_tokens: baseline.any_owner_tokens,
+            }
+        );
+        assert_eq!(unrelated.size(), Ok(0));
+        assert_eq!(unrelated.handle(), unrelated_handle);
+        drop(alias);
+        drop(value);
+        assert!(unrelated.try_drop().is_ok());
+        assert_eq!(
+            ordinary_map_domain_live_counts_for_test()
+                .expect("both exact handles are retired after explicit cleanup"),
+            baseline
+        );
+    }
+
+    #[test]
+    fn exact_capacity_from_real_new_abi_maps_to_err_three() {
+        let baseline = ordinary_map_domain_live_counts_for_test()
+            .expect("ownership domains before real New ABI Capacity");
+        crate::runtime::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(0, || {
+            let value = ordinary_map_new_result_bytecode_value()
+                .expect("real New ABI Capacity is recoverable in NewResult");
+            assert!(matches!(new_result_payload(&value), Value::Int(3)));
+            assert_eq!(
+                ordinary_map_domain_live_counts_for_test()
+                    .expect("ownership domains after exact status=3, handle=0"),
+                baseline
+            );
+        });
     }
 }

@@ -232,12 +232,16 @@ fn explicit_mir_verifier_rejects_incomplete_typed_owned_get_coverage() {
         &source,
         r#"
             func main() -> i32 {
-                let root = map_new()
-                let result = map_get_i32(root, "answer")
-                drop(root)
-                match result {
-                    Ok(value) => value,
-                    Err(code) => code,
+                match map_new() {
+                    Ok(root) => {
+                        let result = map_get_i32(root, "answer")
+                        drop(root)
+                        match result {
+                            Ok(value) => value,
+                            Err(code) => code,
+                        }
+                    },
+                    Err(status) => { status },
                 }
             }
         "#,
@@ -266,5 +270,58 @@ fn explicit_mir_verifier_rejects_incomplete_typed_owned_get_coverage() {
                 "typed owned-get Map candidate without complete operation-attempt coverage"
             ),
         "explicit MIR should report the Checker coverage boundary: {transcript}"
+    );
+}
+
+#[test]
+fn ordinary_map_new_result_core_shape_uses_default_and_verifier_routes() {
+    let mimi = mimi_bin();
+    let source = fixture("mir_ordinary_map_new_result_core.mimi");
+
+    // Default `run` must admit the exact recoverable NewResult shape through
+    // its isolated execution profile and honor the empty-map size exit code.
+    let run = Command::new(&mimi)
+        .env("MIMI_ROUTE_CENSUS", "1")
+        .arg("run")
+        .arg(&source)
+        .output()
+        .expect("run ordinary Map NewResult fixture");
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "mimi run failed:\nstdout:\n{}\nstderr:\n{run_stderr}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        run_stderr.contains(
+            "canonical route disposition: canonical (ordinary-map-new-result-v1) mir_digest="
+        ),
+        "default run did not report the NewResult execution route: {run_stderr}"
+    );
+    assert!(
+        !run_stderr.contains("canonical route disposition: legacy"),
+        "default run fell back to a legacy Map owner: {run_stderr}"
+    );
+
+    // The verifier consumes its own L2 projection of the same CheckedProgram.
+    let verify = Command::new(&mimi)
+        .env("MIMI_ROUTE_CENSUS", "1")
+        .arg("verify")
+        .arg(&source)
+        .output()
+        .expect("verify ordinary Map NewResult fixture");
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+    let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        verify.status.success(),
+        "mimi verify failed:\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        verify_stdout.contains("No contracts to verify"),
+        "the contract-free NewResult fixture should keep the empty verification disposition: {verify_stdout}"
+    );
+    assert!(
+        verify_stderr.contains("checker_profile=ordinary-map-new-result-v1"),
+        "verify did not report the NewResult route admission: {verify_stderr}"
     );
 }
