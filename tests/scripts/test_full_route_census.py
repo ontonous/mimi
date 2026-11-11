@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -2323,9 +2324,12 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
 
     def test_repository_audit_script_output_matches_the_parser_contract(self) -> None:
         script = census.ROOT / "scripts/audit-mir-legacy-owners.sh"
+        environment = os.environ.copy()
+        environment["MIMI_LEGACY_OWNER_AUDIT_SKIP_DYNAMIC_PROBES"] = "1"
         result = subprocess.run(
             ["bash", str(script)],
             cwd=census.ROOT,
+            env=environment,
             capture_output=True,
             check=False,
         )
@@ -2345,7 +2349,7 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
         )
         self.assertEqual(
             {name: len(rows) for name, rows in parsed["owner_evidence_rows"].items()},
-            {"CodegenLegacyRemainder": 1, "FfiVerifierCompatibility": 4},
+            {"CodegenLegacyRemainder": 1, "FfiVerifierCompatibility": 5},
         )
         self.assertEqual(
             {
@@ -2367,7 +2371,7 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
                     (
                         "typed String FFI context reports checker-owned coverage without any legacy owner",
                         "src/verifier/tests.rs::typed_ffi_symbolic_string_contexts_defer_without_legacy_access",
-                        "Vec::<crate::core::LegacyBodyConsumer>::new()",
+                        "VerifStatus::NotInTrustedSubset",
                     ),
                     (
                         "checked verifier-only owner slice proves Ready repr(C) String-field Ensures",
@@ -2383,6 +2387,11 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
                         "nested repr(C) String fields preserve exact caller identity through MIR",
                         "src/verifier/tests.rs::typed_ffi_aggregate_nested_string_fields_preserve_nul_unicode_and_length",
                         'Some("verifier-ffi-owner-slice-v1")',
+                    ),
+                    (
+                        "default verify reports proven, disproven, and unsupported String-record Ensures",
+                        "tests/real_world_cli.rs::canonical_ffi_string_record_default_dual_cli_proven_disproven_nits",
+                        '"? unknown"',
                     ),
                 },
             },
@@ -2624,7 +2633,7 @@ class LegacyOwnerAuditParserTests(unittest.TestCase):
             line for line in base_lines
             if line.startswith("owner=FfiVerifierCompatibility evidence_scope=")
         ]
-        self.assertEqual(len(ffi_evidence), 4)
+        self.assertEqual(len(ffi_evidence), 5)
         codegen_evidence = next(
             line for line in base_lines
             if line.startswith("owner=CodegenLegacyRemainder evidence_scope=")
@@ -3291,7 +3300,12 @@ class StrictGateTests(unittest.TestCase):
 
         def source_diagnostic_record() -> dict:
             record = self._record(path, route="rejected")
-            diagnostic = f"error[E0432] {census.ROOT / path}:2:1-2 unknown name\n"
+            absolute_source = str((census.ROOT / path).resolve())
+            diagnostic = (
+                f"{absolute_source} has 1 type error(s):\n"
+                f"error[E0432] {absolute_source}:2:1-2 unknown name\n"
+                "error: type checking failed\n"
+            )
             record.update({
                 "run_status": "completed",
                 "exit_code": 1,
@@ -3723,7 +3737,8 @@ class ExpectationContractTests(unittest.TestCase):
         test_id = "test_route_contract"
         if is_source_diagnostic:
             diagnostic_text = (
-                f"error[E0432] {root / source_path}:2:3-8 unknown name 'absent'\n"
+                f"{(root / source_path).resolve()} has 1 type error(s):\n"
+                f"error[E0432] {(root / source_path).resolve()}:2:3-8 unknown name 'absent'\n"
                 "error: type checking failed\n"
             )
             output_path = census._source_diagnostic_authority_output_path(
@@ -4299,6 +4314,7 @@ class ExpectationContractTests(unittest.TestCase):
                 "case.mimi", source["sha256"]
             )
             diagnostic_text = (
+                f"{fixture} has 1 type error(s):\n"
                 f"error[E0432] {fixture}:2:3-8 unknown name 'absent'\n"
                 "error: type checking failed\n"
             )
@@ -4318,6 +4334,56 @@ class ExpectationContractTests(unittest.TestCase):
             'env["NO_COLOR"] = "1"', inspect.getsource(census._run_one)
         )
         self.assertIn('"NO_COLOR": "1"', inspect.getsource(census.toolchain_manifest))
+
+    def test_source_diagnostic_build_layouts_bind_counts_and_exact_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            fixture = root / "case.mimi"
+            fixture.write_text("func main() { }\n", encoding="utf-8")
+            absolute_source = str(fixture)
+
+            type_errors = (
+                f"{absolute_source} has 2 type error(s):\n"
+                f"error[E0432] {absolute_source}:1:1-2 first error\n"
+                f"error[E0432] {absolute_source}:1:3-4 second error\n"
+                "error: type checking failed\n"
+            )
+            parse_errors = (
+                f"error {absolute_source}:1:1-2 unexpected token\n"
+                "error: 1 parse error(s) found\n"
+            )
+
+            self.assertTrue(
+                census._source_diagnostic_text_is_well_formed(
+                    type_errors, source_path="case.mimi", root=root
+                )
+            )
+            self.assertTrue(
+                census._source_diagnostic_text_is_well_formed(
+                    parse_errors, source_path="case.mimi", root=root
+                )
+            )
+            self.assertFalse(
+                census._source_diagnostic_text_is_well_formed(
+                    type_errors.replace("has 2 type error(s)", "has 3 type error(s)"),
+                    source_path="case.mimi",
+                    root=root,
+                )
+            )
+            self.assertFalse(
+                census._source_diagnostic_text_is_well_formed(
+                    type_errors.replace(absolute_source, "/tmp/other.mimi", 1),
+                    source_path="case.mimi",
+                    root=root,
+                )
+            )
+            self.assertFalse(
+                census._source_diagnostic_text_is_well_formed(
+                    parse_errors.replace("parse error(s) found", "parse error(s)"),
+                    source_path="case.mimi",
+                    root=root,
+                )
+            )
 
     def test_expected_rejection_schema_requires_disposition_reason_and_failure(self) -> None:
         required_fields = (
@@ -4670,6 +4736,7 @@ class ExpectationContractTests(unittest.TestCase):
             fixture.write_text("func main() { }\n", encoding="utf-8")
             source = census.source_record(fixture, root)
             diagnostic_text = (
+                f"{fixture} has 1 type error(s):\n"
                 f"error[E0432] {fixture}:2:3-8 unknown name '\uFFFD'\n"
                 "error: type checking failed\n"
             )

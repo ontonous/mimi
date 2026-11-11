@@ -86,7 +86,7 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-EXPECTED_CURRENT_DENOMINATOR = 1161
+EXPECTED_CURRENT_DENOMINATOR = 1162
 INPUT_SCHEMA_VERSION = 1
 OUTPUT_EXPECTATIONS_SCHEMA_VERSION = 4
 EXPECTED_AUTHORITY_PATH = "tests/route-census/authorities.rs"
@@ -1073,8 +1073,11 @@ def _self_check(root: Path) -> None:
     source_candidate = census.enumerate_sources(root)[0]
     source_path = str(source_candidate["path"])
     source_sha = str(source_candidate["sha256"])
+    absolute_source = str((root / source_path).resolve())
     source_diagnostic = (
-        f"error[E0001]: {(root / source_path).resolve()}:1:1 static recognizer self-check\n"
+        f"{absolute_source} has 1 type error(s):\n"
+        f"error[E0001] {absolute_source}:1:1 static recognizer self-check\n"
+        "error: type checking failed\n"
     )
     source_diagnostic_id = "route_census_self_check_source_diagnostic"
     source_output_path = generator._source_diagnostic_authority_output_path(

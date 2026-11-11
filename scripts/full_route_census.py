@@ -210,7 +210,7 @@ ACTOR_IDENTITY_HELPER_NAME = "route_census_mimi_path"
 # The Actor callsite tests exercise a substantial helper rather than issuing
 # CLI assertions themselves. Pin its active implementation so changing it to
 # a no-op cannot preserve authority merely by retaining the two callsites.
-ACTOR_HELPER_SHA256 = "8232150480706c593bf386895b06d2fbe2cd4c23ae40a76bde61aea54d1d1e1c"
+ACTOR_HELPER_SHA256 = "485bc6d15df4ba51175bc05f5a087b21c1c58a262db27ce813aad8beaa5db3d0"
 ACTIVE_LEGACY_OWNER_NAMES = (
     "CodegenLegacyRemainder",
     "FfiVerifierCompatibility",
@@ -233,7 +233,7 @@ LEGACY_OWNER_EVIDENCE_TUPLES = (
         "FfiVerifierCompatibility",
         "typed String FFI context reports checker-owned coverage without any legacy owner",
         "src/verifier/tests.rs::typed_ffi_symbolic_string_contexts_defer_without_legacy_access",
-        "Vec::<crate::core::LegacyBodyConsumer>::new()",
+        "VerifStatus::NotInTrustedSubset",
     ),
     (
         "FfiVerifierCompatibility",
@@ -252,6 +252,12 @@ LEGACY_OWNER_EVIDENCE_TUPLES = (
         "nested repr(C) String fields preserve exact caller identity through MIR",
         "src/verifier/tests.rs::typed_ffi_aggregate_nested_string_fields_preserve_nul_unicode_and_length",
         'Some("verifier-ffi-owner-slice-v1")',
+    ),
+    (
+        "FfiVerifierCompatibility",
+        "default verify reports proven, disproven, and unsupported String-record Ensures",
+        "tests/real_world_cli.rs::canonical_ffi_string_record_default_dual_cli_proven_disproven_nits",
+        '"? unknown"',
     ),
 )
 LEGACY_OWNER_CLOSED_ROUTE_GUARD_TUPLES = (
@@ -300,6 +306,13 @@ DIAGNOSTIC_RE = re.compile(
 SOURCE_DIAGNOSTIC_RE = re.compile(
     r"(?i)^[ \t]*error(?:\[[A-Z][A-Z0-9_-]*\])?(?:[ \t]+|[ \t]*:[ \t]+)"
     r"(?P<location>.*?\.mimi:\d+:\d+(?:-(?:\d+:)?\d+)?)(?:[ \t]+|$)"
+)
+SOURCE_DIAGNOSTIC_TYPE_PREAMBLE_RE = re.compile(
+    r"(?P<path>.+\.mimi) has (?P<count>[1-9][0-9]*) type error\(s\):\Z"
+)
+SOURCE_DIAGNOSTIC_TYPE_SUMMARY = "error: type checking failed"
+SOURCE_DIAGNOSTIC_PARSE_SUMMARY_RE = re.compile(
+    r"error: (?P<count>[1-9][0-9]*) parse error\(s\) found\Z"
 )
 DIAGNOSTIC_ERROR_CODE_RE = re.compile(
     r"(?i)^[ \t]*(?:"
@@ -3070,8 +3083,14 @@ SOURCE_DIAGNOSTIC_FORBIDDEN_TEXT = (
 def _source_diagnostic_text_is_well_formed(
     text: str, *, source_path: str | None = None, root: Path | None = None
 ) -> bool:
-    """Accept only exact source diagnostics with no route or fallback signal."""
-    if not isinstance(text, str) or not text or "\x00" in text or "\r" in text:
+    """Accept only complete Mimi build source-diagnostic stderr layouts."""
+    if (
+        not isinstance(text, str)
+        or not text
+        or not text.endswith("\n")
+        or "\x00" in text
+        or "\r" in text
+    ):
         return False
     if any(marker in text.lower() for marker in SOURCE_DIAGNOSTIC_FORBIDDEN_TEXT):
         return False
@@ -3079,20 +3098,52 @@ def _source_diagnostic_text_is_well_formed(
         return False
     if "mimi_route_census" in text.lower():
         return False
-    source_lines = _source_diagnostic_lines(text)
-    plain_lines = [line for line in text.splitlines() if line.strip()]
-    summary_lines = [
-        line for line in plain_lines
-        if re.fullmatch(r"(?i)[ \t]*error:[ \t]*type checking failed[ \t]*", line)
-    ]
-    if (
-        not source_lines
-        or len(summary_lines) > 1
-        or len(plain_lines) != len(source_lines) + len(summary_lines)
-        or any(line not in source_lines and line not in summary_lines for line in plain_lines)
-    ):
+    lines = text.splitlines()
+    if not lines or any(not line.strip() for line in lines):
         return False
-    if any("\x1b" in line for line in text.splitlines()):
+    if any("\x1b" in line for line in lines):
+        return False
+    source_lines = _source_diagnostic_lines(text)
+    if not source_lines:
+        return False
+
+    type_preambles = [
+        (index, match)
+        for index, line in enumerate(lines)
+        if (match := SOURCE_DIAGNOSTIC_TYPE_PREAMBLE_RE.fullmatch(line)) is not None
+    ]
+    type_summaries = [
+        index for index, line in enumerate(lines)
+        if line == SOURCE_DIAGNOSTIC_TYPE_SUMMARY
+    ]
+    parse_summaries = [
+        (index, match)
+        for index, line in enumerate(lines)
+        if (match := SOURCE_DIAGNOSTIC_PARSE_SUMMARY_RE.fullmatch(line)) is not None
+    ]
+    if type_preambles or type_summaries:
+        if (
+            len(type_preambles) != 1
+            or len(type_summaries) != 1
+            or parse_summaries
+            or type_preambles[0][0] != 0
+            or type_summaries[0] != len(lines) - 1
+            or int(type_preambles[0][1].group("count")) != len(source_lines)
+            or len(lines) != len(source_lines) + 2
+        ):
+            return False
+        if source_path is not None:
+            if root is None:
+                return False
+            absolute_source = str((root / source_path).resolve())
+            if type_preambles[0][1].group("path") != absolute_source:
+                return False
+    elif (
+        len(parse_summaries) != 1
+        or parse_summaries[0][0] != len(lines) - 1
+        or int(parse_summaries[0][1].group("count")) != len(source_lines)
+        or len(lines) != len(source_lines) + 1
+    ):
         return False
     if source_path is not None:
         if root is None:
