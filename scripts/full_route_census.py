@@ -210,7 +210,7 @@ ACTOR_IDENTITY_HELPER_NAME = "route_census_mimi_path"
 # The Actor callsite tests exercise a substantial helper rather than issuing
 # CLI assertions themselves. Pin its active implementation so changing it to
 # a no-op cannot preserve authority merely by retaining the two callsites.
-ACTOR_HELPER_SHA256 = "9cce6c96edfe1bbe3f44933a9809b10b5387f65836b08093f4985140846c6acb"
+ACTOR_HELPER_SHA256 = "8232150480706c593bf386895b06d2fbe2cd4c23ae40a76bde61aea54d1d1e1c"
 ACTIVE_LEGACY_OWNER_NAMES = (
     "CodegenLegacyRemainder",
     "FfiVerifierCompatibility",
