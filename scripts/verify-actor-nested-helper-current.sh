@@ -5,6 +5,9 @@ set -o noclobber
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_RELATIVE="scripts/verify-actor-nested-helper-current.sh"
 LLVM_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}"
+# Match the production CLI's 8 MiB Linux stack for route-construction tests;
+# Rust's test harness otherwise uses a smaller worker-thread stack.
+TEST_THREAD_STACK_BYTES=8388608
 ARTIFACT_REQUESTED="${MIMI_ACTOR_CURRENT_ARTIFACT_DIR:-}"
 RUN_STATUS=1
 GATE_FAILURES=0
@@ -125,7 +128,7 @@ record_tool_version() {
         printf 'LLVM_SYS_181_PREFIX_realpath=<missing>\n'
     fi
     for name in CARGO_HOME CARGO_TARGET_DIR CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET \
-        CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_NET_OFFLINE CARGO_TERM_COLOR \
+        CARGO_BUILD_JOBS CARGO_INCREMENTAL CARGO_NET_OFFLINE CARGO_TERM_COLOR RUST_MIN_STACK \
         CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL \
         CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG \
         RUSTFLAGS RUSTDOCFLAGS RUSTUP_TOOLCHAIN RUSTC RUSTC_WRAPPER \
@@ -307,13 +310,14 @@ record_gate() {
     fi
     cargo_path="$(command -v cargo)"
     {
-        printf 'LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never %q ' \
-            "$LLVM_PREFIX" "$cargo_path"
+        printf 'RUST_MIN_STACK=%q LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never %q ' \
+            "$TEST_THREAD_STACK_BYTES" "$LLVM_PREFIX" "$cargo_path"
         printf '%q ' "${cargo_args[@]}"
         printf '\n'
     } > "$gate_dir/command.txt"
     printf '%s\0' "$cargo_path" "${cargo_args[@]}" > "$gate_dir/argv.nul"
     {
+        printf 'RUST_MIN_STACK=%s\n' "$TEST_THREAD_STACK_BYTES"
         printf 'LLVM_SYS_181_PREFIX=%s\n' "$LLVM_PREFIX"
         printf 'CARGO_BUILD_JOBS=1\n'
         printf 'CARGO_TERM_COLOR=never\n'
@@ -322,7 +326,8 @@ record_gate() {
     printf 'expected_passed=%s\nexpected_ignored=%s\n' \
         "$expected_passed" "$expected_ignored" > "$gate_dir/expected-selection.txt"
 
-    if env LLVM_SYS_181_PREFIX="$LLVM_PREFIX" CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never \
+    if env RUST_MIN_STACK="$TEST_THREAD_STACK_BYTES" LLVM_SYS_181_PREFIX="$LLVM_PREFIX" \
+        CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never \
         "$cargo_path" "${cargo_args[@]}" > "$gate_dir/stdout.bin" 2> "$gate_dir/stderr.bin"; then
         status=0
     else
