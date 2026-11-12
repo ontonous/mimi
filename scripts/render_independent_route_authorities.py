@@ -86,7 +86,7 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 
-EXPECTED_CURRENT_DENOMINATOR = 1162
+EXPECTED_CURRENT_DENOMINATOR = 1187
 INPUT_SCHEMA_VERSION = 1
 OUTPUT_EXPECTATIONS_SCHEMA_VERSION = 4
 EXPECTED_AUTHORITY_PATH = "tests/route-census/authorities.rs"
