@@ -244,9 +244,11 @@ class ActorCensusAdjudicationR3Contracts(unittest.TestCase):
         self.assertEqual(row["source_semantic_class"]["value"], "unresolved")
         self.assertEqual(
             row["source_semantic_class"]["status"],
-            "source_hash_drift_forces_unresolved",
+            "live_source_hash_mismatch_forces_unresolved",
         )
-        self.assertTrue(row["source_hash_validation"]["hash_drift_reasons"])
+        self.assertTrue(
+            row["source_hash_validation"]["live_source_hash_mismatch_reasons"]
+        )
         self.assertEqual(len(r3.finalization_blockers(rows)), 1)
 
     def test_build_rejection_route_claim_does_not_replace_source_diagnostic(self) -> None:
@@ -323,6 +325,36 @@ class ActorCensusAdjudicationR3Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate r2 ledger source path"):
             r3.unique_index_and_path(duplicate_path, "r2 ledger", expected_count=2)
 
+    def test_path_uniqueness_uses_normalized_and_physical_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "same.mimi"
+            source.write_text("same source\n", encoding="utf-8")
+            normalized_aliases = [
+                {"inventory_index": 1, "path": "same.mimi"},
+                {"inventory_index": 2, "path": "./same.mimi"},
+            ]
+            with self.assertRaisesRegex(ValueError, "duplicate r2 ledger source path"):
+                r3.unique_index_and_path(
+                    normalized_aliases,
+                    "r2 ledger",
+                    expected_count=2,
+                    repo_root=root,
+                )
+            hardlink = root / "alias.mimi"
+            hardlink.hardlink_to(source)
+            physical_aliases = [
+                {"inventory_index": 1, "path": "same.mimi"},
+                {"inventory_index": 2, "path": "alias.mimi"},
+            ]
+            with self.assertRaisesRegex(ValueError, "duplicate r2 ledger physical source file"):
+                r3.unique_index_and_path(
+                    physical_aliases,
+                    "r2 ledger",
+                    expected_count=2,
+                    repo_root=root,
+                )
+
     def test_adjudication_source_path_provenance_must_match_source_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -344,6 +376,7 @@ class ActorCensusAdjudicationR3Contracts(unittest.TestCase):
             extra = dict(adj)
             extra["inventory_index"] = 2
             extra["source_path"] = "two.mimi"
+            (root / "two.mimi").write_text("synthetic source 2\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "adjudication index roster"):
                 r3.merge_rows([r2_row], [adj, extra], root, expected_count=1)
 
@@ -354,6 +387,201 @@ class ActorCensusAdjudicationR3Contracts(unittest.TestCase):
             adj["independent_candidate_class"] = "expected_build_rejection"
             with self.assertRaisesRegex(ValueError, "route-only disposition"):
                 r3.merge_rows([r2_row], [adj], root, expected_count=1)
+
+    def test_unknown_source_class_and_conflicting_output_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            r2_row, adj = fixture_row(
+                root,
+                1,
+                "one.mimi",
+                adjudication_candidate="required_compile",
+            )
+            adj["independent_candidate_class"] = "invented_class"
+            with self.assertRaisesRegex(ValueError, "unknown source-semantic class"):
+                r3.merge_rows([r2_row], [adj], root, expected_count=1)
+
+            r2_row, adj = fixture_row(
+                root,
+                1,
+                "one.mimi",
+                r1_claims=[
+                    {
+                        "source": "prior",
+                        "field": "expected_class",
+                        "value": "invented_class",
+                    }
+                ],
+                adjudication_candidate="required_compile",
+            )
+            with self.assertRaisesRegex(ValueError, "unknown source-semantic class"):
+                r3.merge_rows([r2_row], [adj], root, expected_count=1)
+
+            r2_row, adj = fixture_row(
+                root,
+                1,
+                "one.mimi",
+                r1_claims=[
+                    {
+                        "source": "repaired_independent_shard",
+                        "field": "expected_class",
+                        "role": "independent_shard_candidate",
+                        "value": "unresolved",
+                    },
+                    {
+                        "source": "schema_v4_r7_ledger",
+                        "field": "source_semantic_class",
+                        "role": "prior_claim_comparison_only",
+                        "value": "required_compile",
+                    },
+                ],
+                adjudication_candidate="expected_source_diagnostic",
+            )
+            rows = r3.merge_rows([r2_row], [adj], root, expected_count=1)
+            rows[0]["source_semantic_class"]["value"] = "required_compile"
+            with self.assertRaisesRegex(ValueError, "candidate/conflict results"):
+                r3.validate_rows(rows, expected_count=1, repo_root=root)
+
+    def test_independent_class_claim_conflict_remains_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            r2_row, adj = fixture_row(
+                root,
+                1,
+                "one.mimi",
+                adjudication_candidate="required_compile",
+            )
+            adj["candidate_semantic_class"] = "known_gap"
+            rows = r3.merge_rows([r2_row], [adj], root, expected_count=1)
+        semantic = rows[0]["source_semantic_class"]
+        self.assertEqual(semantic["value"], "unresolved")
+        self.assertEqual(
+            semantic["status"],
+            "source_class_claim_conflict_forces_unresolved",
+        )
+        self.assertFalse(semantic["update_gate_passed"])
+        self.assertEqual(
+            semantic["class_claim_conflicts"][0]["kind"],
+            "independent_adjudication_candidate_fields_disagree",
+        )
+
+    def test_invalid_authoritative_source_hash_cannot_be_masked_by_valid_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, adj = fixture_row(root, 1, "one.mimi")
+            adj["direct_contract"]["source_sha256_current"] = "not-a-sha256"
+            with self.assertRaisesRegex(ValueError, "malformed authoritative source hash"):
+                r3.adjudication_hash_claims(adj)
+
+    def test_unknown_path_hash_pair_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, adj = fixture_row(root, 1, "one.mimi")
+            adj["direct_contract"]["source_binding"] = {
+                "artifact_path": "one.mimi",
+                "digest": digest(root / "one.mimi"),
+            }
+            with self.assertRaisesRegex(ValueError, "unknown source path/hash schema"):
+                r3.validate_adjudication_source_provenance(adj, root)
+
+    def test_control_status_fields_require_boolean_false_recursively(self) -> None:
+        invalid_rows = [
+            {"nested": [{"accepted": "false"}]},
+            {"nested": [{"mimi_or_cargo_or_test_or_build_executed": "false"}]},
+            {"nested": [{"runtime_or_bootstrap_observation_used": 0}]},
+            {"nested": [{"semantic_authority": "false"}]},
+            {"nested": [{"execution_status": False}]},
+            {"nested": [{"not_executed": "true"}]},
+        ]
+        for row in invalid_rows:
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                r3.validate_input_nonexecution(row, "synthetic")
+            with self.subTest(output=row), self.assertRaises(ValueError):
+                r3._assert_false_fields(row, "synthetic")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, adj = fixture_row(root, 1, "one.mimi")
+            adj["authority_package_current_source_hash_matches"] = None
+            with self.assertRaisesRegex(ValueError, "non-boolean source hash review flag"):
+                r3._source_hash_review_flags(adj)
+
+    def test_write_package_rechecks_live_hashes_before_creating_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            r2_row, adj = fixture_row(
+                root,
+                1,
+                "one.mimi",
+                adjudication_candidate="required_compile",
+            )
+            rows = r3.merge_rows([r2_row], [adj], root, expected_count=1)
+            (root / "one.mimi").write_text("changed after merge\n", encoding="utf-8")
+            output = root / "external-package"
+            with self.assertRaisesRegex(ValueError, "live source SHA changed before package write"):
+                r3.write_package(output, rows, {}, {}, root)
+            self.assertFalse(output.exists())
+
+    def test_hash_and_provenance_blockers_have_separate_summary_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            drifted_r2, drifted_adj = fixture_row(
+                root,
+                1,
+                "drifted.mimi",
+                adjudication_candidate="required_compile",
+            )
+            (root / "drifted.mimi").write_text("drifted bytes\n", encoding="utf-8")
+            retained_r2, retained_adj = fixture_row(
+                root,
+                2,
+                "retained.mimi",
+                r1_claims=[
+                    {
+                        "source": "repaired_independent_shard",
+                        "field": "expected_class",
+                        "role": "independent_shard_candidate",
+                        "value": "unresolved",
+                    }
+                ],
+            )
+            retained_r2["source_hash_validation"]["r1_prior_unresolved_retained"] = True
+            retained_r2["source_hash_validation"]["r1_prior_provenance_status"] = "mismatch_unresolved"
+            rows = r3.merge_rows(
+                [drifted_r2, retained_r2],
+                [drifted_adj, retained_adj],
+                root,
+                expected_count=2,
+            )
+            summary = r3.make_summary(
+                rows,
+                {"unresolved_indices": {1, 2}, "adjudication_by_index": {1: {}, 2: {}}, "shard_files": []},
+            )
+        self.assertEqual(summary["live_source_hash_mismatch_rows"], 1)
+        self.assertEqual(summary["source_hash_provenance_blocker_rows"], 1)
+        self.assertEqual(summary["finalization_blocker_rows"], 2)
+        self.assertNotIn("source_hash_drift_rows", summary)
+
+    def test_manifest_records_merger_hash_and_python_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            r2 = root / "r2.jsonl"
+            r2.write_text('{"inventory_index":1}\n', encoding="utf-8")
+            shard_files = []
+            for ordinal in range(9):
+                shard = root / f"shard-{ordinal}.jsonl"
+                shard.write_text('{"inventory_index":1}\n', encoding="utf-8")
+                shard_files.append(shard)
+            manifest = r3.input_manifest(
+                {
+                    "r2_path": r2,
+                    "r2_rows": [{"inventory_index": 1}],
+                    "shard_files": shard_files,
+                }
+            )
+        self.assertEqual(manifest["merger"]["sha256"], digest(SCRIPT))
+        self.assertTrue(manifest["runtime"]["python_implementation"])
+        self.assertTrue(manifest["runtime"]["python_version"])
+        self.assertTrue(manifest["runtime"]["python_full_version"])
 
     def test_source_has_no_process_execution_api(self) -> None:
         tree = ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT))

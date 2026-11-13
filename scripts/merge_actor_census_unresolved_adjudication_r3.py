@@ -13,10 +13,13 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
+import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
 
@@ -61,6 +64,7 @@ ALLOWED_SOURCE_CLASSES = {
     "environment_failure",
     UNRESOLVED,
 }
+CLASS_METADATA_SENTINELS = {"not_separately_adjudicated"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ADJUDICATION_CLASS_FIELDS = (
     "independent_candidate_class",
@@ -77,10 +81,13 @@ DIRECT_CONTRACT_FIELDS = (
     "source_identity_check",
 )
 ACCEPTANCE_FIELDS = {
+    "acceptance",
     "accepted",
     "accepted_as_route_pass",
     "route_acceptance",
+    "semantic_acceptance",
     "source_semantic_acceptance",
+    "source_semantic_contract_acceptance",
 }
 EXECUTION_FIELDS = {
     "execution_status",
@@ -93,6 +100,36 @@ EXECUTION_FIELDS = {
     "bootstrap_or_runtime_observation_used_as_authority",
 }
 NOT_RUN_VALUES = {"not_run", "not_executed", "not_run_not_accepted"}
+NONEXECUTION_STATUS_FIELDS = {
+    "used_as_semantic_authority",
+    "runtime_or_test_observation_used_as_semantic_authority",
+    "runtime_or_bootstrap_observation_used_as_authority",
+    "runtime_or_bootstrap_observation_used_as_semantic_authority",
+    "bootstrap_or_runtime_observation_used_as_semantic_authority",
+    "runtime_or_bootstrap_authority",
+}
+SOURCE_HASH_STATUS_FIELDS = {
+    "source_sha256_matches_frozen_ledger",
+    "source_sha256_matches_frozen_locator_records",
+}
+SOURCE_BINDING_CONTEXTS = (
+    "direct_contract",
+    "direct_check_contract",
+    "proposed_direct_contract",
+    "source_binding",
+    "source_identity",
+    "source_identity_check",
+    "source_hash_recheck",
+)
+NON_PRIMARY_SOURCE_CONTEXTS = (
+    "non_normative_source_context",
+    "normative_basis",
+    "diagnostic_catalog_context_not_decisive",
+    "docs_spec_scope_check",
+    "test",
+    "tool",
+    "existing_test",
+)
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -146,21 +183,40 @@ def unique_index_and_path(
     label: str,
     *,
     expected_count: int | None = None,
+    repo_root: Path | None = None,
 ) -> dict[int, dict[str, Any]]:
     by_index: dict[int, dict[str, Any]] = {}
     by_path: dict[str, int] = {}
+    by_inode: dict[tuple[int, int], tuple[int, str]] = {}
     for row in rows:
         index = row_index(row)
         path = row_path(row)
+        candidate = PurePosixPath(path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError(f"unsafe {label} source path {path!r}")
+        canonical_path = candidate.as_posix()
+        if canonical_path in {"", "."}:
+            raise ValueError(f"empty {label} source path {path!r}")
         if index in by_index:
             raise ValueError(f"duplicate {label} index {index}")
-        if path in by_path:
+        if canonical_path in by_path:
             raise ValueError(
                 f"duplicate {label} source path {path!r} at indices "
-                f"{by_path[path]} and {index}"
+                f"{by_path[canonical_path]} and {index}"
             )
+        if repo_root is not None:
+            source_file = safe_source_file(repo_root, path)
+            stat = source_file.stat()
+            inode = (stat.st_dev, stat.st_ino)
+            if inode in by_inode:
+                prior_index, prior_path = by_inode[inode]
+                raise ValueError(
+                    f"duplicate {label} physical source file {path!r} and "
+                    f"{prior_path!r} at indices {prior_index} and {index}"
+                )
+            by_inode[inode] = (index, path)
         by_index[index] = row
-        by_path[path] = index
+        by_path[canonical_path] = index
     if expected_count is not None:
         expected = set(range(1, expected_count + 1))
         missing = sorted(expected - set(by_index))
@@ -217,6 +273,10 @@ def add_class_claim(
 ) -> None:
     value = class_value(raw_value)
     if value is None:
+        if raw_value is not None:
+            raise ValueError(
+                f"invalid class claim at {source}.{field}: {raw_value!r}"
+            )
         return
     if value == ROUTE_ONLY_CLASS:
         claims.append(
@@ -230,18 +290,22 @@ def add_class_claim(
             }
         )
         return
-    if value not in ALLOWED_SOURCE_CLASSES:
+    if value in CLASS_METADATA_SENTINELS:
         claims.append(
             {
                 "source": source,
                 "field": field,
                 "value": value,
-                "axis": "unrecognized_claim_preserved",
+                "axis": "class_metadata_only",
                 "semantic_candidate": False,
                 "raw_value_verbatim": raw_value,
             }
         )
         return
+    if value not in ALLOWED_SOURCE_CLASSES:
+        raise ValueError(
+            f"unknown source-semantic class claim at {source}.{field}: {value!r}"
+        )
     claims.append(
         {
             "source": source,
@@ -370,19 +434,20 @@ def adjudication_hash_claims(
     historical: list[dict[str, str]] = []
     for location, mapping in walk_mappings(row):
         for key, value in mapping.items():
-            if not isinstance(value, str) or not _is_hash(value):
-                continue
             name = str(key).lower()
             context = f"{location}.{name}".lower()
+            if name in SOURCE_HASH_STATUS_FIELDS:
+                continue
             if "test" in context or "normative_basis" in context or "file_sha256" in name:
                 continue
-            looks_source_bound = (
-                name.startswith("source_sha256")
-                or name in {"expected_sha256", "sha256"}
-                and any(token in context for token in ("source_identity", "source_binding", "source_hash_recheck"))
-            )
+            looks_source_bound = _is_authoritative_source_hash_field(name, context)
             if not looks_source_bound:
                 continue
+            if not _is_hash(value):
+                raise ValueError(
+                    f"adjudication row {row_index(row)} has malformed authoritative "
+                    f"source hash at {location}.{key}: {value!r}"
+                )
             claim = {"field_path": f"{location}.{key}", "sha256": value}
             if any(token in name for token in ("first_review", "review_start", "original")):
                 historical.append(claim)
@@ -391,10 +456,126 @@ def adjudication_hash_claims(
     return current, historical
 
 
+def _is_authoritative_source_hash_field(name: str, context: str) -> bool:
+    if name.startswith("source_sha256"):
+        return not any(token in name for token in ("matches_", "_matches", "_bound", "_verified"))
+    if name in {"expected_sha256", "sha256", "sha256_current"}:
+        return any(token in context for token in SOURCE_BINDING_CONTEXTS)
+    return False
+
+
+def validate_source_binding_schema(row: Mapping[str, Any]) -> None:
+    """Reject unrecognized path/hash pairs in source authority structures."""
+    known_path_fields = {"source_path", "source_path_absolute", "path", "exact_path"}
+    known_hash_fields = {
+        "source_sha256",
+        "expected_sha256",
+        "sha256",
+        "sha256_current",
+        *SOURCE_HASH_STATUS_FIELDS,
+    }
+    for location, mapping in walk_mappings(row):
+        for key in SOURCE_HASH_STATUS_FIELDS:
+            if key in mapping and not isinstance(mapping[key], bool):
+                raise ValueError(
+                    f"adjudication row {row_index(row)} has non-boolean hash status "
+                    f"at {location}.{key}"
+                )
+        context = location.lower()
+        if any(token in context for token in NON_PRIMARY_SOURCE_CONTEXTS):
+            continue
+        is_contextual_reference = "referenced_current_source_context" in context
+        in_binding_context = any(token in context for token in SOURCE_BINDING_CONTEXTS)
+        path_fields = [
+            str(key).lower()
+            for key, value in mapping.items()
+            if isinstance(value, str)
+            and not str(key).lower().startswith("test_")
+            and ("path" in str(key).lower() or str(key).lower() in {"file", "source"})
+        ]
+        hash_fields = [
+            str(key).lower()
+            for key, value in mapping.items()
+            if not str(key).lower().startswith("test_")
+            and (
+                "sha256" in str(key).lower()
+                or str(key).lower() in {"sha256", "expected_sha256", "hash", "digest"}
+            )
+        ]
+        has_source_path = any(field in {"source_path", "source_path_absolute"} for field in path_fields)
+        if path_fields and hash_fields and not (
+            in_binding_context or has_source_path or is_contextual_reference
+        ):
+            raise ValueError(
+                f"adjudication row {row_index(row)} has an unbound path/hash pair at "
+                f"{location}: paths={path_fields}, hashes={hash_fields}"
+            )
+        if not (in_binding_context or has_source_path or is_contextual_reference):
+            continue
+        if not path_fields and not hash_fields:
+            continue
+        unknown_paths = sorted(set(path_fields) - known_path_fields - {"file", "source"})
+        unknown_hashes = sorted(
+            field
+            for field in set(hash_fields)
+            if field not in known_hash_fields
+            and not (
+                field.startswith("source_sha256")
+                and not any(
+                    token in field
+                    for token in ("matches_", "_matches", "_bound", "_verified")
+                )
+            )
+        )
+        if unknown_paths or unknown_hashes:
+            raise ValueError(
+                f"adjudication row {row_index(row)} has unknown source path/hash "
+                f"schema at {location}: paths={unknown_paths}, hashes={unknown_hashes}"
+            )
+        if is_contextual_reference:
+            digest = mapping.get("sha256_current")
+            if not isinstance(mapping.get("path"), str) or not _is_hash(digest):
+                raise ValueError(
+                    f"adjudication row {row_index(row)} has malformed contextual "
+                    f"source reference at {location}"
+                )
+
+
 def r2_expected_hashes(row: Mapping[str, Any]) -> list[dict[str, str]]:
     validation = row.get("source_hash_validation")
     if not isinstance(validation, Mapping):
         raise ValueError(f"r2 row {row_index(row)} lacks source_hash_validation")
+    for field in ("live_matches_r1_ledger", "live_matches_direct_supplement"):
+        if field in validation and not isinstance(validation[field], bool):
+            raise ValueError(f"r2 row {row_index(row)} has non-boolean {field}")
+    if "r1_prior_unresolved_retained" in validation and not isinstance(
+        validation["r1_prior_unresolved_retained"], bool
+    ):
+        raise ValueError(
+            f"r2 row {row_index(row)} has non-boolean r1_prior_unresolved_retained"
+        )
+    provenance_status = validation.get("r1_prior_provenance_status")
+    if provenance_status not in {"all_current_bindings_match", "mismatch_unresolved"}:
+        raise ValueError(
+            f"r2 row {row_index(row)} has unknown r1 hash provenance status: "
+            f"{provenance_status!r}"
+        )
+    mismatch_reasons = validation.get("mismatch_reasons", [])
+    if not isinstance(mismatch_reasons, list) or any(
+        not isinstance(reason, str) for reason in mismatch_reasons
+    ):
+        raise ValueError(f"r2 row {row_index(row)} has malformed hash mismatch reasons")
+    known_mismatch_reasons = {
+        "r1_prior_source_hash_provenance_unresolved_retained",
+        "source_hash_recheck_flag_reports_mismatch_or_drift",
+        "embedded_source_hash_claim_differs_from_live_source",
+        "supplement_candidate_class_differs_from_orthogonal_ledger",
+    }
+    unknown_reasons = sorted(set(mismatch_reasons) - known_mismatch_reasons)
+    if unknown_reasons:
+        raise ValueError(
+            f"r2 row {row_index(row)} has unknown prior mismatch reasons: {unknown_reasons}"
+        )
     result: list[dict[str, str]] = []
     for field in (
         "live_source_sha256",
@@ -427,23 +608,62 @@ def r2_expected_hashes(row: Mapping[str, Any]) -> list[dict[str, str]]:
     return result
 
 
+def r2_hash_provenance_blockers(row: Mapping[str, Any]) -> list[str]:
+    validation = row.get("source_hash_validation", {})
+    if not isinstance(validation, Mapping):
+        return ["missing_r2_source_hash_validation"]
+    reasons = list(validation.get("mismatch_reasons", []))
+    blockers = [
+        f"r2_prior_hash_provenance:{reason}"
+        for reason in reasons
+        if reason != "supplement_candidate_class_differs_from_orthogonal_ledger"
+    ]
+    if validation.get("r1_prior_provenance_status") == "mismatch_unresolved":
+        blockers.append("r1_prior_hash_provenance_status_mismatch_unresolved")
+    return sorted(set(blockers))
+
+
+def _validate_control_field(name: str, child: Any, label: str, location: str) -> None:
+    if name in ACCEPTANCE_FIELDS:
+        if not isinstance(child, bool) or child is not False:
+            raise ValueError(f"{label}{location} must be the boolean false")
+        return
+    if name == "execution_status":
+        if not isinstance(child, str) or child not in NOT_RUN_VALUES:
+            raise ValueError(f"{label}{location} must remain not_run")
+        return
+    if name == "not_executed":
+        if not isinstance(child, bool) or child is not True:
+            raise ValueError(f"{label}{location} must be boolean true")
+        return
+    if name == "semantic_authority":
+        if isinstance(child, bool):
+            if child is not False:
+                raise ValueError(f"{label}{location} must be boolean false")
+            return
+        if isinstance(child, str) and (
+            "direct_test_contracts" in location or "raw_contract_verbatim" in location
+        ):
+            return
+        raise ValueError(f"{label}{location} has an invalid semantic_authority shape")
+    execution_flag = (
+        name in EXECUTION_FIELDS or name.endswith("_executed") or name == "executed"
+    )
+    authority_flag = name in NONEXECUTION_STATUS_FIELDS or (
+        ("runtime" in name or "bootstrap" in name)
+        and ("authority" in name or name.endswith("_used"))
+    )
+    if execution_flag or authority_flag:
+        if not isinstance(child, bool) or child is not False:
+            raise ValueError(f"{label}{location} must be boolean false; execution/authority is forbidden")
+
+
 def validate_input_nonexecution(value: Any, label: str, location: str = "$") -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
             name = str(key).lower()
             child_location = f"{location}.{key}"
-            if name in ACCEPTANCE_FIELDS and child is not False:
-                raise ValueError(f"{label}{child_location} must be false")
-            if name in EXECUTION_FIELDS:
-                if isinstance(child, bool) and child is not False:
-                    raise ValueError(f"{label}{child_location} reports execution/authority")
-                if isinstance(child, str) and name == "execution_status" and child not in NOT_RUN_VALUES:
-                    raise ValueError(f"{label}{child_location} is not not_run: {child!r}")
-            if name in {
-                "runtime_or_test_observation_used_as_semantic_authority",
-                "runtime_or_bootstrap_observation_used_as_authority",
-            } and child is not False:
-                raise ValueError(f"{label}{child_location} must be false")
+            _validate_control_field(name, child, label, child_location)
             validate_input_nonexecution(child, label, child_location)
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -463,6 +683,7 @@ def validate_adjudication_source_provenance(
     repo_root: Path,
 ) -> None:
     """Fail closed when an adjudication row binds a different Mimi source."""
+    validate_source_binding_schema(row)
     expected = row_path(row)
     expected_file = safe_source_file(repo_root, expected)
     for location, mapping in walk_mappings(row):
@@ -475,9 +696,32 @@ def validate_adjudication_source_provenance(
                 continue
             source_path_field = name in {"source_path", "source_path_absolute"}
             contract_input_path = name == "path" and any(
-                token in path for token in (".input.", ".source_binding.", ".source_identity_check.")
+                token in path
+                for token in (
+                    ".input.",
+                    ".source_binding.",
+                    ".source_identity_check.",
+                    ".source_hash_recheck.",
+                )
             )
+            contextual_reference = "referenced_current_source_context" in path
             if not source_path_field and not contract_input_path:
+                if not contextual_reference or name != "path":
+                    continue
+            if contextual_reference and name == "path":
+                claimed = Path(value)
+                try:
+                    resolved = (
+                        claimed.resolve(strict=True)
+                        if claimed.is_absolute()
+                        else (repo_root / claimed).resolve(strict=True)
+                    )
+                    resolved.relative_to(repo_root.resolve(strict=True))
+                except (OSError, ValueError) as error:
+                    raise ValueError(
+                        f"adjudication row {row_index(row)} has an unsafe contextual "
+                        f"source-path claim at {location}.{key}: {value!r}"
+                    ) from error
                 continue
             claimed = Path(value)
             try:
@@ -507,7 +751,7 @@ def load_inputs(
     r2_path = input_root / R2_RELATIVE_PATH
     r2_rows = read_jsonl(r2_path)
     r2_by_index = unique_index_and_path(
-        r2_rows, "r2 ledger", expected_count=expected_count
+        r2_rows, "r2 ledger", expected_count=expected_count, repo_root=repo_root
     )
     unresolved = {
         index
@@ -540,7 +784,9 @@ def load_inputs(
             shard_indices.add(index)
             shard_paths.add(source)
             adjudication_rows.append(row)
-    adjudication_by_index = unique_index_and_path(adjudication_rows, "adjudication")
+    adjudication_by_index = unique_index_and_path(
+        adjudication_rows, "adjudication", repo_root=repo_root
+    )
     if set(adjudication_by_index) != unresolved:
         missing = sorted(unresolved - set(adjudication_by_index))
         extra = sorted(set(adjudication_by_index) - unresolved)
@@ -557,6 +803,7 @@ def load_inputs(
                 f"{row_path(row)!r} != {row_path(r2_row)!r}"
             )
         validate_input_nonexecution(row, f"adjudication[{index}]")
+        _source_hash_review_flags(row)
         claims = validate_candidate_claims(row, index)
         current_hashes, _ = adjudication_hash_claims(row)
         if not current_hashes or not any(
@@ -579,6 +826,7 @@ def load_inputs(
         validate_adjudication_source_provenance(row, repo_root)
     for row in r2_rows:
         validate_input_nonexecution(row, f"r2[{row_index(row)}]")
+        _source_hash_review_flags(row)
         r2_expected_hashes(row)
         safe_source_file(repo_root, row_path(row))
     return {
@@ -610,9 +858,23 @@ def _source_hash_review_flags(row: Mapping[str, Any]) -> list[str]:
     for location, mapping in walk_mappings(row):
         for key, value in mapping.items():
             name = str(key).lower()
+            context = f"{location}.{name}".lower()
+            source_hash_context = any(
+                token in context for token in ("source_hash", "source_sha", "source_identity")
+            )
+            is_hash_review_flag = (
+                name in SOURCE_HASH_STATUS_FIELDS
+                or any(token in name for token in ("drift", "mismatch", "stable", "match"))
+                and source_hash_context
+                and not name.endswith(("_reason", "_reasons", "_status", "_details", "_description"))
+            )
+            if is_hash_review_flag and not isinstance(value, bool):
+                raise ValueError(
+                    f"adjudication row {row_index(row)} has non-boolean source hash "
+                    f"review flag at {context}"
+                )
             if not isinstance(value, bool):
                 continue
-            context = f"{location}.{name}".lower()
             if ("drift" in name or "mismatch" in name) and value is True:
                 reasons.append(f"{context}=true")
             if ("stable" in name or "match" in name or "rechecked" in name) and value is False:
@@ -633,13 +895,13 @@ def _source_hash_state(
     adjud_hashes: list[dict[str, str]] = []
     historical: list[dict[str, str]] = []
     adjud_matches: bool | None = None
-    review_flags: list[str] = []
+    review_flags: list[str] = _source_hash_review_flags(r2_row)
     if adjudication_row is not None:
         adjud_hashes, historical = adjudication_hash_claims(adjudication_row)
         if not adjud_hashes:
             raise ValueError(f"adjudication row {row_index(adjudication_row)} has no current source hash")
         adjud_matches = all(item["sha256"] == live_sha for item in adjud_hashes)
-        review_flags = _source_hash_review_flags(adjudication_row)
+        review_flags.extend(_source_hash_review_flags(adjudication_row))
         for item in historical:
             if item["sha256"] != live_sha:
                 review_flags.append(
@@ -648,17 +910,25 @@ def _source_hash_state(
     validation = r2_row.get("source_hash_validation", {})
     r1_prior_unresolved = (
         isinstance(validation, Mapping)
-        and validation.get("r1_prior_unresolved_retained") is True
+        and (
+            validation.get("r1_prior_unresolved_retained") is True
+            or validation.get("r1_prior_provenance_status") == "mismatch_unresolved"
+        )
     )
-    reasons: list[str] = []
+    live_hash_mismatch_reasons: list[str] = []
     if not r2_matches:
-        reasons.append("live_source_differs_from_r2_frozen_source_hash")
+        live_hash_mismatch_reasons.append("live_source_differs_from_r2_frozen_source_hash")
     if adjud_matches is False:
-        reasons.append("live_source_differs_from_adjudication_current_hash")
+        live_hash_mismatch_reasons.append(
+            "live_source_differs_from_adjudication_current_source_hash"
+        )
+    provenance_blockers: list[str] = []
+    provenance_blockers.extend(r2_hash_provenance_blockers(r2_row))
     if review_flags:
-        reasons.append("source_hash_drift_or_recheck_flag_in_adjudication")
+        provenance_blockers.append("source_hash_review_flag_or_historical_pin_mismatch")
     if r1_prior_unresolved:
-        reasons.append("r1_prior_unresolved_source_hash_provenance_retained")
+        provenance_blockers.append("r1_prior_unresolved_source_hash_provenance_retained")
+    blocked = bool(live_hash_mismatch_reasons or provenance_blockers)
     return {
         "live_source_sha256": live_sha,
         "r2_source_hash_claims": r2_hashes,
@@ -673,8 +943,11 @@ def _source_hash_state(
             else None
         ),
         "r1_prior_unresolved_retained": r1_prior_unresolved,
-        "hash_drift_reasons": sorted(set(reasons)),
-        "status": "all_source_hashes_match_current" if not reasons else "source_hash_drift_or_prior_mismatch",
+        "live_source_hash_mismatch_reasons": sorted(set(live_hash_mismatch_reasons)),
+        "source_hash_provenance_blockers": sorted(set(provenance_blockers)),
+        "status": "all_source_hashes_and_provenance_match"
+        if not blocked
+        else "source_hash_or_provenance_blocked",
     }
 
 
@@ -952,7 +1225,9 @@ def _effective_source_class(
                 "prior_values": sorted(concrete_prior),
             }
         )
-    hash_blocked = bool(hash_state["hash_drift_reasons"])
+    live_hash_blocked = bool(hash_state["live_source_hash_mismatch_reasons"])
+    provenance_blocked = bool(hash_state["source_hash_provenance_blockers"])
+    hash_blocked = live_hash_blocked or provenance_blocked
     basis_present = adjudication_row is not None and normative_basis_present(adjudication_row)
     update_allowed = (
         adjudication_row is not None
@@ -965,9 +1240,12 @@ def _effective_source_class(
     if adjudication_row is None:
         effective = r2_value
         status = "r2_candidate_retained_without_unresolved_adjudication"
-        if hash_blocked:
+        if live_hash_blocked:
             effective = UNRESOLVED
-            status = "source_hash_drift_forces_unresolved"
+            status = "live_source_hash_mismatch_forces_unresolved"
+        elif provenance_blocked:
+            effective = UNRESOLVED
+            status = "source_hash_provenance_blocker_forces_unresolved"
         elif conflicts:
             effective = UNRESOLVED
             status = "source_class_claim_conflict_forces_unresolved"
@@ -976,8 +1254,10 @@ def _effective_source_class(
         status = "independent_candidate_reconciled_candidate_only"
     else:
         effective = UNRESOLVED
-        if hash_blocked:
-            status = "source_hash_drift_forces_unresolved"
+        if live_hash_blocked:
+            status = "live_source_hash_mismatch_forces_unresolved"
+        elif provenance_blocked:
+            status = "source_hash_provenance_blocker_forces_unresolved"
         elif conflicts:
             status = "source_class_claim_conflict_forces_unresolved"
         elif not basis_present:
@@ -1009,14 +1289,16 @@ def merge_rows(
     expected_count: int | None = COUNT,
 ) -> list[dict[str, Any]]:
     r2_by_index = unique_index_and_path(
-        r2_rows, "r2 ledger", expected_count=expected_count
+        r2_rows, "r2 ledger", expected_count=expected_count, repo_root=repo_root
     )
     unresolved_indices = {
         index
         for index, row in r2_by_index.items()
         if class_value(row.get("source_semantic_class")) == UNRESOLVED
     }
-    adjudication_by_index = unique_index_and_path(adjudication_rows, "adjudication")
+    adjudication_by_index = unique_index_and_path(
+        adjudication_rows, "adjudication", repo_root=repo_root
+    )
     if set(adjudication_by_index) != unresolved_indices:
         missing = sorted(unresolved_indices - set(adjudication_by_index))
         extra = sorted(set(adjudication_by_index) - unresolved_indices)
@@ -1079,9 +1361,12 @@ def merge_rows(
             "runtime_or_bootstrap_authority": False,
             "source_hash_validation": hash_state,
             "source_hash_review_status": (
-                "source_hash_reconciled"
-                if not hash_state["hash_drift_reasons"]
-                else "unresolved_source_hash_drift_or_prior_mismatch"
+                "source_hash_and_provenance_reconciled"
+                if not (
+                    hash_state["live_source_hash_mismatch_reasons"]
+                    or hash_state["source_hash_provenance_blockers"]
+                )
+                else "unresolved_source_hash_or_provenance_blocker"
             ),
             "blockers": sorted(
                 set(
@@ -1091,8 +1376,13 @@ def merge_rows(
                         else []
                     )
                     + (
-                        ["source_hash_drift_or_prior_mismatch"]
-                        if hash_state["hash_drift_reasons"]
+                        ["live_source_hash_mismatch"]
+                        if hash_state["live_source_hash_mismatch_reasons"]
+                        else []
+                    )
+                    + (
+                        ["source_hash_provenance_blocker"]
+                        if hash_state["source_hash_provenance_blockers"]
                         else []
                     )
                     + (
@@ -1107,6 +1397,7 @@ def merge_rows(
     validate_rows(
         result,
         expected_count=expected_count if expected_count is not None else None,
+        repo_root=repo_root,
     )
     return result
 
@@ -1116,28 +1407,240 @@ def _assert_false_fields(value: Any, label: str, location: str = "$") -> None:
         for key, child in value.items():
             name = str(key).lower()
             path = f"{location}.{key}"
-            if name in ACCEPTANCE_FIELDS and child is not False:
-                raise ValueError(f"{label}{path} must be false")
-            if name == "execution_status" and child not in NOT_RUN_VALUES:
-                raise ValueError(f"{label}{path} must remain not_run")
-            if name in EXECUTION_FIELDS and isinstance(child, bool) and child is not False:
-                raise ValueError(f"{label}{path} claims execution or runtime authority")
-            if name in {
-                "runtime_or_test_observation_used_as_semantic_authority",
-                "runtime_or_bootstrap_observation_used_as_authority",
-            } and child is not False:
-                raise ValueError(f"{label}{path} must be false")
+            _validate_control_field(name, child, label, path)
             _assert_false_fields(child, label, path)
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _assert_false_fields(child, label, f"{location}[{index}]")
 
 
+def _expected_class_conflicts(
+    candidate_values: set[str], prior_values: set[str]
+) -> list[dict[str, Any]]:
+    candidate = next(iter(candidate_values)) if len(candidate_values) == 1 else UNRESOLVED
+    conflicts: list[dict[str, Any]] = []
+    if len(candidate_values) > 1:
+        conflicts.append(
+            {
+                "kind": "independent_adjudication_candidate_fields_disagree",
+                "values": sorted(candidate_values),
+            }
+        )
+    if len(prior_values) > 1:
+        conflicts.append(
+            {
+                "kind": "prior_source_semantic_claims_disagree",
+                "values": sorted(prior_values),
+            }
+        )
+    if candidate != UNRESOLVED and prior_values and prior_values != {candidate}:
+        conflicts.append(
+            {
+                "kind": "independent_candidate_conflicts_with_prior_class_claims",
+                "candidate": candidate,
+                "prior_values": sorted(prior_values),
+            }
+        )
+    return conflicts
+
+
+def _validate_semantic_result(row: Mapping[str, Any], index: int) -> None:
+    semantic = row["source_semantic_class"]
+    candidate_claims = semantic.get("independent_candidate_claims_verbatim")
+    prior_claims = semantic.get("r2_source_semantic_claims_verbatim")
+    if not isinstance(candidate_claims, list) or not isinstance(prior_claims, list):
+        raise ValueError(f"r3 row {index} lacks class-claim evidence lists")
+    candidate_values: set[str] = set()
+    for claim in candidate_claims:
+        if not isinstance(claim, Mapping):
+            raise ValueError(f"r3 row {index} has malformed independent class claim")
+        value = claim.get("value")
+        axis = claim.get("axis")
+        if axis == "route_expectation_only":
+            raise ValueError(f"r3 row {index} mixes route expectation into source class")
+        if axis == "source_semantic":
+            if value not in ALLOWED_SOURCE_CLASSES:
+                raise ValueError(f"r3 row {index} has unknown independent source class")
+            candidate_values.add(value)
+        elif axis not in {"class_metadata_only"}:
+            raise ValueError(f"r3 row {index} has unknown class-claim axis {axis!r}")
+    prior_values: set[str] = set()
+    for claim in prior_claims:
+        if not isinstance(claim, Mapping):
+            raise ValueError(f"r3 row {index} has malformed prior class claim")
+        axis = claim.get("axis")
+        value = claim.get("value")
+        if axis == "source_semantic":
+            if value not in ALLOWED_SOURCE_CLASSES:
+                raise ValueError(f"r3 row {index} has unknown prior source class")
+            if value != UNRESOLVED:
+                prior_values.add(value)
+        elif axis not in {"route_expectation_only", "class_metadata_only"}:
+            raise ValueError(f"r3 row {index} has unknown prior class-claim axis {axis!r}")
+    sorted_candidates = sorted(candidate_values)
+    sorted_prior = sorted(prior_values)
+    candidate = next(iter(candidate_values)) if len(candidate_values) == 1 else UNRESOLVED
+    expected_conflicts = _expected_class_conflicts(candidate_values, prior_values)
+    if semantic.get("independent_candidate_values") != sorted_candidates:
+        raise ValueError(f"r3 row {index} candidate category does not match its claims")
+    if semantic.get("independent_candidate_value") != candidate:
+        raise ValueError(f"r3 row {index} candidate value does not match its claims")
+    if semantic.get("prior_concrete_source_semantic_values") != sorted_prior:
+        raise ValueError(f"r3 row {index} prior classes do not match their claims")
+    if semantic.get("class_claim_conflicts") != expected_conflicts:
+        raise ValueError(f"r3 row {index} conflict result does not match class claims")
+    adjudication = row.get("independent_adjudication_row_verbatim")
+    basis_present = isinstance(adjudication, Mapping) and normative_basis_present(adjudication)
+    if semantic.get("normative_basis_present") is not basis_present:
+        raise ValueError(f"r3 row {index} normative-basis status does not match source evidence")
+    hash_state = row["source_hash_validation"]
+    live_hash_blocked = bool(hash_state.get("live_source_hash_mismatch_reasons"))
+    provenance_blocked = bool(hash_state.get("source_hash_provenance_blockers"))
+    hash_blocked = live_hash_blocked or provenance_blocked
+    update_allowed = bool(
+        isinstance(adjudication, Mapping)
+        and candidate != UNRESOLVED
+        and len(candidate_values) == 1
+        and basis_present
+        and not expected_conflicts
+        and not hash_blocked
+    )
+    if semantic.get("update_gate_passed") is not update_allowed:
+        raise ValueError(f"r3 row {index} update gate does not match candidate/blockers")
+    r2_row = row["r2_full_row_verbatim"]
+    raw_r2_value = class_value(r2_row.get("source_semantic_class"))
+    if update_allowed:
+        expected_value = candidate
+        expected_status = "independent_candidate_reconciled_candidate_only"
+    elif adjudication is None:
+        expected_value = raw_r2_value
+        expected_status = "r2_candidate_retained_without_unresolved_adjudication"
+        if live_hash_blocked:
+            expected_value = UNRESOLVED
+            expected_status = "live_source_hash_mismatch_forces_unresolved"
+        elif provenance_blocked:
+            expected_value = UNRESOLVED
+            expected_status = "source_hash_provenance_blocker_forces_unresolved"
+        elif expected_conflicts:
+            expected_value = UNRESOLVED
+            expected_status = "source_class_claim_conflict_forces_unresolved"
+    else:
+        expected_value = UNRESOLVED
+        if live_hash_blocked:
+            expected_status = "live_source_hash_mismatch_forces_unresolved"
+        elif provenance_blocked:
+            expected_status = "source_hash_provenance_blocker_forces_unresolved"
+        elif expected_conflicts:
+            expected_status = "source_class_claim_conflict_forces_unresolved"
+        elif not basis_present:
+            expected_status = "missing_normative_basis_forces_unresolved"
+        else:
+            expected_status = "independent_candidate_unresolved"
+    if semantic.get("value") != expected_value or semantic.get("status") != expected_status:
+        raise ValueError(
+            f"r3 row {index} output class/status disagrees with candidate/conflict results"
+        )
+    expected_blockers = []
+    if expected_conflicts:
+        expected_blockers.append("source_semantic_class_claim_conflict")
+    if live_hash_blocked:
+        expected_blockers.append("live_source_hash_mismatch")
+    if provenance_blocked:
+        expected_blockers.append("source_hash_provenance_blocker")
+    if isinstance(adjudication, Mapping) and not basis_present:
+        expected_blockers.append("independent_candidate_normative_basis_missing")
+    if row.get("blockers") != sorted(expected_blockers):
+        raise ValueError(f"r3 row {index} blocker categories do not match observed evidence")
+    expected_hash_review = (
+        "source_hash_and_provenance_reconciled"
+        if not hash_blocked
+        else "unresolved_source_hash_or_provenance_blocker"
+    )
+    if row.get("source_hash_review_status") != expected_hash_review:
+        raise ValueError(f"r3 row {index} hash-review category does not match hash evidence")
+
+
+def _validate_hash_state(row: Mapping[str, Any], index: int) -> None:
+    state = row.get("source_hash_validation")
+    if not isinstance(state, Mapping) or not _is_hash(state.get("live_source_sha256")):
+        raise ValueError(f"r3 row {index} has no live source SHA binding")
+    r2_row = row.get("r2_full_row_verbatim")
+    if not isinstance(r2_row, Mapping):
+        raise ValueError(f"r3 row {index} lacks the original r2 row")
+    expected_r2_hashes = r2_expected_hashes(r2_row)
+    if state.get("r2_source_hash_claims") != expected_r2_hashes:
+        raise ValueError(f"r3 row {index} altered the r2 source hash claims")
+    live_sha = state["live_source_sha256"]
+    r2_matches = all(claim["sha256"] == live_sha for claim in expected_r2_hashes)
+    if state.get("r2_hash_claims_match_live") is not r2_matches:
+        raise ValueError(f"r3 row {index} misreports r2/live hash agreement")
+    adjudication = row.get("independent_adjudication_row_verbatim")
+    review_flags = _source_hash_review_flags(r2_row)
+    adjudication_hashes: list[dict[str, str]] = []
+    historical: list[dict[str, str]] = []
+    adjudication_matches: bool | None = None
+    if adjudication is not None:
+        if not isinstance(adjudication, Mapping):
+            raise ValueError(f"r3 row {index} has malformed adjudication evidence")
+        adjudication_hashes, historical = adjudication_hash_claims(adjudication)
+        adjudication_matches = all(claim["sha256"] == live_sha for claim in adjudication_hashes)
+        review_flags.extend(_source_hash_review_flags(adjudication))
+        for claim in historical:
+            if claim["sha256"] != live_sha:
+                review_flags.append(f"{claim['field_path']} differs from current live source SHA")
+    if state.get("adjudication_current_source_hash_claims") != adjudication_hashes:
+        raise ValueError(f"r3 row {index} altered the adjudication current hash claims")
+    if state.get("adjudication_current_hash_claims_match_live") is not adjudication_matches:
+        raise ValueError(f"r3 row {index} misreports adjudication/live hash agreement")
+    if state.get("adjudication_historical_source_hash_claims") != historical:
+        raise ValueError(f"r3 row {index} altered the historical hash evidence")
+    review_flags = sorted(set(review_flags))
+    if state.get("source_hash_review_flags") != review_flags:
+        raise ValueError(f"r3 row {index} altered source hash review flags")
+    validation = r2_row.get("source_hash_validation", {})
+    prior_unresolved = (
+        isinstance(validation, Mapping)
+        and (
+            validation.get("r1_prior_unresolved_retained") is True
+            or validation.get("r1_prior_provenance_status") == "mismatch_unresolved"
+        )
+    )
+    if state.get("r1_prior_unresolved_retained") is not prior_unresolved:
+        raise ValueError(f"r3 row {index} misreports prior provenance retention")
+    live_reasons = []
+    if not r2_matches:
+        live_reasons.append("live_source_differs_from_r2_frozen_source_hash")
+    if adjudication_matches is False:
+        live_reasons.append("live_source_differs_from_adjudication_current_source_hash")
+    provenance_reasons = r2_hash_provenance_blockers(r2_row)
+    if review_flags:
+        provenance_reasons.append("source_hash_review_flag_or_historical_pin_mismatch")
+    if prior_unresolved:
+        provenance_reasons.append("r1_prior_unresolved_source_hash_provenance_retained")
+    live_reasons = sorted(set(live_reasons))
+    provenance_reasons = sorted(set(provenance_reasons))
+    if state.get("live_source_hash_mismatch_reasons") != live_reasons:
+        raise ValueError(f"r3 row {index} live hash blocker classification is inconsistent")
+    if state.get("source_hash_provenance_blockers") != provenance_reasons:
+        raise ValueError(f"r3 row {index} provenance blocker classification is inconsistent")
+    blocked = bool(live_reasons or provenance_reasons)
+    expected_status = (
+        "source_hash_or_provenance_blocked"
+        if blocked
+        else "all_source_hashes_and_provenance_match"
+    )
+    if state.get("status") != expected_status:
+        raise ValueError(f"r3 row {index} hash validation status is inconsistent")
+
+
 def validate_rows(
-    rows: Sequence[dict[str, Any]], *, expected_count: int | None = COUNT
+    rows: Sequence[dict[str, Any]],
+    *,
+    expected_count: int | None = COUNT,
+    repo_root: Path | None = REPO_ROOT,
 ) -> None:
     by_index = unique_index_and_path(
-        list(rows), "r3 ledger", expected_count=expected_count
+        list(rows), "r3 ledger", expected_count=expected_count, repo_root=repo_root
     )
     for index, row in by_index.items():
         if row.get("schema") != "actor-census-source-bound-schema-v4-adjudication-r3":
@@ -1159,13 +1662,17 @@ def validate_rows(
             raise ValueError(f"r3 row {index} contains route/unknown value in source class")
         if semantic.get("accepted") is not False or semantic.get("candidate_only") is not True:
             raise ValueError(f"r3 row {index} source class must remain candidate-only")
-        if semantic.get("class_claim_conflicts") and semantic.get("value") != UNRESOLVED:
-            raise ValueError(f"r3 row {index} resolves a source-class conflict")
+        _validate_semantic_result(row, index)
         hash_state = row.get("source_hash_validation")
-        if not isinstance(hash_state, Mapping) or not _is_hash(hash_state.get("live_source_sha256")):
-            raise ValueError(f"r3 row {index} has no live source SHA binding")
-        if hash_state.get("hash_drift_reasons") and semantic.get("value") != UNRESOLVED:
-            raise ValueError(f"r3 row {index} promotes a source class despite hash drift")
+        _validate_hash_state(row, index)
+        if any(
+            hash_state.get(key)
+            for key in (
+                "live_source_hash_mismatch_reasons",
+                "source_hash_provenance_blockers",
+            )
+        ) and semantic.get("value") != UNRESOLVED:
+            raise ValueError(f"r3 row {index} promotes a source class despite hash/provenance blockers")
         direct = row.get("direct_test_contract_status")
         if not isinstance(direct, Mapping):
             raise ValueError(f"r3 row {index} has no direct contract inventory")
@@ -1202,12 +1709,15 @@ def finalization_blockers(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]
     blockers: list[dict[str, Any]] = []
     for row in rows:
         state = row["source_hash_validation"]
-        if state.get("hash_drift_reasons"):
+        live_reasons = state.get("live_source_hash_mismatch_reasons", [])
+        provenance_reasons = state.get("source_hash_provenance_blockers", [])
+        if live_reasons or provenance_reasons:
             blockers.append(
                 {
                     "inventory_index": row["inventory_index"],
                     "path": row["path"],
-                    "reasons": state["hash_drift_reasons"],
+                    "live_source_hash_mismatch_reasons": live_reasons,
+                    "source_hash_provenance_blockers": provenance_reasons,
                 }
             )
     return blockers
@@ -1224,11 +1734,9 @@ def make_summary(rows: Sequence[dict[str, Any]], inputs: Mapping[str, Any]) -> d
             contract_sources[contract["source"]] += 1
     return {
         "schema": "actor-census-source-bound-schema-v4-adjudication-r3-summary",
-        "package_status": (
-            "blocked_source_hash_drift"
-            if finalization_blockers(rows)
-            else "candidate_inventory_reconciled_not_accepted"
-        ),
+        "package_status": "blocked_source_hash_or_provenance"
+        if finalization_blockers(rows)
+        else "candidate_inventory_reconciled_not_accepted",
         "input_roster_status": "complete_r2_1187_plus_nine_adjudication_shards",
         "source_row_count": len(rows),
         "r2_unresolved_row_count": len(inputs["unresolved_indices"]),
@@ -1239,7 +1747,15 @@ def make_summary(rows: Sequence[dict[str, Any]], inputs: Mapping[str, Any]) -> d
         "source_class_conflict_rows": sum(
             bool(row["source_semantic_class"]["class_claim_conflicts"]) for row in rows
         ),
-        "source_hash_drift_rows": len(finalization_blockers(rows)),
+        "live_source_hash_mismatch_rows": sum(
+            bool(row["source_hash_validation"]["live_source_hash_mismatch_reasons"])
+            for row in rows
+        ),
+        "source_hash_provenance_blocker_rows": sum(
+            bool(row["source_hash_validation"]["source_hash_provenance_blockers"])
+            for row in rows
+        ),
+        "finalization_blocker_rows": len(finalization_blockers(rows)),
         "r1_prior_unresolved_hash_provenance_rows": sum(
             row["source_hash_validation"]["r1_prior_unresolved_retained"] for row in rows
         ),
@@ -1262,7 +1778,16 @@ def make_summary(rows: Sequence[dict[str, Any]], inputs: Mapping[str, Any]) -> d
 
 def input_manifest(inputs: Mapping[str, Any]) -> dict[str, Any]:
     files = [inputs["r2_path"], *inputs["shard_files"]]
+    merger_path = Path(__file__).resolve()
     return {
+        "merger": {"path": str(merger_path), "sha256": sha256_file(merger_path)},
+        "runtime": {
+            "python_implementation": platform.python_implementation(),
+            "python_version": platform.python_version(),
+            "python_full_version": sys.version,
+            "python_cache_tag": sys.implementation.cache_tag,
+            "platform": platform.platform(),
+        },
         "r2_file": {
             "path": str(inputs["r2_path"]),
             "sha256": sha256_file(inputs["r2_path"]),
@@ -1281,13 +1806,43 @@ def input_manifest(inputs: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def recheck_live_source_hashes(rows: Sequence[dict[str, Any]], repo_root: Path) -> None:
+    """Re-read all bound source files and reject stale in-memory evidence."""
+    for row in rows:
+        index = row_index(row)
+        path = row_path(row)
+        actual = current_source_sha(repo_root, path)
+        state = row.get("source_hash_validation")
+        if not isinstance(state, Mapping):
+            raise ValueError(f"r3 row {index} has no source hash state to recheck")
+        if state.get("live_source_sha256") != actual:
+            raise ValueError(
+                f"live source SHA changed before package write for {path}: "
+                f"ledger={state.get('live_source_sha256')!r}, live={actual}"
+            )
+        for field in ("r2_source_hash_claims", "adjudication_current_source_hash_claims"):
+            claims = state.get(field, [])
+            if not isinstance(claims, list):
+                raise ValueError(f"r3 row {index} has malformed {field}")
+            for claim in claims:
+                if not isinstance(claim, Mapping) or not _is_hash(claim.get("sha256")):
+                    raise ValueError(f"r3 row {index} has invalid bound hash in {field}")
+                if claim["sha256"] != actual:
+                    raise ValueError(
+                        f"live source SHA does not match {field} claim for {path}: "
+                        f"{claim.get('field') or claim.get('field_path')}"
+                    )
+
+
 def write_package(
     output_dir: Path,
     rows: Sequence[dict[str, Any]],
     summary: Mapping[str, Any],
     manifest: Mapping[str, Any],
+    repo_root: Path = REPO_ROOT,
 ) -> None:
-    validate_rows(rows, expected_count=len(rows))
+    validate_rows(rows, expected_count=len(rows), repo_root=repo_root)
+    recheck_live_source_hashes(rows, repo_root)
     blockers = finalization_blockers(rows)
     if blockers:
         raise ValueError(
@@ -1319,6 +1874,7 @@ def write_package(
         (stage / "SHA256SUMS.json").write_text(
             canonical_json(sums, indent=2), encoding="utf-8"
         )
+        recheck_live_source_hashes(rows, repo_root)
         os.replace(stage, target)
 
 
@@ -1341,7 +1897,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_count=inputs["expected_count"],
     )
     summary = make_summary(rows, inputs)
-    write_package(args.output_dir, rows, summary, input_manifest(inputs))
+    write_package(
+        args.output_dir,
+        rows,
+        summary,
+        input_manifest(inputs),
+        args.repo_root,
+    )
     print(canonical_json({"output_dir": str(args.output_dir.resolve()), "summary": summary}, indent=2))
     return 0
 
