@@ -130,7 +130,7 @@ fn canonical_actor_reference_repeated_mailbox_calls_and_root_replay_resets_it() 
             .execute_with_output(&main_owner(), &[])
             .expect("repeat Actor turns");
         assert_eq!(observation.output, "15\n17\n");
-        assert_closed(&reference, 1, 3, 0);
+        assert_closed(&reference, 1, 2, 0);
     }
 }
 
@@ -150,8 +150,8 @@ fn canonical_actor_bytecode_repeated_mailbox_calls_settle_without_ast() {
     let counts = vm
         .canonical_actor_domain_counts()
         .expect("Flow Actor domain lifecycle is observed");
-    assert_eq!(counts.accepted_messages, 3);
-    assert_eq!(counts.settled_replies, 3);
+    assert_eq!(counts.accepted_messages, 2);
+    assert_eq!(counts.settled_replies, 2);
     assert_eq!(counts.joined_workers, 1);
     assert_eq!(counts.live_roots, 0);
     assert_eq!(counts.live_workers, 0);
@@ -381,21 +381,49 @@ fn canonical_actor_reference_rejects_forged_field_method_and_handle_roles_before
     }
     assert_preflight_rejects(program.clone(), &id, operation);
 
-    let (id, mut operation) = operation_matching(&program, |operation| {
+    let field_program = canonical(
+        r#"
+        actor Reader {
+            base: i32 = 3;
+            func read(delta: i32) -> i32 { self.base + delta }
+        }
+        func main() -> i32 {
+            let r = Reader.spawn()
+            println(r.read(4))
+            0
+        }
+    "#,
+    );
+    let (id, mut operation) = operation_matching(&field_program, |operation| {
         matches!(operation, MirActorOperation::FieldLoad { .. })
     });
     if let MirActorOperation::FieldLoad { field, .. } = &mut operation {
         *field = NodeId("field:forged".into());
     }
-    assert_preflight_rejects(program.clone(), &id, operation);
+    assert_preflight_rejects(field_program.clone(), &id, operation);
 
-    let (id, mut operation) = operation_matching(&program, |operation| {
-        matches!(operation, MirActorOperation::FieldStore { .. })
+    let (id, operation) = operation_matching(&field_program, |operation| {
+        matches!(operation, MirActorOperation::FieldLoad { .. })
     });
-    if let MirActorOperation::FieldStore { state, value, .. } = &mut operation {
-        *state = value.clone();
-    }
-    assert_preflight_rejects(program, &id, operation);
+    let MirActorOperation::FieldLoad {
+        result,
+        actor,
+        field,
+        state,
+    } = operation
+    else {
+        unreachable!()
+    };
+    assert_preflight_rejects(
+        field_program,
+        &id,
+        MirActorOperation::FieldStore {
+            actor,
+            field,
+            state: result,
+            value: state,
+        },
+    );
 }
 
 #[test]

@@ -5989,8 +5989,7 @@ fn canonical_actor_descriptors_bind_fields_initializers_and_method_owners() {
             count: i32 = 7;
             untouched: i32;
             func bump(delta: i32) -> i32 {
-                self.count = self.count + delta
-                self.count
+                self.count + delta
             }
         }
         func main() -> i32 { let c = Counter.spawn(); c.bump(5) }

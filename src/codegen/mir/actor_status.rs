@@ -1177,8 +1177,8 @@ mod tests {
     #[test]
     fn canonical_actor_native_jit_preserves_fixtures_state_and_domain_join() {
         for (source, expected, spawned, accepted) in [
-            (CAPTURE, 0, 1, 2),
-            (SHADOW, 0, 1, 2),
+            (CAPTURE, 0, 1, 1),
+            (SHADOW, 0, 1, 1),
             (REPEATED, 0, 1, 2),
             (TWO_INSTANCES, 67, 2, 3),
         ] {

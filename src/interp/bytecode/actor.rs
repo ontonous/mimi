@@ -1198,8 +1198,24 @@ mod tests {
     #[test]
     fn canonical_actor_vm_rejects_instruction_and_metadata_forgeries_before_stdout() {
         let program = compile(REPEAT);
-        for corruption in 0..4 {
-            let mut forged = (*program).clone();
+        let field_program = compile(
+            r#"
+            actor Reader {
+                base: i32 = 4;
+                func read(delta: i32) -> i32 { self.base + delta }
+            }
+            func main() -> i32 {
+                let r = Reader.spawn()
+                println(r.read(5))
+                0
+            }
+        "#,
+        );
+        for corruption in 0..5 {
+            let mut forged = match corruption {
+                2 | 3 => (*field_program).clone(),
+                _ => (*program).clone(),
+            };
             match corruption {
                 0 => forged.canonical_actors = None,
                 1 => {
@@ -1219,12 +1235,37 @@ mod tests {
                         .functions
                         .iter_mut()
                         .flat_map(|function| &mut function.code)
-                        .find(|op| matches!(op, Op::MirActorFieldStore { .. }))
+                        .find(|op| matches!(op, Op::MirActorFieldLoad { .. }))
                         .unwrap();
-                    let Op::MirActorFieldStore { state, value, .. } = op else {
+                    let Op::MirActorFieldLoad { field, .. } = op else {
                         unreachable!()
                     };
-                    std::mem::swap(state, value);
+                    *field = u32::MAX;
+                }
+                3 => {
+                    let op = forged
+                        .functions
+                        .iter_mut()
+                        .flat_map(|function| &mut function.code)
+                        .find(|op| matches!(op, Op::MirActorFieldLoad { .. }))
+                        .unwrap();
+                    let Op::MirActorFieldLoad {
+                        rd,
+                        state,
+                        descriptor,
+                        field,
+                        instruction,
+                    } = *op
+                    else {
+                        unreachable!()
+                    };
+                    *op = Op::MirActorFieldStore {
+                        state: rd,
+                        value: state,
+                        descriptor,
+                        field,
+                        instruction,
+                    };
                 }
                 _ => {
                     let tokens = crate::lexer::Lexer::new("func main() -> i32 { 0 }")
