@@ -16,7 +16,10 @@
 #   3. 构建/运行不得失败。
 
 set -uo pipefail
-cd "$(dirname "$0")/.."
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=/dev/null
+source "$ROOT_DIR/scripts/dev-env.sh"
 
 BENCH="dsp"
 THRESHOLD="${PERF_GATE_THRESHOLD:-3.0}"
@@ -29,7 +32,7 @@ fail() { echo "PERF-GATE FAIL: $*" >&2; exit 1; }
 
 if [ ! -f "$BIN" ]; then
     echo "PERF-GATE: building release…"
-    LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build --locked --release >/dev/null 2>&1 \
+    cargo build --locked --release >/dev/null 2>&1 \
         || fail "release build failed"
 fi
 
@@ -48,7 +51,7 @@ c_ns=$(printf '%s\n' "${c_times[@]}" | sort -n | awk '{a[NR]=$1} END {print a[in
 # ── native dsp O1 ───────────────────────────────────────────────
 MIMI_SRC="benchmarks/${BENCH}.mimi"
 MIMI_BIN="/tmp/perf_gate_mimi_$$"
-MIMI_OPT=1 LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper "$BIN" build "$MIMI_SRC" -o "$MIMI_BIN" >/dev/null 2>&1 \
+MIMI_OPT=1 "$BIN" build "$MIMI_SRC" -o "$MIMI_BIN" >/dev/null 2>&1 \
     || fail "native build failed"
 m_times=()
 for _ in $(seq 1 "$RUNS"); do

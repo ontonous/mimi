@@ -7,6 +7,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/dev-env.sh"
 MIMI_BIN="${MIMI_BIN:-"$PROJECT_DIR/target/release/mimi"}"
 MIMI_DEBUG_BIN="${MIMI_DEBUG_BIN:-"$PROJECT_DIR/target/debug/mimi"}"
 MIMI_RUN="${MIMI_RUN:-"cargo run --release --"}"

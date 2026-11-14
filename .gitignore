@@ -77,6 +77,8 @@ devdocs/v0.41/**
 references/
 
 # Agent workspace
+.claude/
+.codex*/
 .mimocode/
 .qoder/
 .zcode/

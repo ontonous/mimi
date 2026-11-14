@@ -207,8 +207,20 @@ def anchors(path: Path) -> set[str]:
     return result
 
 
-def validate_files(root: Path, data: dict) -> list[str]:
+def normalize_link_target(raw: str) -> str:
+    """Strip CommonMark `<...>` wrappers and optional link titles from a link destination."""
+    target = raw.strip()
+    if target.startswith("<") and ">" in target[1:]:
+        return target[1 : target.index(">", 1)].strip()
+    parts = target.split(None, 1)
+    return parts[0] if parts else ""
+
+
+def validate_files(
+    root: Path, data: dict, *, allow_missing_external: bool = False
+) -> list[str]:
     errors, anchor_cache = [], {}
+    repo_root = root.parents[1].resolve()
     files = list(root.glob("*.md")) + [root / "plan.toml", root / "tools/check_plan.py"]
     for path in files:
         text = path.read_text()
@@ -218,12 +230,16 @@ def validate_files(root: Path, data: dict) -> list[str]:
             errors.append(f"{path.name}: trailing whitespace")
         if path.suffix != ".md":
             continue
-        for target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", prose(text)):
+        for raw_target in re.findall(r"\[[^\]]+\]\(([^)]+)\)", prose(text)):
+            target = normalize_link_target(raw_target)
             link = urlsplit(target)
             if link.scheme or link.netloc:
                 continue
-            destination = (path.parent / unquote(link.path)).resolve() if link.path else path
+            raw_path = unquote(link.path)
+            destination = (path.parent / raw_path).resolve() if raw_path else path
             if not destination.exists():
+                if allow_missing_external and raw_path.startswith("/") and not destination.is_relative_to(repo_root):
+                    continue
                 errors.append(f"{path.name}: missing link {target}")
             elif link.fragment and destination.suffix == ".md":
                 if destination not in anchor_cache:
@@ -241,6 +257,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ready", action="store_true", help="show tasks whose recorded prerequisites are satisfied")
     parser.add_argument(
+        "--allow-missing-external",
+        action="store_true",
+        help="ignore missing absolute filesystem links outside the repository (e.g. local evidence drives on CI)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="emit one machine-readable summary instead of prose (validation errors remain on stderr)",
@@ -251,7 +272,9 @@ def main() -> int:
         data = tomllib.loads((ROOT / "plan.toml").read_text())
         errors = validate_manifest(data, expected, decision_ids)
         if not errors:
-            errors.extend(validate_files(ROOT, data))
+            errors.extend(
+                validate_files(ROOT, data, allow_missing_external=args.allow_missing_external)
+            )
     except (OSError, ValueError, TypeError) as error:
         print(f"计划结构错误：{error}", file=sys.stderr)
         return 1

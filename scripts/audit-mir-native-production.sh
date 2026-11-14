@@ -368,7 +368,7 @@ def item_attributes_before(tokens, matching, item_index):
 
 
 def module_references(tokens, matching, path, skipped, macro_ranges, file_test_only=False):
-    """Resolve simple external `mod name;` declarations and retain cfg(test) scope."""
+    """Resolve simple external `mod name;` and `include!("file.rs")` targets."""
     inline_modules = []
     for index, token in enumerate(tokens):
         if token["value"] != "mod" or in_ranges(index, macro_ranges):
@@ -380,6 +380,25 @@ def module_references(tokens, matching, path, skipped, macro_ranges, file_test_o
 
     references = []
     for index, token in enumerate(tokens):
+        # Resolve `include!("relative.rs")` relative to the declaring file while
+        # preserving whether all references stay inside `#[cfg(test)]` scope.
+        if (
+            token["kind"] == "ident"
+            and token["value"] == "include"
+            and not in_ranges(index, macro_ranges)
+            and index + 4 < len(tokens)
+            and tokens[index + 1]["value"] == "!"
+            and tokens[index + 2]["value"] in {"(", "[", "{"}
+            and tokens[index + 3]["kind"] == "literal"
+            and tokens[index + 3]["decoded"] is not None
+            and index + 2 in matching
+            and matching[index + 2] == index + 4
+        ):
+            included = (Path(path).parent / tokens[index + 3]["decoded"]).resolve()
+            if included.is_file():
+                references.append((included, file_test_only or skipped[index]))
+            continue
+
         if token["value"] != "mod" or in_ranges(index, macro_ranges):
             continue
         if index + 2 >= len(tokens) or tokens[index + 1]["kind"] != "ident":
@@ -753,6 +772,30 @@ mod maybe_fixtures;
         assert production_child.resolve() not in excluded, excluded
         assert [(item[1].resolve(), item[0]) for item in findings] == [
             (production_child.resolve(), "direct_index")
+        ], findings
+
+        include_root = root / "include_scope"
+        include_root.mkdir()
+        include_mod = include_root / "mod.rs"
+        test_include = include_root / "test_include.rs"
+        prod_include = include_root / "prod_include.rs"
+        test_include.write_text("fn included_test() { values[index]; }\n", encoding="utf-8")
+        prod_include.write_text("fn included_prod() { values[index]; }\n", encoding="utf-8")
+        include_mod.write_text(
+            'mod prod_wrap { include!("prod_include.rs"); }\n#[cfg(test)]\nmod tests { include!("test_include.rs"); }\n',
+            encoding="utf-8",
+        )
+        sources = {
+            include_mod: include_mod.read_text(encoding="utf-8"),
+            test_include: test_include.read_text(encoding="utf-8"),
+            prod_include: prod_include.read_text(encoding="utf-8"),
+        }
+        findings, errors, excluded = audit_sources(sources)
+        assert not errors, errors
+        assert test_include.resolve() in excluded, excluded
+        assert prod_include.resolve() not in excluded, excluded
+        assert [(item[1].resolve(), item[0]) for item in findings] == [
+            (prod_include.resolve(), "direct_index")
         ], findings
 
     print("native_production_audit_self_test=ok")

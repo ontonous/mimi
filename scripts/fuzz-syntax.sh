@@ -142,10 +142,15 @@ func main() -> i64 {
     };
     s
 }"
-        # 14: 字符串
-        "func main() -> string {
+        # 14: 合法字符串函数与标量入口
+        "func greeting() -> string {
     let s = \"hello\";
     s
+}
+func main() -> i32 {
+    let s = greeting();
+    println(s);
+    0
 }"
         # 15: 复杂嵌套表达式
         "func main() -> i64 {
